@@ -8,17 +8,19 @@
 
 **给谁用**：想用 AI 做 Rust 迁移、但担心翻译质量的开发者和团队。
 
-**做什么**：一套 Claude Code Plugin（3 个核心命令：`/migrate analyze`、`/migrate run`、`/migrate review`，后续 +1 个 `/migrate graduate`），自动分析源项目 -> 生成迁移规则 -> 逐模块翻译 -> 用 8 层测试验证正确性。你只需要 `/migrate analyze` 开始，工具引导你完成后续步骤。
+**做什么**：一套 Claude Code Plugin（3 个核心命令：`/migrate analyze`、`/migrate run`、`/migrate review`，后续 +1 个 `/migrate graduate`），自动分析源项目 -> 生成迁移规则 -> 逐模块翻译 -> 用 8 层测试验证正确性。使用流程是手动依次调用 `/migrate analyze` -> `/migrate run` -> `/migrate review` 三个命令，每个命令内部自动完成多个子步骤（你无需手工逐步执行子步骤，Skill 内部自动调度）。
 
-> **「3 命令」是入口数，不是「只跑 3 步」**：每个命令内部自动串联多个子步骤——`/migrate analyze` 自动执行 初始化 -> 规则生成 -> 测试搭建 共 7 步（3 次 SubAgent 调用）；`/migrate run` 自动执行 Phase A 忠实翻译 -> 对抗性审查 -> Phase B 优化 -> F2 验证（共 2 次 SubAgent 调用：translator 翻译/优化 + verifier 审查/验证）；`/migrate review` 运行完整验证管线。设计价值在于**把多步编排自动化、用户少记命令**，而非「3 条命令就够」。各子步骤间有文件存在性检查点与最多 2 次重试，单步偏差不必整体重来（编排可靠性的 M0 验证与 Plan B 降级见 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径)，逐步骨架见 [09 附录 B](./09-appendix-schemas.md#附录-bmvp-skill-的-skillmd-骨架)）。
+> **「3 命令」是入口数，不是「只跑 3 步」**：每个命令内部自动串联多个子步骤——`/migrate analyze` 自动执行 初始化 -> 规则生成 -> 测试搭建 共 7 步（3 次 SubAgent 调用）；`/migrate run` 自动执行 Phase A 忠实翻译 -> 对抗性审查 -> Phase B 优化 -> F2 验证（共 2 次 SubAgent 调用：translator 翻译/优化 + verifier 审查/验证）；`/migrate review` 运行完整验证管线。设计价值在于**把多步编排自动化、用户少记命令**，而非「3 条命令就够」。各子步骤间有文件存在性检查点与最多 2 次重试，单步偏差不必整体重来（编排可靠性的 M0 验证与 Plan B 降级见 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径)，逐步骨架见 [09 附录 B](./09-appendix-schemas.md#附录-bmvp-skill-的-skillmd-骨架)）。**规模预期**：本工具的「MVP」指路线图 M1，是 **50-70 人天的开发实施量（2 人约 6-9 周）**，并非「3 条命令、开箱即用」——它是验证迁移质量的工作流，需团队实施落地（工作量权威见 [08 § M1](./08-roadmap-and-reference.md#m1-mvp6-8-周)）。**前置提醒**：M0 假设验证（5-10 人天）是 M1 估算的前置，若 Spike 1 或 4 失败会改变 M1 范围（强制 Plan B3，工作量抬至 60-75 人天），建议小团队先完成 M0 再承诺 M1 时间。
 
-**核心差异**：验证管线开箱即用——cargo check / clippy / proptest / fuzz 的管线自动配置，**独立脚本门禁让 AI 无法跳过验证**（纯 prompt 做不到这一点）。产出物（迁移规则 + KNOWN_DIFFERENCES.md 差异登记 + MDR 决策记录）是团队协作和审计的标准化资产。
+**核心差异**：验证管线开箱即用——cargo check / clippy / proptest / fuzz 的管线自动配置，**模块翻译完成时由独立确定性脚本（`verify.sh`）做门禁**：脚本内部逻辑（cargo check/clippy/nextest 通过率等 Tier 0 必过项）AI 无法修改或跳过，门禁不过则 SKILL 不进入 Phase B（纯 prompt 做不到这一点；门禁 Schema 与停止条件见 [06 § 10.3](./06-plugin-structure.md#103-hooks自动化门禁) 与 [09 Step 5](./09-appendix-schemas.md#step-5-f2-测试验证)）。注：F1 编译反馈由 rust-analyzer LSP 提供、F3 集成验证由 `/migrate review` 手动触发，二者非「独立脚本」强制门禁，真正的不可跳过门禁是 F2 的 `verify.sh`。产出物（迁移规则 + KNOWN_DIFFERENCES.md 差异登记 + MDR 决策记录）是团队协作和审计的标准化资产。
 
 > **最小概念集**（入门只需理解这些）：
 > - 3 个核心命令（MVP 3 个，后续 +1）：`/migrate analyze` -> `/migrate run` -> `/migrate review`（+ `/migrate graduate` 后续迭代）
 > - 3 层反馈：F1 编译（rust-analyzer LSP 秒级自动）-> F2 测试（分钟级）-> F3 集成（Sprint 级手动）
 > - 翻译双阶段：Phase A 忠实翻译 -> 对抗性审查 -> Phase B 惯用化优化
 > - 其余概念（26 条规则、4 个 SubAgent、8 层测试等）在你推进到相应阶段时才需要理解
+>
+> 注：「MVP」= 路线图 M1，是 50-70 人天的开发实施量；随 Plugin 预装分发的是验证管线模板（通用规则库 + cargo check/clippy/proptest/fuzz 管线），可即装即用，而 M1 完整迁移工作流需实施落地，二者区别勿混淆。
 
 ---
 
@@ -26,7 +28,7 @@
 
 | 维度 | 手动方式（Claude Code + 好 prompt） | 本工具 |
 |------|--------------------------------------|--------|
-| 验证门禁 | 依赖 prompt 指令跟随，AI 可自我说服跳过 | **独立脚本门禁**（PostToolUse Hook），AI 无法绕过 |
+| 验证门禁 | 依赖 prompt 指令跟随，AI 可自我说服跳过 | **独立确定性脚本门禁**（Skill 调用 `verify.sh`，脚本内部逻辑 AI 无法修改/跳过），门禁不过不进 Phase B |
 | 迁移规则 | 每次手写 PORTING.md，格式不统一 | **26 类规则模板**（通用规则随 Plugin 分发 + 项目专有规则本地生成），渐进式生成，版本化演化 |
 | 差异追踪 | 靠人记忆哪些行为不同 | **KNOWN_DIFFERENCES.md** 自动发现 + 分类 + 人类审批 |
 | 断点续传 | 关闭会话后丢失进度 | **migration-state.json** 完整状态持久化 |
@@ -144,7 +146,7 @@ rust-migrate-plugin/
 | # | 变化 | 严重度 |
 |---|------|--------|
 | 1 | 图设计全面重构：6 路开源项目源码分析（stack-graphs/guppy/CodeGraph/GitNexus/UA/cargo-modules），从 4 行扩展为 7 个子节，覆盖数据模型/内存引擎/持久化/构建管线/增量更新/查询/可视化 | 必须 |
-| 2 | 图节点类型精细化：13 种节点（MVP 10 + M2 3）+ 12 种边（MVP 8 + M2 4），含设计决策推导 | 必须 |
+| 2 | 图节点类型精细化：12 种节点（MVP 9 + M2 3）+ 12 种边（MVP 8 + M2 4），含设计决策推导 | 必须 |
 | 3 | 迁移案例修正：Pokemon Showdown 确认为幻觉并移除；Bun PORTING.md 确认不在仓库中；新增 Claw-Code 深度分析 | 必须 |
 | 4 | PARITY.md 增强：引入等价深度标签（strong/stub，M2 扩展四级），借鉴 Claw-Code 的多维度追踪 | 重要 |
 | 5 | Clippy 作为迁移规则执行器：MVP 3-5 条 disallowed_methods 硬性门禁 | 重要 |

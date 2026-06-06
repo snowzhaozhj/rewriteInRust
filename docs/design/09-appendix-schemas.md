@@ -109,9 +109,24 @@
       "risk": "high"
     }
   },
-  "config_ref": ".rustmigrate.toml"
+  "config_ref": ".rustmigrate.toml",
+  "metadata": {
+    "graph_build_completed": true,
+    "graph_build_completed_at": "2026-06-06T16:05:00Z",
+    "last_error": null,
+    "lock_token": null
+  }
 }
 ```
+
+**`metadata` 字段说明**：
+
+| 字段 | 类型 | 含义 |
+|------|------|------|
+| `graph_build_completed` | `boolean` | CLI `rustmigrate graph build` 是否已**提交事务并释放 DB**。语义明确为「`graph build` 进程的 `BEGIN IMMEDIATE TRANSACTION ... COMMIT` 已提交、SQLite 连接已关闭」——即 DB 写锁已释放，下游 analyzer SubAgent 可安全获取只读连接。该字段由 `graph build` 在事务提交后写入（CLI 本身持有事务，写入是确定性的，不依赖外部轮询）。 |
+| `graph_build_completed_at` | `string \| null` | 上述提交完成时间（ISO 8601），用于诊断时序问题 |
+| `last_error` | `string \| null` | 最近一次 run 中止的结构化错误原因（如 Step 0.5 检测到循环依赖时记录环路径），便于用户排查；正常运行为 `null` |
+| `lock_token` | `string \| null` | MVP 恒为 `null`；M2 用于分布式锁令牌（见 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径)） |
 
 ### 状态机概念名 → JSON 字段值映射
 
@@ -153,9 +168,14 @@
 | `paused` | `"3_rounds_failed_awaiting_degrade_decision"` | 3 轮翻译失败，等待人类选择降级方式 |
 | `blocked` | `"waiting_for_core/config_ffi_decision"` | 等待 core/config 模块 FFI 方案落定 |
 | `degrade_manual` | `"async_cancellation_too_complex"` | 异步取消逻辑过于复杂，需人工处理 |
+| `translating` | `"phase_a_complete_awaiting_review"` | Phase A 忠实翻译完成，待 verifier 对抗审查（[03 § 4.3](./03-execution-model.md#43-内循环模块级单会话内-phase-ab-双阶段翻译) Step 4） |
+| `translating` | `"phase_b_optimization_in_progress"` | Phase B 惯用化优化进行中（Step 5） |
+| `translating` | `"phase_b_failed_at_round_N"` | Phase B 第 N 轮编译修正失败，已持久化部分状态供续传（见下方断点续传） |
 | `done` | `null` | 无需额外说明 |
 
 `substatus` 无枚举约束，由 SubAgent 或人工自行填写，仅用于辅助沟通，不参与状态机流转判断。
+
+> **Phase A/B 子步骤的 substatus 约定**：02-architecture.md § 3.4 注明「Phase A/B 是 TRANSLATE 状态内的内部子步骤，不占用状态机节点」。MVP 通过上述 `translating` 的 substatus（`phase_a_complete_awaiting_review` / `phase_b_optimization_in_progress` / `phase_b_failed_at_round_N`）在 `migration-state.json` 中表达 Phase 级进度，使中间崩溃可定位到具体 Phase 而无需新增状态机节点。Phase A 完成时间戳记录在模块的 `attempts[].timestamp`，恢复逻辑据此判断哪个 Phase 失败。
 
 ### 合法状态转换
 
@@ -173,6 +193,8 @@ blocked → {原状态}（阻塞解除后恢复到进入 blocked 前的状态）
 
 degrade_* → translating（通过 /migrate run --module=X --force 恢复）
 ```
+
+**到达 `done` 的前置条件**：除测试通过率 ≥ 预期、clippy 无 warning 外，该模块的 `TODO(port)` 计数须 = 0（由 verifier 在 [附录 B § /migrate run Step 5 TODO(port) 检查点](#附录-bmvp-skill-的-skillmd-骨架)保证）；不满足则标记 incomplete，停留在 `reviewing`/`testing` 而非进入 `done`。
 
 **blocked 状态处理**：
 - 当模块 A 依赖的模块 B 降级或阻塞时，A 进入 `blocked` 状态
@@ -217,10 +239,28 @@ degrade_* → translating（通过 /migrate run --module=X --force 恢复）
 ### Step 2: 构建源码图
 使用 Bash tool 执行：`rustmigrate graph build --root ./src --format json`
 CLI 构建基础图（contains/imports 边），存储到 `.rust-migration/source-graph.db`（SQLite）。
-然后调用 analyzer SubAgent 做语义增强（补充 calls/uses_type 边、复杂度标注）。
 
 **检查点**：验证 source-graph.db 存在。执行 `rustmigrate graph stats` 确认节点/边数量合理。
 如果验证失败，报告错误并停止。
+
+### Step 2.5: 确认 graph build 已释放数据库（前置门禁）
+在启动 analyzer SubAgent 前，**确定性**确认 CLI `graph build` 已提交事务并释放 DB 写锁，避免 analyzer 与 CLI 同时持有连接：
+
+```
+使用 Bash + jq 读取 migration-state.json：
+  COMPLETED = .metadata.graph_build_completed
+
+判定：
+  - COMPLETED == true  → 通过门禁，进入下一指令段
+  - COMPLETED != true  → graph build 未正常提交（CLI 在事务提交后才会写入该字段，
+                          见附录 A「metadata 字段说明」），属于 graph build 失败，
+                          报告错误并停止，提示用户检查 graph build 日志后重新执行
+                          `rustmigrate graph build`（不进入 analyzer，不轮询等待）
+```
+
+> **为何无需轮询/超时**：`graph_build_completed` 由 CLI `graph build` 在 `COMMIT` 后、进程退出前同步写入（CLI 自身持有事务，写入是确定性的）。MVP 串行执行下，Step 2 的 `graph build` Bash 调用返回后该字段必然已落盘，故此处只需**单次读取判定**，不存在 busy-loop 或死锁等待。若读到 `false/缺失`，说明 `graph build` 进程异常退出（事务未提交），应作为错误处理而非继续等待。M2 引入真正并行后，若 Spike 1 暴露时序问题，再升级为 `rustmigrate validate state --check-graph-consistency` 显式校验命令（见 [08-roadmap-and-reference.md](./08-roadmap-and-reference.md)）。
+
+然后调用 analyzer SubAgent 做语义增强（补充 calls/uses_type 边、复杂度标注）。
 
 ### Step 3: 生成初始状态
 基于 analyzer 的产出物，生成以下文件：
@@ -277,6 +317,19 @@ CLI 构建基础图（contains/imports 边），存储到 `.rust-migration/sourc
 读取 migration-state.json 中所有 status='blocked' 的模块，逐个检查其阻塞源是否已解决：
 
 ```
+[前置] 循环依赖检测（防止 blocked 模块互相等待导致死锁）：
+  构建有向子图 G：仅含当前 status='blocked' 的模块为节点，
+                 对每个 blocked 模块 M，为 M → (M.blocked_by 中仍为 'blocked' 的模块) 连边
+  对 G 执行环检测（MVP 用一次 DFS 着色法即可，无需完整 Kosaraju/Tarjan SCC）
+  若检测到环（含自依赖 A→A）：
+    - 报错并中止本次 run，输出具体环路径，例如：
+      "循环依赖检测：A blocked_by B, B blocked_by C, C blocked_by A
+       — 这些模块互相阻塞，无法自动恢复。请修正 migration-state.json 的
+       blocked_by 字段（删除误配的依赖），或用
+       `/migrate run --module=X --degrade=skip` 将环中某模块降级为 skip 以打破循环。"
+    - 将错误原因记入 migration-state.json 的 metadata.last_error 字段
+    - 不进入下方逐个恢复逻辑
+
 对每个 blocked 模块 M：
   读取 M.blocked_by（字符串数组）
   查询 blocked_by 中每个模块在 migration-state.json 中的当前 status
@@ -288,7 +341,7 @@ CLI 构建基础图（contains/imports 边），存储到 `.rust-migration/sourc
     - 保持 blocked 状态，将当前未完成的阻塞源记入 M.substatus
 ```
 
-> MVP 不做自动拓扑排序：A→B→C 多层 blocked 时，本步骤只解除「blocked_by 全部完成」的一层，连续运行会逐层推进（见 [附录 A § 合法状态转换「多模块同时 blocked」注](#合法状态转换)）。
+> MVP 不做自动拓扑排序：A→B→C 多层 blocked 时，本步骤只解除「blocked_by 全部完成」的一层，连续运行会逐层推进（见 [附录 A § 合法状态转换「多模块同时 blocked」注](#合法状态转换)）。但**环形**阻塞（A→B→C→A 或自依赖）无法靠逐层推进解除，故 Step 0.5 在恢复前先做一次 DFS 环检测并报错中止，避免静默死锁。`metadata.last_error` 字段见 [附录 A「metadata 字段说明」](#附录-amigration-statejson-schema)。
 
 ### Step 0.6: 目标模块依赖就绪检查（前置门禁）
 查询目标模块的依赖是否全部完成（通过 `rustmigrate graph deps <module>` 或 migration-state.json）。
@@ -367,7 +420,9 @@ verifier 在对抗性审查时附带校验 Phase A 是否保持了 1:1 结构（
 可修复 → 修复后重新执行 Step 5。
 不可修复 → 记录到 KNOWN_DIFFERENCES.md。
 
-**检查点**：测试通过率 ≥ 预期，clippy 无 warning。
+**TODO(port) 检查点（verifier）**：扫描生成的 Rust 代码中 `TODO(port)` 匹配数。若 > 0，在审查报告中标记该模块为 incomplete，将等价深度（PARITY.md）置为 `stub` 而非 `strong`，并阻塞 → `done` 状态转移（清理纪律见 [03 § 4.3 Step 3](./03-execution-model.md#43-内循环模块级单会话内-phase-ab-双阶段翻译)）。
+
+**检查点**：测试通过率 ≥ 预期，clippy 无 warning，TODO(port) 计数 = 0（否则标记 incomplete）。
 
 ### Step 6: 状态更新
 更新 `migration-state.json` 中该模块的状态。
@@ -515,3 +570,94 @@ verifier 在对抗性审查时附带校验 Phase A 是否保持了 1:1 结构（
   ]
 }
 ```
+
+---
+
+## 附录 E：意图摘要（`{module}-intent.md`）内容规范
+
+> 意图摘要是 Phase A 翻译的语义契约（见 [03 § 4.3 Step 2](./03-execution-model.md#43-内循环模块级单会话内-phase-ab-双阶段翻译)）。translator 生成时必须逐项覆盖以下 6 个核心字段；verifier 对抗审查（[03 § 7.7](./03-execution-model.md#77-不等价证据探测维度清单) 维度 9）逐字段核对 Phase A/B 代码与本摘要的一致性。
+
+**Markdown 模板**：
+
+```markdown
+# 意图摘要：{module}
+
+## 1. 标题/目的
+{该模块做什么、为什么存在；纯语义描述，不含源语言语法}
+
+## 2. 公开接口签名
+{逐个列出对外函数：名称 + 入参类型 + 返回类型；语言无关的契约描述}
+
+## 3. 前置/后置条件
+- 前置：{调用前必须成立的不变式}
+- 后置：{调用后保证成立的不变式}
+
+## 4. 错误处理方案
+{哪些输入/状态会失败、如何失败（异常/错误码/panic）、错误如何传播}
+
+## 5. 并发模型
+{是否共享可变状态、是否异步、取消语义；无并发则写「纯同步，无共享状态」}
+
+## 6. 关键边界值处理
+{整数溢出策略（RULE-3）、空集合/null、Unicode、浮点精度等的明确处理}
+```
+
+**工具化校验 JSON Schema（M1 用于产出物有效性检查，L2）**：
+
+```json
+{
+  "version": "0.1",
+  "type": "object",
+  "required": ["module", "purpose", "interfaces", "preconditions",
+               "postconditions", "error_model", "concurrency_model", "boundary_handling"],
+  "properties": {
+    "module": { "type": "string" },
+    "purpose": { "type": "string", "minLength": 1 },
+    "interfaces": { "type": "array", "minItems": 1,
+      "items": { "type": "object", "required": ["name", "params", "returns"] } },
+    "preconditions": { "type": "array", "items": { "type": "string" } },
+    "postconditions": { "type": "array", "items": { "type": "string" } },
+    "error_model": { "type": "string", "minLength": 1 },
+    "concurrency_model": { "type": "string", "minLength": 1 },
+    "boundary_handling": { "type": "string", "minLength": 1 }
+  }
+}
+```
+
+> verifier 产出物有效性检查（L2）：6 字段全部非空且 `interfaces` 至少一项；缺字段视为意图摘要不完整，要求 translator 重新生成。完整语义形式化验证为 M2+ 扩展。
+
+---
+
+## 附录 F：评分报告 `sprint-N-report.json` Schema
+
+> 由 verifier 在 `/migrate review` 时产出（评分公式与 M1/M2 时序见 [03 § 7.5](./03-execution-model.md#75-质量评估分层评分卡)）。M1 仅产出 `quality_scores`（per-module）与基础结构；`quality_trends`（跨 Sprint 递进）在 M2 由 `rustmigrate stats quality-trends` 填充。
+
+```json
+{
+  "version": "0.1",
+  "sprint": 2,
+  "quality_scores": {
+    "modules": {
+      "utils/string": {
+        "deterministic_avg": 92,
+        "ai_avg": 85,
+        "final_score": 89.9,
+        "deterministic_details": {
+          "compile_pass": 100, "test_pass_rate": 100,
+          "loc_ratio": 1.6, "cyclomatic_ratio": 1.05,
+          "fn_count_ratio": 1.1, "clippy_warnings": 0, "unsafe_blocks": 0
+        },
+        "ai_details": { "idiomaticity": 88, "semantic_fidelity": 85, "maintainability": 82 },
+        "confidence": 90
+      }
+    }
+  },
+  "quality_trends": {
+    "sprint_1": { "final_score": 87.0, "deterministic_avg": 90 },
+    "sprint_2": { "final_score": 89.9, "deterministic_avg": 92 }
+  },
+  "evaluation_method_version": "0.1"
+}
+```
+
+> `quality_trends` 为各 Sprint 聚合值的**递进序列**（非单一对象），供 M2 回归检测对比。`evaluation_method_version` 用于跨 Sprint 一致性校验（评分规则变更时递增），配置见 [06 § 11.1](./06-plugin-structure.md#111-rustmigratetoml-配置文件) `[quality]`。
