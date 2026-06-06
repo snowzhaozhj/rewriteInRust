@@ -156,8 +156,9 @@ UA 52,950 stars 的成功密码：**把 LLM 从"对话伙伴"变成"流水线中
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                      用户入口 (Skills)                           │
-│  /migrate-init  /migrate-plan  /migrate-run  /migrate-verify    │
-│  /migrate-status  /migrate-graduate  /migrate-unsafe-audit      │
+│  /migrate-init  /migrate-plan  /migrate-test  /migrate-run      │
+│  /migrate-verify  /migrate-status  /migrate-graduate            │
+│  /migrate-unsafe-audit                                           │
 ├─────────────────────────────────────────────────────────────────┤
 │                编排层 (SKILL.md 分步指令 + SubAgent 调度)           │
 │  Sprint 管理 → 策略路由 → 状态机 → 断点续传 → 错误恢复           │
@@ -256,33 +257,42 @@ UA 52,950 stars 的成功密码：**把 LLM 从"对话伙伴"变成"流水线中
                     └────┬────┘
                          ▼
                     ┌─────────┐
-              ┌─────│ PROFILE │   客观事实采集
-              │     └────┬────┘
-              │          ▼
-         error│     ┌─────────┐
-         recovery   │  PLAN   │   主观决策
-              │     └────┬────┘
-              │          ▼
-              │     ┌─────────┐
-              ├─────│ SCAFFOLD│   测试基础设施搭建
-              │     └────┬────┘
-              │          ▼
-              │     ┌─────────────────────────┐
-              │     │    SPRINT LOOP           │
-              │     │  ┌───────────┐           │
-              └────►│  │ TRANSLATE │──► CHECK  │──► 失败 3 轮 → PAUSE
-                    │  └───────────┘     │     │                  │
-                    │       ▲            ▼     │     生成降级分析  │
-                    │       │         VERIFY   │     报告，暂停    │
-                    │       │            │     │     等待人类确认  │
-                    │       └── RETRY ◄──┘     │                  │
-                    │       ▲                  │  人类显式确认降级 │
-                    │       └──────────────────┼──(/migrate-run   │
-                    └─────────────────────────┘   --degrade=ffi)  │
-                              │                                   │
-                              ▼                        DEGRADE ◄──┘
-                         ┌─────────┐
-                         │GRADUATE │   知识固化 + 模式退出
+                    │ PROFILE │   客观事实采集
+                    └────┬────┘
+                         ▼
+                    ┌─────────┐
+                    │  PLAN   │   主观决策
+                    └────┬────┘
+                         ▼
+                    ┌─────────┐
+                    │ SCAFFOLD│   测试基础设施搭建
+                    └────┬────┘
+                         ▼
+                    ┌─────────────────────────────────┐
+                    │         SPRINT LOOP              │
+                    │                                  │
+                    │  TRANSLATE ──► CHECK ──► VERIFY  │
+                    │      ▲    (最多3轮重试)    │     │
+                    │      └────────────────────┘     │
+                    │                                  │
+                    └──────────┬───────────────────────┘
+                               │              │
+                          全部完成       3轮失败
+                               │              ▼
+                               │         ┌─────────┐
+                    ┌──────────┤         │  PAUSE  │  暂停等待人类决策
+                    │          │         └────┬────┘
+                    │          │              │ 人类显式确认
+                    │          │              ▼
+                    │          │         ┌─────────┐
+                    │          │         │ DEGRADE │  FFI/手动/裁剪
+                    │          │         └─────────┘
+                    ▼          │
+               ┌─────────┐    │   ┌─────────────────────────────┐
+               │GRADUATE │    │   │  BLOCKED（可从任意状态进入） │
+               └─────────┘    │   │  依赖模块降级/阻塞时触发     │
+             知识固化+退出     │   │  解除后恢复 pre_blocked_status│
+                              │   └─────────────────────────────┘
                          └─────────┘
 
 降级决策流程（人类确认制，不自动降级）：
@@ -1277,8 +1287,16 @@ SubAgent B (串行)
 **编排机制的本质（MVP 阶段）**：
 - MVP 阶段的编排**依赖 Claude 的指令跟随能力**，而非确定性程序控制。Skill 的 SKILL.md 通过强约束分步指令引导 Claude 的行为（如"第 1 步：调用 analyzer SubAgent；第 2 步：检查产出物；第 3 步：调用 translator SubAgent"）。
 - 这意味着编排的可靠性取决于 LLM 对指令的遵守程度，而非代码级别的 if-else 分支。
-- **M0 验证要求**：在 M0 Spike 1 中验证 Claude 能否可靠执行 3+ 步的 SubAgent 调度序列。如果指令跟随不够可靠，触发 Plan B（微 Skill 链 / 外部脚本编排）。
+- **M0 验证要求**：在 M0 Spike 1 中验证 Claude 能否可靠执行 3+ 步的 SubAgent 调度序列。如果指令跟随不够可靠，触发 Plan B。
 - **检查点确定性**：SubAgent 间的编排检查点使用确定性文件存在性检查（脚本），不依赖 AI 判断产出物是否"有效"——由 `.claude/scripts/` 中的校验脚本负责。
+
+**Plan B 具体方案**（M0 Spike 1 失败时触发）：
+
+| 方案 | 实现方式 | 代价 | 用户体验退化 |
+|------|---------|------|-------------|
+| **Plan B1: 微 Skill 链** | 将 `/migrate-run` 拆为 `/migrate-translate`、`/migrate-check`、`/migrate-test-gen` 等微命令，每个 Skill 只做 1 步（1 次 SubAgent 调用）。状态通过 `migration-state.json` 在微 Skill 间传递。用户手动或脚本串联。 | 额外 2-3 人天开发 | 用户需手动执行更多命令，但每步更可控 |
+| **Plan B2: 外部脚本编排** | 用 bash/Python 脚本调用 Claude Code CLI（`claude -p "执行 /migrate-translate ..."`），脚本中做 if-else 分支、文件检查、重试逻辑。编排逻辑 100% 确定性。 | 额外 3-5 人天开发 | 依赖 Claude Code CLI API 的稳定性；需用户安装额外依赖 |
+| **Plan B3: 混合方案** | 简单步骤（1-2 步）用 SKILL.md 指令，复杂编排（3+ 步循环/条件）用外部脚本。取两者优势。 | 额外 2-4 人天开发 | 最可能的实际落地方案 |
 
 **未来演进**：M2 阶段引入有限并行（analyzer + scaffolder 可并行），M4 阶段引入完整 DAG 调度。
 
@@ -1623,9 +1641,24 @@ concurrency = false
 - `/migrate-unsafe-audit`
 
 **验收指标**：
-- 在 3 个真实 TS 小项目（<5K 行）中完成至少 1 个纯函数模块的迁移
+- 在 3 个真实 TS 小项目（<5K 行）中，每个项目至少完成 1 个纯函数模块的迁移（合计 ≥3 个模块）
 - 迁移后代码通过 Tier 0 门禁
 - 黄金文件测试 100% 通过
+- 用户从 `/migrate-init` 到 `/migrate-verify` 的完整流程可在 30 分钟内走通（单模块）
+- 断点续传验证：中断会话后恢复，不丢失 migration-state.json 状态
+
+**M1 工作量分解（粗估）**：
+
+| 交付物 | 预估人天 | 说明 |
+|--------|---------|------|
+| 6 个 SKILL.md | 6-8 | 每个 Skill 约 1-1.5 天（含调试） |
+| 4 个 SubAgent agent.md | 3-4 | 系统提示编写 + 职责边界定义 |
+| 3 个 Hook 脚本 | 1-2 | check.sh + verify.sh + full-verify.sh |
+| TS 语言适配器 | 3-5 | detect.sh + extract-types.sh + extract-deps.sh + porting-template.md |
+| migration-state.json 管理 | 2-3 | Schema 定义 + 状态流转逻辑 + 断点续传 |
+| .rustmigrate.toml | 1 | Schema 定义 + 默认值生成 |
+| 集成测试 + 调试 | 5-8 | 3 个真实项目上的端到端验证 |
+| **合计** | **21-31** | 1 人约 6-8 周，2 人约 3-4 周 |
 
 ### M2: 质量提升（8-12 周）
 
