@@ -1,6 +1,6 @@
 # Rust 迁移验证工作台 — 项目设计文档
 
-> **版本**: v0.6 | **日期**: 2026-06-06 | **基于**: 18 路深度调研 + 103 agent deep research + 4 路审查反馈 + 3 项补充调研 + 8 条精细审查反馈 + 11 条精准修订 + 9 条审查反馈修订 + 5 条次要修订
+> **版本**: v0.7 | **日期**: 2026-06-06 | **基于**: 18 路深度调研 + 103 agent deep research + 4 路审查反馈 + 3 项补充调研 + 8 条精细审查反馈 + 11 条精准修订 + 9 条审查反馈修订 + 5 条次要修订 + Codex 审查 + 8 路补充调研
 
 ---
 
@@ -112,7 +112,7 @@ UA 52,950 stars 的成功密码：**把 LLM 从"对话伙伴"变成"流水线中
 |------|------|------|---------|
 | 编译器反馈迭代修复 | SafeTrans (ACM CCS 2025) | 成功率 54% → 80% | 论文验证 |
 | 依赖图拓扑排序翻译 | DepTrans (ACM FSE 2026) | 仅需修改 <15% 目标代码 | 论文验证 |
-| 多候选生成+最优选择 | LAC2R / MCTS | 避免陷入局部最优修复 | 论文验证 |
+| 多候选生成+最优选择 | LAC2R / MCTS | 避免陷入局部最优修复；候选排序优先用确定性指标（编译通过、测试通过数、代码行数）而非 AI 评分 | 论文验证 |
 | Few-shot 引导修复 | SafeTrans | 为每类错误准备匹配的修复示例库 | 论文验证 |
 | 等价性验证 | MatchFixAgent (ICML 2026) | 99.2% 等价性判定覆盖率 | 论文验证 |
 | 编译环境反馈 | Environment-in-the-Loop (ACM ReCode 2026) | 编译环境作为循环参与者 | 论文验证 |
@@ -148,9 +148,9 @@ UA 52,950 stars 的成功密码：**把 LLM 从"对话伙伴"变成"流水线中
 │  （完整工具分级详见 5.2-5.4 节）                                 │
 │  差异测试框架 → 行为录制 → 不等价证据收集                        │
 ├─────────────────────────────────────────────────────────────────┤
-│                      质量门禁                                    │
-│  F1 Hook: PostToolUse 写入 .rs → cargo check (Tier 0)            │
-│  F2 指令: Skill SKILL.md 步骤完成 → 测试套件 (Tier 0+1)          │
+│                      质量门禁（独立脚本，agent 无法跳过）          │
+│  F1 Hook: .claude/scripts/check.sh → cargo check (Tier 0)        │
+│  F2 Hook: .claude/scripts/verify.sh → 测试套件 (Tier 0+1)        │
 │  F3 Skill: /migrate-verify 手动触发 → 集成验证 (Tier 0+1+2)      │
 ├─────────────────────────────────────────────────────────────────┤
 │                      FFI 桥接层 (增量迁移/降级路径)               │
@@ -240,22 +240,25 @@ UA 52,950 stars 的成功密码：**把 LLM 从"对话伙伴"变成"流水线中
               │     ┌─────────────────────────┐
               │     │    SPRINT LOOP           │
               │     │  ┌───────────┐           │
-              └────►│  │ TRANSLATE │──► CHECK  │──► 失败 3 轮 → DEGRADE
+              └────►│  │ TRANSLATE │──► CHECK  │──► 失败 3 轮 → PAUSE
                     │  └───────────┘     │     │                  │
-                    │       ▲            ▼     │                  │
-                    │       │         VERIFY   │    人工决定恢复   │
-                    │       │            │     │  (/migrate-run   │
-                    │       └── RETRY ◄──┘     │   --module=X     │
-                    │       ▲                  │   --force)       │
-                    │       └──────────────────┼──────────────────┘
-                    └─────────────────────────┘
-                              │
-                              ▼
+                    │       ▲            ▼     │     生成降级分析  │
+                    │       │         VERIFY   │     报告，暂停    │
+                    │       │            │     │     等待人类确认  │
+                    │       └── RETRY ◄──┘     │                  │
+                    │       ▲                  │  人类显式确认降级 │
+                    │       └──────────────────┼──(/migrate-run   │
+                    └─────────────────────────┘   --degrade=ffi)  │
+                              │                                   │
+                              ▼                        DEGRADE ◄──┘
                          ┌─────────┐
                          │GRADUATE │   知识固化 + 模式退出
                          └─────────┘
 
-降级路径（DEGRADE）：
+降级决策流程（人类确认制，不自动降级）：
+  1. 3 轮翻译失败后 → **暂停**（不自动降级）
+  2. 生成降级分析报告（失败原因、建议降级方式、影响范围）
+  3. 人类通过 `/migrate-run --degrade=ffi|manual|skip` **显式确认**降级方式
   → FFI 桥接（保持原实现，Rust 端调用）
   → 人工介入（标记 TODO，等人类处理）
   → 功能裁剪（协商后移除该功能）
@@ -316,8 +319,9 @@ Sprint N:
   3. Sprint Review
      - 集成验证（Tier 0 + Tier 1 + 按需 Tier 2）
      - 更新 PARITY.md
-     - 回顾 PORTING.md，追加新发现的规则
+     - 回顾 PORTING.md，追加新发现的规则（附 changelog）
      - 更新 KNOWN_DIFFERENCES.md
+     - **知识沉淀**（见 6.11 节）：提取 patterns/anti-patterns，写入 SPRINT_LEARNINGS.md
      - 评估是否需要调整迁移策略
 
   4. Sprint Retrospective
@@ -345,7 +349,7 @@ Work Unit（一个 Claude Code 会话）:
   Step 3: 翻译 + 编译验证
     - 生成 Rust 代码
     - F1 反馈：cargo check（秒级，每次写入触发）
-    - 编译失败 → 即时修复（最多 3 轮）
+    - 编译失败 → 先跑 `cargo fix --allow-dirty`（确定性自动修复）→ 剩余错误交给 AI 修复（最多 3 轮）
     - 注意：此步骤只做编译验证，不生成测试
 
   Step 4: 测试生成与验证
@@ -537,17 +541,21 @@ stalled_sprint_threshold = 3         # 连续停滞 Sprint 数
 
 | 产出物 | 用途 | 生成方式 | 生命周期 |
 |--------|------|---------|---------|
-| PORTING.md | 迁移规则宪法 | AI 初版 + 人工审查 + Sprint 迭代 | 长期保留 |
+| PORTING.md | 迁移规则宪法（底部含 Changelog） | AI 初版 + 人工审查 + Sprint 迭代 | 长期保留 |
 | PARITY.md | 迁移进度跟踪 | 自动更新 | 迁移完成后归档 |
-| KNOWN_DIFFERENCES.md | 已知行为差异登记 | 验证过程自动生成 + 人工确认 | 长期保留 |
-| AGENTS.md | AI 行为约束 | 模板 + 项目定制 | 迁移完成后可丢弃 |
-| MDR（迁移决策记录） | 架构决策溯源 | 人工编写或 AI 辅助 | 长期保留 |
+| KNOWN_DIFFERENCES.md | 已知行为差异登记 | verifier 即时写入 + 人工确认 | 长期保留 |
+| AGENTS.md | AI 行为约束（含反合理化表） | 模板 + 项目定制 | 迁移完成后可丢弃 |
+| MDR（迁移决策记录） | 架构决策溯源 | 决策发生时立即记录 | 长期保留 |
+| SPRINT_LEARNINGS.md | Sprint 级知识总结 | Sprint Review 时追加 | 长期保留 |
+| DESIGN_ASSUMPTIONS.md | M0 假设验证报告 | M0 假设验证周产出 | 长期保留 |
+| patterns/ | 翻译模式库（成功经验复用） | 模块完成时提取 | 长期保留 |
+| anti-patterns/ | 失败经验库 | 模块失败时记录 | 长期保留 |
 | migration-state.json | 状态机 + Sprint 元数据 | 自动管理 | 迁移完成后归档 |
 | test-fixtures/ | 行为录制测试集 | 自动录制 | 长期保留（回归测试） |
 
 ### 6.2 PORTING.md — 迁移规则宪法（26 类）
 
-参考 Bun 的 576 行 PORTING.md，定义所有翻译规则。**渐进式生成**：PLAN 阶段生成必须的核心规则，后续 Sprint 按需追加。
+参考 Bun 的 576 行 PORTING.md，定义所有翻译规则。**渐进式生成**：PLAN 阶段生成必须的核心规则，后续 Sprint 按需追加。**确定性 vs AI 边界**：约 60% 的规则（类型映射、命名转换、标准库映射等）可通过确定性模板生成，仅语义复杂的规则（错误处理策略、并发模式选择等）交给 AI。
 
 | # | 规则类 | MVP? | 说明 |
 |---|--------|------|------|
@@ -630,7 +638,20 @@ stalled_sprint_threshold = 3         # 连续停滞 Sprint 数
 - **审批**: @lisi 2026-06-12
 ```
 
-**行动指南**：验证阶段发现行为差异时，先记录到此文件，再由人类决定是"修复"还是"接受"。
+**已知差异类型预定义表**（确定性分类，verifier 发现差异时从此表选择类型，不自行发明）：
+
+| 类型代码 | 差异类型 | 典型场景 |
+|---------|---------|---------|
+| `ITER_ORDER` | 迭代顺序差异 | HashMap vs 插入序 Map |
+| `FLOAT_PREC` | 浮点精度差异 | IEEE 754 实现差异 |
+| `NULL_HANDLING` | 空值处理差异 | null/undefined → Option |
+| `STRING_LEN` | 字符串长度语义差异 | UTF-16 长度 vs UTF-8 字节数 |
+| `INT_OVERFLOW` | 整数溢出行为差异 | wrapping vs panic vs silent |
+| `ERROR_MSG` | 错误消息文本差异 | 不影响功能的消息格式变化 |
+| `TIMING` | 时序/性能差异 | 执行顺序或延迟不同 |
+| `PLATFORM` | 平台特定差异 | OS API 行为差异 |
+
+**行动指南**：验证阶段发现行为差异时，verifier **立即追加**到此文件（不等到 Sprint Review），由人类决定是"修复"还是"接受"。
 
 ### 6.5 MDR — 迁移决策记录
 
@@ -681,6 +702,18 @@ stalled_sprint_threshold = 3         # 连续停滞 Sprint 数
 - 新代码必须有测试
 - 修改已有代码必须跑相关测试
 - 覆盖率不低于源模块
+
+## 反合理化表（verification-is-non-negotiable）
+以下是 agent 可能跳过验证的常见借口及反驳——SubAgent 系统提示中必须包含此表：
+
+| 借口 | 反驳 |
+|------|------|
+| "这个改动太小了，不需要测试" | 小改动也可能引入行为差异，门禁脚本会自动执行，无需人工判断 |
+| "编译通过就说明没问题" | 编译只检查类型，不检查语义等价性 |
+| "测试太慢了，先跳过" | 使用 cargo nextest 并行执行，Tier 0 测试应在秒级完成 |
+| "这个差异可以接受" | agent 无权决定差异是否可接受，必须记录到 KNOWN_DIFFERENCES.md 由人类审批 |
+| "上下文窗口不够了，省略验证步骤" | 验证由独立脚本执行，不消耗上下文窗口 |
+| "前面的模块都通过了，这个模式一样" | 每个模块必须独立验证，不允许类推 |
 ```
 
 ### 6.7 三级代码注释策略
@@ -720,9 +753,13 @@ stalled_sprint_threshold = 3         # 连续停滞 Sprint 数
 |--------|---------|-----------|------|
 | PORTING.md | 活跃维护 | **长期保留** | 后续维护参考 |
 | PARITY.md | 活跃更新 | 归档 | 不再需要 |
-| KNOWN_DIFFERENCES.md | 活跃更新 | **长期保留** | 故障排查参考 |
+| KNOWN_DIFFERENCES.md | 即时写入 | **长期保留** | 故障排查参考 |
 | AGENTS.md | 活跃使用 | 安全丢弃 | 仅迁移期间有效 |
-| MDR | 按需写 | **长期保留** | 架构决策溯源 |
+| MDR | 决策时立即写 | **长期保留** | 架构决策溯源 |
+| SPRINT_LEARNINGS.md | Sprint Review 追加 | **长期保留** | 知识沉淀 |
+| DESIGN_ASSUMPTIONS.md | M0 产出 | **长期保留** | 技术假设记录 |
+| patterns/ | 持续积累 | **长期保留** | 翻译模式复用 |
+| anti-patterns/ | 持续积累 | **长期保留** | 避免重蹈覆辙 |
 | migration-state.json | 核心状态 | 归档 | 不再需要 |
 | test-fixtures/ | 活跃使用 | **长期保留** | 回归测试资产 |
 
@@ -743,6 +780,48 @@ stalled_sprint_threshold = 3         # 连续停滞 Sprint 数
 1. 移除 AGENTS.md 和 CLAUDE.md 中的迁移配置
 2. 归档 PARITY.md 和 migration-state.json
 3. 保留 PORTING.md、KNOWN_DIFFERENCES.md、MDR、test-fixtures
+
+### 6.11 增量知识沉淀架构
+
+核心理念（借鉴 Compound Engineering）：**每一次工程活动都应让下一次更容易**。
+
+#### 4 层知识存储
+
+| 层级 | 范围 | 存储位置 | 写入时机 |
+|------|------|---------|---------|
+| L0 会话级 | 单次 Claude Code 会话内的发现 | 会话上下文 | 实时 |
+| L1 模块级 | 单个模块的翻译经验 | `intermediate/{module}-learnings.md` | 模块完成时 |
+| L2 Sprint 级 | Sprint 内的模式总结 | `SPRINT_LEARNINGS.md` | Sprint Review 时 |
+| L3 项目级 | 跨 Sprint 的项目级知识 | `PORTING.md` changelog + `patterns/` + `anti-patterns/` | 持续积累 |
+
+#### 新增产出物
+
+| 产出物 | 用途 | 说明 |
+|--------|------|------|
+| `patterns/` | 翻译模式库——成功的翻译模式供后续模块复用 | 如 `patterns/async-to-tokio.md` |
+| `anti-patterns/` | 失败经验库——踩过的坑不再踩 | 如 `anti-patterns/naive-mutex-wrap.md` |
+| `SPRINT_LEARNINGS.md` | Sprint 级知识总结 | 每次 Sprint Review 时追加 |
+
+#### 写入时机规则
+
+- **MDR**：决策发生时**立即记录**，不等到 Sprint Review
+- **KNOWN_DIFFERENCES.md**：verifier 发现差异时**立即追加**，不批量写入
+- **PORTING.md**：底部增加 `## Changelog` 节，每次规则变更记录原因和 Sprint 编号
+- **patterns / anti-patterns**：模块完成或失败时写入
+
+#### 知识复利机制
+
+每次模块迁移完成后，执行知识沉淀步骤：
+1. 提取本次迁移中的可复用模式 → 写入 `patterns/`
+2. 记录失败尝试和原因 → 写入 `anti-patterns/`
+3. 更新 PORTING.md（如有新规则）→ 追加 changelog
+4. 后续模块翻译时，translator SubAgent 的上下文注入 `patterns/` 中的相关模式
+
+#### Beads/AgentMemory 集成 [M2+ 评估]
+
+建议在 M0 Spike 5 中评估以下集成可行性：
+- **Beads**：用于 SubAgent 任务状态的跨会话持久化（替代部分 migration-state.json 手工管理）
+- **AgentMemory**：用于翻译知识的语义检索（从 patterns/anti-patterns 中检索相关经验）
 
 ---
 
@@ -791,12 +870,13 @@ Step 3: 接口契约定义（不依赖 Rust 代码）
   ├── 前置条件 / 后置条件
   └── 副作用描述
 
-Step 4: 模块迁移完成后，由 verifier SubAgent 生成 Rust 测试
-  ├── 将黄金测试集翻译为 Rust
-  ├── 将行为录制转为 insta 快照测试
-  └── 基于接口契约生成 proptest
-  注意：测试由 verifier SubAgent 在翻译完成后生成，不是 translator 同步生成。
-  时序：translator 完成翻译 → F1 编译验证通过 → verifier 生成测试 → F2 测试验证。
+Step 4: 模块迁移完成后，生成 Rust 测试（确定性 + AI 混合）
+  ├── 测试骨架从录制数据**确定性生成**（脚本模板化输入输出对 → Rust #[test] 函数）
+  ├── 将黄金测试集翻译为 Rust（确定性模板）
+  ├── 将行为录制转为 insta 快照测试（确定性模板）
+  └── 基于接口契约生成 proptest（AI 辅助，需理解语义）
+  注意：测试骨架优先由确定性脚本生成，仅语义复杂的测试逻辑交给 verifier SubAgent。
+  时序：translator 完成翻译 → F1 编译验证通过 → 确定性测试骨架生成 → verifier 补充语义测试 → F2 测试验证。
 ```
 
 **行动指南**：测试搭建的核心是**行为录制和接口契约**，这两者不依赖 Rust 代码的存在。测试生成职责归属 verifier SubAgent，与翻译（translator）解耦。
@@ -846,15 +926,39 @@ Step 4: 模块迁移完成后，由 verifier SubAgent 生成 Rust 测试
 
 **关键点**：验证管线中的独立节点可以并行执行，不必等待其他节点完成。
 
-### 7.4 "翻译膨胀"检测标准
+### 7.4 安全护栏（借鉴 RustLift）
 
-| 指标 | 健康范围 | 告警阈值 | 行动 |
+| 机制 | 说明 | 实现方式 |
+|------|------|---------|
+| **Approval Token** | 批量执行前需要人类预览并授权令牌 | `/migrate-run` 在执行 Sprint 批量翻译前，先展示待翻译模块列表和预估成本，用户确认后生成一次性令牌 |
+| **Preview-before-spend** | AI 调用前预估 token 成本 | 编排器在调度翻译任务前，根据源码大小和上下文预算预估 token 消耗，超出阈值需用户确认 |
+| **不自动宣布成功** | 翻译成功后停在 `needs_review` 而非自动标 `done` | 模块状态流转增加 `reviewing` 状态（已有），verifier 通过后仍需人类最终确认 |
+
+### 7.5 质量评估分层评分卡
+
+翻译质量评估使用确定性指标（工具可直接计算）+ AI 辅助指标（需语义理解）的分层评分卡：
+
+**确定性指标（工具自动计算，权重 70%）**：
+
+| 指标 | 健康范围 | 告警阈值 | 工具 |
 |------|---------|---------|------|
-| 代码行数比 | 1.2x - 2.0x | > 3.0x | 提示 LLM 简化 |
-| 圈复杂度比 | 0.8x - 1.2x | > 1.5x | 审查逻辑结构 |
-| 函数数量比 | 0.9x - 1.3x | > 2.0x | 检查是否过度拆分 |
+| 编译通过 | 是 | 否 → 阻塞 | cargo check |
+| 测试通过率 | 100% | < 95% | cargo nextest |
+| 代码行数比 | 1.2x - 2.0x | > 3.0x | tokei |
+| 圈复杂度比 | 0.8x - 1.2x | > 1.5x | scc |
+| 函数数量比 | 0.9x - 1.3x | > 2.0x | tokei |
+| clippy 警告数 | 0 | > 0 | cargo clippy |
+| unsafe 块数 | 0（理想） | 按 P0-P4 分类 | cargo-geiger |
 
-### 7.5 行为等价性验证
+**AI 辅助指标（verifier 评估，权重 30%）**：
+
+| 指标 | 说明 |
+|------|------|
+| 惯用性 | 是否使用 idiomatic Rust 模式 |
+| 语义保真度 | 意图摘要与实现的一致性 |
+| 可维护性 | 代码结构清晰度、注释充分度 |
+
+### 7.6 行为等价性验证
 
 | 项目类型 | 录制方式 | 对比方式 |
 |---------|---------|---------|
@@ -863,7 +967,7 @@ Step 4: 模块迁移完成后，由 verifier SubAgent 生成 Rust 测试
 | 库/SDK | FFI(PyO3/napi-rs) 调用原实现 | proptest 生成输入对比输出 |
 | 有状态服务 | 共享数据库 schema | 操作后状态 snapshot 对比 |
 
-### 7.6 不等价证据探测维度清单
+### 7.7 不等价证据探测维度清单
 
 verifier SubAgent 在对抗性审查阶段，应在以下维度系统性探测新旧实现的行为差异。此清单作为 verifier 的"检查表"，确保不遗漏常见差异点：
 
@@ -1016,6 +1120,15 @@ MVP 中 SubAgent 的实现基于 Claude Code 的标准 agent 定义机制：
 
 ### 10.3 Hooks（自动化门禁）
 
+**关键原则（借鉴 DAE）**：门禁用独立脚本，agent 无法说服自己跳过。所有 Tier 0 门禁改为 `.claude/scripts/` 中的独立脚本，通过 Hook 调用——不依赖 SKILL.md 提示词的指令跟随。
+
+```
+.claude/scripts/
+├── check.sh          # F1: cargo check + cargo fix --allow-dirty
+├── verify.sh         # F2: cargo nextest run + cargo clippy
+└── full-verify.sh    # F3: 完整验证管线
+```
+
 ```json
 {
   "hooks": {
@@ -1023,8 +1136,8 @@ MVP 中 SubAgent 的实现基于 Claude Code 的标准 agent 定义机制：
       {
         "event": "Write",
         "pattern": "**/*.rs",
-        "command": "cargo check --message-format=json 2>&1 | head -50",
-        "comment": "Tier 0 — cargo check: 每次写入 .rs 文件后自动编译检查 (F1)"
+        "command": ".claude/scripts/check.sh",
+        "comment": "Tier 0 — 独立脚本门禁: agent 无法跳过 (F1)"
       }
     ]
   }
@@ -1032,19 +1145,20 @@ MVP 中 SubAgent 的实现基于 Claude Code 的标准 agent 定义机制：
 ```
 
 **F2 和 F3 的实现方式**：
-- **F2（模块完成后验证）**：不通过 Hook 实现。在各 Skill 的 SKILL.md 中通过分步指令要求"翻译步骤完成后执行 `cargo nextest run --lib` + `cargo clippy -- -D warnings`"。
-- **F3（Sprint Review 集成验证）**：不通过 Hook 实现。由 `/migrate-verify` Skill 手动触发，执行 `cargo deny check` + `cargo audit` 等完整验证管线。
+- **F2（模块完成后验证）**：通过 `.claude/scripts/verify.sh` 独立脚本执行 `cargo nextest run --lib` + `cargo clippy -- -D warnings`。Skill SKILL.md 中指令调用该脚本，但脚本本身是确定性的，agent 无法修改或跳过其内部逻辑。
+- **F3（Sprint Review 集成验证）**：由 `/migrate-verify` Skill 触发 `.claude/scripts/full-verify.sh`，执行 `cargo deny check` + `cargo audit` 等完整验证管线。
 
 **概念事件 → Claude Code 实际实现机制映射表**：
 
 | 概念事件 | 反馈层级 | Claude Code 实现机制 | 说明 |
 |---------|---------|---------------------|------|
-| 写入 .rs 文件 | F1 | `PostToolUse` Hook（`Write` 事件） | 真实 Claude Code Hook 事件，自动触发 |
-| 模块翻译完成 | F2 | Skill SKILL.md 分步指令 | 在指令中要求 Claude 执行验证命令 |
-| Sprint Review | F3 | `/migrate-verify` Skill 手动触发 | 用户显式调用 |
+| 写入 .rs 文件 | F1 | `PostToolUse` Hook → `.claude/scripts/check.sh` | 独立脚本，agent 无法跳过 |
+| 模块翻译完成 | F2 | Skill 调用 `.claude/scripts/verify.sh` | 脚本确定性执行，不依赖指令跟随 |
+| Sprint Review | F3 | `/migrate-verify` → `.claude/scripts/full-verify.sh` | 用户显式调用 |
 | 迁移状态变更 | — | `migration-state.json` 文件写入 | 编排器自行管理 |
+| 编排检查点 | — | 确定性文件存在性检查（脚本） | 检查产出物文件是否存在且有效 |
 
-**Tier 0 覆盖确认**：Tier 0 的三个工具（cargo check / clippy / cargo-nextest）——cargo check 通过 `PostToolUse` Hook 自动触发（F1），clippy 和 cargo-nextest 通过 Skill SKILL.md 指令在翻译步骤完成后执行（F2）。
+**Tier 0 覆盖确认**：Tier 0 的三个工具（cargo check / clippy / cargo-nextest）全部通过独立脚本执行——cargo check 由 `PostToolUse` Hook 触发 `check.sh`（F1），clippy 和 cargo-nextest 由 `verify.sh`（F2）执行。
 
 ### 10.4 unsafe 分类管理
 
@@ -1110,7 +1224,8 @@ SubAgent B (串行)
 **编排机制的本质（MVP 阶段）**：
 - MVP 阶段的编排**依赖 Claude 的指令跟随能力**，而非确定性程序控制。Skill 的 SKILL.md 通过强约束分步指令引导 Claude 的行为（如"第 1 步：调用 analyzer SubAgent；第 2 步：检查产出物；第 3 步：调用 translator SubAgent"）。
 - 这意味着编排的可靠性取决于 LLM 对指令的遵守程度，而非代码级别的 if-else 分支。
-- **M0 验证要求**：在 M0 阶段需要验证 Claude 能否可靠执行 3+ 步的 SubAgent 调度序列。如果指令跟随不够可靠，需要引入更细粒度的检查点或将长序列拆分为多个短 Skill。
+- **M0 验证要求**：在 M0 Spike 1 中验证 Claude 能否可靠执行 3+ 步的 SubAgent 调度序列。如果指令跟随不够可靠，触发 Plan B（微 Skill 链 / 外部脚本编排）。
+- **检查点确定性**：SubAgent 间的编排检查点使用确定性文件存在性检查（脚本），不依赖 AI 判断产出物是否"有效"——由 `.claude/scripts/` 中的校验脚本负责。
 
 **未来演进**：M2 阶段引入有限并行（analyzer + scaffolder 可并行），M4 阶段引入完整 DAG 调度。
 
@@ -1118,12 +1233,18 @@ SubAgent B (串行)
 
 ```
 .rust-migration/
-├── PORTING.md                 # 迁移规则宪法（26 类，渐进式生成）
+├── PORTING.md                 # 迁移规则宪法（26 类，渐进式生成，底部含 Changelog）
 ├── PARITY.md                  # 迁移进度跟踪（Sprint 聚合）
-├── KNOWN_DIFFERENCES.md       # 已知行为差异登记簿
-├── AGENTS.md                  # AI 行为约束
+├── KNOWN_DIFFERENCES.md       # 已知行为差异登记簿（即时写入）
+├── AGENTS.md                  # AI 行为约束（含反合理化表）
+├── SPRINT_LEARNINGS.md        # Sprint 级知识总结（每次 Review 追加）
+├── DESIGN_ASSUMPTIONS.md      # M0 假设验证报告
 ├── .rustmigrate.toml          # 项目级配置（见第十一章）
 ├── migration-state.json       # 状态机 + Sprint 元数据
+├── patterns/                  # 翻译模式库（成功经验复用）
+│   └── async-to-tokio.md      # 示例：异步翻译模式
+├── anti-patterns/             # 失败经验库（避免重蹈覆辙）
+│   └── naive-mutex-wrap.md    # 示例：天真 Mutex 包装的教训
 ├── intermediate/              # 中间分析产物
 │   ├── source-graph.json      # 源码依赖图
 │   ├── type-map.json          # 类型映射
@@ -1135,7 +1256,7 @@ SubAgent B (串行)
 │   ├── proptest-regressions/  # proptest seed 记录
 │   ├── fuzz-corpus/           # 模糊测试语料
 │   └── benchmarks/            # 性能基线数据
-├── decisions/                 # MDR 迁移决策记录
+├── decisions/                 # MDR 迁移决策记录（决策时立即写入）
 │   ├── MDR-001-error-strategy.md
 │   └── MDR-002-async-runtime.md
 └── reports/                   # 验证报告
@@ -1372,6 +1493,8 @@ concurrency = false
 |------|--------|--------|---------|
 | LLM 进步使工具过时 | 高 | 中 | 核心价值在验证层而非生成层——即使 LLM 翻译变完美，验证仍然需要 |
 | Code Metal 下沉到中端 | 高 | 低 | 保持开源+轻量定位，做他们不做的验证层 |
+| Dynamic Workflows 竞争 | 高 | 中 | 真正竞争来源——我们的差异化在**方法论编码**（PORTING.md + 验证管线），而非通用工作流 |
+| MCP 生态 AST 工具从下方威胁 | 中 | 中 | 低层 AST 工具会商品化，我们的价值在方法论层而非工具层 |
 | 用户基数小 | 中 | 中 | 产出物（PORTING.md、测试集、MDR）独立有价值 |
 | 每种语言对需大量维护 | 中 | 高 | 优先支持 TS→Rust，LanguageAdapter 降低扩展成本 |
 | UA 扩展到迁移场景 | 中 | 中 | 差异化在验证层，不在理解层 |
@@ -1379,22 +1502,46 @@ concurrency = false
 | dependency-cruiser 单人风险 | 低 | 中 | 准备 fork 计划 |
 | 过度设计 | 中 | 高 | **MVP 聚焦 TS 单模块，拒绝 scope creep** |
 
+**竞品定位说明**：
+- **RustLift**（C/C++→Rust 控制平面）：理念一致（Approval Token 等机制已借鉴），市场不重叠（他们做 C/C++，我们从 TS 起步）
+- **Quarkus Migration Skills** 的 Gate Check 模式值得参考（已融入独立脚本门禁设计）
+- ~~act101 / Holonic / ShiftCodex~~ — 经调研确认为 LLM 幻觉，不存在此类产品
+
+### 12.2 Plan B 体系
+
+每个关键技术假设有明确的 Plan B，在 M0 假设验证周中判定是否触发：
+
+| 关键假设 | 验证方式（M0 Spike） | Plan B |
+|---------|---------------------|--------|
+| SubAgent 编排可靠 | Spike 1: 3+ 步调度序列测试 | 微 Skill 链（每个 Skill 只做 1 步）/ 外部脚本编排 |
+| Hook 触发可靠 | Spike 2: PostToolUse 场景测试 | 改为 SKILL.md 显式指令 + 独立脚本 |
+| tree-sitter 精度足够 | Spike 3: TS 项目 AST 精度测试 | TS Compiler API / LLM 直接读源码 |
+| SKILL.md 长指令可跟随 | Spike 4: >2000 字指令跟随率测试 | 拆分为多个短 Skill |
+| 用户愿意学配置 | 用户反馈收集 | 纯约定零配置模式（合理默认值，无 .rustmigrate.toml） |
+
+**行动指南**：M0 结束后更新 `DESIGN_ASSUMPTIONS.md`，标记每个假设的状态（verified / plan-b-triggered），后续里程碑据此调整实现方案。
+
 ---
 
 ## 十三、实施路线图
 
-### M0: 基础搭建（2 周）
+### M0: 假设验证周（1 周）
 
-**目标**：项目骨架 + 第一个 Skill 能跑
+**目标**：验证 5 个关键技术假设，产出假设验证报告，而非项目骨架
+
+**5 个 Spike（每个 1-2 天）**：
+- [ ] **Spike 1: SubAgent 编排可靠性** — 验证 Claude 能否可靠执行 3+ 步的 SubAgent 调度序列（Plan B：微 Skill 链 / 外部脚本编排）
+- [ ] **Spike 2: Hook 验证** — 验证 PostToolUse Hook 在 cargo check 场景下的触发可靠性和延迟（Plan B：改为 SKILL.md 显式指令）
+- [ ] **Spike 3: tree-sitter 精度** — 验证 tree-sitter 对 TS 项目的 AST 解析精度是否满足模块拆分需求（Plan B：TS Compiler API / LLM 直接读源码）
+- [ ] **Spike 4: SKILL.md 跟随边界** — 验证 SKILL.md 长指令（>2000 字）的指令跟随率和遗漏率（Plan B：拆分为多个短 Skill）
+- [ ] **Spike 5: Beads/AgentMemory 集成评估** — 评估 Beads（任务状态持久化）和 AgentMemory（知识记忆）的集成可行性
 
 **交付物**：
-- [ ] Claude Code 插件项目结构搭建
-- [ ] `/migrate-init` 基础版（TS 项目画像）
-- [ ] `migration-state.json` schema 定义
-- [ ] `.rustmigrate.toml` 配置 schema
-- [ ] TypeScript LanguageAdapter 骨架
+- [ ] `DESIGN_ASSUMPTIONS.md` — 假设验证报告（每个 Spike 的结论 + Plan B 是否触发）
+- [ ] `migration-state.json` schema 定义（沿用）
+- [ ] `.rustmigrate.toml` 配置 schema（沿用）
 
-**验收指标**：在 1 个 TS 开源项目上跑通 `/migrate-init`，生成项目画像。
+**验收指标**：5 个 Spike 全部完成，每个假设有明确的"验证通过"或"触发 Plan B"结论。
 
 ### M1: MVP（6-8 周）
 
@@ -1518,7 +1665,7 @@ concurrency = false
 
 ```json
 {
-  "version": "0.5",
+  "version": "0.7",
   "state": "sprint_loop",
   "state_history": [
     {
@@ -1745,11 +1892,13 @@ degrade_* → translating（通过 /migrate-run --module=X --force 恢复）
 注意：写入 .rs 文件后 PostToolUse Hook 会自动触发 cargo check（F1 反馈）。
 
 ### Step 3: F1 编译反馈循环
-如果 cargo check 失败，将错误信息反馈给 translator SubAgent 修复。
-最多重试 3 轮（由 .rustmigrate.toml 的 max_retry_rounds 控制）。
-3 轮后仍失败 → 进入 DEGRADE 流程。
+如果 cargo check 失败：
+1. 先执行 `cargo fix --allow-dirty`（确定性自动修复）
+2. 剩余错误反馈给 translator SubAgent 修复
+3. 最多重试 3 轮（由 .rustmigrate.toml 的 max_retry_rounds 控制）
+4. 3 轮后仍失败 → **暂停**，生成降级分析报告，等待人类通过 `/migrate-run --degrade=ffi` 确认
 
-**检查点**：cargo check 通过。
+**检查点**：`.claude/scripts/check.sh` 通过（独立脚本，agent 无法跳过）。
 
 ### Step 4: F2 测试验证
 调用 verifier SubAgent 生成当前模块的 Rust 测试（基于意图摘要、接口契约和已有黄金文件）。
