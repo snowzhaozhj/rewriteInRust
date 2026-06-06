@@ -30,7 +30,7 @@ Sprint N:
      - 更新 PARITY.md — 由 Skill 主上下文自动更新
      - 回顾 PORTING 规则，追加新发现的规则（附 changelog）— 人工 + AI 辅助
      - 更新 KNOWN_DIFFERENCES.md — 由 verifier 即时写入，Review 时人工审批
-     - **知识沉淀**（见 6.11 节）：提取 patterns/anti-patterns，写入 SPRINT_LEARNINGS.md — verifier 提取 + 人工审阅
+     - **知识沉淀**（[见文档体系 > 增量知识沉淀](./05-documentation-system.md#611-增量知识沉淀架构)）：提取 patterns/anti-patterns，写入 SPRINT_LEARNINGS.md — verifier 提取 + 人工审阅
      - 评估是否需要调整迁移策略 — 人工决策
 
   4. Sprint Retrospective

@@ -6,59 +6,57 @@
 
 本项目从第一天起设计为 Claude Code Plugin，遵循标准 Plugin 打包格式。
 
-### plugin.json
+### .claude-plugin/plugin.json
 
 ```json
+// .claude-plugin/plugin.json
 {
   "name": "rust-migrate",
   "version": "0.1.0",
-  "description": "Rust 迁移验证工作台 — AI 辅助的 Rust 迁移验证管线",
-  "author": "rust-migrate-team",
-  "skills": ["migrate"],
-  "agents": ["analyzer", "translator", "verifier", "scaffolder"],
-  "hooks": true,
-  "rules": true
+  "description": "Rust 迁移验证工作台 — AI 辅助的代码迁移 + 验证管线",
+  "author": "rewriteInRust",
+  "skills": "./skills/"
 }
 ```
 
-### Plugin 目录结构
+> **注意**：`agents/`、`hooks/` 等目录通过 Plugin 目录约定自动发现，不需要在 plugin.json 中显式声明。Plugin 不支持 `rules/` 目录分发（见 10.1.1 规则分层策略）。
+
+### Plugin 目录结构（方案 D 混合策略）
 
 ```
-rust-migrate-plugin/                    # Plugin 根目录
-├── plugin.json                         # Plugin 元数据（名称、版本、描述）
+rust-migrate-plugin/
+├── .claude-plugin/plugin.json        # Plugin 元数据
 ├── skills/
 │   └── migrate/
-│       ├── SKILL.md                    # 主 Skill（/migrate 命令入口）
-│       ├── analyze.md                  # /migrate analyze 子命令
-│       ├── run.md                      # /migrate run 子命令
-│       ├── review.md                   # /migrate review 子命令
-│       ├── graduate.md                 # /migrate graduate 子命令（非 MVP）
-│       ├── adapters/                   # 语言适配器（见 11.2 节）
-│       │   ├── typescript/
-│       │   └── python/
-│       └── references/                 # 通用知识库（参考资料）
+│       ├── SKILL.md                  # 主入口（路由 + 通用约定）
+│       ├── analyze.md                # /migrate analyze 子命令指令
+│       ├── run.md                    # /migrate run 子命令指令
+│       ├── review.md                 # /migrate review 子命令指令
+│       ├── graduate.md               # /migrate graduate（非 MVP）
+│       ├── adapters/                 # 语言适配器
+│       │   └── typescript/
+│       └── references/               # 参考指南（按需 Read）
 │           ├── patterns/
+│           │   ├── async-to-tokio.md
+│           │   └── express-to-axum.md
 │           └── anti-patterns/
-├── agents/
-│   ├── analyzer.md                     # 分析 SubAgent
-│   ├── translator.md                   # 翻译 SubAgent
-│   ├── verifier.md                     # 验证 SubAgent
-│   └── scaffolder.md                   # 测试搭建 SubAgent
+│               └── naive-mutex-wrap.md
+├── agents/                           # SubAgent 定义（内嵌核心规则）
+│   ├── analyzer.md                   # 含核心分析规则
+│   ├── translator.md                 # 含核心翻译规则（类型映射、命名约定等）
+│   ├── verifier.md                   # 含核心验证规则
+│   └── scaffolder.md                 # 含核心测试规则
 ├── hooks/
-│   ├── settings.json                   # Hook 配置
+│   ├── hooks.json                    # Hook 配置
 │   └── scripts/
-│       ├── fmt.sh                      # cargo fmt（PostToolUse，写入 .rs 后自动格式化）
-│       ├── verify.sh                   # F2 验证脚本
-│       ├── full-verify.sh              # F3 完整验证脚本
-│       └── file-guard.sh              # 文件保护（PreToolUse）
-├── rules/                              # 通用迁移规则（按 paths 条件加载）
-│   ├── ts-type-mapping.md
-│   ├── ts-naming-convention.md
-│   ├── rust-idioms.md
-│   ├── error-handling-patterns.md
-│   └── unsafe-policy.md
-└── README.md                           # Plugin 使用说明
+│       ├── fmt.sh                    # cargo fmt（PostToolUse，写入 .rs 后自动格式化）
+│       ├── verify.sh                 # F2 验证脚本
+│       ├── full-verify.sh            # F3 完整验证脚本
+│       └── file-guard.sh             # 文件保护（PreToolUse）
+└── README.md
 ```
+
+> **规则分发策略**：Plugin 不支持 `rules/` 目录分发。核心规则（短、高频、必须遵守）内嵌在 `agents/*.md` 中随 Agent 启动加载；参考指南（长、按需、条件触发）放在 `skills/migrate/references/` 下由 SKILL.md 条件 Read；项目专有规则由 `/migrate analyze` 生成到 `.rust-migration/porting/` 目录，由 SKILL.md 显式 Read。
 
 ---
 
@@ -76,6 +74,24 @@ MVP 核心命令 3 个，后续迭代 +1 个。所有命令共享 `/migrate` 命
 > **设计理由**：社区共识所有 skill 共享 25,000 token 预算，SKILL.md 有 500 行上限。8 个独立 SKILL.md 总量过大，且对用户而言命令数过多。参考 OpenSpec 等成功案例仅 3 个命令，将 8 个 Skill 合并为 3+1 个。
 >
 > `analyze` 内部通过 SKILL.md 分步指令实现原 init→plan→test 的串行流程，用户无需记住 3 个命令的执行顺序。
+
+---
+
+## 10.1.1 规则分层策略（方案 D：混合）
+
+Plugin 不支持 `rules/` 目录分发，因此采用混合策略将规则按特征分层存放：
+
+| 规则类型 | 特征 | 存放位置 | 加载方式 |
+|---------|------|---------|---------|
+| 核心规则（~50行/agent） | 短、必须遵守、高频 | `agents/*.md` 内嵌 | Agent 启动即生效 |
+| 参考指南（~200-500行/个） | 长、按需、条件触发 | `skills/migrate/references/` | SKILL.md 条件 Read |
+| 项目专有规则 | 项目特定 | `.rust-migration/porting/` | SKILL.md 显式 Read |
+
+**核心规则**：每个 Agent 的 `.md` 文件中直接内嵌该角色必须遵守的核心规则（如 translator.md 内嵌类型映射规则、命名约定等）。这些规则简短（每个 Agent 约 50 行），Agent 启动时自动加载，无需额外 Read 操作。
+
+**参考指南**：较长的模式指南（如 `async-to-tokio.md`、`express-to-axum.md`）和反模式文档放在 `skills/migrate/references/` 下。SKILL.md 根据当前迁移模块的特征条件性地 Read 相关指南（如检测到 Express 路由时 Read `express-to-axum.md`）。
+
+**项目专有规则**：由 `/migrate analyze` 分析源码后生成到 `.rust-migration/porting/` 目录（如 `dependency-mapping.md`、`business-logic-rules.md`）。这些规则与具体项目绑定，不随 Plugin 分发，由 SKILL.md 在翻译阶段显式 Read。
 
 ---
 
@@ -133,7 +149,7 @@ hooks/scripts/
 
 ### Hook 配置
 
-Hook 配置遵循 Claude Code 真实 API 格式（`hooks/settings.json`）：
+Hook 配置遵循 Claude Code 真实 API 格式（`hooks/hooks.json`）：
 
 ```json
 {
@@ -288,7 +304,7 @@ SubAgent B (串行)
 ├── AGENTS.md                  # AI 行为约束（含反合理化表）
 ├── SPRINT_LEARNINGS.md        # Sprint 级知识总结（每次 Review 追加）
 ├── DESIGN_ASSUMPTIONS.md      # M0 假设验证报告
-├── .rustmigrate.toml          # 项目级配置（见 11.1 节）
+├── .rustmigrate.toml          # 项目级配置（[见插件结构 > 配置文件](./06-plugin-structure.md#111-rustmigratetoml-配置文件)）
 ├── migration-state.json       # 状态机 + Sprint 元数据
 ├── porting/                   # 项目专有迁移规则
 │   ├── dependency-mapping.md  # 项目特有的依赖映射
@@ -320,7 +336,7 @@ SubAgent B (串行)
     └── sprint-N-report.json
 ```
 
-> **与 Plugin 目录的关系**：`.rust-migration/` 是项目本地产出物目录（每个迁移项目独立），Plugin 目录（`rust-migrate-plugin/`）是分发给所有用户的通用工具包。通用规则放在 Plugin 的 `rules/` 下，通用知识放在 Plugin 的 `skills/migrate/references/` 下。
+> **与 Plugin 目录的关系**：`.rust-migration/` 是项目本地产出物目录（每个迁移项目独立），Plugin 目录（`rust-migrate-plugin/`）是分发给所有用户的通用工具包。核心规则内嵌在 Plugin 的 `agents/*.md` 中，参考指南放在 Plugin 的 `skills/migrate/references/` 下（见 10.1.1 规则分层策略）。
 
 ---
 

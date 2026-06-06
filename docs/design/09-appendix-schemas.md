@@ -115,7 +115,7 @@
 
 ### 状态机概念名 → JSON 字段值映射
 
-| 状态机图（3.4 节） | migration-state.json `status` 值 | 说明 |
+| 状态机图（[见架构设计 > 状态机](./02-architecture.md#34-编排器状态机设计)） | migration-state.json `status` 值 | 说明 |
 |-------------------|----------------------------------|------|
 | TRANSLATE | `translating` | 翻译中 |
 | CHECK | `compile_fixing` | 编译修复中 |
@@ -314,6 +314,10 @@ Private 方法默认翻译（不省略），保持结构完整性。
 更新 `PARITY.md` 中该模块的进度行。
 如有架构决策，写入 MDR。
 ```
+
+---
+
+注：原附录 C（证据等级说明）已合并到 [README.md](./README.md) 中。
 
 ---
 

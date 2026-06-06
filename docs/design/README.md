@@ -41,12 +41,16 @@
 
 | 子文件 | 内容 | 原章节 |
 |--------|------|--------|
-| [01-positioning-and-methodology.md](./01-positioning-and-methodology.md) | 项目定位 + 核心方法论 | 第一章（1.1-1.4）+ 第二章（2.1-2.4） |
+| [01-positioning-and-methodology.md](./01-positioning-and-methodology.md) | 项目定位 + 核心方法论 | 第一章 + 第二章 |
 | [02-architecture.md](./02-architecture.md) | 架构设计（整体架构、状态机、上下文管理） | 第三章 |
-| [03-execution-testing.md](./03-execution-testing.md) | 执行模式（Sprint 循环）+ 工具链选型 + 测试验证策略 + 策略路由 | 第四章 + 第五章 + 第七章 + 第八章 |
-| [04-plugin-structure.md](./04-plugin-structure.md) | Plugin 结构 + 文档与知识沉淀体系 + 工作流扩展 | 第十章 + 第六章 + 第十一章 |
-| [05-roadmap-risks.md](./05-roadmap-risks.md) | 风险评估 + 实施路线图 + 关键数据参考 + 常见陷阱 | 第十二章 + 第十三章 + 第十四章 + 第九章 |
-| [schemas/](./schemas/) | JSON Schema 及示例（migration-state、source-graph、type-map、call-graph） | 原附录 A/D |
+| [03-execution-model.md](./03-execution-model.md) | 执行模式（Sprint 循环）+ 测试验证策略 + 策略路由 | 第四章 + 第七章 + 第八章 |
+| [04-toolchain.md](./04-toolchain.md) | 工具链选型 | 第五章 |
+| [05-documentation-system.md](./05-documentation-system.md) | 文档与知识沉淀体系 | 第六章 |
+| [06-plugin-structure.md](./06-plugin-structure.md) | Plugin 结构 + 工作流扩展 | 第十章 + 第十一章 |
+| [07-pitfalls-and-risks.md](./07-pitfalls-and-risks.md) | 常见陷阱 + 风险评估 | 第九章 + 第十二章 |
+| [08-roadmap-and-reference.md](./08-roadmap-and-reference.md) | 实施路线图 + 关键数据参考 | 第十三章 + 第十四章 |
+| [09-appendix-schemas.md](./09-appendix-schemas.md) | Schema 定义 + SKILL.md 骨架 | 附录 |
+| [schemas/](./schemas/) | JSON Schema 示例文件（migration-state、source-graph、type-map、call-graph） | 附录数据 |
 
 每个子文件顶部有 `> [返回主索引](./README.md)` 导航链接，可独立阅读。
 

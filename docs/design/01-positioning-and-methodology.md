@@ -23,7 +23,7 @@
 
 一套 **Claude Code Plugin**（包含 Skills、Hooks、SubAgents、Rules），将散落在各处的迁移最佳实践编码成**可重复执行的验证工作流**。Plugin 通过标准目录结构打包分发（`plugin.json` + `skills/` + `agents/` + `hooks/` + `rules/`），编排逻辑通过 SKILL.md 分步指令 + SubAgent 调度实现。
 
-**v0.9 变更**：原描述为"Skills + Workflows + Hooks + SubAgents"散放组合。v0.9 起明确为统一的 Claude Code Plugin 格式，所有组件纳入 Plugin 标准目录，支持一键安装和分发。详细 Plugin 目录结构见 [04-plugin-structure.md](./04-plugin-structure.md)。
+**v0.9 变更**：原描述为"Skills + Workflows + Hooks + SubAgents"散放组合。v0.9 起明确为统一的 Claude Code Plugin 格式，所有组件纳入 Plugin 标准目录，支持一键安装和分发。详细 Plugin 目录结构见 [06-plugin-structure.md](./06-plugin-structure.md)。
 
 **Plugin 组件概览**：
 
@@ -147,7 +147,7 @@ Phase B — 编译修正 + 惯用化优化
 | 等价性验证 | MatchFixAgent (ICML 2026) | 99.2% 等价性判定覆盖率 | **待验证**（2026 论文） |
 | 编译环境反馈 | Environment-in-the-Loop (ACM ReCode 2026) | 编译环境作为循环参与者 | **待验证**（2026 论文） |
 
-> **关键论文汇总**（完整列表见 [05-roadmap-risks.md](./05-roadmap-risks.md)）：
+> **关键论文汇总**（完整列表见 [08-roadmap-and-reference.md](./08-roadmap-and-reference.md)）：
 >
 > | 论文 | 会议 | 验证状态 |
 > |------|------|---------|
@@ -170,7 +170,7 @@ Phase B — 编译修正 + 惯用化优化
 
 #### 行业参考案例（方法论层面）
 
-本项目的方法论设计参考了以下成功迁移案例（完整列表见 [05-roadmap-risks.md](./05-roadmap-risks.md)）：
+本项目的方法论设计参考了以下成功迁移案例（完整列表见 [08-roadmap-and-reference.md](./08-roadmap-and-reference.md)）：
 
 | 案例 | 可参考维度 | 证据等级 |
 |------|-----------|---------|

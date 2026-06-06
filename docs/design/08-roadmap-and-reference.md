@@ -12,7 +12,7 @@
 
 **5 个 Spike（每个 1-2 天，Spike 3/5 可并行执行以缩短总时长）**：
 - [ ] **Spike 1: SubAgent 编排可靠性** — 验证 Claude 能否可靠执行 3+ 步的 SubAgent 调度序列（Plan B：微 Skill 链 / 外部脚本编排）
-- [ ] **Spike 2: Hook 验证** — 验证 PostToolUse Hook 在 cargo check 场景下的触发可靠性和延迟（Plan B：改为 SKILL.md 显式指令）
+- [ ] **Spike 2: rust-analyzer LSP 验证** — 验证 rust-analyzer LSP Plugin 在写入 .rs 文件后的诊断反馈延迟和可靠性（Plan B：回退到 PostToolUse Hook + cargo check）
 - [ ] **Spike 3: tree-sitter 精度** — 验证 tree-sitter 对 TS 项目的 AST 解析精度是否满足模块拆分需求（Plan B：TS Compiler API / LLM 直接读源码）
 - [ ] **Spike 4: SKILL.md 跟随边界** — 验证 SKILL.md 长指令（>2000 字）的指令跟随率和遗漏率（Plan B：拆分为多个短 Skill）
 - [ ] **Spike 5: Beads/AgentMemory 集成评估** — 评估 Beads（任务状态持久化）和 AgentMemory（知识记忆）的集成可行性
@@ -150,7 +150,7 @@
 
 > **注意**：Bun 和 Claw-Code 的极端速度可能包含未公开的前期准备工作，不应作为时间估算基准。
 
-**Bun PORTING.md 引用说明**：本项目设计中多处引用 Bun 的 576 行 PORTING.md 作为方法论参考（见第六章 6.2 节）。该引用**待验证**——需确认 Bun 的 PORTING.md 当前是否仍然公开可访问、内容是否与引用描述一致。M0 阶段应安排验证此引用，如不可验证则调整为其他公开案例或移除具体行数引用。
+**Bun PORTING.md 引用说明**：本项目设计中多处引用 Bun 的 576 行 PORTING.md 作为方法论参考（[见文档体系 > 迁移规则体系](./05-documentation-system.md#62-迁移规则体系通用--项目专有)）。该引用**待验证**——需确认 Bun 的 PORTING.md 当前是否仍然公开可访问、内容是否与引用描述一致。M0 阶段应安排验证此引用，如不可验证则调整为其他公开案例或移除具体行数引用。
 
 ### 关键论文
 

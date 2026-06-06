@@ -53,23 +53,31 @@ confidence: high
 
 ### 规则分层
 
-拆分为两层：
+拆分为三层（方案 D）：
 
-**通用规则**（随 Plugin 分发）：
-- 位置：`.claude/rules/` 目录，使用 paths 条件加载
-- 内容：语言通用的类型映射、命名约定、标准库映射、禁止模式等（约 60% 的确定性模板规则）
-- 格式：每个规则一个 `.md` 文件，通过 Claude Code 的 rules 机制按 paths 条件自动加载
+**核心规则**（嵌入 agents/*.md，随 Plugin 分发）：
+- 位置：`agents/*.md`（各 SubAgent 系统提示中直接包含）
+- 内容：SubAgent 必须遵守的硬性翻译规则（类型映射、错误处理模式、命名约定、禁止模式等，约 60% 的确定性模板规则）
+- 理由：嵌入 agent 系统提示可确保规则始终在上下文中，无需额外加载步骤
+
+**参考指南**（随 Plugin 分发，按需加载）：
+- 位置：`skills/migrate/references/` 目录
+- 内容：跨项目通用的翻译模式、反模式、最佳实践、详细参考文档
+- 格式：YAML frontmatter + Markdown（便于语义检索）
+- 加载方式：SKILL.md 按需 Read（不自动注入，避免占用上下文预算）
 - 示例结构：
   ```
-  .claude/rules/
-  ├── ts-type-mapping.md          # paths: ["*.ts", "*.tsx"]
-  ├── ts-naming-convention.md     # paths: ["*.ts", "*.tsx"]
-  ├── rust-idioms.md              # paths: ["*.rs"]
-  ├── error-handling-patterns.md  # paths: ["*.rs"]
-  └── unsafe-policy.md            # paths: ["*.rs"]
+  skills/migrate/references/
+  ├── patterns/
+  │   ├── async-to-tokio.md
+  │   └── error-handling-migration.md
+  ├── anti-patterns/
+  │   ├── naive-mutex-wrap.md
+  │   └── arc-everything.md
+  └── type-mapping-details.md
   ```
 
-**项目专有规则**（项目本地）：
+**项目专有规则**（用户项目本地）：
 - 位置：`.rust-migration/porting/` 目录
 - 内容：项目特有的规则（外部依赖映射、业务逻辑处理策略、特殊模式等）
 - 格式：Markdown 文件，按规则类分文件
@@ -318,7 +326,7 @@ confidence: high
 - [ ] 所有模块状态为 done 或 degrade(FFI)
 - [ ] KNOWN_DIFFERENCES.md 中所有差异已评审
 - [ ] 测试覆盖率 >= 原项目
-- [ ] P0 级 unsafe 全部消除，P1 级 unsafe 全部封装审计完毕，P4 级 unsafe 全部重新归类（见 10.4 节 unsafe 分类管理）
+- [ ] P0 级 unsafe 全部消除，P1 级 unsafe 全部封装审计完毕，P4 级 unsafe 全部重新归类（[见插件结构 > unsafe 分类管理](./06-plugin-structure.md#104-unsafe-分类管理)）
 - [ ] 性能基准无退化（允许 +-10%）
 - [ ] CI/CD 已切换到 Rust 构建
 - [ ] 团队完成 Rust 培训，能独立维护
