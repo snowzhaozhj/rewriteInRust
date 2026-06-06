@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rust 迁移工作流 - 项目设计文档</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-secondary: #8b949e;
+    --accent: #58a6ff;
+    --accent-green: #3fb950;
+    --accent-red: #f85149;
+    --accent-yellow: #d29922;
+    --accent-purple: #bc8cff;
+    --accent-orange: #f0883e;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 40px 24px;
+  }
+  h1 {
+    font-size: 2.2em;
+    border-bottom: 2px solid var(--accent);
+    padding-bottom: 16px;
+    margin-bottom: 8px;
+  }
+  .subtitle {
+    color: var(--text-secondary);
+    font-size: 0.9em;
+    margin-bottom: 40px;
+  }
+  h2 {
+    font-size: 1.5em;
+    color: var(--accent);
+    margin-top: 48px;
+    margin-bottom: 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  h3 {
+    font-size: 1.15em;
+    color: var(--accent-purple);
+    margin-top: 28px;
+    margin-bottom: 10px;
+  }
+  h4 {
+    font-size: 1em;
+    color: var(--accent-orange);
+    margin-top: 20px;
+    margin-bottom: 8px;
+  }
+  p { margin-bottom: 12px; }
+  strong { color: #f0f6fc; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 24px; margin-bottom: 12px; }
+  li { margin-bottom: 4px; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0;
+    font-size: 0.92em;
+  }
+  th {
+    background: var(--surface);
+    color: var(--accent);
+    text-align: left;
+    padding: 10px 14px;
+    border: 1px solid var(--border);
+    font-weight: 600;
+  }
+  td {
+    padding: 8px 14px;
+    border: 1px solid var(--border);
+    vertical-align: top;
+  }
+  tr:nth-child(even) { background: rgba(22,27,34,0.5); }
+  code {
+    background: var(--surface);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.88em;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    color: var(--accent-orange);
+  }
+  pre {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    overflow-x: auto;
+    margin: 16px 0;
+    font-size: 0.85em;
+    line-height: 1.5;
+  }
+  pre code {
+    background: none;
+    padding: 0;
+    color: var(--text);
+  }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px 24px;
+    margin: 16px 0;
+  }
+  .card-green { border-left: 4px solid var(--accent-green); }
+  .card-red { border-left: 4px solid var(--accent-red); }
+  .card-yellow { border-left: 4px solid var(--accent-yellow); }
+  .card-blue { border-left: 4px solid var(--accent); }
+  .card-purple { border-left: 4px solid var(--accent-purple); }
+  .badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 0.78em;
+    font-weight: 600;
+    margin-right: 6px;
+  }
+  .badge-adopt { background: #1a3a2a; color: var(--accent-green); }
+  .badge-trial { background: #3a2a1a; color: var(--accent-yellow); }
+  .badge-avoid { background: #3a1a1a; color: var(--accent-red); }
+  .badge-build { background: #2a1a3a; color: var(--accent-purple); }
+  .toc {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px 28px;
+    margin: 24px 0;
+  }
+  .toc h3 { margin-top: 0; color: var(--text); }
+  .toc ol { padding-left: 20px; }
+  .toc li { margin-bottom: 6px; }
+  .toc a { color: var(--text-secondary); }
+  .toc a:hover { color: var(--accent); }
+  .metric-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+    margin: 16px 0;
+  }
+  .metric-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    text-align: center;
+  }
+  .metric-value {
+    font-size: 1.8em;
+    font-weight: 700;
+    color: var(--accent);
+  }
+  .metric-label {
+    font-size: 0.82em;
+    color: var(--text-secondary);
+    margin-top: 4px;
+  }
+  .phase-flow {
+    display: flex;
+    gap: 8px;
+    margin: 16px 0;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .phase-box {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 16px;
+    font-size: 0.88em;
+    text-align: center;
+    min-width: 140px;
+  }
+  .phase-arrow {
+    color: var(--text-secondary);
+    font-size: 1.2em;
+  }
+  .checklist { list-style: none; padding-left: 0; }
+  .checklist li { padding: 4px 0; }
+  .checklist li::before { content: "[ ] "; color: var(--text-secondary); font-family: monospace; }
+  hr { border: none; border-top: 1px solid var(--border); margin: 32px 0; }
+  @media (max-width: 768px) {
+    body { padding: 16px; }
+    h1 { font-size: 1.6em; }
+    .metric-grid { grid-template-columns: repeat(2, 1fr); }
+    .phase-flow { flex-direction: column; align-items: stretch; }
+    .phase-arrow { transform: rotate(90deg); text-align: center; }
+  }
+</style>
+</head>
+<body>
+
+<h1>Rust 迁移工作流</h1>
+<p class="subtitle">v0.1 | 2026-06-06 | 18 路深度调研 + 103 agent deep research 工作流</p>
+
+<div class="metric-grid">
+  <div class="metric-card">
+    <div class="metric-value">18</div>
+    <div class="metric-label">调研路线</div>
+  </div>
+  <div class="metric-card">
+    <div class="metric-value">103</div>
+    <div class="metric-label">deep research agents</div>
+  </div>
+  <div class="metric-card">
+    <div class="metric-value">60+</div>
+    <div class="metric-label">评估工具数</div>
+  </div>
+  <div class="metric-card">
+    <div class="metric-value">6</div>
+    <div class="metric-label">核心论文</div>
+  </div>
+</div>
+
+<div class="toc">
+<h3>目录</h3>
+<ol>
+<li><a href="#positioning">项目定位</a></li>
+<li><a href="#methodology">核心方法论</a></li>
+<li><a href="#architecture">架构设计</a></li>
+<li><a href="#toolchain">工具链选型</a></li>
+<li><a href="#documents">文档体系</a></li>
+<li><a href="#testing">测试与验证</a></li>
+<li><a href="#motivation">动机驱动的策略路由</a></li>
+<li><a href="#pitfalls">常见陷阱</a></li>
+<li><a href="#plugin">Claude Code 插件结构</a></li>
+<li><a href="#risks">风险评估</a></li>
+<li><a href="#roadmap">实施路线图</a></li>
+<li><a href="#references">关键参考</a></li>
+</ol>
+</div>
+
+<!-- Section 1: Positioning -->
+<h2 id="positioning">1. 项目定位</h2>
+
+<div class="card card-blue">
+<strong>核心洞察</strong>：代码生成正在商品化。<strong>验证才是价值所在。</strong>（Code Metal CEO）
+</div>
+
+<h3>我们做什么</h3>
+<p>一套 <strong>Claude Code 插件生态</strong>（Skills + Workflows + Hooks + SubAgents），将散落在各处的迁移最佳实践（Bun PORTING.md、SafeTrans 迭代修复、DepTrans 依赖图引导、UA 知识图谱）编码成<strong>可重复执行的工作流</strong>。</p>
+
+<h3>我们不做什么</h3>
+<ul>
+<li>端到端自动迁移工具（Code Metal 有 $2 亿融资做这个）</li>
+<li>替代 Claude Code（我们是增强层）</li>
+<li>通用代码翻译平台</li>
+</ul>
+
+<h3>核心价值主张</h3>
+<table>
+<tr><th>#</th><th>价值</th><th>说明</th></tr>
+<tr><td>1</td><td><strong>方法论编码</strong></td><td>将 Bun/Claw-Code 等成功模式打包为开箱即用的工作流</td></tr>
+<tr><td>2</td><td><strong>验证基础设施</strong></td><td>行为录制 &rarr; 差异测试 &rarr; 属性测试 &rarr; 模糊测试管线</td></tr>
+<tr><td>3</td><td><strong>项目自适应</strong></td><td>自动画像源项目，路由到合适的迁移策略</td></tr>
+<tr><td>4</td><td><strong>持久化产出物</strong></td><td>每次执行产出 PORTING.md、PARITY.md、测试集、决策记录</td></tr>
+</table>
+
+<!-- Section 2: Methodology -->
+<h2 id="methodology">2. 核心方法论</h2>
+
+<h3>三层范式：AI - 工具 - 人类</h3>
+<table>
+<tr><th>层</th><th>角色</th><th>负责什么</th></tr>
+<tr><td><span class="badge badge-build">AI</span></td><td>高吞吐执行</td><td>语义理解、代码翻译、测试生成</td></tr>
+<tr><td><span class="badge badge-adopt">工具</span></td><td>确定性约束</td><td>编译器、Lint、AST 分析、覆盖率、模糊测试</td></tr>
+<tr><td><span class="badge badge-trial">人类</span></td><td>判断与责任</td><td>架构决策、发布节奏、unsafe 审计</td></tr>
+</table>
+
+<h3>意图驱动，而非逐行直译</h3>
+<div class="phase-flow">
+<div class="phase-box"><strong>解构</strong><br><small>提取业务意图<br>（不含源语言语法）</small></div>
+<span class="phase-arrow">&rarr;</span>
+<div class="phase-box"><strong>约束</strong><br><small>定义架构"宪法"<br>（PORTING.md）</small></div>
+<span class="phase-arrow">&rarr;</span>
+<div class="phase-box"><strong>重塑</strong><br><small>用 idiomatic Rust<br>重新实现</small></div>
+</div>
+
+<h3>集成的学术前沿技术</h3>
+<table>
+<tr><th>技术</th><th>来源</th><th>效果</th></tr>
+<tr><td>编译器反馈迭代修复</td><td>SafeTrans (ACM 2025)</td><td>成功率 54% &rarr; 80%</td></tr>
+<tr><td>依赖图引导翻译</td><td>DepTrans (FSE 2026)</td><td>&lt;15% 目标代码修改</td></tr>
+<tr><td>多候选生成+最优选择</td><td>LAC2R / MCTS</td><td>避免陷入局部最优修复</td></tr>
+<tr><td>等价性验证</td><td>MatchFixAgent (ICML 2026)</td><td>99.2% 判定覆盖率</td></tr>
+</table>
+
+<!-- Section 3: Architecture -->
+<h2 id="architecture">3. 架构设计</h2>
+
+<pre><code>用户入口 (Skills)
+  /migrate-init  /migrate-plan  /migrate-run  /migrate-verify
+       |
+编排层 (Workflows)
+  项目画像 &rarr; 策略路由 &rarr; 阶段管理 &rarr; 进度跟踪
+       |
+  +-----------分析层-----------+     +--------转换层--------+
+  | tree-sitter (AST)          |     | LLM 翻译引擎         |
+  | OXC (JS/TS 深度解析)       |     | PORTING.md 规则引擎   |
+  | Mypy (Python 类型)         |     | syn+quote (Rust 生成) |
+  | dependency-cruiser (JS 依赖)|    | ast-grep (模式重写)   |
+  | import-linter+grimp (Py 依赖)|   +----------------------+
+  +-----------------------------+
+       |
+验证层 (Harness)
+  cargo check &rarr; clippy &rarr; cargo-llvm-cov &rarr; insta
+  proptest &rarr; cargo-fuzz &rarr; cargo-mutants &rarr; Miri
+  差异测试 &rarr; 行为录制 &rarr; 不等价证据收集
+       |
+质量门禁 (Hooks)
+  PostToolUse: 写入 .rs 后自动 cargo check
+  TaskCompleted: 模块完成后自动跑测试套件
+       |
+FFI 桥接层 (增量迁移)
+  napi-rs (Node.js) | PyO3 (Python) | cxx/bindgen (C/C++)
+       |
+产出物 (.rust-migration/)
+  PORTING.md | PARITY.md | AGENTS.md | migration-state.json
+  intermediate/ | test-fixtures/ | decisions/ | reports/</code></pre>
+
+<h3>工作流阶段</h3>
+<div class="phase-flow">
+<div class="phase-box" style="border-color: var(--accent)"><strong>Phase 0</strong><br>项目<br>画像</div>
+<span class="phase-arrow">&rarr;</span>
+<div class="phase-box" style="border-color: var(--accent-purple)"><strong>Phase 1</strong><br>迁移<br>规划</div>
+<span class="phase-arrow">&rarr;</span>
+<div class="phase-box" style="border-color: var(--accent-green)"><strong>Phase 2</strong><br>测试基础<br>设施搭建</div>
+<span class="phase-arrow">&rarr;</span>
+<div class="phase-box" style="border-color: var(--accent-orange)"><strong>Phase 3</strong><br>增量<br>迁移</div>
+<span class="phase-arrow">&rarr;</span>
+<div class="phase-box" style="border-color: var(--accent-yellow)"><strong>Phase 4</strong><br>集成<br>验证</div>
+<span class="phase-arrow">&rarr;</span>
+<div class="phase-box" style="border-color: var(--accent-red)"><strong>Phase 5</strong><br>渐进<br>部署</div>
+</div>
+
+<h4>Phase 0: 项目画像</h4>
+<p>自动分析源码仓库生成项目画像：语言/框架检测、代码规模、模块结构、依赖图、测试现状、关键难点（并发模型、FFI、动态特性、插件系统）、依赖可替代性分析、迁移动机确认。</p>
+
+<h4>Phase 1: 迁移规划</h4>
+<p>自动生成 PORTING.md（20 类规则）、PARITY.md（进度跟踪）、AGENTS.md（AI 行为约束）。<strong>人工审查检查点。</strong></p>
+
+<h4>Phase 2: 测试基础设施</h4>
+<div class="card card-green">
+<strong>核心原则：先迁移测试，再迁移代码。</strong>
+<p style="margin-top:8px">评估原项目测试质量 &rarr; 翻译已有测试 / 录制行为 / AI 生成测试 &rarr; 在原语言中验证 &rarr; 建立黄金测试集</p>
+</div>
+
+<p>测试分层：L1 黄金文件, L2 属性测试 (proptest), L3 快照测试 (insta), L4 模糊测试 (cargo-fuzz), L5 变异测试 (cargo-mutants)</p>
+
+<h4>Phase 3: 增量迁移</h4>
+<p><strong>顺序</strong>：依赖图拓扑排序，叶子模块优先。</p>
+<p><strong>单模块循环</strong>：语义分析 &rarr; 生成 3-5 候选 &rarr; 编译过滤 &rarr; 测试过滤 &rarr; 选最优 &rarr; clippy + 安全检查 &rarr; 对抗性审查 &rarr; 通过: 更新 PARITY.md / 失败: 编译器反馈 &rarr; LLM 重试（最多 3 轮）&rarr; 仍失败: 降级为 FFI 桥接或人工介入</p>
+
+<h4>Phase 4: 集成验证</h4>
+<p>差异测试、性能基准（criterion）、unsafe 审计（cargo-geiger + Miri）、覆盖率验证、复杂度对比（检测"翻译膨胀"）</p>
+
+<h4>Phase 5: 渐进部署（可选）</h4>
+<p>Strangler Fig 模式、FFI 桥接、kill switch、双运行架构</p>
+
+<!-- Section 4: Toolchain -->
+<h2 id="toolchain">4. 工具链选型</h2>
+
+<p>基于 60+ 工具的企业级成熟度评估。</p>
+
+<h3><span class="badge badge-adopt">ADOPT</span> 经过实战验证，直接采用</h3>
+<table>
+<tr><th>类别</th><th>工具</th><th>生产验证</th></tr>
+<tr><td>多语言 AST</td><td><strong>tree-sitter</strong></td><td>GitHub, Neovim, Zed</td></tr>
+<tr><td>Rust 代码生成</td><td><strong>syn + quote</strong></td><td>几乎整个 Rust 生态 (dtolnay)</td></tr>
+<tr><td>快照测试</td><td><strong>insta</strong></td><td>Armin Ronacher (Flask/Sentry 作者)</td></tr>
+<tr><td>属性测试</td><td><strong>proptest</strong></td><td>功能稳定 "passive maintenance"</td></tr>
+<tr><td>模糊测试</td><td><strong>cargo-fuzz</strong></td><td>libFuzzer, OSS-Fuzz 标准</td></tr>
+<tr><td>UB 检测</td><td><strong>Miri</strong></td><td>Rust 官方工具</td></tr>
+<tr><td>覆盖率</td><td><strong>cargo-llvm-cov</strong></td><td>LLVM 原生，比 tarpaulin 更准确</td></tr>
+<tr><td>代码搜索/重写</td><td><strong>ast-grep</strong></td><td>14K stars，Rust 原生，极活跃</td></tr>
+<tr><td>JS/TS 依赖</td><td><strong>dependency-cruiser</strong></td><td>JS/TS 唯一可选 (madge 已停滞)</td></tr>
+<tr><td>Python 类型</td><td><strong>Mypy</strong></td><td>Dropbox, Google, Meta, Bloomberg</td></tr>
+<tr><td>Python 依赖</td><td><strong>import-linter + grimp</strong></td><td>可程序化、可执行约束</td></tr>
+<tr><td>Node.js FFI</td><td><strong>napi-rs</strong></td><td>SWC/Next.js 生产验证</td></tr>
+<tr><td>Python FFI</td><td><strong>PyO3 + maturin</strong></td><td>OpenAI, Hugging Face 生产使用</td></tr>
+<tr><td>C FFI</td><td><strong>bindgen + cbindgen</strong></td><td>Rust 官方标准</td></tr>
+<tr><td>任务运行</td><td><strong>just</strong></td><td>34K stars</td></tr>
+<tr><td>测试运行</td><td><strong>cargo-nextest</strong></td><td>比 cargo test 快最高 3 倍</td></tr>
+<tr><td>文档</td><td><strong>mdBook</strong></td><td>Rust 官方</td></tr>
+<tr><td>图表</td><td><strong>Mermaid</strong></td><td>GitHub 原生渲染</td></tr>
+</table>
+
+<h3><span class="badge badge-trial">TRIAL</span> 有前景但需验证</h3>
+<table>
+<tr><th>工具</th><th>风险</th><th>缓解措施</th></tr>
+<tr><td><strong>petgraph</strong></td><td>bus factor=1，279 issues</td><td>轻量场景可自建邻接表</td></tr>
+<tr><td><strong>Kani</strong></td><td>474 issues，对真实代码有限制</td><td>仅用于关键核心函数</td></tr>
+<tr><td><strong>cargo-mutants</strong></td><td>个人业余项目</td><td>需实测大规模表现后再依赖</td></tr>
+<tr><td><strong>cxx</strong></td><td>作者称 "MVP"</td><td>复杂 C++ 考虑 autocxx + bindgen</td></tr>
+<tr><td><strong>OXC</strong></td><td>0.x 不稳定 API</td><td>备选 tree-sitter-typescript</td></tr>
+</table>
+
+<h3><span class="badge badge-avoid">AVOID</span> 明确不用</h3>
+<table>
+<tr><th>工具</th><th>原因</th><th>替代</th></tr>
+<tr><td>GoReplay</td><td>已停滞，290 issues，仅 HTTP/1.1</td><td>mitmproxy</td></tr>
+<tr><td>madge</td><td>2024 年 8 月后无更新</td><td>dependency-cruiser</td></tr>
+<tr><td>Pyright (管道)</td><td>单人项目，无 Python API</td><td>Mypy</td></tr>
+<tr><td>pydeps</td><td>无法处理动态导入</td><td>import-linter + grimp</td></tr>
+<tr><td>cargo-tarpaulin</td><td>被 cargo-llvm-cov 超越</td><td>cargo-llvm-cov</td></tr>
+<tr><td>bolero</td><td>246 stars，维护不够</td><td>cargo-fuzz</td></tr>
+<tr><td>D2</td><td>pre-1.0，无 GitHub 原生支持</td><td>Mermaid</td></tr>
+<tr><td>FalkorDB</td><td>代码图场景过度设计</td><td>petgraph + SQLite</td></tr>
+</table>
+
+<h3><span class="badge badge-build">BUILD</span> 必须自建（核心差异化）</h3>
+<table>
+<tr><th>#</th><th>组件</th><th>复杂度</th><th>说明</th></tr>
+<tr><td>G1</td><td><strong>跨语言类型 IR + Rust 类型生成器</strong></td><td>高</td><td>TS/Python/Go 类型 &rarr; 统一 IR &rarr; idiomatic Rust 类型</td></tr>
+<tr><td>G2</td><td><strong>跨语言代码图映射层</strong></td><td>高</td><td>源/目标调用图拓扑验证</td></tr>
+<tr><td>G3</td><td><strong>统一差异测试框架</strong></td><td>中</td><td>跨 HTTP/CLI/库接口的录制回放 + 对比引擎</td></tr>
+<tr><td>G4</td><td><strong>Rust Scientist 库</strong></td><td>低</td><td>并行执行新旧代码路径（约 300 行）</td></tr>
+<tr><td>G5</td><td><strong>统一依赖图格式转换器</strong></td><td>低</td><td>将各工具输出统一为标准格式</td></tr>
+<tr><td>G6</td><td><strong>AI 迁移编排器</strong></td><td>高</td><td>协调 LLM + 工具 + 测试的"大脑"</td></tr>
+</table>
+
+<!-- Section 5: Documents -->
+<h2 id="documents">5. 文档体系</h2>
+
+<h3>三份核心文档</h3>
+
+<div class="card card-blue">
+<h4>PORTING.md &mdash; 迁移规则宪法</h4>
+<p>20 类规则，覆盖类型映射、错误处理、内存管理、并发、命名约定、禁止模式、unsafe 策略、惯用法映射等。参考：Bun 的 576 行、约 300 条规则的 PORTING.md。</p>
+</div>
+
+<div class="card card-green">
+<h4>PARITY.md &mdash; 迁移进度跟踪</h4>
+<p>每个模块的状态跟踪：pending / translating / testing / verified / done。关联 commit hash 和测试通过率。参考：Claw-Code 的 9-lane checkpoint 系统。</p>
+</div>
+
+<div class="card card-yellow">
+<h4>AGENTS.md &mdash; AI 行为约束</h4>
+<p>AI agent 的显式规则：禁止删除文件、Git 安全规则、禁止引入未经批准的依赖、不确定时必须留 TODO、每个 unsafe 块必须有 SAFETY 注释。参考：pi_agent_rust。</p>
+</div>
+
+<h3>产出物目录结构</h3>
+<pre><code>.rust-migration/
+  PORTING.md              # 迁移规则宪法
+  PARITY.md               # 迁移进度跟踪
+  AGENTS.md               # AI 行为约束
+  migration-state.json    # 项目画像 + 状态机
+  intermediate/           # 中间分析产物
+    source-graph.json     # 源码依赖图
+    type-map.json         # 类型映射中间表示
+    call-graph.json       # 调用图
+  test-fixtures/          # 行为录制测试集
+    golden/               # 黄金文件（输入/输出对）
+    recordings/           # HTTP/CLI 录制
+  decisions/              # 迁移决策记录
+  reports/                # 验证报告</code></pre>
+
+<!-- Section 6: Testing -->
+<h2 id="testing">6. 测试与验证</h2>
+
+<h3>4 阶段验证管线</h3>
+<div class="phase-flow">
+<div class="phase-box" style="border-color: var(--accent)"><strong>阶段 1</strong><br>源码分析<br><small>（确定性）</small></div>
+<span class="phase-arrow">&rarr;</span>
+<div class="phase-box" style="border-color: var(--accent-purple)"><strong>阶段 2</strong><br>AI 翻译<br><small>（非确定性）</small></div>
+<span class="phase-arrow">&rarr;</span>
+<div class="phase-box" style="border-color: var(--accent-green)"><strong>阶段 3</strong><br>确定性<br>验证</div>
+<span class="phase-arrow">&rarr;</span>
+<div class="phase-box" style="border-color: var(--accent-red)"><strong>阶段 4</strong><br>反馈<br>循环</div>
+</div>
+
+<h3>"翻译膨胀"检测</h3>
+<table>
+<tr><th>指标</th><th>健康范围</th><th>告警阈值</th></tr>
+<tr><td>代码行数比</td><td>1.2x - 2.0x</td><td>&gt; 3.0x</td></tr>
+<tr><td>圈复杂度比</td><td>0.8x - 1.2x</td><td>&gt; 1.5x</td></tr>
+<tr><td>函数数量比</td><td>0.9x - 1.3x</td><td>&gt; 2.0x</td></tr>
+</table>
+
+<h3>按项目类型验证行为等价性</h3>
+<table>
+<tr><th>类型</th><th>方法</th></tr>
+<tr><td>CLI 工具</td><td>录制 args &rarr; stdout/stderr/exitcode，黄金文件对比</td></tr>
+<tr><td>HTTP 服务</td><td>mitmproxy 录制请求/响应，差异对比</td></tr>
+<tr><td>库/SDK</td><td>通过 FFI（PyO3/napi-rs）调用原实现，proptest 生成输入对比</td></tr>
+<tr><td>有状态服务</td><td>共享数据库 schema，对比操作后状态</td></tr>
+</table>
+
+<!-- Section 7: Motivation -->
+<h2 id="motivation">7. 动机驱动的策略路由</h2>
+
+<table>
+<tr><th>动机</th><th>迁移顺序</th><th>验收标准</th><th>允许"不等价"？</th></tr>
+<tr><td>性能</td><td>profiling 驱动，热路径优先</td><td>benchmark 对比</td><td>是（更快的算法）</td></tr>
+<tr><td>内存安全</td><td>unsafe 密集区优先</td><td>CVE 消除，cargo-geiger 通过</td><td>否</td></tr>
+<tr><td>部署简化</td><td>整体迁移</td><td>交叉编译通过，单二进制</td><td>否</td></tr>
+<tr><td>并发安全</td><td>并发热点优先</td><td>编译通过 = 无数据竞争</td><td>否</td></tr>
+<tr><td>合规</td><td>外部要求驱动</td><td>审计报告通过</td><td>否</td></tr>
+</table>
+
+<!-- Section 8: Pitfalls -->
+<h2 id="pitfalls">8. 常见陷阱</h2>
+
+<h3>技术陷阱</h3>
+<table>
+<tr><th>陷阱</th><th>说明</th><th>缓解措施</th></tr>
+<tr><td>逐行直译</td><td>得到 Arc&lt;Mutex&lt;&gt;&gt; 满天飞的代码</td><td>意图驱动：先解构语义，再用 Rust 惯用法重新实现</td></tr>
+<tr><td>HashMap 迭代顺序</td><td>Rust HashMap 使用随机化哈希</td><td>差异测试 + 需要顺序时用 BTreeMap/IndexMap</td></tr>
+<tr><td>UTF-8 vs UTF-16</td><td>JS string.length 返回 UTF-16 code units</td><td>专门的字符串语义测试用例</td></tr>
+<tr><td>整数溢出</td><td>Debug panic, Release wrapping</td><td>PORTING.md 中明确溢出策略</td></tr>
+<tr><td>全局状态</td><td>模块级变量 &rarr; OnceLock/lazy_static</td><td>Phase 0 做全局状态审计</td></tr>
+<tr><td>错误处理范式</td><td>异常冒泡 &ne; Result 传播</td><td>重新设计错误策略（anyhow vs thiserror）</td></tr>
+</table>
+
+<h3>流程陷阱</h3>
+<table>
+<tr><th>陷阱</th><th>数据</th><th>缓解措施</th></tr>
+<tr><td>认知债务</td><td>AI 代码问题率 1.7 倍，METR：开发者感觉快 20% 实际慢 19%</td><td>代码认领：每个模块有人能不借助 AI 解释</td></tr>
+<tr><td>审查瓶颈</td><td>AI：1 万行/小时，人类审阅：200-500 行/小时</td><td>控制并行度，不追求生成速度</td></tr>
+<tr><td>最后 20%</td><td>uutils 在 90.58% 兼容性停滞</td><td>接受部分模块用 FFI 桥接</td></tr>
+<tr><td>性能倒退</td><td>Arc 开销可能超过 GC；通道间接层 +30%</td><td>迁移后必须跑 benchmark</td></tr>
+</table>
+
+<h3>易忽略清单</h3>
+<ul class="checklist">
+<li>构建系统迁移（package.json &rarr; Cargo.toml，CI/CD 重配）</li>
+<li>用户面向字符串提取和回归测试</li>
+<li>许可证兼容性审计（cargo-deny）</li>
+<li>全局状态和初始化顺序审计</li>
+<li>插件系统可行性评估</li>
+<li>监控/日志格式兼容性（tracing vs 传统日志）</li>
+<li>回滚计划和双运行架构</li>
+<li>序列化格式字节级兼容性测试</li>
+<li>团队 Rust 学习曲线预算（3-6 个月）</li>
+<li>配置/环境变量处理</li>
+<li>平台特定代码的 cfg 映射</li>
+</ul>
+
+<!-- Section 9: Plugin -->
+<h2 id="plugin">9. Claude Code 插件结构</h2>
+
+<h3>Skills（用户入口）</h3>
+<table>
+<tr><th>Skill</th><th>功能</th></tr>
+<tr><td><code>/migrate-init</code></td><td>初始化迁移项目，分析源码仓库，生成项目画像</td></tr>
+<tr><td><code>/migrate-plan</code></td><td>生成 PORTING.md + PARITY.md + AGENTS.md</td></tr>
+<tr><td><code>/migrate-test</code></td><td>搭建测试基础设施，录制行为，生成测试套件</td></tr>
+<tr><td><code>/migrate-run</code></td><td>执行指定模块的迁移</td></tr>
+<tr><td><code>/migrate-verify</code></td><td>运行完整验证管线</td></tr>
+<tr><td><code>/migrate-status</code></td><td>查看迁移进度仪表板</td></tr>
+</table>
+
+<h3>SubAgents（专职角色）</h3>
+<table>
+<tr><th>Agent</th><th>职责</th></tr>
+<tr><td><code>project-profiler</code></td><td>分析源项目特征，生成画像</td></tr>
+<tr><td><code>porting-guide-writer</code></td><td>生成 PORTING.md</td></tr>
+<tr><td><code>test-scaffolder</code></td><td>搭建测试基础设施</td></tr>
+<tr><td><code>code-translator</code></td><td>执行意图驱动的翻译</td></tr>
+<tr><td><code>equivalence-checker</code></td><td>验证行为等价性</td></tr>
+<tr><td><code>adversarial-reviewer</code></td><td>对抗性审查翻译质量</td></tr>
+<tr><td><code>rust-idiom-checker</code></td><td>检查 idiomatic Rust 合规性</td></tr>
+</table>
+
+<!-- Section 10: Risks -->
+<h2 id="risks">10. 风险评估</h2>
+
+<table>
+<tr><th>风险</th><th>严重度</th><th>可能性</th><th>缓解措施</th></tr>
+<tr><td>LLM 进步使工具过时</td><td><span class="badge badge-avoid">高</span></td><td>中</td><td>核心价值在验证层，不在生成层</td></tr>
+<tr><td>Code Metal 下沉到中端市场</td><td><span class="badge badge-avoid">高</span></td><td>低</td><td>保持开源 + 轻量定位</td></tr>
+<tr><td>用户基数小</td><td><span class="badge badge-trial">中</span></td><td>中</td><td>产出物（PORTING.md、测试集）独立有价值</td></tr>
+<tr><td>每种语言对需大量维护</td><td><span class="badge badge-trial">中</span></td><td>高</td><td>优先支持 TS&rarr;Rust 和 Python&rarr;Rust</td></tr>
+<tr><td>petgraph 维护风险</td><td><span class="badge badge-adopt">低</span></td><td>中</td><td>轻量场景可自建 DAG</td></tr>
+</table>
+
+<!-- Section 11: Roadmap -->
+<h2 id="roadmap">11. 实施路线图</h2>
+
+<h3>第一阶段：MVP（4-6 周）</h3>
+<div class="card card-green">
+<strong>目标</strong>：跑通 TypeScript &rarr; Rust 的单模块迁移
+<ul>
+<li>实现 <code>/migrate-init</code>（项目画像）</li>
+<li>核心 PORTING.md 生成（TS&rarr;Rust 模板）</li>
+<li>单模块迁移循环（翻译 &rarr; 编译 &rarr; 测试 &rarr; 修复）</li>
+<li>基础验证管线（cargo check + clippy + 测试）</li>
+<li>黄金文件测试框架</li>
+</ul>
+</div>
+
+<h3>第二阶段：质量提升（4-6 周）</h3>
+<div class="card card-blue">
+<ul>
+<li>多候选生成 + 最优选择</li>
+<li>编译器反馈迭代修复（2-3 轮）</li>
+<li>属性测试（proptest 等价性验证）</li>
+<li>模糊测试（cargo-fuzz 差异对比）</li>
+<li>PARITY.md 自动更新</li>
+</ul>
+</div>
+
+<h3>第三阶段：多语言支持（4-6 周）</h3>
+<div class="card card-purple">
+<ul>
+<li>Python &rarr; Rust 支持（Mypy 类型提取 + PyO3 桥接）</li>
+<li>统一差异测试框架</li>
+<li>行为录制框架</li>
+<li>依赖图可视化</li>
+</ul>
+</div>
+
+<h3>第四阶段：完善（持续）</h3>
+<div class="card card-yellow">
+<ul>
+<li>C/C++ &rarr; Rust, Go &rarr; Rust 支持</li>
+<li>Kani 集成（关键路径验证）</li>
+<li>社区驱动的规则库积累</li>
+<li>性能基准自动化</li>
+</ul>
+</div>
+
+<!-- Section 12: References -->
+<h2 id="references">12. 关键参考</h2>
+
+<h3>案例研究</h3>
+<table>
+<tr><th>项目</th><th>规模</th><th>耗时</th><th>结果</th></tr>
+<tr><td>Bun (Zig&rarr;Rust)</td><td>100 万行</td><td>11 天</td><td>99.8% 测试通过</td></tr>
+<tr><td>Claw-Code (TS&rarr;Rust)</td><td>48K 行</td><td>4 天</td><td>95.5% Rust</td></tr>
+<tr><td>Cloudflare Pingora</td><td>从零构建</td><td>-</td><td>CPU -70%, 内存 -67%</td></tr>
+<tr><td>Discord (Go&rarr;Rust)</td><td>单服务</td><td>-</td><td>消除 GC 延迟尖刺</td></tr>
+</table>
+
+<h3>学术论文</h3>
+<table>
+<tr><th>论文</th><th>会议</th><th>核心贡献</th></tr>
+<tr><td>SafeTrans</td><td>ACM CCS 2025</td><td>迭代修复 54%&rarr;80%</td></tr>
+<tr><td>DepTrans</td><td>ACM FSE 2026</td><td>7B 模型超 32B，依赖图引导</td></tr>
+<tr><td>Environment-in-the-Loop</td><td>ACM ReCode 2026</td><td>编译环境作为反馈参与者</td></tr>
+<tr><td>MatchFixAgent</td><td>ICML 2026</td><td>99.2% 等价性判定覆盖率</td></tr>
+<tr><td>Hayroll</td><td>PLDI 2026</td><td>C 宏翻译</td></tr>
+<tr><td>LLMigrate</td><td>arXiv 2025</td><td>调用图引导，&lt;15% 代码修改</td></tr>
+</table>
+
+<h3>成本估算</h3>
+<div class="metric-grid">
+<div class="metric-card">
+<div class="metric-value">~$10</div>
+<div class="metric-label">每千行（中位数）</div>
+</div>
+<div class="metric-card">
+<div class="metric-value">2-4 周</div>
+<div class="metric-label">1 万行项目</div>
+</div>
+<div class="metric-card">
+<div class="metric-value">2-4 月</div>
+<div class="metric-label">5 万行项目</div>
+</div>
+<div class="metric-card">
+<div class="metric-value">6-12 月</div>
+<div class="metric-label">10 万行+ 项目</div>
+</div>
+</div>
+
+<hr>
+<p style="text-align:center; color: var(--text-secondary); font-size: 0.85em; margin-top: 40px;">
+基于 18 路调研、103 个 deep research agents、60+ 工具评估<br>
+rewriteInRust Project &copy; 2026
+</p>
+
+</body>
+</html>
