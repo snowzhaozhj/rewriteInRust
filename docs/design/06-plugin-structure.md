@@ -26,6 +26,8 @@
 ```
 rust-migrate-plugin/
 ├── .claude-plugin/plugin.json        # Plugin 元数据
+├── bin/                              # 预编译 CLI 二进制
+│   └── rustmigrate-{os}-{arch}      # 如 rustmigrate-darwin-arm64
 ├── skills/
 │   └── migrate/
 │       ├── SKILL.md                  # 主入口（路由 + 通用约定）
@@ -53,10 +55,113 @@ rust-migrate-plugin/
 │       ├── verify.sh                 # F2 验证脚本
 │       ├── full-verify.sh            # F3 完整验证脚本
 │       └── file-guard.sh             # 文件保护（PreToolUse）
+├── scripts/
+│   └── ensure-cli.sh                 # 检测/选择正确的预编译二进制
 └── README.md
 ```
 
 > **规则分发策略**：Plugin 不支持 `rules/` 目录分发。核心规则（短、高频、必须遵守）内嵌在 `agents/*.md` 中随 Agent 启动加载；参考指南（长、按需、条件触发）放在 `skills/migrate/references/` 下由 SKILL.md 条件 Read；项目专有规则由 `/migrate analyze` 生成到 `.rust-migration/porting/` 目录，由 SKILL.md 显式 Read。
+
+---
+
+## 10.0.1 CLI 工具架构（`rustmigrate`）
+
+Plugin 中的确定性计算由独立的 Rust CLI 工具 `rustmigrate` 承担，AI 判断留给 Plugin（SubAgent + SKILL.md）。
+
+### CLI vs Plugin 边界
+
+| 维度 | CLI（`rustmigrate`） | Plugin（SubAgent / SKILL.md） |
+|------|---------------------|-------------------------------|
+| 计算类型 | 确定性：AST 解析、图遍历、代码统计、状态校验 | 非确定性：翻译策略、代码生成、等价性判断 |
+| 可测试性 | 单元测试 + 集成测试覆盖 | 需要人工或 LLM-as-judge 评估 |
+| 输出格式 | 结构化 JSON `{status, data, warnings}` | 自然语言 + 文件产出物 |
+| 执行速度 | 毫秒级 | 秒~分钟级（LLM 调用） |
+| 典型操作 | `graph build`、`stats loc`、`validate state` | `/migrate run`（翻译）、对抗性审查 |
+
+### CLI 命令概览（M1 必需）
+
+| 子命令 | 说明 |
+|--------|------|
+| `rustmigrate init` | 初始化 `.rust-migration/` 目录和 `.rustmigrate.toml` 配置文件 |
+| `rustmigrate profile` | 分析源码项目画像（语言检测、框架识别、代码统计） |
+| `rustmigrate graph build` | 使用 tree-sitter 解析源码，构建模块依赖图（输出 `source-graph.json`） |
+| `rustmigrate graph topo-sort` | 对依赖图执行拓扑排序，输出迁移顺序 |
+| `rustmigrate validate state` | 校验 `migration-state.json` 的合法性（JSON Schema + 状态机约束） |
+| `rustmigrate validate config` | 校验 `.rustmigrate.toml` 配置文件的合法性 |
+| `rustmigrate state get` | 查询指定模块的当前迁移状态 |
+| `rustmigrate state transition` | 执行状态转换（带前置条件检查） |
+| `rustmigrate stats loc` | 统计源码和 Rust 代码行数（嵌入 tokei） |
+| `rustmigrate stats compare` | 对比源码与 Rust 代码的复杂度指标 |
+| `rustmigrate scaffold workspace` | 生成 Cargo workspace 骨架（注入 dev-dependencies） |
+
+### Workspace 结构
+
+参考 ast-grep / oxc 的 workspace 组织方式，采用 crate 分层：
+
+```
+cli/
+├── Cargo.toml              # workspace root
+├── crates/
+│   ├── core/               # 核心逻辑（分析、图、状态机、校验）
+│   │   ├── src/
+│   │   │   ├── graph.rs    # 依赖图构建/遍历（petgraph）
+│   │   │   ├── profile.rs  # 项目画像分析（tree-sitter + tokei）
+│   │   │   ├── state.rs    # 状态机管理
+│   │   │   ├── scaffold.rs # workspace 骨架生成
+│   │   │   └── validate.rs # 配置/状态校验（jsonschema）
+│   │   └── Cargo.toml
+│   └── cli/                # CLI 入口（clap）
+│       ├── src/main.rs     # clap 命令路由
+│       └── Cargo.toml
+```
+
+### CLI 与 Plugin 交互
+
+SKILL.md 通过 Bash tool 调用 CLI，所有输出为统一 JSON 格式：
+
+```json
+{
+  "status": "ok",           // "ok" | "error" | "warning"
+  "data": { ... },          // 命令特定的结构化数据
+  "warnings": ["..."]       // 非致命警告列表
+}
+```
+
+调用示例（SKILL.md 中的指令）：
+```
+使用 Bash tool 执行：rustmigrate graph build --root ./src --format json
+解析 JSON 输出中的 data.modules 字段，获取模块列表。
+```
+
+### 关键嵌入 crate 列表
+
+| Crate | 用途 | 对应子命令 |
+|-------|------|-----------|
+| tree-sitter + 语言绑定 | 多语言 AST 解析 | `graph build`, `profile` |
+| ast-grep-core | 代码模式搜索/重写 | `profile`（惯用法检测） |
+| tokei | 代码行数统计 | `stats loc`, `stats compare` |
+| syn + quote | Rust 代码生成/分析 | `scaffold workspace` |
+| petgraph | 依赖图数据结构 | `graph build`, `graph topo-sort` |
+| jsonschema | JSON Schema 校验 | `validate state`, `validate config` |
+
+### 分发方式
+
+1. **Plugin `bin/` 预编译**：Plugin 的 `bin/` 目录包含主流平台的预编译二进制（`rustmigrate-darwin-arm64`、`rustmigrate-linux-x86_64` 等）。`scripts/ensure-cli.sh` 在首次调用时检测 OS/Arch 并选择正确的二进制。
+2. **`cargo install rustmigrate`**：用户也可通过 crates.io 安装最新版本，覆盖 Plugin 预编译版本。
+3. **优先级**：`$PATH` 中的 `rustmigrate` > Plugin `bin/` 中的预编译版本。
+
+### M1 CLI 工作量估算
+
+| 模块 | 工作量 | 说明 |
+|------|--------|------|
+| CLI 骨架（clap + JSON 输出） | 1 人天 | workspace 搭建 + clap 路由 + 统一输出格式 |
+| `profile`（tree-sitter + tokei） | 2 人天 | 语言检测 + 框架识别 + 代码统计 |
+| `graph build` + `topo-sort`（petgraph） | 2 人天 | AST 提取模块关系 + 拓扑排序 |
+| `state` + `validate`（jsonschema） | 1.5 人天 | 状态机 + JSON Schema 校验 |
+| `stats loc` + `compare` | 1 人天 | tokei 封装 + 复杂度对比 |
+| `scaffold workspace` | 1 人天 | Cargo.toml 生成 + dev-deps 注入 |
+| 测试 + CI | 1.5 人天 | 单元测试 + 集成测试 + GitHub Actions |
+| **合计** | **~10 人天** | M1 阶段完成 |
 
 ---
 

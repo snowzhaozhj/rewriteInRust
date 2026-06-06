@@ -66,7 +66,10 @@
 | migration-state.json 管理 | 2-3 | Schema 定义 + 状态流转逻辑 + 断点续传 |
 | .rustmigrate.toml | 1 | Schema 定义 + 默认值生成 |
 | 集成测试 + 调试 | 5-8 | 3 个真实项目上的端到端验证 |
-| **合计** | **22-33** | 1 人约 6-8 周，2 人约 3-4 周 |
+| CLI 核心（11 个子命令） | 8-12 | init/profile/graph/validate/state/stats/scaffold |
+| CLI 嵌入 crate 集成 | 3-4 | tree-sitter + ast-grep-core + tokei + petgraph 绑定 |
+| CLI 测试 | 2-3 | 集成测试 + fixtures |
+| **合计** | **35-52** | 1 人约 9-13 周，2 人约 5-7 周 |
 
 ### M2: 质量提升（8-12 周）
 
@@ -87,6 +90,8 @@
 - [ ] Workflow 定义文件（ultracode 格式）
 - [ ] 多 agent worktree 隔离机制
 - [ ] /goal 自主迁移循环支持
+- [ ] CLI 扩展（search/analyze/report 等 16 个子命令）
+- [ ] CI/CD 集成（`rustmigrate` 在 GitHub Actions 中使用）
 
 **验收指标**：
 - 在 3 个真实 TS 中型项目（5K-20K 行）中完成多模块迁移

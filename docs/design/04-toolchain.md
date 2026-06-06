@@ -94,3 +94,53 @@
 - **持久化存储**：SQLite（节点+边表，JSON 属性字段）
 - **查询深度**：控制在 4-5 层以内（SQLite 递归 CTE 性能范围）
 - **可视化**：Mermaid（文档内嵌）+ Graphviz DOT（自动生成）
+
+## 5.8 工具集成方式分类
+
+所有工具按集成方式分为三类，决定了安装方式、调用路径和用户体验。
+
+### 类别 A：嵌入 CLI（`rustmigrate` Cargo 依赖）
+
+纯 Rust crate，编译进 `rustmigrate` 二进制。用户不需要单独安装，CLI 提供统一的 JSON 输出接口。
+
+| 工具 | 输入 | 输出 | 集成理由 |
+|------|------|------|---------|
+| **tree-sitter** + 语言绑定（tree-sitter-typescript / tree-sitter-python 等） | 源文件路径 | AST 节点 JSON（类型、位置、子节点） | 多语言 AST 解析是核心能力，必须零依赖可用 |
+| **ast-grep-core** | AST + 模式规则 | 匹配结果 JSON（位置、捕获） | 代码搜索/重写是高频操作，嵌入避免 CLI 调用开销 |
+| **tokei** | 目录路径 | 语言统计 JSON（行数、文件数、复杂度） | 代码量对比是基础分析，嵌入保证跨平台一致性 |
+| **syn + quote** | Rust 源码字符串 | Rust TokenStream / 格式化代码 | 代码生成和 AST 操作是翻译阶段核心依赖 |
+| **petgraph** | 节点+边列表 | 拓扑排序、路径查询、子图提取 JSON | 依赖图是核心数据结构，内存操作性能敏感 |
+
+### 类别 B：外部调用（子进程 + JSON 解析）
+
+独立工具链或非 Rust 语言编写，只能通过子进程调用。CLI 封装 `ToolRunner` trait 统一处理调用、超时、JSON 解析和错误上报。
+
+| 工具 | 输入 | 输出 | 集成理由 |
+|------|------|------|---------|
+| **cargo check** | Cargo 项目路径 | 编译诊断 JSON（`--message-format=json`） | Rust 编译器本身是外部工具链 |
+| **cargo clippy** | Cargo 项目路径 | Lint 诊断 JSON | 需要完整 rustc 工具链 |
+| **cargo-nextest** | Cargo 项目路径 + 测试过滤 | 测试结果 JSON（JUnit XML 或 libtest JSON） | 独立二进制，替代 cargo test |
+| **cargo-llvm-cov** | Cargo 项目路径 | 覆盖率 JSON（lcov 格式） | 依赖 LLVM 覆盖率工具链 |
+| **cargo-deny** | Cargo.toml | 许可证/依赖审计 JSON | 独立工具，需单独安装 |
+| **cargo-audit** | Cargo.lock | CVE 报告 JSON | 依赖 RustSec 数据库 |
+| **cargo-geiger** | Cargo 项目路径 | unsafe 统计 JSON | 独立工具，需单独安装 |
+| **cargo-fuzz** | 目标 + 语料目录 | 崩溃报告 | 依赖 libFuzzer |
+| **cargo-mutants** | Cargo 项目路径 | 变异测试报告 JSON | 独立工具，耗时长 |
+| **Miri** | Cargo 项目路径 | UB 检测报告 | rustup 组件，需单独安装 |
+| **dependency-cruiser** | JS/TS 项目路径 | 依赖图 JSON | Node.js 工具，需 `npx` |
+| **Mypy** | Python 项目路径 | 类型信息 JSON（`--output=json`） | Python 工具，需 `pip` |
+| **import-linter + grimp** | Python 项目路径 | 依赖图 JSON | Python 工具，需 `pip` |
+
+### 类别 C：目标项目依赖（scaffold 注入）
+
+被迁移项目的 `dev-dependencies` 或 `dependencies`，由 `rustmigrate scaffold` 命令注入到目标项目的 `Cargo.toml`。
+
+| 工具 | 输入 | 输出 | 集成理由 |
+|------|------|------|---------|
+| **insta** | 测试函数中的值 | 快照文件（`.snap`） | 快照测试框架，需作为目标项目的 dev-dependency |
+| **proptest** | 属性策略定义 | 测试结果 + 回归种子文件 | 属性测试框架，需编译进目标测试二进制 |
+| **criterion** | 基准测试函数 | 性能报告 HTML/JSON | 基准测试框架，需作为目标项目的 dev-dependency |
+| **loom / shuttle** | 并发测试代码 | 状态空间探索结果 | 并发测试框架，需替换标准库原语 |
+| **napi-rs** | Rust 函数 + `#[napi]` 宏 | Node.js 可调用的 `.node` 二进制 | FFI 桥接，需作为目标项目的 dependency |
+| **PyO3** | Rust 函数 + `#[pyfunction]` 宏 | Python 可调用的 `.so/.pyd` | FFI 桥接，需作为目标项目的 dependency |
+| **bindgen / cbindgen** | C/C++ 头文件 / Rust 源码 | Rust FFI 绑定 / C 头文件 | FFI 桥接，需在目标项目的 build.rs 中配置 |
