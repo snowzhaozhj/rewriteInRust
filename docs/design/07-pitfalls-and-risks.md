@@ -100,7 +100,7 @@
 | 关键假设 | 验证方式（M0 Spike） | Plan B |
 |---------|---------------------|--------|
 | SubAgent 编排可靠 | Spike 1: 3+ 步调度序列测试 | 微 Skill 链（每个 Skill 只做 1 步）/ 外部脚本编排 |
-| Hook 触发可靠 | Spike 2: PostToolUse 场景测试 | 改为 SKILL.md 显式指令 + 独立脚本 |
+| rust-analyzer LSP 可靠 | Spike 2: rust-analyzer LSP 诊断反馈延迟和可靠性验证 | 回退到 PostToolUse Hook + cargo check |
 | tree-sitter 精度足够 | Spike 3: TS 项目 AST 精度测试 | TS Compiler API / LLM 直接读源码 |
 | SKILL.md 长指令可跟随 | Spike 4: >2000 字指令跟随率测试 | 拆分为多个短 Skill |
 | 用户愿意学配置 | 用户反馈收集 | 纯约定零配置模式（合理默认值，无 .rustmigrate.toml） |

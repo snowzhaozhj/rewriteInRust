@@ -1,6 +1,6 @@
 # Rust 迁移验证工作台 — 项目设计文档
 
-> **版本**: v0.9 | **日期**: 2026-06-06 | **基于**: 18 路深度调研 + 103 agent deep research + 7 轮审查反馈迭代 + 3 路独立审查（v0.8）+ 8 路专项研究（v0.9）
+> **版本**: v0.9.1 | **日期**: 2026-06-06 | **基于**: 18 路深度调研 + 103 agent deep research + 7 轮审查反馈迭代 + 3 路独立审查（v0.8）+ 8 路专项研究（v0.9）
 
 ---
 
@@ -58,29 +58,30 @@
 
 ### Plugin 目录结构概览
 
-本项目从第一天起设计为 Claude Code Plugin，通过 `plugin.json` 标准格式打包分发：
+本项目从第一天起设计为 Claude Code Plugin，通过 `.claude-plugin/plugin.json` 标准格式打包分发：
 
 ```
 rust-migrate-plugin/
-├── plugin.json                         # Plugin 元数据
+├── .claude-plugin/plugin.json          # Plugin 元数据（name, version, skills 路径）
 ├── skills/
 │   └── migrate/
-│       ├── SKILL.md                    # /migrate 命令入口
+│       ├── SKILL.md                    # /migrate 命令入口（路由分发）
 │       ├── analyze.md                  # /migrate analyze 子命令
 │       ├── run.md                      # /migrate run 子命令
 │       ├── review.md                   # /migrate review 子命令
 │       ├── graduate.md                 # /migrate graduate（非 MVP）
 │       ├── adapters/                   # 语言适配器
-│       └── references/                 # 通用知识库
-├── agents/                             # 4 个 SubAgent
+│       └── references/                 # 参考指南（按需 Read）
+│           ├── patterns/               # 翻译模式（如 async-to-tokio.md）
+│           └── anti-patterns/          # 反模式（如 naive-mutex-wrap.md）
+├── agents/                             # 4 个 SubAgent（内嵌核心规则）
 │   ├── analyzer.md                     # 源码分析 + 项目画像
-│   ├── translator.md                   # 规则生成 + 代码翻译
+│   ├── translator.md                   # 代码翻译（含核心类型映射/命名规则）
 │   ├── verifier.md                     # 等价性验证 + 对抗审查
 │   └── scaffolder.md                   # 测试基础设施搭建
-├── hooks/                              # 自动化门禁
-│   ├── settings.json
+├── hooks/
+│   ├── hooks.json                      # Hook 配置（cargo fmt + 文件保护）
 │   └── scripts/
-├── rules/                              # 通用迁移规则（按 paths 条件加载）
 └── README.md
 ```
 

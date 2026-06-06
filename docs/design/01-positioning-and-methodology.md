@@ -21,7 +21,7 @@
 
 ### 1.3 我们做什么
 
-一套 **Claude Code Plugin**（包含 Skills、Hooks、SubAgents、Rules），将散落在各处的迁移最佳实践编码成**可重复执行的验证工作流**。Plugin 通过标准目录结构打包分发（`plugin.json` + `skills/` + `agents/` + `hooks/` + `rules/`），编排逻辑通过 SKILL.md 分步指令 + SubAgent 调度实现。
+一套 **Claude Code Plugin**（包含 Skills、Hooks、SubAgents），将散落在各处的迁移最佳实践编码成**可重复执行的验证工作流**。Plugin 通过标准目录结构打包分发（`.claude-plugin/plugin.json` + `skills/` + `agents/` + `hooks/`），核心规则嵌入 SubAgent 系统提示，参考指南按需加载。编排逻辑通过 SKILL.md 分步指令 + SubAgent 调度实现。
 
 **v0.9 变更**：原描述为"Skills + Workflows + Hooks + SubAgents"散放组合。v0.9 起明确为统一的 Claude Code Plugin 格式，所有组件纳入 Plugin 标准目录，支持一键安装和分发。详细 Plugin 目录结构见 [06-plugin-structure.md](./06-plugin-structure.md)。
 
