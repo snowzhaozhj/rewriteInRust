@@ -1,6 +1,6 @@
 # Rust 迁移验证工作台 — 项目设计文档
 
-> **版本**: v0.8 | **日期**: 2026-06-06 | **基于**: 18 路深度调研 + 103 agent deep research + 7 轮审查反馈迭代 + 3 路独立审查（v0.8）
+> **版本**: v0.8.1 | **日期**: 2026-06-06 | **基于**: 18 路深度调研 + 103 agent deep research + 7 轮审查反馈迭代 + 3 路独立审查（v0.8）
 
 ---
 
@@ -8,12 +8,12 @@
 
 **给谁用**：想用 AI 做 Rust 迁移、但担心翻译质量的开发者和团队。
 
-**做什么**：一套 Claude Code 插件（6 个 `/migrate-*` 命令），自动分析源项目 → 生成迁移规则 → 逐模块翻译 → 用 8 层测试验证正确性。你只需要 `/migrate-init` 开始，工具引导你完成后续步骤。
+**做什么**：一套 Claude Code 插件（8 个 `/migrate-*` 命令，MVP 阶段 6 个），自动分析源项目 → 生成迁移规则 → 逐模块翻译 → 用 8 层测试验证正确性。你只需要 `/migrate-init` 开始，工具引导你完成后续步骤。
 
 **核心差异**：验证管线开箱即用——cargo check / clippy / proptest / fuzz 的管线自动配置，**独立脚本门禁让 AI 无法跳过验证**（纯 prompt 做不到这一点）。产出物（PORTING.md 迁移规则 + KNOWN_DIFFERENCES.md 差异登记 + MDR 决策记录）是团队协作和审计的标准化资产。
 
 > **最小概念集**（入门只需理解这些）：
-> - 6 个 Skill 命令：`/migrate-init` → `-plan` → `-test` → `-run` → `-verify` → `-status`
+> - 8 个 Skill 命令（MVP 6 个）：`/migrate-init` → `-plan` → `-test` → `-run` → `-verify` → `-status`（+ `-graduate`、`-unsafe-audit` 后续迭代）
 > - 3 层反馈：F1 编译（秒级自动）→ F2 测试（分钟级）→ F3 集成（Sprint 级手动）
 > - 其余概念（26 条规则、4 个 SubAgent、8 层测试等）在你推进到相应阶段时才需要理解
 
