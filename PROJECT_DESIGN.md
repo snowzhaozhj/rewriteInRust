@@ -1,6 +1,6 @@
 # Rust 迁移验证工作台 — 项目设计文档
 
-> **版本**: v0.4 | **日期**: 2026-06-06 | **基于**: 18 路深度调研 + 103 agent deep research + 4 路审查反馈 + 3 项补充调研 + 8 条精细审查反馈 + 11 条精准修订
+> **版本**: v0.5 | **日期**: 2026-06-06 | **基于**: 18 路深度调研 + 103 agent deep research + 4 路审查反馈 + 3 项补充调研 + 8 条精细审查反馈 + 11 条精准修订 + 9 条审查反馈修订
 
 ---
 
@@ -142,7 +142,10 @@ UA 52,950 stars 的成功密码：**把 LLM 从"对话伙伴"变成"流水线中
 │                      验证层 (Harness) — 核心价值                 │
 │  Tier 0: cargo check → clippy → cargo-nextest                   │
 │  Tier 1: cargo-llvm-cov → insta → proptest → cargo-deny/audit  │
-│  Tier 2: cargo-fuzz → cargo-mutants → Miri → criterion → loom  │
+│          → cargo-geiger                                          │
+│  Tier 2: cargo-fuzz → cargo-mutants → Miri → loom              │
+│  （criterion 默认 Tier 2，性能动机时提升为 Tier 1）              │
+│  （完整工具分级详见 5.2-5.4 节）                                 │
 │  差异测试框架 → 行为录制 → 不等价证据收集                        │
 ├─────────────────────────────────────────────────────────────────┤
 │                      质量门禁                                    │
@@ -215,6 +218,8 @@ UA 52,950 stars 的成功密码：**把 LLM 从"对话伙伴"变成"流水线中
 
 ### 3.4 编排器状态机设计
 
+> **MVP 分层说明**：本节描述编排器的完整概念设计。MVP（M0-M1）仅通过 SKILL.md 分步指令 + migration-state.json 实现子集功能，不构建程序化状态机。完整状态机在 M2+ 阶段按需实现。
+
 ```
                     ┌─────────┐
                     │  INIT   │
@@ -236,11 +241,13 @@ UA 52,950 stars 的成功密码：**把 LLM 从"对话伙伴"变成"流水线中
               │     │    SPRINT LOOP           │
               │     │  ┌───────────┐           │
               └────►│  │ TRANSLATE │──► CHECK  │──► 失败 3 轮 → DEGRADE
-                    │  └───────────┘     │     │
-                    │       ▲            ▼     │
-                    │       │         VERIFY   │
-                    │       │            │     │
-                    │       └── RETRY ◄──┘     │
+                    │  └───────────┘     │     │                  │
+                    │       ▲            ▼     │                  │
+                    │       │         VERIFY   │    人工决定恢复   │
+                    │       │            │     │  (/migrate-run   │
+                    │       └── RETRY ◄──┘     │   --module=X     │
+                    │       ▲                  │   --force)       │
+                    │       └──────────────────┼──────────────────┘
                     └─────────────────────────┘
                               │
                               ▼
@@ -252,16 +259,21 @@ UA 52,950 stars 的成功密码：**把 LLM 从"对话伙伴"变成"流水线中
   → FFI 桥接（保持原实现，Rust 端调用）
   → 人工介入（标记 TODO，等人类处理）
   → 功能裁剪（协商后移除该功能）
+
+恢复路径（DEGRADE → TRANSLATE）：
+  → 由用户通过 `/migrate-run --module=X --force` 显式触发
+  → 重新进入翻译循环，清除降级标记，重置重试计数
+  → 适用场景：PORTING.md 规则更新后、LLM 能力提升后、人工提供了额外指导后
 ```
 
-**降级后依赖级联影响**：当模块 A 降级为 FFI 桥接时，依赖 A 的模块 B 的翻译需要知道 A 的接口类型（FFI 桥接 vs 原生 Rust）。编排器在 A 降级后需要：
+**降级后依赖级联影响** [M2+]：当模块 A 降级为 FFI 桥接时，依赖 A 的模块 B 的翻译需要知道 A 的接口类型（FFI 桥接 vs 原生 Rust）。编排器在 A 降级后需要：
 1. 更新 `migration-state.json` 中 A 的状态为 `degrade(ffi)`，并记录 A 的 FFI 接口描述
 2. 后续模块 B 的翻译上下文中注入 A 的接口类型信息——如果 A 是 FFI 桥接，B 需要通过 FFI 调用 A 而非直接 Rust 调用
 3. 如果 A 后来从 FFI 桥接升级为原生 Rust，B 的调用方式也需要同步更新
 
-**断点续传**：`migration-state.json` 记录每个模块的状态和最近一次成功的 checkpoint，重启后从 checkpoint 恢复。
+**断点续传** [MVP]：`migration-state.json` 记录每个模块的状态和最近一次成功的 checkpoint，重启后从 checkpoint 恢复。
 
-**错误恢复**：每次翻译尝试的输入输出都持久化到 `intermediate/attempts/`，失败后可回溯分析。
+**错误恢复** [MVP]：每次翻译尝试的输入输出都持久化到 `intermediate/attempts/`，失败后可回溯分析。
 
 ### 3.5 LLM 上下文窗口管理
 
@@ -330,12 +342,14 @@ Work Unit（一个 Claude Code 会话）:
     - AI 生成意图摘要（纯文本，不含源语言语法）
     - 识别关键语义点：错误处理、并发、状态管理
 
-  Step 3: 翻译 + 即时验证
+  Step 3: 翻译 + 编译验证
     - 生成 Rust 代码
     - F1 反馈：cargo check（秒级，每次写入触发）
     - 编译失败 → 即时修复（最多 3 轮）
+    - 注意：此步骤只做编译验证，不生成测试
 
-  Step 4: 测试验证
+  Step 4: 测试生成与验证
+    - 翻译完成后，由 verifier SubAgent 生成测试（非 translator 同步生成）
     - F2 反馈：cargo test + clippy（分钟级）
     - 测试失败 → 分析原因 → 修复或记录到 KNOWN_DIFFERENCES.md
 
@@ -741,7 +755,10 @@ stalled_sprint_threshold = 3         # 连续停滞 Sprint 数
 | L0 | **单元测试** | cargo test | 0 | 基础正确性 |
 | L1 | **快照/黄金文件测试** | insta | 1 | 锁定输入/输出对（合并原 L1+L3，消除重叠） |
 | L2 | 属性测试 | proptest | 1 | `for all x: old(x) == new(x)` |
-| L3 | **E2E 差异测试** | 自建差异框架 | 1 | 整体行为等价 |
+| L3 | **E2E 差异测试** | 自建差异框架 | 1（M2+ 完整版）/ M1 使用简化脚本对比 | 整体行为等价 |
+
+> **M1 阶段 L3 轻量替代**：M1 不构建完整的自建差异测试框架（G3 组件）。改用简单的 shell 脚本做输入输出对比——对 CLI 工具运行相同输入，`diff` 比较 stdout/stderr/exitcode；对库函数通过 FFI 桥接调用新旧实现并比较输出。完整差异测试框架在 M2 阶段实现。
+
 | L4 | 模糊测试 | cargo-fuzz | 2 | 随机输入差异对比 |
 | L5 | 变异测试 | cargo-mutants | 2 | 验证测试真正保护了行为 |
 | L6 | **性能回归** | criterion | 2（性能动机时提升为 1） | 无性能退化 |
@@ -774,13 +791,15 @@ Step 3: 接口契约定义（不依赖 Rust 代码）
   ├── 前置条件 / 后置条件
   └── 副作用描述
 
-Step 4: 模块迁移完成后，才生成 Rust 测试
+Step 4: 模块迁移完成后，由 verifier SubAgent 生成 Rust 测试
   ├── 将黄金测试集翻译为 Rust
   ├── 将行为录制转为 insta 快照测试
   └── 基于接口契约生成 proptest
+  注意：测试由 verifier SubAgent 在翻译完成后生成，不是 translator 同步生成。
+  时序：translator 完成翻译 → F1 编译验证通过 → verifier 生成测试 → F2 测试验证。
 ```
 
-**行动指南**：测试搭建的核心是**行为录制和接口契约**，这两者不依赖 Rust 代码的存在。
+**行动指南**：测试搭建的核心是**行为录制和接口契约**，这两者不依赖 Rust 代码的存在。测试生成职责归属 verifier SubAgent，与翻译（translator）解耦。
 
 ### 7.3 验证管线（DAG 结构，非线性）
 
@@ -843,6 +862,23 @@ Step 4: 模块迁移完成后，才生成 Rust 测试
 | HTTP 服务 | mitmproxy 录制请求/响应 | JSON diff + header 对比 |
 | 库/SDK | FFI(PyO3/napi-rs) 调用原实现 | proptest 生成输入对比输出 |
 | 有状态服务 | 共享数据库 schema | 操作后状态 snapshot 对比 |
+
+### 7.6 不等价证据探测维度清单
+
+verifier SubAgent 在对抗性审查阶段，应在以下维度系统性探测新旧实现的行为差异。此清单作为 verifier 的"检查表"，确保不遗漏常见差异点：
+
+| # | 探测维度 | 具体探测点 | 典型差异来源 |
+|---|---------|-----------|-------------|
+| 1 | **边界值** | 空输入、最大值、零、负数、最小值 | 不同语言对边界值的默认处理不同 |
+| 2 | **类型边界** | null/undefined/NaN、整数溢出点（i32::MAX+1）、类型强制转换边界 | JS number 是 f64，Rust 有严格整数类型 |
+| 3 | **集合操作** | 空集合、单元素、大集合（>10K 元素）、迭代顺序依赖 | HashMap 迭代顺序随机化 |
+| 4 | **时间/日期** | 时区边界（UTC±12）、夏令时切换、闰秒、epoch 前日期 | 时区库实现差异 |
+| 5 | **字符串** | 空串、Unicode 多字节字符、emoji（多码点）、超长字符串（>1MB）、特殊字符（\0, \r\n） | UTF-8 vs UTF-16 长度语义 |
+| 6 | **并发** | 多线程竞态、取消/超时、死锁场景、共享状态一致性 | GC vs 所有权模型差异 |
+| 7 | **错误路径** | 所有 catch/except 分支、嵌套错误、错误链传播、panic vs Result | 异常模型 vs Result 模型 |
+| 8 | **浮点精度** | 累积误差（长链计算）、比较精度（epsilon）、NaN 传播、±Inf、-0.0 | IEEE 754 实现/优化差异 |
+
+**行动指南**：verifier SubAgent 的系统提示中应包含此清单。每个模块验证时，verifier 根据模块涉及的数据类型和操作，选择相关维度生成针对性测试用例。
 
 ---
 
@@ -952,6 +988,29 @@ Step 4: 模块迁移完成后，才生成 Rust 测试
 | `scaffolder` | 测试基础设施搭建、行为录制、黄金测试集管理 | insta, cargo-fuzz, mitmproxy |
 
 **行动指南**：每个 SubAgent 有独立的系统提示，包含其职责边界和可用工具列表。Agent 之间通过 `migration-state.json` 和产出物文件通信。
+
+#### 10.2.1 SubAgent 实现机制
+
+MVP 中 SubAgent 的实现基于 Claude Code 的标准 agent 定义机制：
+
+**文件形式**：
+- 每个 SubAgent 是 `.claude/agents/` 目录下的一个独立 `.md` 文件（如 `analyzer.md`、`translator.md`、`verifier.md`、`scaffolder.md`）
+- 每个 `.md` 文件定义该 SubAgent 的系统提示，包含职责描述、可用工具列表、行为约束和输出格式要求
+
+**调用方式**：
+- Skill 的 SKILL.md 中通过 Claude Code 的 `Agent` tool 调用 SubAgent
+- 调用时指定 `agentType` 为对应的 agent 名称（如 `analyzer`），Claude Code 自动加载对应的 `.claude/agents/analyzer.md` 作为系统提示
+- 示例：SKILL.md 中写"使用 Agent tool 调用 analyzer SubAgent，传入项目根目录路径"
+
+**上下文隔离**：
+- 每个 SubAgent 运行在独立的 agent 上下文中，不共享对话历史
+- SubAgent 之间通过文件系统（`.rust-migration/` 目录）共享数据，不直接通信
+- 这保证了每个 SubAgent 的上下文窗口不被其他 SubAgent 的输出污染
+
+**错误传播**：
+- SubAgent 的输出文本返回给 Skill（即主对话上下文中的 Claude）
+- Skill 根据 SubAgent 的输出文本判断成功/失败——检查关键产出物文件是否存在且有效
+- 失败时 Skill 根据 SKILL.md 的分步指令决定重试或降级
 
 ### 10.3 Hooks（自动化门禁）
 
@@ -1431,7 +1490,7 @@ concurrency = false
 
 ```json
 {
-  "version": "0.4",
+  "version": "0.5",
   "state": "sprint_loop",
   "state_history": [
     {
@@ -1520,6 +1579,42 @@ concurrency = false
   "config_ref": ".rustmigrate.toml"
 }
 ```
+
+### 模块级状态枚举
+
+每个模块在 `migration-state.json` 的 `modules[].status` 字段使用以下状态值：
+
+| 状态 | 含义 | 说明 |
+|------|------|------|
+| `pending` | 未开始 | 模块已识别但尚未开始迁移 |
+| `translating` | 翻译中 | translator SubAgent 正在生成 Rust 代码 |
+| `compile_fixing` | 编译修复中 | F1 反馈循环中，正在修复编译错误 |
+| `testing` | 测试验证中 | F2 阶段，verifier SubAgent 正在生成和运行测试 |
+| `reviewing` | 对抗审查中 | verifier SubAgent 正在执行对抗性审查（不等价证据探测） |
+| `done` | 完成 | 翻译和验证全部通过 |
+| `degrade_ffi` | 降级为 FFI 桥接 | 翻译失败，保持原实现，Rust 端通过 FFI 调用 |
+| `degrade_manual` | 降级为人工处理 | 翻译失败，标记 TODO 等待人工处理 |
+| `degrade_skip` | 降级为功能裁剪 | 协商后移除该功能 |
+| `blocked` | 被依赖阻塞 | 依赖的模块尚未完成迁移，无法开始 |
+
+**合法状态转换**：
+
+```
+pending → translating → compile_fixing → testing → reviewing → done
+                                                              → degrade_ffi
+                                                              → degrade_manual
+                                                              → degrade_skip
+
+blocked 可从任何状态进入（依赖模块降级或阻塞时触发）
+blocked → {原状态}（阻塞解除后恢复到进入 blocked 前的状态）
+
+degrade_* → translating（通过 /migrate-run --module=X --force 恢复）
+```
+
+**blocked 状态处理**：
+- 当模块 A 依赖的模块 B 降级或阻塞时，A 自动进入 `blocked` 状态
+- `migration-state.json` 中记录 `blocked_by` 字段（阻塞来源模块）和 `pre_blocked_status` 字段（进入 blocked 前的状态）
+- 阻塞解除后（B 完成迁移或降级决策确定），A 恢复到 `pre_blocked_status`
 
 ---
 
@@ -1630,3 +1725,92 @@ concurrency = false
 | **论文验证** | 发表在同行评审会议/期刊 | 高——有实验数据和复现方法 |
 | **商业案例** | 企业官方博客/技术报告 | 中高——有生产数据但可能选择性披露 |
 | **社区传闻** | GitHub 项目/个人博客/论坛 | 中低——可能缺少关键细节，需独立验证 |
+
+---
+
+## 附录 D：关键中间产物 Schema（简化版）
+
+> 以下为 `.rust-migration/intermediate/` 目录下关键中间产物的简化 JSON 结构示例。完整 JSON Schema 在 M1 阶段补充。
+
+### source-graph.json（源码依赖图）
+
+```json
+{
+  "version": "0.1",
+  "generated_at": "2026-06-06T10:05:00Z",
+  "modules": [
+    {
+      "id": "utils/string",
+      "path": "src/utils/string.ts",
+      "language": "typescript",
+      "loc": 320,
+      "exports": ["capitalize", "slugify", "truncate"],
+      "complexity": "low"
+    }
+  ],
+  "dependencies": [
+    {
+      "from": "core/parser",
+      "to": "utils/string",
+      "type": "import",
+      "symbols": ["slugify"]
+    }
+  ],
+  "topological_order": ["utils/string", "utils/math", "core/parser", "core/runtime"]
+}
+```
+
+### type-map.json（类型映射表）
+
+```json
+{
+  "version": "0.1",
+  "generated_at": "2026-06-06T11:00:00Z",
+  "mappings": [
+    {
+      "source_type": "string",
+      "source_language": "typescript",
+      "rust_type": "String",
+      "notes": "UTF-16 → UTF-8，注意 length 语义差异",
+      "rule_ref": "PORTING.md#R07"
+    },
+    {
+      "source_type": "number",
+      "source_language": "typescript",
+      "rust_type": "f64",
+      "notes": "JS number 统一为 f64；整数场景可优化为 i64/u64",
+      "rule_ref": "PORTING.md#R02"
+    },
+    {
+      "source_type": "Map<string, T>",
+      "source_language": "typescript",
+      "rust_type": "HashMap<String, T>",
+      "notes": "注意迭代顺序差异（JS Map 保持插入序，Rust HashMap 不保证）",
+      "rule_ref": "PORTING.md#R02"
+    }
+  ]
+}
+```
+
+### call-graph.json（调用图）
+
+```json
+{
+  "version": "0.1",
+  "generated_at": "2026-06-06T10:05:00Z",
+  "functions": [
+    {
+      "id": "utils/string::capitalize",
+      "module": "utils/string",
+      "calls": ["utils/string::isEmptyString"],
+      "called_by": ["core/parser::parseTitle", "cli/format::formatOutput"]
+    },
+    {
+      "id": "core/parser::parseTitle",
+      "module": "core/parser",
+      "calls": ["utils/string::capitalize", "utils/string::truncate"],
+      "called_by": ["core/runtime::processDocument"]
+    }
+  ]
+}
+```
