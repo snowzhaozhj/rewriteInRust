@@ -6,7 +6,7 @@
 
 | Tier | 含义 | 触发方式 | 失败影响 |
 |------|------|---------|---------|
-| **Tier 0 硬性门禁** | 每次写入/提交必须通过 | Hook 自动触发 | 阻塞继续 |
+| **Tier 0 硬性门禁** | 每次写入/提交必须通过 | LSP 自动（F1）+ 脚本门禁（F2） | 阻塞继续 |
 | **Tier 1 推荐** | 画像自动启用，可按需关闭 | Sprint Review 触发 | 警告但不阻塞 |
 | **Tier 2 高级** | 用户显式启用 | 手动触发 | 可选 |
 
@@ -353,8 +353,8 @@ CLI `rustmigrate graph` 子命令提供以下查询（M1 实现前 4 项）：
 |------|------|------|------|
 | `topo-sort` | 确定翻译顺序 | Kahn/DFS 拓扑排序（借鉴 Guppy 的 cycle-aware TopoWithCycles） | 是 |
 | `deps <module>` | 某模块的依赖树 | 正向 BFS | 是 |
-| `rdeps <module>` | 谁依赖此模块 | 反向 BFS | 是 |
-| `cycles` | 循环依赖检测 | Kosaraju SCC | 是 |
+| `rdeps <module>` | 谁依赖此模块 | 反向 BFS | M2 |
+| `cycles` | 循环依赖检测 | Kosaraju SCC | M2 |
 | `impact <file>` | 文件变更影响半径 | 反向 BFS + 深度分层 | 否 |
 | `community` | 功能聚类分析 | Louvain 社区检测 | 否 |
 | `path <A> <B>` | 两节点间最短路径 | BFS 最短路径 | 否 |

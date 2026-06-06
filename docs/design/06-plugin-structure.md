@@ -167,14 +167,7 @@ SKILL.md 通过 Bash tool 调用 CLI，所有输出为统一 JSON 格式：
 
 | 模块 | 工作量 | 说明 |
 |------|--------|------|
-| CLI 骨架（clap + JSON 输出） | 1 人天 | workspace 搭建 + clap 路由 + 统一输出格式 |
-| `profile`（tree-sitter + tokei） | 2 人天 | 语言检测 + 框架识别 + 代码统计 |
-| `graph build` + 查询命令（petgraph + rusqlite） | 3 人天 | AST 提取 + 图存储 + topo-sort/deps/rdeps/cycles/stats/export |
-| `state` + `validate`（jsonschema） | 1.5 人天 | 状态机 + JSON Schema 校验 |
-| `stats loc` + `compare` | 1 人天 | tokei 封装 + 复杂度对比 |
-| `scaffold workspace` | 1 人天 | Cargo.toml 生成 + dev-deps 注入 |
-| 测试 + CI | 1.5 人天 | 单元测试 + 集成测试 + GitHub Actions |
-| **合计** | **~11 人天** | M1 阶段完成 |
+> CLI 细化工作量估算见 [08-roadmap-and-reference.md § M1 工作量分解](./08-roadmap-and-reference.md)（合计 18-25 人天，含 crate 集成和测试）。
 
 ---
 
@@ -437,6 +430,7 @@ SubAgent B (串行)
 ├── DESIGN_ASSUMPTIONS.md      # M0 假设验证报告
 ├── migration-state.json       # 状态机 + Sprint 元数据
 ├── source-graph.db            # 源码图 SQLite 数据库（主存储）
+├── source-ref/                # 源文件锁定副本（迁移期间保留，graduate 后清理）
 ├── porting/                   # 项目专有迁移规则
 │   ├── dependency-mapping.md  # 项目特有的依赖映射
 │   ├── business-logic-rules.md # 业务逻辑翻译策略
