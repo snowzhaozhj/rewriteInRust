@@ -1,6 +1,6 @@
 # Rust 迁移验证工作台 — 项目设计文档
 
-> **版本**: v0.2 | **日期**: 2026-06-06 | **基于**: 18 路深度调研 + 103 agent deep research + 4 路审查反馈 + 3 项补充调研
+> **版本**: v0.3 | **日期**: 2026-06-06 | **基于**: 18 路深度调研 + 103 agent deep research + 4 路审查反馈 + 3 项补充调研 + 8 条精细审查反馈
 
 ---
 
@@ -126,8 +126,8 @@ UA 52,950 stars 的成功密码：**把 LLM 从"对话伙伴"变成"流水线中
 │  import-linter+grimp (Py依赖)│                                  │
 ├──────────────────────────────┴──────────────────────────────────┤
 │                      验证层 (Harness) — 核心价值                 │
-│  Tier 0: cargo check → clippy → cargo test                     │
-│  Tier 1: cargo-llvm-cov → insta → proptest → cargo-deny        │
+│  Tier 0: cargo check → clippy → cargo-nextest                   │
+│  Tier 1: cargo-llvm-cov → insta → proptest → cargo-deny/audit  │
 │  Tier 2: cargo-fuzz → cargo-mutants → Miri → criterion → loom  │
 │  差异测试框架 → 行为录制 → 不等价证据收集                        │
 ├─────────────────────────────────────────────────────────────────┤
@@ -141,7 +141,7 @@ UA 52,950 stars 的成功密码：**把 LLM 从"对话伙伴"变成"流水线中
 ├─────────────────────────────────────────────────────────────────┤
 │                      产出物 (Artifacts)                          │
 │  .rust-migration/                                               │
-│  ├── PORTING.md              # 迁移规则宪法（25 类）             │
+│  ├── PORTING.md              # 迁移规则宪法（26 类）             │
 │  ├── PARITY.md               # 迁移进度跟踪（Sprint 聚合）      │
 │  ├── KNOWN_DIFFERENCES.md    # 已知行为差异登记簿               │
 │  ├── AGENTS.md               # AI 行为约束                      │
@@ -313,11 +313,11 @@ Work Unit（一个 Claude Code 会话）:
 
   Step 3: 翻译 + 即时验证
     - 生成 Rust 代码
-    - L1 反馈：cargo check（秒级，每次写入触发）
+    - F1 反馈：cargo check（秒级，每次写入触发）
     - 编译失败 → 即时修复（最多 3 轮）
 
   Step 4: 测试验证
-    - L2 反馈：cargo test + clippy（分钟级）
+    - F2 反馈：cargo test + clippy（分钟级）
     - 测试失败 → 分析原因 → 修复或记录到 KNOWN_DIFFERENCES.md
 
   Step 5: 产出物更新
@@ -330,18 +330,18 @@ Work Unit（一个 Claude Code 会话）:
 
 | 层级 | 触发时机 | 延迟 | 内容 | 处理方式 |
 |------|---------|------|------|---------|
-| L1 编译 | 每次写入 .rs 文件 | 秒级 | cargo check 错误 | 自动反馈给 LLM 重试 |
-| L2 测试 | 模块翻译完成 | 分钟级 | 测试失败 + clippy 警告 | AI 分析修复或标记差异 |
-| L3 集成 | Sprint Review | Sprint 级 | 集成测试 + 覆盖率 + 性能基准 | 团队决策是否通过 |
+| F1 编译反馈 | 每次写入 .rs 文件 | 秒级 | cargo check 错误 | 自动反馈给 LLM 重试 |
+| F2 测试反馈 | 模块翻译完成 | 分钟级 | 测试失败 + clippy 警告 | AI 分析修复或标记差异 |
+| F3 集成反馈 | Sprint Review | Sprint 级 | 集成测试 + 覆盖率 + 性能基准 | 团队决策是否通过 |
 
-**行动指南**：Hook 配置中，L1 对应 `PostToolUse`，L2 对应 `TaskCompleted`，L3 由 `/migrate-verify` 手动触发。
+**行动指南**：Hook 配置中，F1 对应 `PostToolUse`，F2 对应 `TaskCompleted`，F3 由 `/migrate-verify` 手动触发。
 
 ### 4.5 问题前移矩阵
 
 目标：尽可能在早期阶段发现问题，降低修复成本。
 
-| 问题类型 | 能在 L1(编译) 发现？ | 能在 L2(测试) 发现？ | 必须到 L3(集成)？ |
-|---------|---------------------|---------------------|------------------|
+| 问题类型 | 能在 F1(编译反馈) 发现？ | 能在 F2(测试反馈) 发现？ | 必须到 F3(集成反馈)？ |
+|---------|------------------------|------------------------|---------------------|
 | 类型不匹配 | 是 | — | — |
 | 借用/生命周期 | 是 | — | — |
 | 逻辑错误 | — | 是（单元测试） | — |
@@ -400,8 +400,6 @@ Work Unit（一个 Claude Code 会话）:
 | 编译 | **cargo check** | 编译通过 | Rust 标准工具 |
 | Lint | **cargo clippy** | 惯用性检查 | Rust 标准工具 |
 | 测试 | **cargo-nextest** | 测试执行 | cargo test 全面升级 |
-| 许可证 | **cargo-deny** | 许可证合规 + 依赖审计 | 企业级工具 |
-| CVE | **cargo-audit** | 已知漏洞扫描 | RustSec 数据库 |
 
 ### 5.3 Tier 1：推荐（画像自动启用）
 
@@ -410,6 +408,8 @@ Work Unit（一个 Claude Code 会话）:
 | 覆盖率 | **cargo-llvm-cov** | LLVM 原生覆盖率 | 始终 |
 | 快照 | **insta** | 快照测试（锁定输出） | 有 CLI/API 输出时 |
 | 属性 | **proptest** | 属性测试（等价性验证） | 有纯函数时 |
+| 许可证 | **cargo-deny** | 许可证合规 + 依赖审计 | Sprint Review 触发 |
+| CVE | **cargo-audit** | 已知漏洞扫描 | Sprint Review 触发 |
 | 搜索/重写 | **ast-grep** | 模式匹配 + 代码重写 | 始终 |
 | 统计 | **tokei + scc** | 代码复杂度对比 | 始终 |
 | 多语言 AST | **tree-sitter** | 源码结构分析 | 始终 |
@@ -492,7 +492,7 @@ Work Unit（一个 Claude Code 会话）:
 | migration-state.json | 状态机 + Sprint 元数据 | 自动管理 | 迁移完成后归档 |
 | test-fixtures/ | 行为录制测试集 | 自动录制 | 长期保留（回归测试） |
 
-### 6.2 PORTING.md — 迁移规则宪法（25 类）
+### 6.2 PORTING.md — 迁移规则宪法（26 类）
 
 参考 Bun 的 576 行 PORTING.md，定义所有翻译规则。**渐进式生成**：Sprint 0 生成必须的核心规则，后续 Sprint 按需追加。
 
@@ -523,6 +523,7 @@ Work Unit（一个 Claude Code 会话）:
 | 23 | **序列化/反序列化兼容性** | 否 | JSON/protobuf 字节级兼容 |
 | 24 | **日志/可观测性映射** | 否 | 日志框架 → tracing，格式兼容 |
 | 25 | **平台特定行为映射** | 否 | OS API → cfg 条件编译 |
+| 26 | **多态/动态分发映射** | 否 | 接口/继承/泛型 → trait/enum dispatch/泛型，虚表 vs 静态分发选择 |
 
 **版本化演化**：每条规则有版本号和变更记录，每个 Sprint Review 可以修改规则，但必须记录变更原因。
 
@@ -680,7 +681,7 @@ Work Unit（一个 Claude Code 会话）:
 - [ ] 所有模块状态为 done 或 degrade(FFI)
 - [ ] KNOWN_DIFFERENCES.md 中所有差异已评审
 - [ ] 测试覆盖率 ≥ 原项目
-- [ ] 无 P0/P1 级 unsafe 未清理（见 unsafe 矩阵）
+- [ ] P0 级 unsafe 全部消除，P1 级 unsafe 全部封装审计完毕，P4 级 unsafe 全部重新归类（见 unsafe 矩阵）
 - [ ] 性能基准无退化（允许 ±10%）
 - [ ] CI/CD 已切换到 Rust 构建
 - [ ] 团队完成 Rust 培训，能独立维护
@@ -698,10 +699,10 @@ Work Unit（一个 Claude Code 会话）:
 
 | 层 | 名称 | 工具 | Tier | 目标 |
 |----|------|------|------|------|
-| L0 | **E2E 差异测试** | 自建差异框架 | 1 | 整体行为等价 |
-| L1 | 黄金文件测试 | insta | 1 | 锁定输入/输出对 |
+| L0 | **单元测试** | cargo test | 0 | 基础正确性 |
+| L1 | **快照/黄金文件测试** | insta | 1 | 锁定输入/输出对（合并原 L1+L3，消除重叠） |
 | L2 | 属性测试 | proptest | 1 | `for all x: old(x) == new(x)` |
-| L3 | 快照测试 | insta | 1 | 锁定每个函数输出 |
+| L3 | **E2E 差异测试** | 自建差异框架 | 1 | 整体行为等价 |
 | L4 | 模糊测试 | cargo-fuzz | 2 | 随机输入差异对比 |
 | L5 | 变异测试 | cargo-mutants | 2 | 验证测试真正保护了行为 |
 | L6 | **性能回归** | criterion | 1/2 | 无性能退化 |
@@ -818,7 +819,7 @@ Step 4: 模块迁移完成后，才生成 Rust 测试
 | 并发安全 | 并发热点优先 | loom/shuttle 推荐 | 编译通过 = 无数据竞争 | 否 |
 | 合规 | 外部要求驱动 | cargo-deny 必须 | 审计报告通过 | 否 |
 
-**行动指南**：Phase 0 画像时确认迁移动机，据此自动配置 Tier 1/2 工具和验收标准。
+**行动指南**：Phase 0 画像时确认迁移动机（支持多动机，`.rustmigrate.toml` 中 `migration_motives` 数组，首项为主要动机），据此自动配置 Tier 1/2 工具和验收标准。多动机场景下取各动机工具和验收标准的并集。
 
 ---
 
@@ -850,6 +851,9 @@ Step 4: 模块迁移完成后，才生成 Rust 测试
 | 迭代器惰性 | Python generator 惰性 | Rust iterator 也惰性但语义不同 | 注意 collect 时机 |
 | 整数大小 | JS number = f64 | Rust 多种整数类型 | 类型映射表明确 |
 | 相等性语义 | JS == vs === | Rust PartialEq/Eq | PORTING.md 统一规则 |
+| **Promise eager vs Future lazy** | JS Promise 创建即执行 | Rust Future 需要 executor 驱动，不 `.await` 不执行 | 审查所有 async 调用点，确保 Future 被驱动；PORTING.md 规则 22 专项覆盖 |
+| **Send/Sync 约束传染** | 源语言无编译期线程安全标记 | 跨 `.await` 持有的类型必须 Send，共享引用必须 Sync | 迁移后大量类型编译失败；需提前审计并发共享点，选择 Arc/Mutex 或重构 |
+| **可变性传播与架构重组** | 源语言允许多处同时修改对象 | `&mut` 排他借用，同一时刻只能有一个可变引用 | 无法直译多处同时写入的模式；需重构为消息传递、Cell/RefCell 或拆分数据结构 |
 
 ### 9.3 流程陷阱
 
@@ -893,7 +897,7 @@ Step 4: 模块迁移完成后，才生成 Rust 测试
 | `/migrate-plan` | 手动 | 生成 PORTING.md + PARITY.md + AGENTS.md | 是 |
 | `/migrate-test` | 手动 | 搭建测试基础设施，录制行为，生成测试套件 | 是 |
 | `/migrate-run` | 手动 | 执行指定模块的迁移（内循环） | 是 |
-| `/migrate-verify` | 手动 | 运行完整验证管线（L3 集成验证） | 是 |
+| `/migrate-verify` | 手动 | 运行完整验证管线（F3 集成验证） | 是 |
 | `/migrate-status` | 手动 | 查看迁移进度仪表板 | 是 |
 | `/migrate-graduate` | 手动 | 评估毕业标准，从迁移模式过渡到原生开发 | 否 |
 | `/migrate-unsafe-audit` | 手动 | unsafe 分类审计 + 清理优先级 | 否 |
@@ -919,38 +923,95 @@ Step 4: 模块迁移完成后，才生成 Rust 测试
         "event": "Write",
         "pattern": "**/*.rs",
         "command": "cargo check --message-format=json 2>&1 | head -50",
-        "comment": "Tier 0: 每次写入 .rs 文件后自动编译检查"
+        "comment": "Tier 0 — cargo check: 每次写入 .rs 文件后自动编译检查 (F1)"
       }
     ],
     "TaskCompleted": [
       {
         "command": "cargo nextest run --lib 2>&1 | tail -20 && cargo clippy -- -D warnings 2>&1 | tail -10",
-        "comment": "Tier 0+1: 模块完成后自动测试 + lint"
+        "comment": "Tier 0 — cargo-nextest + clippy: 模块完成后自动测试 + lint (F2)"
+      }
+    ],
+    "SprintReview": [
+      {
+        "command": "cargo deny check 2>&1 | tail -20 && cargo audit 2>&1 | tail -20",
+        "comment": "Tier 1 — cargo-deny + cargo-audit: Sprint Review 时触发许可证/CVE 审计 (F3)"
       }
     ]
   }
 }
 ```
 
+**Tier 0 Hook 覆盖确认**：Tier 0 的三个工具（cargo check / clippy / cargo-nextest）均有对应 Hook 触发——cargo check 在 `PostToolUse`（F1），clippy 和 cargo-nextest 在 `TaskCompleted`（F2）。
+
 ### 10.4 unsafe 分类管理
 
 不只是"加注释"，而是分级管理：
 
-| 优先级 | 类别 | 说明 | 处理方式 |
-|--------|------|------|---------|
-| P0 | 可立即消除 | 有 safe 替代方案 | 本 Sprint 内替换 |
-| P1 | FFI 边界 | 调用外部 C 库必需 | 封装在最小 unsafe 块 + SAFETY 注释 |
-| P2 | 性能关键 | safe 版本有显著开销 | benchmark 证明后保留 + Miri 测试 |
-| P3 | 暂无 safe 方案 | 等待 Rust 语言演进 | 标记 TODO + 定期重评估 |
-| P4 | 历史遗留 | 迁移过程中引入 | 毕业前必须清理到 P2 以上 |
+| 优先级 | 类别 | 说明 | 处理方式 | "清理"含义 |
+|--------|------|------|---------|-----------|
+| P0 | 可立即消除 | 有 safe 替代方案 | 本 Sprint 内替换为 safe 代码 | **消除**——unsafe 块不再存在 |
+| P1 | FFI 边界 | 调用外部 C 库必需 | 封装在最小 unsafe 块 + SAFETY 注释 + 审计确认 | **封装审计完毕**——unsafe 仍存在，但已封装在安全抽象后，且审计通过 |
+| P2 | 性能关键 | safe 版本有显著开销 | benchmark 证明后保留 + Miri 测试 | 保留（有性能证据） |
+| P3 | 暂无 safe 方案 | 等待 Rust 语言演进 | 标记 TODO + 定期重评估 | 保留（等待上游） |
+| P4 | 历史遗留 | 迁移过程中临时引入 | 毕业前必须**重新归类**到 P0-P3 | **重新归类**——不允许以"历史遗留"状态毕业 |
 
-**行动指南**：`/migrate-unsafe-audit` 自动扫描所有 unsafe 块，生成分类报告，标注清理优先级。
+**行动指南**：`/migrate-unsafe-audit` 自动扫描所有 unsafe 块，生成分类报告，标注清理优先级。毕业标准：P0 全部消除，P1 全部封装审计完毕，P4 全部重新归类到 P0-P3。
 
-### 10.5 产出物目录结构
+### 10.5 编排调度路径
+
+每个 Skill 的执行并非单一 SubAgent 调用，而是按预定义序列调度多个 SubAgent 协作。MVP 阶段 SubAgent **串行执行**，通过文件通信 + 顺序约束实现协调。
+
+#### Skill 内部调度序列
+
+| Skill | 调度序列 | 关键产出物 |
+|-------|---------|-----------|
+| `/migrate-init` | `analyzer` → 写入 `migration-state.json` + 项目画像 | migration-state.json, source-graph.json |
+| `/migrate-plan` | `analyzer`(补充分析) → `translator`(规则生成) → 写入 PORTING.md + PARITY.md | PORTING.md, PARITY.md, AGENTS.md |
+| `/migrate-test` | `analyzer`(接口提取) → `scaffolder`(测试搭建) → 写入 test-fixtures/ | test-fixtures/, 行为录制 |
+| `/migrate-run` | `translator`(翻译) → F1 循环 → `verifier`(验证) → F2 循环 → 更新状态 | Rust 代码, 测试, MDR |
+| `/migrate-verify` | `verifier`(全量验证) → 生成报告 → 更新 PARITY.md | sprint-N-report.json |
+| `/migrate-unsafe-audit` | `verifier`(unsafe 扫描) → 分类报告 | unsafe-audit.json |
+
+#### MVP 阶段执行模型
+
+```
+Skill 入口
+  │
+  ▼
+SubAgent A (串行)
+  │── 读取 migration-state.json（输入）
+  │── 执行任务
+  │── 写入产出物文件（输出）
+  │
+  ▼
+顺序约束检查
+  │── 验证 SubAgent A 产出物存在且有效
+  │── 失败 → 重试或报错退出
+  │
+  ▼
+SubAgent B (串行)
+  │── 读取 SubAgent A 的产出物（输入）
+  │── 执行任务
+  │── 写入产出物文件（输出）
+  │
+  ▼
+状态更新
+  └── 更新 migration-state.json
+```
+
+**文件通信协议**：
+- SubAgent 间**不直接通信**，通过 `.rust-migration/` 下的文件传递数据
+- 每个 SubAgent 的输入/输出文件路径在 Skill 脚本中硬编码
+- 顺序约束：后序 SubAgent 启动前，检查前序产出物文件的存在性和有效性（JSON Schema 校验）
+
+**未来演进**：M2 阶段引入有限并行（analyzer + scaffolder 可并行），M4 阶段引入完整 DAG 调度。
+
+### 10.6 产出物目录结构
 
 ```
 .rust-migration/
-├── PORTING.md                 # 迁移规则宪法（25 类，渐进式生成）
+├── PORTING.md                 # 迁移规则宪法（26 类，渐进式生成）
 ├── PARITY.md                  # 迁移进度跟踪（Sprint 聚合）
 ├── KNOWN_DIFFERENCES.md       # 已知行为差异登记簿
 ├── AGENTS.md                  # AI 行为约束
@@ -991,8 +1052,17 @@ source_root = "./src"
 rust_root = "./rust-src"
 source_commit = "abc123"             # 锁定源码版本
 
+# 排除不参与迁移的路径（glob 模式）
+exclude = [
+  "src/vendor/**",                   # 第三方代码
+  "src/**/*.test.ts",                # 源语言测试文件
+  "src/**/__mocks__/**",             # Mock 文件
+  "dist/**",                         # 构建产物
+]
+
 [strategy]
-migration_motive = "performance"     # performance | memory_safety | deployment | concurrency | compliance
+# 支持多动机（数组），第一个为主要动机，影响工具选型和验收标准
+migration_motives = ["performance", "memory_safety"]  # performance | memory_safety | deployment | concurrency | compliance
 parallel_strategy = "feature_freeze" # feature_freeze | dual_track | strangler_fig
 max_concurrent_agents = 3
 max_retry_rounds = 3                 # 翻译失败最大重试轮数
@@ -1030,33 +1100,65 @@ crate_naming = "kebab-case"          # 子 crate 命名风格
 
 ### 11.2 语言扩展架构
 
-设计为适配器模式，通过 `LanguageAdapter` trait 支持新语言：
+设计为**目录约定 + JSON Schema 契约**的适配器模式。每种源语言对应一个适配器目录，包含检测、分析、模板等脚本和配置文件。
 
-```rust
-// 概念设计（非实际代码，Skill 脚本中以对应逻辑实现）
-trait LanguageAdapter {
-    /// 语言标识
-    fn language_id(&self) -> &str;
+#### 目录约定
 
-    /// 检测项目是否使用此语言
-    fn detect(&self, project_root: &Path) -> DetectionResult;
+```
+.claude/skills/migrate/adapters/
+├── typescript/
+│   ├── adapter.json            # 适配器元数据（JSON Schema 契约）
+│   ├── detect.sh               # 检测项目是否使用此语言
+│   ├── extract-types.sh        # 类型提取（调用 TS Compiler API）
+│   ├── extract-deps.sh         # 依赖图提取（调用 dependency-cruiser）
+│   ├── porting-template.md     # PORTING.md 模板规则（语言专用）
+│   ├── ffi-bridge.sh           # FFI 桥接配置（napi-rs）
+│   └── analysis-tools.json     # 语言专用工具列表
+├── python/
+│   ├── adapter.json
+│   ├── detect.sh
+│   ├── extract-types.sh        # 调用 Mypy
+│   ├── extract-deps.sh         # 调用 import-linter + grimp
+│   ├── porting-template.md
+│   ├── ffi-bridge.sh           # PyO3 + maturin
+│   └── analysis-tools.json
+└── c_cpp/
+    └── ...                     # bindgen + cbindgen
+```
 
-    /// 提取类型信息（语言专用，不走统一 IR）
-    fn extract_types(&self, file: &Path) -> Vec<TypeInfo>;
+#### adapter.json 契约（JSON Schema）
 
-    /// 提取依赖图
-    fn extract_dependencies(&self, project_root: &Path) -> DependencyGraph;
-
-    /// 返回该语言的 PORTING.md 模板规则
-    fn porting_template(&self) -> Vec<PortingRule>;
-
-    /// 返回 FFI 桥接工具
-    fn ffi_bridge(&self) -> Option<FfiBridge>;
-
-    /// 返回语言专用的分析工具列表
-    fn analysis_tools(&self) -> Vec<ToolConfig>;
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["language_id", "display_name", "detect", "extract_types", "extract_deps"],
+  "properties": {
+    "language_id":    { "type": "string", "description": "语言标识，如 typescript / python / c_cpp" },
+    "display_name":   { "type": "string", "description": "显示名称" },
+    "detect":         { "type": "string", "description": "检测脚本路径（相对于适配器目录）" },
+    "extract_types":  { "type": "string", "description": "类型提取脚本路径" },
+    "extract_deps":   { "type": "string", "description": "依赖图提取脚本路径" },
+    "porting_template": { "type": "string", "description": "PORTING.md 模板文件路径" },
+    "ffi_bridge":     { "type": ["string", "null"], "description": "FFI 桥接脚本路径（可选）" },
+    "analysis_tools": { "type": "string", "description": "分析工具配置文件路径" }
+  }
 }
 ```
+
+#### 逻辑接口参考
+
+适配器的脚本需覆盖以下逻辑接口（对应原概念设计中的方法）：
+
+| 逻辑接口 | 对应脚本 | 职责 |
+|---------|---------|------|
+| `language_id` | adapter.json 字段 | 语言标识 |
+| `detect` | detect.sh | 检测项目是否使用此语言，返回 0/1 |
+| `extract_types` | extract-types.sh | 提取类型信息（语言专用，不走统一 IR） |
+| `extract_dependencies` | extract-deps.sh | 提取依赖图，输出统一 JSON 格式 |
+| `porting_template` | porting-template.md | 该语言的 PORTING.md 预置规则 |
+| `ffi_bridge` | ffi-bridge.sh | FFI 桥接工具配置 |
+| `analysis_tools` | analysis-tools.json | 语言专用分析工具列表 |
 
 **MVP 支持**：TypeScript 适配器。
 **后续迭代**：Python 适配器 → C/C++ 适配器 → Go 适配器。
@@ -1140,7 +1242,7 @@ concurrency = false
 
 ## 十三、实施路线图
 
-### Sprint 0: 基础搭建（2 周）
+### M0: 基础搭建（2 周）
 
 **目标**：项目骨架 + 第一个 Skill 能跑
 
@@ -1153,7 +1255,7 @@ concurrency = false
 
 **验收指标**：在 1 个 TS 开源项目上跑通 `/migrate-init`，生成项目画像。
 
-### Phase 1: MVP（6-8 周）
+### M1: MVP（6-8 周）
 
 **目标**：跑通 TypeScript → Rust 的**单模块纯函数/CLI 子模块**迁移
 
@@ -1181,7 +1283,7 @@ concurrency = false
 - 迁移后代码通过 Tier 0 门禁
 - 黄金文件测试 100% 通过
 
-### Phase 2: 质量提升（8-12 周）
+### M2: 质量提升（8-12 周）
 
 **目标**：验证管线完整，翻译质量可靠
 
@@ -1204,7 +1306,7 @@ concurrency = false
 - 翻译膨胀率 < 3.0x
 - 降级路径（FFI 桥接）在至少 1 个复杂模块上成功
 
-### Phase 3: 多语言支持（8-16 周）
+### M3: 多语言支持（8-16 周）
 
 **目标**：支持 Python → Rust
 
@@ -1222,7 +1324,7 @@ concurrency = false
 - Python FFI 桥接（PyO3）在迁移项目中可用
 - 毕业评估能正确识别"已完成"vs"未完成"状态
 
-### Phase 4: 完善（持续）
+### M4: 完善（持续）
 
 - C/C++ LanguageAdapter（bindgen + cbindgen）
 - Go LanguageAdapter
@@ -1237,8 +1339,10 @@ concurrency = false
 
 ### 成本估算
 
-| 规模 | 预估时间 | 预估成本 | 备注 |
-|------|---------|---------|------|
+> **注意**：以下"预估成本"栏**仅指 LLM API 调用成本**，不含人力、基础设施、CI/CD 等其他费用。
+
+| 规模 | 预估时间 | 预估成本（仅 LLM API） | 备注 |
+|------|---------|----------------------|------|
 | 1K 行 | 1-3 天 | $3-$30 | 纯函数模块 |
 | 10K 行 | 2-4 周（1-2 人） | $30-$300 | 含测试搭建 |
 | 50K 行 | 2-4 个月（2-4 人） | $150-$1500 | 含 FFI 桥接 |
@@ -1246,13 +1350,13 @@ concurrency = false
 
 ### 成功案例基准
 
-| 项目 | 规模 | 耗时 | 结果 | 证据等级 |
-|------|------|------|------|---------|
-| Bun (Zig→Rust) | 100 万行 | 11 天 | 99.8% 测试通过 | **商业案例**（Bun 团队博客） |
-| Claw-Code (TS→Rust) | 48K 行 | 4 天 | 功能完整 | **社区传闻**（GitHub 项目） |
-| Pokemon Showdown (JS→Rust) | 10 万行 | 7 天 | 功能完整 | **社区传闻**（GitHub 项目） |
-| Cloudflare Pingora (C→Rust) | 从零构建 | N/A | CPU-70%, 内存-67% | **商业案例**（Cloudflare 博客） |
-| Discord (Go→Rust) | 单服务 | N/A | 消除 GC 延迟尖刺 | **商业案例**（Discord 博客） |
+| 项目 | 规模 | 耗时 | 结果 | 证据等级 | 可参考维度 |
+|------|------|------|------|---------|-----------|
+| Bun (Zig→Rust) | 100 万行 | 11 天 | 99.8% 测试通过 | **商业案例**（Bun 团队博客） | 测试驱动验证流程、大规模迁移节奏 |
+| Claw-Code (TS→Rust) | 48K 行 | 4 天 | 功能完整 | **社区传闻**（GitHub 项目） | AI 辅助翻译工作流、PORTING.md 实践 |
+| Pokemon Showdown (JS→Rust) | 10 万行 | 7 天 | 功能完整 | **社区传闻**（GitHub 项目） | 大型 JS 项目迁移模式、模块拆分策略 |
+| Cloudflare Pingora (C→Rust) | 从零构建 | N/A | CPU-70%, 内存-67% | **商业案例**（Cloudflare 博客） | 性能动机验收标准、FFI 桥接方案 |
+| Discord (Go→Rust) | 单服务 | N/A | 消除 GC 延迟尖刺 | **商业案例**（Discord 博客） | 并发安全动机、GC→所有权模型迁移 |
 
 > **注意**：Bun 和 Claw-Code 的极端速度可能包含未公开的前期准备工作，不应作为时间估算基准。
 
@@ -1262,7 +1366,7 @@ concurrency = false
 |------|------|---------|-------------|
 | SafeTrans | ACM CCS 2025 | 迭代修复 54%→80% | 反馈循环设计基础 |
 | DepTrans | ACM FSE 2026 | 7B 模型超 32B，依赖图引导 | 拓扑排序翻译策略 |
-| Environment-in-the-Loop | ACM ReCode 2026 | 编译环境作为反馈参与者 | L1 反馈循环理论依据 |
+| Environment-in-the-Loop | ACM ReCode 2026 | 编译环境作为反馈参与者 | F1 反馈循环理论依据 |
 | MatchFixAgent | ICML 2026 | 99.2% 等价性判定 | 验证层方法参考 |
 | Hayroll | PLDI 2026 | C 宏翻译 | C→Rust 适配器参考 |
 | LLMigrate | arXiv 2025 | 调用图引导，<15% 修改 | 依赖图分析策略 |
@@ -1273,7 +1377,35 @@ concurrency = false
 
 ```json
 {
-  "version": "0.2",
+  "version": "0.3",
+  "phase": "sprint_loop",
+  "phase_history": [
+    {
+      "phase": "init",
+      "entered_at": "2026-06-06T10:00:00Z",
+      "exited_at": "2026-06-06T10:05:00Z"
+    },
+    {
+      "phase": "profile",
+      "entered_at": "2026-06-06T10:05:00Z",
+      "exited_at": "2026-06-06T11:00:00Z"
+    },
+    {
+      "phase": "plan",
+      "entered_at": "2026-06-06T11:00:00Z",
+      "exited_at": "2026-06-06T14:00:00Z"
+    },
+    {
+      "phase": "scaffold",
+      "entered_at": "2026-06-06T14:00:00Z",
+      "exited_at": "2026-06-06T16:00:00Z"
+    },
+    {
+      "phase": "sprint_loop",
+      "entered_at": "2026-06-06T16:00:00Z",
+      "exited_at": null
+    }
+  ],
   "project": {
     "name": "my-project",
     "source_language": "typescript",
