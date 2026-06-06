@@ -110,6 +110,9 @@
 | **tokei** | 目录路径 | 语言统计 JSON（行数、文件数、复杂度） | 代码量对比是基础分析，嵌入保证跨平台一致性 |
 | **syn + quote** | Rust 源码字符串 | Rust TokenStream / 格式化代码 | 代码生成和 AST 操作是翻译阶段核心依赖 |
 | **petgraph** | 节点+边列表 | 拓扑排序、路径查询、子图提取 JSON | 依赖图是核心数据结构，内存操作性能敏感 |
+| **jsonschema** | JSON 数据 + Schema 文件 | 校验结果（通过/失败+错误详情） | 检查点校验必须确定性执行，Schema 编译期内嵌 |
+
+> **scc 与 tokei 的取舍**：5.3 节列出 `tokei + scc` 并用。v0.9.2 决定**仅嵌入 tokei**——tokei 是纯 Rust crate 可直接嵌入，覆盖核心 LOC 统计需求；scc 是 Go 编写的外部二进制，其额外的复杂度/COCOMO 估算能力可通过 tree-sitter AST 分析自行实现。如需 scc 的性能优势（大仓场景），可作为可选外部调用。
 
 ### 类别 B：外部调用（子进程 + JSON 解析）
 
@@ -130,6 +133,11 @@
 | **dependency-cruiser** | JS/TS 项目路径 | 依赖图 JSON | Node.js 工具，需 `npx` |
 | **Mypy** | Python 项目路径 | 类型信息 JSON（`--output=json`） | Python 工具，需 `pip` |
 | **import-linter + grimp** | Python 项目路径 | 依赖图 JSON | Python 工具，需 `pip` |
+| **just** | Justfile | 任务执行结果 | 任务运行器，替代 Makefile |
+| **bacon** | Cargo 项目路径 | 持续编译反馈 | 文件监控，本地开发辅助 |
+| **Kani** | Cargo 项目路径 + 验证目标 | 形式化验证结果 | Tier 2，需 nightly + 额外安装 |
+| **Semgrep/OpenGrep** | 源码 + 规则文件 | 安全扫描结果 JSON | 安全检测，Rust 规则较少 |
+| **cargo-careful** | Cargo 项目路径 | UB 检测结果 | 编译慢，Tier 2 补充 |
 
 ### 类别 C：目标项目依赖（scaffold 注入）
 
