@@ -1,0 +1,23 @@
+{
+  "version": "0.1",
+  "generated_at": "2026-06-06T10:05:00Z",
+  "modules": [
+    {
+      "id": "utils/string",
+      "path": "src/utils/string.ts",
+      "language": "typescript",
+      "loc": 320,
+      "exports": ["capitalize", "slugify", "truncate"],
+      "complexity": "low"
+    }
+  ],
+  "dependencies": [
+    {
+      "from": "core/parser",
+      "to": "utils/string",
+      "type": "import",
+      "symbols": ["slugify"]
+    }
+  ],
+  "topological_order": ["utils/string", "utils/math", "core/parser", "core/runtime"]
+}

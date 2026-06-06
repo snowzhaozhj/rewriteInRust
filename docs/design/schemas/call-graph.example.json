@@ -1,0 +1,18 @@
+{
+  "version": "0.1",
+  "generated_at": "2026-06-06T10:05:00Z",
+  "functions": [
+    {
+      "id": "utils/string::capitalize",
+      "module": "utils/string",
+      "calls": ["utils/string::isEmptyString"],
+      "called_by": ["core/parser::parseTitle", "cli/format::formatOutput"]
+    },
+    {
+      "id": "core/parser::parseTitle",
+      "module": "core/parser",
+      "calls": ["utils/string::capitalize", "utils/string::truncate"],
+      "called_by": ["core/runtime::processDocument"]
+    }
+  ]
+}

@@ -1,0 +1,101 @@
+{
+  "version": "0.9",
+  "state": "sprint_loop",
+  "state_history": [
+    {
+      "state": "init",
+      "entered_at": "2026-06-06T10:00:00Z",
+      "exited_at": "2026-06-06T10:05:00Z"
+    },
+    {
+      "state": "profile",
+      "entered_at": "2026-06-06T10:05:00Z",
+      "exited_at": "2026-06-06T11:00:00Z"
+    },
+    {
+      "state": "plan",
+      "entered_at": "2026-06-06T11:00:00Z",
+      "exited_at": "2026-06-06T14:00:00Z"
+    },
+    {
+      "state": "scaffold",
+      "entered_at": "2026-06-06T14:00:00Z",
+      "exited_at": "2026-06-06T16:00:00Z"
+    },
+    {
+      "state": "sprint_loop",
+      "entered_at": "2026-06-06T16:00:00Z",
+      "exited_at": null
+    }
+  ],
+  "project": {
+    "name": "my-project",
+    "source_language": "typescript",
+    "source_commit": "abc123",
+    "source_loc": 15000,
+    "created_at": "2026-06-06T10:00:00Z"
+  },
+  "sprint": {
+    "current": 2,
+    "history": [
+      {
+        "id": 1,
+        "started_at": "2026-06-06T10:00:00Z",
+        "completed_at": "2026-06-13T18:00:00Z",
+        "target_modules": ["utils/string", "utils/math"],
+        "completed_modules": ["utils/string", "utils/math"],
+        "porting_md_version": "1.2",
+        "notes": "首个 Sprint，规则追加了整数溢出处理"
+      }
+    ]
+  },
+  "modules": {
+    "utils/string": {
+      "status": "done",
+      "substatus": null,
+      "sprint": 1,
+      "attempts": [
+        {
+          "timestamp": "2026-06-07T14:00:00Z",
+          "result": "success",
+          "retry_count": 1,
+          "checkpoint": "intermediate/attempts/utils-string-001.json"
+        }
+      ],
+      "test_pass_rate": "24/24",
+      "coverage": 91,
+      "known_differences": 0,
+      "risk": "low"
+    },
+    "core/parser": {
+      "status": "testing",
+      "substatus": "proptest_failing",
+      "sprint": 2,
+      "attempts": [
+        {
+          "timestamp": "2026-06-14T09:00:00Z",
+          "result": "partial",
+          "retry_count": 2,
+          "checkpoint": "intermediate/attempts/core-parser-002.json"
+        }
+      ],
+      "test_pass_rate": "18/22",
+      "coverage": 76,
+      "known_differences": 1,
+      "risk": "medium"
+    },
+    "core/runtime": {
+      "status": "blocked",
+      "substatus": "waiting_for_core/parser_testing_complete",
+      "sprint": 2,
+      "blocked_by": ["core/parser"],
+      "pre_blocked_status": "pending",
+      "attempts": [],
+      "test_pass_rate": null,
+      "coverage": null,
+      "known_differences": 0,
+      "risk": "high"
+    }
+  },
+  "config_ref": ".rustmigrate.toml"
+}
