@@ -17,7 +17,7 @@
 ├──────────────────────────────┬──────────────────────────────────┤
 │         分析层               │            转换层                 │
 │  tree-sitter (多语言 AST)    │  LLM 翻译引擎（意图驱动）        │
-│  Mypy (Python 类型提取)      │  PORTING.md 规则引擎             │
+│  Mypy (Python 类型提取)      │  迁移规则引擎（porting/ 目录）    │
 │  TS Compiler API (TS 类型)   │  syn+quote (Rust 代码生成)       │
 │  dependency-cruiser (JS 依赖)│  ast-grep (模式匹配重写)         │
 │  import-linter+grimp (Py依赖)│                                  │

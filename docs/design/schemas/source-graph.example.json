@@ -1,23 +1,92 @@
 {
-  "version": "0.1",
+  "version": "0.2",
   "generated_at": "2026-06-06T10:05:00Z",
-  "modules": [
+  "storage": "sqlite",
+  "db_path": ".rust-migration/source-graph.db",
+  "nodes": [
     {
-      "id": "utils/string",
-      "path": "src/utils/string.ts",
-      "language": "typescript",
-      "loc": 320,
-      "exports": ["capitalize", "slugify", "truncate"],
-      "complexity": "low"
+      "id": "file:src/utils/string.ts",
+      "node_type": "File",
+      "name": "string.ts",
+      "file_path": "src/utils/string.ts",
+      "line_range": [1, 320],
+      "is_exported": false,
+      "complexity": "simple"
+    },
+    {
+      "id": "function:src/utils/string.ts:capitalize",
+      "node_type": "Function",
+      "name": "capitalize",
+      "file_path": "src/utils/string.ts",
+      "line_range": [15, 28],
+      "is_exported": true,
+      "complexity": "simple",
+      "is_async": false,
+      "visibility": "pub",
+      "migration_status": "done",
+      "migration_priority": 1
+    },
+    {
+      "id": "class:src/models/user.ts:UserModel",
+      "node_type": "Class",
+      "name": "UserModel",
+      "file_path": "src/models/user.ts",
+      "line_range": [5, 85],
+      "is_exported": true,
+      "complexity": "moderate",
+      "is_abstract": false,
+      "decorators": ["@Injectable"],
+      "migration_status": "translating",
+      "migration_priority": 3
+    },
+    {
+      "id": "rust_target:my_crate::utils::string::capitalize",
+      "node_type": "RustTarget",
+      "name": "capitalize",
+      "file_path": "rust-src/utils/string.rs",
+      "line_range": [10, 22],
+      "rust_kind": "Function",
+      "rust_path": "my_crate::utils::string::capitalize",
+      "crate_name": "my-utils"
     }
   ],
-  "dependencies": [
+  "edges": [
     {
-      "from": "core/parser",
-      "to": "utils/string",
-      "type": "import",
-      "symbols": ["slugify"]
+      "source": "file:src/utils/string.ts",
+      "target": "function:src/utils/string.ts:capitalize",
+      "edge_type": "contains",
+      "provenance": "tree-sitter",
+      "weight": 1.0
+    },
+    {
+      "source": "file:src/core/parser.ts",
+      "target": "file:src/utils/string.ts",
+      "edge_type": "imports",
+      "provenance": "tree-sitter",
+      "weight": 1.0
+    },
+    {
+      "source": "function:src/core/parser.ts:parseTitle",
+      "target": "function:src/utils/string.ts:capitalize",
+      "edge_type": "calls",
+      "provenance": "ast-grep",
+      "weight": 0.95
+    },
+    {
+      "source": "function:src/utils/string.ts:capitalize",
+      "target": "rust_target:my_crate::utils::string::capitalize",
+      "edge_type": "maps_to",
+      "provenance": "manual",
+      "weight": 1.0,
+      "mapping_notes": "直接映射，注意 UTF-16→UTF-8 字符串语义差异"
     }
   ],
-  "topological_order": ["utils/string", "utils/math", "core/parser", "core/runtime"]
+  "topological_order": ["utils/string", "utils/math", "core/parser", "core/runtime"],
+  "file_fingerprints": {
+    "src/utils/string.ts": {
+      "content_hash": "sha256:a1b2c3d4e5f6...",
+      "structure_hash": "sha256:f6e5d4c3b2a1...",
+      "analyzed_at": "2026-06-06T10:05:00Z"
+    }
+  }
 }

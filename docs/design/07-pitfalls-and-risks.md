@@ -13,7 +13,7 @@
 | 逐行直译 | 得到 `Arc<Mutex<>>` 满天飞的代码 | 意图驱动重构：先解构语义，再用 Rust 惯用法重新实现 |
 | HashMap 迭代顺序 | Rust HashMap 随机化哈希 | 差异测试 + 需要顺序时用 BTreeMap 或 IndexMap |
 | UTF-8 vs UTF-16 | JS string.length 返回 UTF-16 code units | 专门的字符串语义测试用例 |
-| 整数溢出 | Debug panic, Release wrapping | PORTING.md 中明确溢出策略 |
+| 整数溢出 | Debug panic, Release wrapping | 迁移规则中明确溢出策略 |
 | 全局状态 | 模块级变量 → OnceLock/lazy_static | 全局状态审计作为 PROFILE 阶段的一部分 |
 | 错误处理范式 | 异常冒泡 ≠ Result 传播 | 重新设计错误处理策略（MDR 记录） |
 | 浮点精度 | 不同编译器/平台结果不同 | 数值计算的 epsilon 对比测试 |
@@ -23,19 +23,19 @@
 
 | 陷阱 | 源语言 | Rust 差异 | 缓解 |
 |------|--------|----------|------|
-| 闭包语义 | JS/Python 引用捕获 | Rust 需明确 move/borrow | PORTING.md 规则 + clippy |
+| 闭包语义 | JS/Python 引用捕获 | Rust 需明确 move/borrow | 迁移规则 + clippy |
 | null 三态 | JS: null/undefined/absent | Rust: Option<T> | 类型映射时统一为 Option |
-| 隐式类型转换 | JS: "1" + 1 = "11" | Rust 无隐式转换 | PORTING.md 禁止模式 |
+| 隐式类型转换 | JS: "1" + 1 = "11" | Rust 无隐式转换 | 迁移规则禁止模式 |
 | 正则方言 | JS/Python/Rust regex 差异 | 语法/Unicode 支持不同 | 正则表达式专项测试 |
 | 字符串切片 panic | — | Rust 非 char 边界切片 panic | 使用 .get() 安全访问 |
 | 模块初始化顺序 | 语言定义顺序 | Rust 无保证 | OnceLock 显式初始化 |
 | 迭代器惰性 | Python generator 惰性 | Rust iterator 也惰性但语义不同 | 注意 collect 时机 |
 | 整数大小 | JS number = f64 | Rust 多种整数类型 | 类型映射表明确 |
-| 相等性语义 | JS == vs === | Rust PartialEq/Eq | PORTING.md 统一规则 |
-| **Promise eager vs Future lazy** | JS Promise 创建即执行 | Rust Future 需要 executor 驱动，不 `.await` 不执行 | 审查所有 async 调用点，确保 Future 被驱动；PORTING.md 规则 22 专项覆盖 |
+| 相等性语义 | JS == vs === | Rust PartialEq/Eq | 迁移规则统一约定 |
+| **Promise eager vs Future lazy** | JS Promise 创建即执行 | Rust Future 需要 executor 驱动，不 `.await` 不执行 | 审查所有 async 调用点，确保 Future 被驱动；迁移规则 #22 专项覆盖 |
 | **Send/Sync 约束传染** | 源语言无编译期线程安全标记 | 跨 `.await` 持有的类型必须 Send，共享引用必须 Sync | 迁移后大量类型编译失败；需提前审计并发共享点，选择 Arc/Mutex 或重构 |
 | **可变性传播与架构重组** | 源语言允许多处同时修改对象 | `&mut` 排他借用，同一时刻只能有一个可变引用 | 无法直译多处同时写入的模式；需重构为消息传递、Cell/RefCell 或拆分数据结构 |
-| **异步取消安全性（Cancel Safety）** | JS Promise 创建后无法取消，始终运行到完成 | Rust Future 可在任意 `.await` 点被 drop（取消）；`tokio::select!` / `tokio::time::timeout` 会导致未选中的 Future 被 drop | 如果 Future 持有锁或处于半完成写操作状态，被 drop 会导致数据不一致。迁移时需逐一审查 `select!`/`timeout` 中的 Future 是否取消安全；PORTING.md 规则 22（异步运行时）中专项覆盖取消安全性审查 |
+| **异步取消安全性（Cancel Safety）** | JS Promise 创建后无法取消，始终运行到完成 | Rust Future 可在任意 `.await` 点被 drop（取消）；`tokio::select!` / `tokio::time::timeout` 会导致未选中的 Future 被 drop | 如果 Future 持有锁或处于半完成写操作状态，被 drop 会导致数据不一致。迁移时需逐一审查 `select!`/`timeout` 中的 Future 是否取消安全；迁移规则 #22（异步运行时）中专项覆盖取消安全性审查 |
 
 ### 9.3 流程陷阱
 
@@ -75,13 +75,14 @@
 
 | 风险 | 严重度 | 可能性 | 缓解措施 |
 |------|--------|--------|---------|
+| **Claude Code Plugin API 破坏性变更** | 高 | 中 | 整个项目依赖 Plugin 机制（agents/、hooks/、skills/），API 变更需同步适配。缓解：(a) 将 Plugin API 依赖集中在薄适配层；(b) M0 增加 Spike 0 验证最小 Plugin 骨架加载路径；(c) 关注 Claude Code 官方 changelog |
 | **MVP 编排依赖指令跟随** | 高 | 高 | MVP 编排通过 SKILL.md 指令实现，可靠性取决于 LLM 指令跟随能力（非确定性程序控制）。M0 Spike 1 验证后决定是否触发 Plan B（微 Skill 链 / 外部脚本编排）。**用户需知晓 MVP 阶段可能需手动干预编排流程** |
 | 用户自建迁移工作流（AI IDE + 手动 prompt） | 高 | 高 | 最直接的替代方案。差异化在确定性门禁（独立脚本）和标准化产出物体系——纯 prompt 无法阻止 AI 跳过验证。**<2K 行项目建议直接手动迁移** |
 | LLM 进步使工具过时 | 高 | 中 | 核心价值在验证层而非生成层——即使 LLM 翻译变完美，验证仍然需要 |
 | Code Metal 下沉到中端 | 高 | 低 | 保持开源+轻量定位，做他们不做的验证层 |
-| Dynamic Workflows 竞争 | 高 | 中 | 真正竞争来源——我们的差异化在**方法论编码**（PORTING.md + 验证管线），而非通用工作流 |
+| Dynamic Workflows 竞争 | 高 | 中 | 真正竞争来源——我们的差异化在**方法论编码**（迁移规则 + 验证管线），而非通用工作流 |
 | MCP 生态 AST 工具从下方威胁 | 中 | 中 | 低层 AST 工具会商品化，我们的价值在方法论层而非工具层 |
-| 用户基数小 | 中 | 中 | 产出物（PORTING.md、测试集、MDR）独立有价值 |
+| 用户基数小 | 中 | 中 | 产出物（迁移规则、测试集、MDR）独立有价值 |
 | 每种语言对需大量维护 | 中 | 高 | 优先支持 TS→Rust，LanguageAdapter 降低扩展成本 |
 | UA 扩展到迁移场景 | 中 | 中 | 差异化在验证层，不在理解层 |
 | petgraph 维护风险 | 低 | 中 | 轻量场景可自建 DAG |

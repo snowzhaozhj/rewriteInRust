@@ -78,7 +78,9 @@ Plugin 中的确定性计算由独立的 Rust CLI 工具 `rustmigrate` 承担，
 | 执行速度 | 毫秒级 | 秒~分钟级（LLM 调用） |
 | 典型操作 | `graph build`、`stats loc`、`validate state` | `/migrate run`（翻译）、对抗性审查 |
 
-### CLI 命令概览（M1 必需）
+### CLI 命令概览
+
+**MVP（M1）— 11 个命令**：
 
 | 子命令 | 说明 |
 |--------|------|
@@ -87,17 +89,22 @@ Plugin 中的确定性计算由独立的 Rust CLI 工具 `rustmigrate` 承担，
 | `rustmigrate graph build` | 使用 tree-sitter 解析源码，构建源码图（存储到 `source-graph.db`） |
 | `rustmigrate graph topo-sort` | 对依赖图执行拓扑排序，输出迁移顺序 |
 | `rustmigrate graph deps <module>` | 查询模块的正向依赖树 |
-| `rustmigrate graph rdeps <module>` | 查询谁依赖此模块（反向依赖） |
-| `rustmigrate graph cycles` | 检测循环依赖（Kosaraju SCC 算法） |
 | `rustmigrate graph stats` | 图统计信息（节点/边计数、度分布） |
-| `rustmigrate graph export` | 导出图为 JSON/DOT/Mermaid 格式 |
 | `rustmigrate validate state` | 校验 `migration-state.json` 的合法性（JSON Schema + 状态机约束） |
-| `rustmigrate validate config` | 校验 `.rustmigrate.toml` 配置文件的合法性 |
 | `rustmigrate state get` | 查询指定模块的当前迁移状态 |
 | `rustmigrate state transition` | 执行状态转换（带前置条件检查） |
 | `rustmigrate stats loc` | 统计源码和 Rust 代码行数（嵌入 tokei） |
-| `rustmigrate stats compare` | 对比源码与 Rust 代码的复杂度指标 |
 | `rustmigrate scaffold workspace` | 生成 Cargo workspace 骨架（注入 dev-dependencies） |
+
+**M2 扩展 — 5 个命令**：
+
+| 子命令 | 说明 | 推迟理由 |
+|--------|------|---------|
+| `rustmigrate graph rdeps <module>` | 反向依赖查询 | MVP 阶段 deps 正向查询够用 |
+| `rustmigrate graph cycles` | 循环依赖检测 | MVP 目标是 <5K 行单项目，环少见 |
+| `rustmigrate graph export` | 导出为 JSON/DOT/Mermaid | MVP 阶段 stats 输出够用 |
+| `rustmigrate stats compare` | 源码与 Rust 复杂度对比 | MVP 阶段手动 tokei 对比即可 |
+| `rustmigrate validate config` | 校验 `.rustmigrate.toml` | MVP 阶段 TOML 解析时隐式校验即可 |
 
 ### Workspace 结构
 
@@ -524,7 +531,7 @@ skills/migrate/adapters/
 │   ├── detect.sh               # 检测项目是否使用此语言
 │   ├── extract-types.sh        # 类型提取（调用 TS Compiler API）
 │   ├── extract-deps.sh         # 依赖图提取（调用 dependency-cruiser）
-│   ├── porting-template.md     # PORTING.md 模板规则（语言专用）
+│   ├── porting-template.md     # 迁移规则模板（语言专用，生成到 .rust-migration/porting/）
 │   ├── ffi-bridge.sh           # FFI 桥接配置（napi-rs）
 │   └── analysis-tools.json     # 语言专用工具列表
 ├── python/

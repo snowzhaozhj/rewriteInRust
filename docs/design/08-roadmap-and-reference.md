@@ -8,9 +8,10 @@
 
 ### M0: 假设验证周（1-2 周）
 
-**目标**：验证 5 个关键技术假设，产出假设验证报告，而非项目骨架
+**目标**：验证 6 个关键技术假设，产出假设验证报告，而非项目骨架
 
-**5 个 Spike（每个 1-2 天，Spike 3/5 可并行执行以缩短总时长）**：
+**6 个 Spike（每个 1-2 天，Spike 0 最先执行，Spike 3/5 可并行执行以缩短总时长）**：
+- [ ] **Spike 0: Plugin API 骨架验证** — 用最小 Plugin（1 个 Skill + 1 个 SubAgent + 1 个 Hook）验证 Claude Code Plugin 的完整加载路径。确认 `plugin.json`、`agents/` 自动发现、`hooks/hooks.json` 格式、SubAgent 通过 Agent tool 调用等核心机制的实际行为与设计假设一致。这是所有后续 Spike 的前提。（Plan B：回退到纯 CLAUDE.md + slash commands 的非 Plugin 方案）
 - [ ] **Spike 1: SubAgent 编排可靠性** — 验证 Claude 能否可靠执行 `/migrate analyze` 的 4 步调度序列。验收标准：5 次独立测试中成功率 ≥ 80%（即 ≥4 次完成全部步骤且产出物有效）。低于阈值触发 Plan B（微 Skill 链 / 外部脚本编排）
 - [ ] **Spike 2: rust-analyzer LSP 验证** — 验证 rust-analyzer LSP Plugin 在写入 .rs 文件后的诊断反馈延迟和可靠性（Plan B：回退到 PostToolUse Hook + cargo check）
 - [ ] **Spike 3: tree-sitter 精度** — 验证 tree-sitter 对 TS 项目的 AST 解析精度是否满足模块拆分需求（Plan B：TS Compiler API / LLM 直接读源码）
@@ -22,14 +23,14 @@
 - [ ] `migration-state.json` schema 定义（沿用）
 - [ ] `.rustmigrate.toml` 配置 schema（沿用）
 
-**验收指标**：5 个 Spike 全部完成，每个假设有明确的"验证通过"或"触发 Plan B"结论。
+**验收指标**：6 个 Spike 全部完成，每个假设有明确的"验证通过"或"触发 Plan B"结论。Spike 0 必须最先完成且验证通过，否则后续 Spike 无法执行。
 
 ### M1: MVP（6-8 周）
 
 **目标**：跑通 TypeScript → Rust 的**单模块纯函数/CLI 子模块**迁移
 
 **范围限定（MVP 必须）**：
-- [ ] `/migrate analyze` 完整版（合并原 init + plan + test：TS 项目画像 + 依赖图 + PORTING.md 生成 + 黄金文件测试搭建）
+- [ ] `/migrate analyze` 完整版（合并原 init + plan + test：TS 项目画像 + 依赖图 + 迁移规则生成（porting/ 目录）+ 黄金文件测试搭建）
 - [ ] `/migrate run` — 单模块迁移内循环（含 Phase A/B 双阶段翻译）
 - [ ] `/migrate review` — 验证管线 + 进度仪表板（合并原 verify + status）
 - [ ] Tier 0 门禁集成（cargo check + clippy + cargo test）
@@ -66,10 +67,14 @@
 | migration-state.json 管理 | 2-3 | Schema 定义 + 状态流转逻辑 + 断点续传 |
 | .rustmigrate.toml | 1 | Schema 定义 + 默认值生成 |
 | 集成测试 + 调试 | 5-8 | 3 个真实项目上的端到端验证 |
-| CLI 核心（16 个子命令） | 9-13 | init/profile/graph(build+topo-sort+deps+rdeps+cycles+stats+export)/validate/state/stats/scaffold |
-| CLI 嵌入 crate 集成 | 4-5 | tree-sitter + ast-grep-core + tokei + petgraph + rusqlite 绑定 |
-| CLI 测试 | 2-3 | 集成测试 + fixtures |
-| **合计** | **37-55** | 1 人约 9-14 周，2 人约 5-7 周 |
+| CLI 核心（11 个 MVP 子命令） | 10-14 | init/profile/graph(build+topo-sort+deps+stats)/validate-state/state(get+transition)/stats-loc/scaffold |
+| CLI 嵌入 crate 集成 | 5-7 | tree-sitter + ast-grep-core + tokei + petgraph + rusqlite 绑定 + 跨平台编译 |
+| CLI 测试 | 3-4 | 集成测试 + fixtures + 1 个自建微型项目 |
+| Plan B 缓冲 | 2-5 | M0 Spike 触发 Plan B 时的额外开发量 |
+| **合计** | **50-70** | 1 人约 12-18 周，2 人约 6-9 周 |
+
+> **M0 假设验证周**（5-10 人天）不在上述 M1 估算中，应单独核算。
+> **与 v0.9.2 估算的差异**：集成测试（+4 天）、CLI graph build（+3 天）、crate 集成（+2 天）、Plan B 缓冲（+3 天）。详见可行性审查报告。
 
 ### M2: 质量提升（8-12 周）
 
@@ -105,7 +110,7 @@
 
 **交付物**：
 - [ ] Python LanguageAdapter（Mypy 类型提取 + PyO3 桥接）
-- [ ] Python 专用 PORTING.md 模板
+- [ ] Python 专用迁移规则模板（porting-template.md）
 - [ ] 统一差异测试框架
 - [ ] `/migrate graduate` 毕业评估
 - [ ] 性能基准对比自动化（criterion 集成）

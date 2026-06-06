@@ -200,27 +200,27 @@ degrade_* → translating（通过 /migrate run --module=X --force 恢复）
 读取当前目录的文件结构，识别源语言和框架。
 检查以下文件是否存在：package.json, tsconfig.json, pyproject.toml, go.mod, CMakeLists.txt。
 
-### Step 2: 调用 analyzer SubAgent（项目画像）
-使用 analyzer SubAgent 执行项目画像分析。
-输入：项目根目录路径。
-等待产出物：`.rust-migration/intermediate/source-graph.json`。
+### Step 2: 构建源码图
+使用 Bash tool 执行：`rustmigrate graph build --root ./src --format json`
+CLI 构建基础图（contains/imports 边），存储到 `.rust-migration/source-graph.db`（SQLite）。
+然后调用 analyzer SubAgent 做语义增强（补充 calls/uses_type 边、复杂度标注）。
 
-**检查点**：验证 source-graph.json 存在且包含 `modules` 和 `dependencies` 字段。
+**检查点**：验证 source-graph.db 存在。执行 `rustmigrate graph stats` 确认节点/边数量合理。
 如果验证失败，报告错误并停止。
 
 ### Step 3: 生成初始状态
 基于 analyzer 的产出物，生成以下文件：
 - `.rust-migration/migration-state.json`（初始状态：PROFILE）
-- `.rust-migration/.rustmigrate.toml`（默认配置）
+- `.rustmigrate.toml`（默认配置，项目根目录）
 
 **检查点**：验证 migration-state.json 的 state 字段为 "profile"。
 
 ### Step 4: 调用 translator SubAgent（规则生成）
-使用 translator SubAgent 生成 PORTING.md 初始规则。
-输入：source-graph.json + 语言适配器的 porting-template.md。
-等待产出物：`.rust-migration/PORTING.md`。
+使用 translator SubAgent 生成迁移规则初始内容。
+输入：source-graph.db 图数据 + 语言适配器的 porting-template.md。
+等待产出物：`.rust-migration/porting/` 目录（含 dependency-mapping.md、core-rules.md 等规则文件）。
 
-**检查点**：验证 PORTING.md 存在且包含核心规则类（类型映射、错误处理等）。
+**检查点**：验证 `.rust-migration/porting/` 目录存在且包含至少一个规则文件。
 
 ### Step 5: 生成辅助产出物
 基于 analyzer 和 translator 的产出物，生成以下文件：
@@ -229,7 +229,7 @@ degrade_* → translating（通过 /migrate run --module=X --force 恢复）
 
 ### Step 6: 调用 scaffolder SubAgent（测试基础设施搭建）
 使用 scaffolder SubAgent 搭建黄金文件测试基础设施。
-输入：source-graph.json + 模块接口信息。
+输入：source-graph.db 图数据 + 模块接口信息。
 等待产出物：`.rust-migration/test-fixtures/golden/` 目录下的测试数据。
 
 **检查点**：验证 test-fixtures/golden/ 目录存在且非空。
@@ -246,12 +246,12 @@ degrade_* → translating（通过 /migrate run --module=X --force 恢复）
 
 ## 前置条件
 - `.rust-migration/migration-state.json` 存在且 state 为 "sprint_loop"
-- `.rust-migration/PORTING.md` 存在
+- `.rust-migration/porting/` 目录存在且包含规则文件
 - 目标模块已在 Sprint 计划中
 
 ## 上下文加载
 1. 读取 `migration-state.json`，确认当前 Sprint 和目标模块
-2. 读取 `PORTING.md` 中与目标模块相关的规则（按模块类型筛选）
+2. 读取 `.rust-migration/porting/` 目录中与目标模块相关的迁移规则（按模块类型筛选）
 3. 读取目标模块源码
 4. 读取依赖模块的接口签名（仅接口，不含实现）
 
@@ -259,7 +259,7 @@ degrade_* → translating（通过 /migrate run --module=X --force 恢复）
 
 ### Step 1: 语义解构（调用 translator SubAgent）
 调用 translator SubAgent，要求其生成目标模块的意图摘要。
-输入：源码 + 相关 PORTING.md 规则。
+输入：源码 + 相关迁移规则（`.rust-migration/porting/` 目录下的规则文件）。
 产出物：`.rust-migration/intermediate/{module}-intent.md`。
 
 **检查点**：意图摘要文件存在且非空。
@@ -269,7 +269,7 @@ degrade_* → translating（通过 /migrate run --module=X --force 恢复）
 优先保持与源码的 1:1 对应（便于 diff 对照审查）。
 Private 方法默认翻译（不省略），保持结构完整性。
 标记系统：TODO(port) 标记未完成项，PERF(port) 标记已知性能问题，PORT NOTE 标记翻译决策。
-输入：意图摘要 + PORTING.md 规则 + 依赖接口。
+输入：意图摘要 + 迁移规则（porting/ 目录）+ 依赖接口。
 产出物：Rust 源文件写入 `rust_root` 对应路径。
 
 **检查点**：Rust 文件存在。
@@ -409,21 +409,21 @@ Private 方法默认翻译（不省略），保持结构完整性。
       "source_language": "typescript",
       "rust_type": "String",
       "notes": "UTF-16 → UTF-8，注意 length 语义差异",
-      "rule_ref": "PORTING.md#R07"
+      "rule_ref": "porting/core-rules.md#R07"
     },
     {
       "source_type": "number",
       "source_language": "typescript",
       "rust_type": "f64",
       "notes": "JS number 统一为 f64；整数场景可优化为 i64/u64",
-      "rule_ref": "PORTING.md#R02"
+      "rule_ref": "porting/core-rules.md#R02"
     },
     {
       "source_type": "Map<string, T>",
       "source_language": "typescript",
       "rust_type": "HashMap<String, T>",
       "notes": "注意迭代顺序差异（JS Map 保持插入序，Rust HashMap 不保证）",
-      "rule_ref": "PORTING.md#R02"
+      "rule_ref": "porting/core-rules.md#R02"
     }
   ]
 }

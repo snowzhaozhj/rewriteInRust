@@ -149,7 +149,7 @@ Work Unit（一个 Claude Code 会话）:
 **行动指南**：
 - 在 PROFILE 阶段（项目画像）中决定并行策略
 - 功能冻结：在 `migration-state.json` 中锁定源码 commit hash
-- 双轨开发：每个 Sprint 开始前检查源项目变更，必要时更新 PORTING 规则
+- 双轨开发：每个 Sprint 开始前检查源项目变更，必要时更新迁移规则
 - Strangler Fig：需要额外配置 FFI 桥接层和路由层
 
 ## 4.7 异步翻译策略
@@ -166,7 +166,7 @@ Work Unit（一个 Claude Code 会话）:
 
 **行动指南**：PROFILE 阶段（项目画像）中评估源项目的异步模式，在 `.rustmigrate.toml` 的 `async_strategy` 字段记录决策。如果选择"全栈异步"，须写 MDR 记录运行时选择（tokio vs async-std）和取消安全性审查计划。
 
-## 4.7 PROFILE → PLAN 中间步骤：原项目可复现基线
+## 4.8 PROFILE → PLAN 中间步骤：原项目可复现基线
 
 在 PROFILE（画像）和 PLAN（规划）之间，插入一个关键步骤：
 
@@ -179,7 +179,7 @@ Work Unit（一个 Claude Code 会话）:
 
 **行动指南**：如果源项目本地构建失败，**停止迁移**——先修复源项目。
 
-## 4.8 项目级止损标准
+## 4.9 项目级止损标准
 
 当迁移进展持续不佳时，需要及时止损而非无限投入。以下阈值为参考值，可在 `.rustmigrate.toml` 的 `[stop_loss]` 节中配置覆盖。
 
