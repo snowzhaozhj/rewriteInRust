@@ -114,7 +114,7 @@ rust-migrate-plugin/
 
 | 格式 | 适用场景 | 文件示例 |
 |------|---------|---------|
-| **JSON** | 机器状态、程序读写 | `migration-state.json`、`source-graph.json`、报告文件 |
+| **JSON** | 机器状态、程序读写 | `migration-state.json`、报告文件；图数据主存储为 SQLite（`source-graph.db`） |
 | **TOML** | 项目配置、人类可编辑 | `.rustmigrate.toml` |
 | **YAML frontmatter + Markdown** | 知识/模式文件（需元数据 + 正文） | `patterns/*.md`、`anti-patterns/*.md` |
 | **纯 Markdown** | 人类文档（规则、记录、差异） | 迁移规则、MDR、`KNOWN_DIFFERENCES.md` |

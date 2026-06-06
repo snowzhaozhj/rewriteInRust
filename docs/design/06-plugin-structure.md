@@ -220,6 +220,7 @@ Plugin 不支持 `rules/` 目录分发，因此采用混合策略将规则按特
 | `analyzer` | 源码分析、项目画像、依赖图语义增强、惯用法检查 | tree-sitter, dependency-cruiser, Mypy, tokei |
 | `translator` | 迁移规则生成、Phase A 忠实翻译 + Phase B 惯用化优化、多候选生成 | LLM, syn+quote, ast-grep |
 | `verifier` | 等价性验证、**模块级测试生成**、Phase A→B 中间的对抗性审查、不等价证据收集、性能对比 | cargo-test, proptest, criterion, Miri |
+| `scaffolder` | 测试基础设施搭建、行为录制、黄金测试集管理、Cargo workspace 骨架生成 | insta, cargo-fuzz, mitmproxy |
 
 ### SubAgent 输入/输出接口表
 
@@ -233,7 +234,6 @@ Plugin 不支持 `rules/` 目录分发，因此采用混合策略将规则按特
 | **verifier**（对抗审查） | Phase A Rust 产出物、原始源码、迁移规则 | `{module}-review.md`（审查报告） | Phase A 翻译完成 | 审查报告包含差异列表 |
 | **verifier**（测试验证） | Phase B Rust 产出物、黄金文件 | 测试结果 JSON（stdout）、KNOWN_DIFFERENCES.md 追加条目 | Phase B 翻译完成 | 测试通过率 ≥ 预期 |
 | **scaffolder** | `source-graph.db`、模块接口信息 | `test-fixtures/golden/` 测试数据、Cargo.toml dev-deps 注入 | analyzer 已完成 | 测试基础设施可运行 |
-| `scaffolder` | 测试基础设施搭建、行为录制、黄金测试集管理 | insta, cargo-fuzz, mitmproxy |
 
 **行动指南**：每个 SubAgent 有独立的系统提示，包含其职责边界和可用工具列表。Agent 之间通过 `migration-state.json` 和产出物文件通信。
 
@@ -374,7 +374,7 @@ Hook 配置遵循 Claude Code 真实 API 格式（`hooks/hooks.json`）：
 | `/migrate review` | `verifier`(全量验证) → 生成报告 → 更新 PARITY.md + 状态仪表板输出 | sprint-N-report.json, 终端仪表板 | 原 verify+status 合并 |
 | `/migrate graduate` | `verifier`(毕业评估：覆盖率 + unsafe 审计 + 性能基准) → 生成毕业报告 | graduation-report.json, unsafe-audit.json | 原 graduate+unsafe-audit 合并 |
 
-> **注意**：`/migrate analyze` 的 4 步序列是 M0 Spike 1 验证的主要对象——如果指令跟随不够可靠，此命令应拆为子步骤（Plan B1 微 Skill 链）。
+> **注意**：`/migrate analyze` 的 7 步序列（含 3 次 SubAgent 调用）是 M0 Spike 1 验证的主要对象——如果指令跟随不够可靠，此命令应拆为子步骤（Plan B1 微 Skill 链）。
 
 ### MVP 阶段执行模型
 
@@ -411,7 +411,7 @@ SubAgent B (串行)
 **编排机制的本质（MVP 阶段）**：
 - MVP 阶段的编排**依赖 Claude 的指令跟随能力**，而非确定性程序控制。Skill 的 SKILL.md 通过强约束分步指令引导 Claude 的行为（如"第 1 步：调用 analyzer SubAgent；第 2 步：检查产出物；第 3 步：调用 translator SubAgent"）。
 - 这意味着编排的可靠性取决于 LLM 对指令的遵守程度，而非代码级别的 if-else 分支。
-- **M0 验证要求**：在 M0 Spike 1 中验证 Claude 能否可靠执行 4 步的 SubAgent 调度序列（`/migrate analyze` 路径）。如果指令跟随不够可靠，触发 Plan B。
+- **M0 验证要求**：在 M0 Spike 1 中验证 Claude 能否可靠执行 `/migrate analyze` 的 7 步序列（含 3 次 SubAgent 串行调用）。如果指令跟随不够可靠，触发 Plan B。
 - **检查点确定性**：SubAgent 间的编排检查点使用确定性文件存在性检查（脚本），不依赖 AI 判断产出物是否"有效"——由校验脚本负责。
 
 **Plan B 具体方案**（M0 Spike 1 失败时触发）：

@@ -289,7 +289,7 @@ confidence: high
 
 ## 核心规则
 - 本项目正在从 [源语言] 迁移到 Rust
-- 通用迁移规则见 .claude/rules/（按 paths 条件自动加载）
+- 核心迁移规则嵌入 Plugin agents/*.md，参考指南见 skills/migrate/references/
 - 项目专有迁移规则见 .rust-migration/porting/
 - 迁移进度见 .rust-migration/PARITY.md
 - 已知差异见 .rust-migration/KNOWN_DIFFERENCES.md
@@ -424,7 +424,7 @@ confidence: high
 
 | # | 假设 | Spike | 结论 | Plan B? | 说明 |
 |---|------|-------|------|---------|------|
-| 1 | SubAgent 4 步编排可靠 | Spike 1 | verified (4/5 通过) | 否 | 第 3 次失败因上下文膨胀，缩减 analyzer 输出后稳定 |
+| 1 | SubAgent 3 次串行调用可靠 | Spike 1 | verified (4/5 通过) | 否 | 第 3 次失败因上下文膨胀，缩减 analyzer 输出后稳定 |
 | 2 | rust-analyzer LSP 反馈秒级 | Spike 2 | verified | 否 | 小项目 <1s，中项目 ~3s |
 | 3 | tree-sitter TS 精度 | Spike 3 | plan-b-triggered | 是 | 装饰器解析不完整，改用 ast-grep |
 ```

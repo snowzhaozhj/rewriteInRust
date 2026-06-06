@@ -7,21 +7,21 @@
       "source_language": "typescript",
       "rust_type": "String",
       "notes": "UTF-16 → UTF-8，注意 length 语义差异",
-      "rule_ref": "PORTING.md#R07"
+      "rule_ref": "porting/core-rules.md#R07"
     },
     {
       "source_type": "number",
       "source_language": "typescript",
       "rust_type": "f64",
       "notes": "JS number 统一为 f64；整数场景可优化为 i64/u64",
-      "rule_ref": "PORTING.md#R02"
+      "rule_ref": "porting/core-rules.md#R02"
     },
     {
       "source_type": "Map<string, T>",
       "source_language": "typescript",
       "rust_type": "HashMap<String, T>",
       "notes": "注意迭代顺序差异（JS Map 保持插入序，Rust HashMap 不保证）",
-      "rule_ref": "PORTING.md#R02"
+      "rule_ref": "porting/core-rules.md#R02"
     }
   ]
 }

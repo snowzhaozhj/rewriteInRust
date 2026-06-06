@@ -110,7 +110,7 @@ UA 52,950 stars 的成功密码：**把 LLM 从"对话伙伴"变成"流水线中
 
 翻译内循环拆为两个显式阶段：Phase A 忠实翻译（保持 1:1 对应）→ 对抗性审查 → Phase B 惯用化优化。先保证语义正确，再追求惯用性。详细步骤见 [03-execution-model.md § 4.3](./03-execution-model.md#43-内循环模块级单会话内-phase-ab-双阶段翻译)。
 
-**参考案例**：Bun 的迁移规则实践（PORTING.md 30+ 章节，虽未公开但源码中引用 207 次）和 Claw-Code 的 PARITY.md + Mock Parity Harness 行为验证。
+**参考案例**：Bun 将迁移规则融入 CLAUDE.md 和内部文档（虽不独立成文，但源码中引用 30+ 章节 207 次），以及 Claw-Code 的 PARITY.md + Mock Parity Harness 行为验证。
 
 ### 2.4 学术前沿技术集成
 
@@ -153,7 +153,7 @@ UA 52,950 stars 的成功密码：**把 LLM 从"对话伙伴"变成"流水线中
 | 案例 | 可参考维度 | 证据等级 |
 |------|-----------|---------|
 | Bun (Zig->Rust, 100 万行, 11 天) | 测试驱动验证流程、大规模迁移节奏 | 商业案例 |
-| Claw-Code (TS->Rust, 48K 行, 4 天) | AI 辅助翻译工作流、PORTING.md 实践 | 社区传闻 |
+| Claw-Code (TS->Rust, 48K 行, 4 天) | PARITY.md + Mock Parity Harness 行为验证 | 开源项目 |
 | Cloudflare Pingora (C->Rust) | 性能动机验收标准、FFI 桥接方案 | 商业案例 |
 | Discord (Go->Rust) | 并发安全动机、GC->所有权模型迁移 | 商业案例 |
 
