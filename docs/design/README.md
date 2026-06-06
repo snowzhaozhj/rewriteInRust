@@ -10,6 +10,8 @@
 
 **做什么**：一套 Claude Code Plugin（3 个核心命令：`/migrate analyze`、`/migrate run`、`/migrate review`，后续 +1 个 `/migrate graduate`），自动分析源项目 -> 生成迁移规则 -> 逐模块翻译 -> 用 8 层测试验证正确性。你只需要 `/migrate analyze` 开始，工具引导你完成后续步骤。
 
+> **「3 命令」是入口数，不是「只跑 3 步」**：每个命令内部自动串联多个子步骤——`/migrate analyze` 自动执行 初始化 -> 规则生成 -> 测试搭建 共 7 步（3 次 SubAgent 调用）；`/migrate run` 自动执行 Phase A 忠实翻译 -> 对抗性审查 -> Phase B 优化 -> F2 验证（共 2 次 SubAgent 调用：translator 翻译/优化 + verifier 审查/验证）；`/migrate review` 运行完整验证管线。设计价值在于**把多步编排自动化、用户少记命令**，而非「3 条命令就够」。各子步骤间有文件存在性检查点与最多 2 次重试，单步偏差不必整体重来（编排可靠性的 M0 验证与 Plan B 降级见 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径)，逐步骨架见 [09 附录 B](./09-appendix-schemas.md#附录-bmvp-skill-的-skillmd-骨架)）。
+
 **核心差异**：验证管线开箱即用——cargo check / clippy / proptest / fuzz 的管线自动配置，**独立脚本门禁让 AI 无法跳过验证**（纯 prompt 做不到这一点）。产出物（迁移规则 + KNOWN_DIFFERENCES.md 差异登记 + MDR 决策记录）是团队协作和审计的标准化资产。
 
 > **最小概念集**（入门只需理解这些）：

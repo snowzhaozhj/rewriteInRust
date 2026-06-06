@@ -25,6 +25,18 @@
 
 **验收指标**：6 个 Spike 全部完成，每个假设有明确的"验证通过"或"触发 Plan B"结论。Spike 0 必须最先完成且验证通过，否则后续 Spike 无法执行。
 
+#### M0 → M1 决策检查点
+
+M0 收尾时依据 `DESIGN_ASSUMPTIONS.md` 的 Spike 结论，按下表确定进入 M1 的方案与工作量档位（Plan B 体系与触发规则见 [07-pitfalls-and-risks.md § 12.2](./07-pitfalls-and-risks.md#122-plan-b-体系)，强制触发判定见 [06-plugin-structure.md § 10.5](./06-plugin-structure.md#105-编排调度路径)）：
+
+| M0 结果 | M1 方案 | M1 工作量档位 |
+|---------|---------|--------------|
+| Spike 1 成功率 ≥ 80% 且 Spike 4 通过 | 基线：SKILL.md 指令编排 | 50-65 人天 |
+| Spike 1 成功率 < 80%（或 Spike 4 失败） | **强制** Plan B3 混合编排（不可选） | 60-75 人天（+5-10 人天） |
+| Spike 0 失败 | 回退非 Plugin 方案（CLAUDE.md + slash commands），M1 重新评估 | 单独核算 |
+
+> 规则：**只要 Spike 1 < 80% 通过率，M1 自动采用 Plan B3 混合方案，工作量 +5-10 人天**，不进入基线档位。该判定在 M0 验收会上一次性做出，避免 M1 中途返工。
+
 ### M1: MVP（6-8 周）
 
 **目标**：跑通 TypeScript → Rust 的**单模块纯函数/CLI 子模块**迁移
@@ -53,6 +65,16 @@
 - 用户从 `/migrate analyze` 到 `/migrate review` 的完整流程可在 30 分钟内走通（单模块）
 - 断点续传验证：中断会话后恢复，不丢失 migration-state.json 状态
 
+**性能门禁（量化，作为"是否可升级 M2"的客观依据）**：
+
+| 指标 | 阈值 | 测试方法 |
+|------|------|---------|
+| 图构建耗时 | `rustmigrate graph build` < 10s（100 文件项目） | 测试环境：M1/M2 Mac 或 4 核 CI runner；测试项目：100 个 `.ts` 文件、约 5K 行；冷启动（无 SQLite 缓存）计时 |
+| 单 agent 完整流程用时 | 单模块 analyze→run→review 在 30-40 分钟内（与上方定性指标一致） | 在 3 个验收项目上各跑 1 个纯函数模块，取耗时区间；不含人工审阅等待 |
+| 上下文预算利用率 | < 90%（5K 行以下模块的单次 Work Unit） | 记录 Work Unit 峰值上下文 token / 预算上限（≤100K，见 02-architecture.md）；interface_only 加载策略下统计 |
+
+> 性能门禁仅约束 MVP 范围内的串行单 agent 路径。多 agent 并行吞吐属 M2 指标（见下），M1 不要求。
+
 **M1 工作量分解（粗估）**：
 
 | 交付物 | 预估人天 | 说明 |
@@ -76,6 +98,11 @@
 > **M0 假设验证周**（5-10 人天）不在上述 M1 估算中，应单独核算。
 > **与 v0.9.2 估算的差异**：集成测试（+4 天）、CLI graph build（+3 天）、crate 集成（+2 天）、Plan B 缓冲（+3 天）。详见可行性审查报告。
 
+> **场景 A / B 对比**（**实际范围取决于 M0 验收结果**）：
+> - **基线 M1**（所有 Spike 验证通过，无 Plan B）：**50-65 人天**。
+> - **失败缓冲 M1**（Spike 1 编排 / Spike 4 SKILL.md 跟随触发 Plan B3 混合方案）：**60-75 人天**。上表「Plan B 缓冲 2-5 人天」仅覆盖单个 Spike 回退；若 Spike 1+4 同时失败，需额外 +5-10 人天实施 Plan B3（编排层改用微 Skill 链 / 外部脚本编排），故上限抬高到 75 人天。
+> 决策规则见下方「M0→M1 决策检查点」。
+
 ### M2: 质量提升（8-12 周）
 
 **目标**：验证管线完整，翻译质量可靠
@@ -94,15 +121,29 @@
 - [ ] Sprint 循环外循环支持
 - [ ] Workflow 定义文件（ultracode 格式）
 - [ ] 多 agent worktree 隔离机制
+- [ ] 状态机程序化实现（独立 Rust orchestrator 二进制，确定性编排，替代 MVP 的 SKILL.md 指令驱动；见 [02 § 3.4.1](./02-architecture.md#341-mvp--m2-演进与向后兼容)）
+- [ ] migration-state.json 向后兼容框架（`version` 字段 + 自动迁移脚本，集成进 M2 CLI 的 `init`/`validate state` 版本检测与升级）
 - [ ] /goal 自主迁移循环支持
 - [ ] CLI 扩展（search/analyze/report 等 16 个子命令）
-- [ ] CI/CD 集成（`rustmigrate` 在 GitHub Actions 中使用）
+- [ ] CI/CD 集成（`rustmigrate` 在 GitHub Actions 中使用；落地设计见 [03-execution-model.md § 4.11](./03-execution-model.md#411-cicd-集成m2-范围)）
+
+> **图并发写策略（analyzer + scaffolder 并行阶段）**：M2 的有限并行仅限 analyzer + scaffolder 两个 SubAgent（见 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径)），但两者最终都写入共享的 `source-graph.db`（单 SQLite，同一时刻仅一个写者）。除上方「SQLite 并发写冲突率」门禁外，M2 规划阶段还需实测这两个 agent 对 `nodes`/`edges` 表的并发写在 WAL 模式（[04 § 5.7.3](./04-toolchain.md#573-持久化存储)已选用）下的写锁等待：若单次 ≤ 20ms，记为「WAL 足够，记录锁行为」；若 > 50ms，采用「共享只读图 + 写批量化」或「每 agent 写分片后合并」并记录权衡。此为 M2 规划项，不进 M0 Spike（M0 Spike 仅验证 MVP 串行关键路径）。状态机程序化 + schema 向后兼容框架合计 +3–5 人天。
 
 **验收指标**：
 - 在 3 个真实 TS 中型项目（5K-20K 行）中完成多模块迁移
 - 属性测试覆盖核心函数
 - 翻译膨胀率 < 3.0x
 - 降级路径（FFI 桥接）在至少 1 个复杂模块上成功
+
+**性能门禁（量化，评估规模化就绪）**：
+
+| 指标 | 阈值 | 测试方法 |
+|------|------|---------|
+| 多 agent 并行吞吐 | ≥ 1.5 模块/小时（`max_concurrent_agents=3`） | 在中型验收项目上跑 Workflow 批量模式，统计同批内 3 agent 并行完成模块数 / 墙钟小时；不含人工审阅 |
+| SQLite 并发写冲突率 | < 10%（3 agent 负载下） | 3 agent 并发写 source-graph.db，统计 `SQLITE_BUSY`/重试次数 占总写操作比例（WAL 模式连接配置见 04-toolchain.md § 5.7） |
+| 性能基准无退化 | 相对 M1 基线波动 ≤ ±10% | 复用 M1 性能门禁三项（图构建、单 agent 流程、上下文利用率），在相同测试项目上回归对比 |
+
+> M2 并行吞吐指标上限按 `max_concurrent_agents=3` 设定，与 MVP 范围一致；不引入未规划的 4+ agent 并行（属 M4 优化项）。
 
 ### M3: 多语言支持（8-16 周）
 
@@ -130,6 +171,17 @@
 - 社区反馈驱动的规则库积累
 - 多 agent 并行编排优化
 - Strangler Fig 模式工具支持
+
+### 13.1.1 M1→M2→M3 规则库累积效应分析
+
+路线图各阶段并非孤立——M1 产出的规则库是 M2/M3 的输入，这条隐含的演化路径在此显式化，避免把 MVP 误读为"零规则即开箱即用"。
+
+- **(a) M1 → M2/M3 规则累积**：M1 在 3 个 <5K 项目迁移中发现的项目规则（写入 `.rust-migration/porting/`），作为 M2「多候选排序」的打分依据与 M3 Python 适配器的初始模板来源。预期 M1 发现 **15-25 条新通用规则**（覆盖 TS→Rust 常见陷阱，对应 [07-pitfalls-and-risks.md § 9.2 跨语言语义陷阱](./07-pitfalls-and-risks.md#92-跨语言语义陷阱补充) 与 [03-execution-model.md § 7.7 不等价探测维度](./03-execution-model.md#77-不等价证据探测维度清单)）。
+- **(b) M1 验收后「规则库成熟度评估检查点」**：M1 验收会上评估规则库对 TS→Rust 常见陷阱的覆盖率——以 § 9.2 跨语言语义陷阱、§ 7.7 探测维度清单为对照基线；覆盖率不足的陷阱类别列入 M2 规则补充计划。此评估不阻断 M1 验收，仅作为 M2 范围输入。
+- **(c) M3 Python 适配器复用**：M3 应复用 TS 适配器的 type-extraction 脚本框架（`extract-types.sh` 的调用契约）与差异测试基础设施；Mypy 集成与 PyO3 桥接为 Python 专有部分，不影响通用框架（适配器契约见 [06-plugin-structure.md § 11.2](./06-plugin-structure.md#112-语言扩展架构)）。
+- **(d) 社区检测的多语言价值**：M2 的 Leiden 社区检测按依赖耦合分批，与语言无关，M3 多语言场景直接复用。
+
+> **规则成熟度演化**：MVP 的验证管线开箱即用，但**项目专有规则首轮迁移需 1-2 个 Sprint 积累**（见 [01-positioning-and-methodology.md § 1.3](./01-positioning-and-methodology.md#13-我们做什么)）。通用规则随版本沉淀，项目规则随首轮迁移生成。
 
 ---
 

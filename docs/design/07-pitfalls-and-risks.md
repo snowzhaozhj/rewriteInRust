@@ -77,6 +77,7 @@
 |------|--------|--------|---------|
 | **Claude Code Plugin API 破坏性变更** | 高 | 中 | 整个项目依赖 Plugin 机制（agents/、hooks/、skills/），API 变更需同步适配。缓解：(a) 将 Plugin API 依赖集中在薄适配层；(b) M0 增加 Spike 0 验证最小 Plugin 骨架加载路径；(c) 关注 Claude Code 官方 changelog |
 | **MVP 编排依赖指令跟随** | 高 | 高 | MVP 编排通过 SKILL.md 指令实现，可靠性取决于 LLM 指令跟随能力（非确定性程序控制）。M0 Spike 1 验证后决定是否触发 Plan B（微 Skill 链 / 外部脚本编排）。**用户需知晓 MVP 阶段可能需手动干预编排流程** |
+| **M1→M2 schema 向后兼容性** | 高 | 中 | M1 用 SKILL.md 指令驱动 + `migration-state.json`，M2 切换到程序化状态机；M1 在跑的项目升级到 M2 时 schema 若有 breaking change 会不兼容。缓解：`migration-state.json` 强制 `version` 字段 + 语义化版本，M2 实现自动迁移脚本并在 CLI `init`/`validate state` 集成版本检测与自动升级（演进契约见 [02 § 3.4.1](./02-architecture.md#341-mvp--m2-演进与向后兼容)） |
 | 用户自建迁移工作流（AI IDE + 手动 prompt） | 高 | 高 | 最直接的替代方案。差异化在确定性门禁（独立脚本）和标准化产出物体系——纯 prompt 无法阻止 AI 跳过验证。**<2K 行项目建议直接手动迁移** |
 | LLM 进步使工具过时 | 高 | 中 | 核心价值在验证层而非生成层——即使 LLM 翻译变完美，验证仍然需要 |
 | Code Metal 下沉到中端 | 高 | 低 | 保持开源+轻量定位，做他们不做的验证层 |

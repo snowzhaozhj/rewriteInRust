@@ -119,12 +119,40 @@ confidence: high
 | 25 | **平台特定行为映射** | 项目专有 | 否 | OS API → cfg 条件编译 |
 | 26 | **多态/动态分发映射** | 通用 | 否 | 接口/继承/泛型 → trait/enum dispatch/泛型 |
 
-**版本化演化**：每条规则有版本号和变更记录，每个 Sprint Review 可以修改规则，但必须记录变更原因。
+**版本化演化**：每条规则有版本号和变更记录，每个 Sprint Review 可以修改规则，但必须记录变更原因。详见下方「规则版本管理与代码一致性」。
+
+#### 规则版本管理与代码一致性
+
+**规则格式与版本号**：每条规则以 `## RULE-NN: <名称> (v<N>)` 形式标注，版本号采用 `major.minor.patch`：
+
+- `patch`：措辞/示例补充，不改变翻译结果（不触发回溯）
+- `minor`：新增约束或放宽限制，向后兼容（不触发回溯，但新模块按新版翻译）
+- `major`（breaking change）：与既有产出代码可能矛盾（如"禁止使用某 API"），**仅在 Plugin 主版本更新时引入**，并在 KNOWN_DIFFERENCES.md 中列出受影响范围与升级步骤
+
+每次变更在 `porting/changelog.md` 记录：变更时间、原因、影响范围、向后兼容性（兼容/breaking）。
+
+**冲突仲裁**：若同一规则类在通用层（核心规则/参考指南）与项目专有层（`porting/`）均定义，**项目专有规则优先适用**。
+
+**代码回溯机制**：当 breaking change 引入与已生成代码矛盾的规则时，触发回溯检查流程：
+
+1. PARITY.md「模块详情」表新增 **Porting Version** 列，记录该模块翻译时所依据的规则版本（如 `v1 of RULE-2,3,5`），用于追踪"每个模块在哪个规则版本下翻译"。
+2. `/migrate review` 在汇总时比对当前规则版本与各模块的 Porting Version，输出需重新翻译的模块列表（落入 `reports/sprint-N-report.json`）。
+3. 关键规则（如 RULE-11 禁止模式、RULE-12 unsafe 策略）发生 breaking change 时，在 migration-state.json 中记录 `affected_modules` 字段，供精准回溯。
+
+> **CLI 边界**：上述比对属确定性计算，可由未来的合规检查命令（M2，归入 [06 § 10.0.1](./06-plugin-structure.md#1001-cli-工具架构rustmigrate) 的 M2 扩展候选）承担；MVP 阶段由 `/migrate review` 的 SubAgent 完成比对，不新增 CLI 子命令以免突破 11+5 命令清单（命令权威以 06 为准）。
 
 **行动指南**：
 - MVP 阶段只生成标记"是"的规则
 - 每次翻译失败且原因是规则缺失时，追加新规则并标注"由 Sprint N 失败触发"
-- 规则格式：`源语言模式 → Rust 等价物 + 注意事项 + 示例`
+- 规则格式：`## RULE-NN: <名称> (v<N>)` + `源语言模式 → Rust 等价物 + 注意事项 + 示例`
+
+**规则维护责任与社区贡献**：规则库三层结构的维护职责与更新周期如下，社区贡献新规则/改进规则的提交流程（PR 模板、评审合并标准）由 Plugin 仓库的 `CONTRIBUTING.md` + SKILL.md 内嵌的「规则提交指南」承载，不在设计文档中展开以免信息分散。
+
+| 层级 | 维护责任 | 更新周期 | 外部对齐 |
+|------|---------|---------|---------|
+| 核心规则（`agents/*.md`） | Plugin 维护者，社区 PR | 每个 M 阶段 review 一次 | 与 Rust edition、clippy lint 集版本对齐 |
+| 参考指南（`references/`） | Plugin 维护者 + 社区贡献 | 每个 M 阶段 review 一次 | 与所引用 crate 的主版本对齐 |
+| 项目专有（`porting/`） | 迁移项目团队 | 每个 Sprint Review | 与项目依赖映射同步 |
 
 ---
 
@@ -143,12 +171,14 @@ confidence: high
 | S1     | 3         | 2      | 95%    | 82%    | 模块 C 类型复杂 |
 
 ## 模块详情
-| 模块 | 状态 | 等价深度 | Sprint | 尝试次数 | 测试通过 | 覆盖率 | 已知差异 | 风险 |
-|------|------|---------|--------|---------|---------|--------|---------|------|
-| utils/string | done | strong | S1 | 1 | 24/24 | 91% | 0 | 低 |
-| core/parser | testing | stub | S1 | 2 | 18/22 | 76% | 1 | 中 |
-| core/runtime | pending | — | S2 | 0 | — | — | — | 高 |
+| 模块 | 状态 | 等价深度 | Sprint | Porting Version | 尝试次数 | 测试通过 | 覆盖率 | 已知差异 | 风险 |
+|------|------|---------|--------|-----------------|---------|---------|--------|---------|------|
+| utils/string | done | strong | S1 | v1 of RULE-2,3,8 | 1 | 24/24 | 91% | 0 | 低 |
+| core/parser | testing | stub | S1 | v2 of RULE-3,11 | 2 | 18/22 | 76% | 1 | 中 |
+| core/runtime | pending | — | S2 | — | 0 | — | — | — | 高 |
 ```
+
+> **Porting Version 列**：记录该模块翻译时依据的规则版本，用于 breaking change 后的回溯检查（见 [§6.2 规则版本管理与代码一致性](#规则版本管理与代码一致性)）。`/migrate review` 比对当前规则版本与各模块的 Porting Version，识别需重新翻译的模块。
 
 **等价深度标签**（借鉴 Claw-Code 的四级标签，MVP 使用 strong/stub 两级，M2 扩展）：
 
@@ -203,6 +233,18 @@ confidence: high
 
 **行动指南**：验证阶段发现行为差异时，verifier **立即追加**到此文件（不等到 Sprint Review），由人类决定是"修复"还是"接受"。
 
+### 6.4.1 社区透明度与异议协议
+
+PARITY.md 与 KNOWN_DIFFERENCES.md 是迁移质量的对外承诺，需具备开源项目的可见性与可质疑性。
+
+**发布绑定**：每次发布 Rust 迁移版本时，将当时的 PARITY.md 与 KNOWN_DIFFERENCES.md 作为 release artifact 随 GitHub Release 一并发布（快照），并标注对应的源码 commit hash。快照是**补充**而非替代——`.rust-migration/` 下的 live 文件持续更新，发布快照提供"某版本对外承诺了哪些差异/进度"的可追溯定格，避免后续修改造成"进度幻觉"。
+
+**异议机制**：社区用户或 code reviewer 对某条已登记差异（KD-NNN）有异议时，通过 GitHub Issue 引用该 KD 编号提出，附复现步骤。维护者在对应 KD 条目追加「异议 / 复议结论」字段（同 §6.4 已有的 `@-mention + 日期` 审批形式），决定维持、升级为待修复、或细化差异范围。
+
+**冲突仲裁**：新发现差异与 KNOWN_DIFFERENCES.md 中"已接受"差异冲突时，以更窄、更精确的描述为准，并在两条目互相交叉引用；无法合并时由维护者按异议机制裁决。
+
+**审批权限**：修改 KNOWN_DIFFERENCES.md 中已审批条目受 file-guard.sh 保护（见 [06 § 10.3 Hooks](./06-plugin-structure.md#103-hooks自动化门禁)），需人类审批者 `@-mention + 日期`。本节是对 §6.4 已有审批形式（KD-001/KD-002 示例）的制度化，非新增机制。
+
 ---
 
 ## 6.5 MDR — 迁移决策记录
@@ -251,6 +293,13 @@ confidence: high
 - 翻译前先输出意图摘要，确认后再生成代码
 - 禁止逐行直译，必须用 idiomatic Rust
 - 优先使用标准库，其次用 PORTING 规则指定的 crate
+
+## 规则编码策略（clippy.toml vs 自定义 lint，权威决策树）
+- 规则 ≤ 10 条且全部可用 clippy.toml 的 disallowed_methods/types/macros 表达 → 留在 clippy.toml
+- 规则 > 15 条，或 > 30% 需语义判断（禁止清单无法表达）→ 升级为 .rust-migration/lint-rules/ 自定义 lint crate
+- verifier 在 /migrate analyze 末尾必须复核生成的 clippy.toml；规则数 > 20 时升级规则编码策略评审
+- clippy.toml 只拦截被禁方法的直接调用，不能阻止 wrapper/unsafe/宏间接规避——须与 #![deny(unsafe_code)] 等全局属性及本反合理化表配合，不视为绝对防线
+（详见 04 § 5.2）
 
 ## 测试规则
 - 新代码必须有测试
@@ -442,3 +491,28 @@ confidence: high
 建议在 M0 Spike 5 中评估以下集成可行性：
 - **Beads**：用于 SubAgent 任务状态的跨会话持久化（替代部分 migration-state.json 手工管理）
 - **AgentMemory**：用于翻译知识的语义检索（从 patterns/anti-patterns 中检索相关经验）
+
+---
+
+## 6.12 知识生命周期与维护政策
+
+L0-L3 四层知识中的长期产出物（patterns/anti-patterns、SPRINT_LEARNINGS.md）若只增不维护，会随规则演进与时间推移变成"死文档"。本节定义其新鲜度、关联与失效机制。patterns 与 §6.2 规则同样经历版本化与 deprecation，保持两者一致。
+
+**Frontmatter 扩展**：pattern/anti-pattern 的 YAML frontmatter 在 §6.1 基础字段外增加：
+
+```yaml
+last_verified: 2026-06-10        # ISO 日期，最近一次确认仍适用
+status: active                   # active | needs-review | deprecated
+related_rules: [RULE-3, RULE-22] # 关联规则类，供影响分析
+related_mdrs: [MDR-001]          # 关联决策记录
+```
+
+**新鲜度管理**：每 6 个月（或按 Sprint 周期配置）自动将到期 pattern 标记 `needs-review`；translator/verifier 在引用时若遇 `needs-review`，须确认仍适用（更新 `last_verified`）或标记 `deprecated`。
+
+**关联索引**：在 `.rust-migration/context/` 生成 `index.json`，记录 `pattern → related_rules / related_mdrs / 使用模块` 的映射。SKILL.md 翻译前按模块特征（如 `is_async=true`）查询索引，仅注入相关且 `status=active` 的 pattern，避免全量加载占用上下文预算。
+
+**规则变更影响分析**：Sprint Review 时扫描本 Sprint 的规则变更，凡 `related_rules` 命中变更规则的 pattern 自动标记 `needs-review`，确保规则改动后相关经验被复核而非默默失效。
+
+**验收与提交流程**：新 pattern 提交后在 Sprint Review 确认 `confidence` 等级——`high`/`medium` 进入注入候选，`confidence: low` 仅作参考、不自动注入。
+
+**Deprecation 流程**：过期 pattern 移至 `anti-patterns/deprecated/` 保留作学习资料，不直接删除（记录"为何不再适用"）。

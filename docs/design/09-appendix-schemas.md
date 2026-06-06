@@ -175,9 +175,23 @@ degrade_* → translating（通过 /migrate run --module=X --force 恢复）
 ```
 
 **blocked 状态处理**：
-- 当模块 A 依赖的模块 B 降级或阻塞时，A 自动进入 `blocked` 状态
-- `migration-state.json` 中记录 `blocked_by` 字段（阻塞来源模块）和 `pre_blocked_status` 字段（进入 blocked 前的状态）
-- 阻塞解除后（B 完成迁移或降级决策确定），A 恢复到 `pre_blocked_status`
+- 当模块 A 依赖的模块 B 降级或阻塞时，A 进入 `blocked` 状态
+- `migration-state.json` 中记录 `blocked_by` 字段和 `pre_blocked_status` 字段（进入 blocked 前的状态）
+  - **`blocked_by` 是字符串数组**（一个模块可能同时被多个上游模块阻塞），见上文示例 `"blocked_by": ["core/parser"]`
+- 阻塞解除后（B 全部进入 `done` 或 `degrade_*`），A 恢复到 `pre_blocked_status`
+
+**检测与恢复的责任边界（避免永久阻塞）**：
+
+| 事件 | MVP（M0-M1）由谁负责 | M2+ 由谁负责 |
+|------|----------------------|--------------|
+| 进入 blocked / 填充 `blocked_by` | `/migrate run` 的前置检查（见 [附录 B](#附录-bmvp-skill-的-skillmd-骨架) Step 0.5），手动填充，**MVP 不自动持续扫描** | `rustmigrate validate state` 程序化检测并更新 |
+| 解除 blocked / 恢复 `pre_blocked_status` | `/migrate run` 执行前的 Step 0.5 检查点：遍历所有 `blocked` 模块，若其 `blocked_by` 全部进入 `done`/`degrade_*` 则恢复 | `rustmigrate validate state` 自动拓扑解除 |
+
+> **注（多模块同时 blocked）**：MVP 不做自动拓扑排序。若 A→B→C 三者均 blocked，用户应按依赖关系**逐层手动恢复**（先解 C，再解 B，最后 A）——每次 `/migrate run` 的 Step 0.5 只解除「`blocked_by` 已全部完成」的那一层，故连续运行会自然逐层推进。完整自动拓扑排序在 M2 阶段实现。
+
+> **注（与降级级联的区别）**：本节描述的是「上游完成 → 下游解除 blocked」的**恢复**问题。另有「上游降级为 FFI → 下游需感知接口类型变化」的**级联**问题，二者不同，后者见 [02-architecture.md § 3.4「降级后依赖级联影响」](./02-architecture.md#34-编排器状态机设计)。
+
+> **注（`pre_blocked_status` 失效场景）**：若 B 降级后代码发生重构、B→A 依赖关系本身变更，则 `pre_blocked_status` 可能不再准确。MVP 的处理是：恢复后该模块仍会走完整的 `/migrate run` 流程重新验证，故即使 `pre_blocked_status` 偏旧也不会产出错误结果（最坏情况是多跑一次翻译/验证）。
 
 ---
 
@@ -255,7 +269,32 @@ CLI 构建基础图（contains/imports 边），存储到 `.rust-migration/sourc
 3. 读取目标模块源码
 4. 读取依赖模块的接口签名（仅接口，不含实现）
 
+> **单 Skill 可行性 / token 成本预估**：调用 translator 前先按「源码大小 + 相关规则 + 依赖接口（interface_only）→ ≤ 100K tokens」预估单次 Work Unit 的 context 预算，> 95K 提示拆分、> 100K 走降级路径——映射公式、各成分 token 量级与降级行为以 [02-architecture.md § 3.5.1 上下文预算运行时检查与拆分策略](./02-architecture.md#351-上下文预算运行时检查与拆分策略) 为权威。本骨架的每个 `**检查点**` 即为「指令段 → 文件存在性检查点 → 下一指令段」的实例编码：单步检查点失败按 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径) 的 `max_retries_per_step` 重试，不回滚已通过的前序步骤。
+
 ## 分步指令
+
+### Step 0.5: 自动解除可解除的 blocked 模块
+读取 migration-state.json 中所有 status='blocked' 的模块，逐个检查其阻塞源是否已解决：
+
+```
+对每个 blocked 模块 M：
+  读取 M.blocked_by（字符串数组）
+  查询 blocked_by 中每个模块在 migration-state.json 中的当前 status
+  若所有阻塞源都已进入 'done' 或 'degrade_*'：
+    - 将 M.status 恢复为 M.pre_blocked_status
+    - 写入日志："解除对 module M 的阻塞：所有阻塞源已解决"
+    - 写回 migration-state.json
+  否则：
+    - 保持 blocked 状态，将当前未完成的阻塞源记入 M.substatus
+```
+
+> MVP 不做自动拓扑排序：A→B→C 多层 blocked 时，本步骤只解除「blocked_by 全部完成」的一层，连续运行会逐层推进（见 [附录 A § 合法状态转换「多模块同时 blocked」注](#合法状态转换)）。
+
+### Step 0.6: 目标模块依赖就绪检查（前置门禁）
+查询目标模块的依赖是否全部完成（通过 `rustmigrate graph deps <module>` 或 migration-state.json）。
+若存在依赖未进入 `done`/`degrade_*`：
+- **中止本次 run**，输出阻塞原因（列出哪些依赖未完成）
+- 将目标模块标记为 `blocked`，填充 `blocked_by`（未完成的依赖数组）和 `pre_blocked_status`
 
 ### Step 1: 语义解构（调用 translator SubAgent）
 调用 translator SubAgent，要求其生成目标模块的意图摘要。
@@ -264,10 +303,21 @@ CLI 构建基础图（contains/imports 边），存储到 `.rust-migration/sourc
 
 **检查点**：意图摘要文件存在且非空。
 
+### Step 1.5: 意图确认门禁（人类决策点，MVP 默认开启）
+向用户展示 Step 1 生成的意图摘要全文，**暂停**等待人类确认后才进入 Step 2。
+这是与 [03 § 7.4 安全护栏](./03-execution-model.md#74-安全护栏借鉴-rustlift)（Approval Token / 不自动宣布成功）一致的人类决策点：意图摘要是后续翻译的语义契约，错误的意图会污染整个内循环，因此必须在翻译前拦截。
+确认方式（沿用 [03 § 4.2.1](./03-execution-model.md#421-执行模式分层) Skill 交互式模式，不新增 CLI 命令）：交互式询问"意图摘要是否准确？(确认/修订)"。
+- 确认 → 进入 Step 2。
+- 修订 → 用户补充约束后重新执行 Step 1。
+power-user 可在 `.rustmigrate.toml` 设 `auto_confirm_intent = true` 跳过本门禁（/goal 自主循环与 Workflow 批量模式默认跳过）；首次迁移和高风险模块建议保持开启。
+
+**检查点**：用户已确认意图摘要（或配置显式跳过）。
+
 ### Step 2: Phase A — 忠实翻译（调用 translator SubAgent）
 调用 translator SubAgent，基于意图摘要生成 Rust 代码。
-优先保持与源码的 1:1 对应（便于 diff 对照审查）。
+**Phase A 优先 1:1 结构对应，不做优化**：保持与源码的 1:1 对应（便于 diff 对照审查）。不得删除死代码、辅助函数、冗余字段或内联未使用常量——即使看似无用也须保留源码结构，惯用化优化留到 Phase B。
 Private 方法默认翻译（不省略），保持结构完整性。
+非平凡函数须加 PORT NOTE 注释，标注源码行号范围或等价锚点（便于 diff 对照与 Step 3.5 结构校验）。
 标记系统：TODO(port) 标记未完成项，PERF(port) 标记已知性能问题，PORT NOTE 标记翻译决策。
 输入：意图摘要 + 迁移规则（porting/ 目录）+ 依赖接口。
 产出物：Rust 源文件写入 `rust_root` 对应路径。
@@ -281,6 +331,16 @@ Private 方法默认翻译（不省略），保持结构完整性。
 产出物：`.rust-migration/intermediate/{module}-review.md`（差异列表 + 修正建议）。
 
 **检查点**：审查报告文件存在且非空。
+
+### Step 3.5: Phase A 结构校验门禁（在进入行为对抗审查后、Phase B 前）
+verifier 在对抗性审查时附带校验 Phase A 是否保持了 1:1 结构（确认翻译器未提前优化）：
+- 函数数量比 0.9x–2.0x（与 [03 § 7.5 质量记分卡](./03-execution-model.md#75-质量评估分层评分卡)告警阈值一致）
+- 代码行数比 1.2x–3.0x（同上）
+- 主控制流（循环、条件分支）数量/嵌套层级按源码 AST 结构大致对应
+
+若结构比例越界 → 标记为「Phase A 疑似已优化」，**要求 translator 以忠实保留模式重做 Phase A**，再进入 Step 4。这是一道门禁而非软提示。
+
+**检查点**：结构比例在界内，或已重做 Phase A 通过校验。
 
 ### Step 4: Phase B — 编译修正 + 惯用化优化（调用 translator SubAgent）
 基于审查报告修正语义偏差。

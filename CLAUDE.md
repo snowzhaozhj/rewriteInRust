@@ -59,6 +59,9 @@ docs: vX.Y.Z 简要描述
 - 迁移案例参考 → `08-roadmap-and-reference.md § 14`
 - 产出物目录结构 → `06-plugin-structure.md § 10.6`
 - 状态机定义 → `02-architecture.md § 3.4` + `09-appendix-schemas.md`
+- 迁移规则体系（26 类规则列表）→ `05-documentation-system.md § 6.2`
+- 规则分层策略（核心/参考/项目专有）→ `06-plugin-structure.md § 10.1.1`
+- Plugin 目录结构 → `06-plugin-structure.md § 10.0`
 
 ## 调研与审查方法论
 

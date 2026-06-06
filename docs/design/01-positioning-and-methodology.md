@@ -25,6 +25,8 @@
 
 **v0.9 变更**：原描述为"Skills + Workflows + Hooks + SubAgents"散放组合。v0.9 起明确为统一的 Claude Code Plugin 格式，所有组件纳入 Plugin 标准目录，支持一键安装和分发。详细 Plugin 目录结构见 [06-plugin-structure.md](./06-plugin-structure.md)。
 
+> **规则成熟度说明**：验证管线与通用迁移规则开箱即用，但**项目专有规则在首轮迁移需 1-2 个 Sprint 积累**（通过 `/migrate analyze` 生成、随 Sprint Review 迭代补充）。规则库随版本与社区贡献持续沉淀，演化路径见 [08-roadmap-and-reference.md § 13.1.1](./08-roadmap-and-reference.md#1311-m1m2m3-规则库累积效应分析)。
+
 **Plugin 组件概览**：
 
 | 组件类型 | 数量 | 说明 |
@@ -81,6 +83,8 @@ UA 52,950 stars 的成功密码：**把 LLM 从"对话伙伴"变成"流水线中
 | 复杂规则生成（~40%） | -- | LLM + 人类审查 |
 | 对抗性审查 / 不等价探测 | -- | verifier SubAgent |
 
+**关键风险揭示**：我们采用了 UA 的「确定性工具 + LLM 分工」原则，但**编排层在 MVP 阶段仍依赖 LLM 指令跟随**（SKILL.md 分步指令驱动 SubAgent 调度，非确定性程序控制，详见 [06-plugin-structure.md § 10.5](./06-plugin-structure.md#105-编排调度路径)）——这是 MVP 的关键可靠性风险，已在 M0 Spike 1 立项验证，Plan B 体系（微 Skill 链 / 外部脚本编排 / 混合方案）已备，触发规则见 [08-roadmap-and-reference.md M0→M1 决策检查点](./08-roadmap-and-reference.md#m0--m1-决策检查点)。
+
 ### 2.2 三层范式：AI-工具-人类
 
 | 层 | 角色 | 负责什么 | 信任度 |
@@ -104,11 +108,11 @@ UA 52,950 stars 的成功密码：**把 LLM 从"对话伙伴"变成"流水线中
 
 **v0.9 变更**：翻译流程增加 Phase A/B 双阶段——Phase A 先做忠实翻译（保持与源码 1:1 对应，便于 diff 对照审查），经对抗性审查后进入 Phase B 惯用化优化。详见执行模式章节。
 
-**行动指南**：每个模块迁移前，先让 AI 生成纯文本的"意图摘要"，人类确认后才开始翻译。
+**行动指南**：每个模块迁移前，先让 AI 生成纯文本的"意图摘要"，人类确认后才开始翻译。该确认在执行流中落地为一道显式门禁（内循环 Step 2.5，MVP 默认开启；power-user 可配置跳过），见 [03-execution-model.md § 4.3](./03-execution-model.md#43-内循环模块级单会话内-phase-ab-双阶段翻译)。
 
 #### Phase A/B 双阶段翻译（v0.9 新增）
 
-翻译内循环拆为两个显式阶段：Phase A 忠实翻译（保持 1:1 对应）→ 对抗性审查 → Phase B 惯用化优化。先保证语义正确，再追求惯用性。详细步骤见 [03-execution-model.md § 4.3](./03-execution-model.md#43-内循环模块级单会话内-phase-ab-双阶段翻译)。
+翻译内循环拆为两个显式阶段：Phase A 忠实翻译（保持 1:1 对应）→ 对抗性审查 → Phase B 惯用化优化。先保证语义正确，再追求惯用性。1:1 对应通过两条机制保证可审计：(1) Phase A 不做优化（保留死代码/辅助函数/冗余结构，非平凡函数加 PORT NOTE 标注源码行号锚点）；(2) 进入 Phase B 前有一道结构校验门禁（函数数/行数/控制流比例越界则要求重做 Phase A）。详细步骤见 [03-execution-model.md § 4.3](./03-execution-model.md#43-内循环模块级单会话内-phase-ab-双阶段翻译)。
 
 **参考案例**：Bun 将迁移规则融入 CLAUDE.md 和内部文档（虽不独立成文，但源码中引用 30+ 章节 207 次），以及 Claw-Code 的 PARITY.md + Mock Parity Harness 行为验证。
 

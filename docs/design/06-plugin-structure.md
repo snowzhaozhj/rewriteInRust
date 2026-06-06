@@ -86,7 +86,7 @@ Plugin 中的确定性计算由独立的 Rust CLI 工具 `rustmigrate` 承担，
 |--------|------|
 | `rustmigrate init` | 初始化 `.rust-migration/` 目录 + 项目根目录 `.rustmigrate.toml` 配置文件 |
 | `rustmigrate profile` | 分析源码项目画像（语言检测、框架识别、代码统计） |
-| `rustmigrate graph build` | 使用 tree-sitter 解析源码，构建源码图（存储到 `source-graph.db`） |
+| `rustmigrate graph build` | 使用 tree-sitter 解析源码，构建源码图（存储到 `source-graph.db`）；`--profile` 输出性能画像 JSON（见 [04 § 5.7.4.1](./04-toolchain.md#5741-性能基准与扩展性)） |
 | `rustmigrate graph topo-sort` | 对依赖图执行拓扑排序，输出迁移顺序 |
 | `rustmigrate graph deps <module>` | 查询模块的正向依赖树 |
 | `rustmigrate graph stats` | 图统计信息（节点/边计数、度分布） |
@@ -154,7 +154,7 @@ SKILL.md 通过 Bash tool 调用 CLI，所有输出为统一 JSON 格式：
 | tokei | 代码行数统计 | `stats loc`, `stats compare` |
 | syn + quote | Rust 代码生成/分析 | `scaffold workspace` |
 | petgraph | 依赖图数据结构（StableGraph + newtype 索引） | `graph build/topo-sort/deps/rdeps/cycles` |
-| rusqlite | SQLite 图持久化 + FTS5 全文搜索 | `graph build`（写入）, `graph export`（查询） |
+| rusqlite | SQLite 图持久化（FTS5 全文搜索 M2 才启用，见 [04 § 5.7.3](./04-toolchain.md#573-持久化存储)） | `graph build`（写入）, `graph export`（M2 查询） |
 | jsonschema | JSON Schema 校验 | `validate state`, `validate config` |
 
 ### 分发方式
@@ -168,6 +168,25 @@ SKILL.md 通过 Bash tool 调用 CLI，所有输出为统一 JSON 格式：
 | 模块 | 工作量 | 说明 |
 |------|--------|------|
 > CLI 细化工作量估算见 [08-roadmap-and-reference.md § M1 工作量分解](./08-roadmap-and-reference.md)（合计 18-25 人天，含 crate 集成和测试）。
+
+---
+
+## 10.0.2 版本控制与向后兼容策略
+
+Plugin 内部接口（`plugin.json`、`agents/*.md`、Skill 命令签名、产出物 Schema）演进时遵循以下策略，应对 Claude Code Plugin API 破坏性变更（风险见 [07-pitfalls-and-risks.md § 12.1](./07-pitfalls-and-risks.md#121-风险矩阵)）：
+
+| 变更对象 | 版本控制 | 兼容性规则 |
+|---------|---------|-----------|
+| `plugin.json` `version` | 语义化版本（SemVer） | 破坏性变更升 major；新增可选能力升 minor |
+| `agents/*.md` 格式 | 随 Plugin major 版本 | 不兼容的字段/格式变更须升 major，并提供旧格式迁移说明 |
+| Skill 命令签名（参数/输出） | 随 Plugin 版本 | 变更需经 **deprecation 期**（至少 1 个 minor 版本保留旧签名 + 警告），再于下个 major 移除 |
+| `migration-state.json` / `source-graph.db` Schema | 顶层 `schema_version` 字段 | 不兼容变更须升 `schema_version` 并提供迁移工具（`rustmigrate` 升级命令读旧版本、写新版本） |
+
+**关键规则**：
+- **新增可选参数不触发 deprecation**：Claude Code 为 Skill tool 新增 *可选* 参数时，不视为破坏性变更，仅在 CHANGELOG 记录。
+- **兼容性窗口**：除 deprecation 期外，明确支持范围为「当前 + 前 2 个 major 版本」。
+- **通知机制**：不兼容变更在 CHANGELOG + Plugin README 顶部「Breaking Changes」段落显式公告；运行时检测到旧 Schema 时输出升级提示。
+- **自动化兼容测试**：M0 Spike 0 验证 Plugin 在最近 2 个 Claude Code 版本上的最小骨架加载路径；该测试纳入 CI，作为 API 破坏性变更的早期信号。
 
 ---
 
@@ -186,9 +205,13 @@ MVP 核心命令 3 个，后续迭代 +1 个。所有命令共享 `/migrate` 命
 >
 > `analyze` 内部通过 SKILL.md 分步指令实现原 init→plan→test 的串行流程，用户无需记住 3 个命令的执行顺序。
 
+> **SKILL.md 行数预算与外部引用模式**：500 行是软约束（实践中 SKILL.md 可超出，如社区先例 UA 的 SKILL.md 达约 45KB）。为控制主 SKILL.md 体量，可复用的检查点校验模式（JSON Schema 校验、文件存在性、非空校验、重试逻辑模板）抽到 `skills/migrate/lib/checkpoint-patterns.md`，SKILL.md 按模式名引用而非全文展开。**Plan B 拆分阈值**：若某命令的 SKILL.md 在补全错误处理后内容超过 800 行，对其复杂步骤（3+ 步）触发 Plan B3（混合外部脚本）。MVP 检查点采用文件存在性确定性判断（L1），M2+ 视复杂度升级为内容校验检查点（L2/L3，见 § 10.5 产出物有效性分级）。
+
 ---
 
 ## 10.1.1 规则分层策略（方案 D：混合）
+
+> 本节为「规则分层策略（核心/参考/项目专有）」的权威定义。26 类迁移规则的完整列表见 [05-documentation-system.md § 6.2 迁移规则体系](./05-documentation-system.md#62-迁移规则体系通用--项目专有)（权威来源）。
 
 Plugin 不支持 `rules/` 目录分发，因此采用混合策略将规则按特征分层存放：
 
@@ -219,14 +242,16 @@ Plugin 不支持 `rules/` 目录分发，因此采用混合策略将规则按特
 
 > 每个 SubAgent 通过 `.rust-migration/` 目录下的文件通信。以下表格定义各 SubAgent 的输入/输出契约。
 
-| SubAgent | 输入文件 | 输出文件 | 前置条件 | 后置条件 |
-|----------|---------|---------|---------|---------|
-| **analyzer** | 源码目录、`.rustmigrate.toml` | `source-graph.db`（语义增强）、项目画像摘要（stdout JSON） | CLI `rustmigrate graph build` 已完成基础图构建 | `source-graph.db` 含 calls/uses_type 边 |
-| **translator**（规则生成） | `source-graph.db`、适配器 `porting-template.md` | `porting/` 目录（迁移规则文件） | analyzer 已完成 | `porting/` 至少含一个规则文件 |
-| **translator**（代码翻译） | `porting/` 规则、目标模块源码、依赖接口 | Rust 源文件（写入目标目录）、`{module}-intent.md`（意图摘要） | 模块状态为 translating | Rust 文件存在且通过 F1 编译 |
-| **verifier**（对抗审查） | Phase A Rust 产出物、原始源码、迁移规则 | `{module}-review.md`（审查报告） | Phase A 翻译完成 | 审查报告包含差异列表 |
-| **verifier**（测试验证） | Phase B Rust 产出物、黄金文件 | 测试结果 JSON（stdout）、KNOWN_DIFFERENCES.md 追加条目 | Phase B 翻译完成 | 测试通过率 ≥ 预期 |
-| **scaffolder** | `source-graph.db`、模块接口信息 | `test-fixtures/golden/` 测试数据、Cargo.toml dev-deps 注入 | analyzer 已完成 | 测试基础设施可运行 |
+| SubAgent | 输入文件 | 输出文件 | 前置条件 | 后置条件 | Schema 校验规则（产出物有效性） |
+|----------|---------|---------|---------|---------|------------------------------|
+| **analyzer** | 源码目录、`.rustmigrate.toml` | `source-graph.db`（语义增强）、项目画像摘要（stdout JSON） | CLI `rustmigrate graph build` 已完成基础图构建 | `source-graph.db` 含 calls/uses_type 边 | 必须含 calls/uses_type 边；节点数 ≥ 5；边数 ≥ 5（L3 语义检查，M1 可人工 sampling） |
+| **translator**（规则生成） | `source-graph.db`、适配器 `porting-template.md` | `porting/` 目录（迁移规则文件） | analyzer 已完成 | `porting/` 至少含一个规则文件 | `porting/` 非空且至少一个 `.md` 规则文件大小 > 0（L1/L2） |
+| **translator**（代码翻译） | `porting/` 规则、目标模块源码、依赖接口 | Rust 源文件（写入 `rust_root/` 目录，由 `.rustmigrate.toml` 配置）、`{module}-intent.md`（意图摘要） | 模块状态为 translating | Rust 文件存在且通过 F1 编译 | Rust 文件存在且 F1 编译通过；`{module}-intent.md` 非空（L1/L2） |
+| **verifier**（对抗审查） | `.rust-migration/intermediate/attempts/{module}-phase-a.rs`（Phase A 持久化代码）、原始源码（`source-ref/`）、迁移规则 | `{module}-review.md`（审查报告） | Phase A 翻译完成并已持久化 | 审查报告包含差异列表 | `{module}-review.md` 存在且含差异列表标题（L1/L2） |
+| **verifier**（测试验证） | Phase B Rust 产出物、黄金文件 | 测试结果 JSON（stdout）、KNOWN_DIFFERENCES.md 追加条目 | Phase B 翻译完成 | 测试通过率 ≥ 预期 | 测试结果 JSON 通过 Schema 校验；通过率字段存在（L2） |
+| **scaffolder** | `source-graph.db`、模块接口信息 | `test-fixtures/golden/` 测试数据、Cargo.toml dev-deps 注入 | analyzer 已完成 | 测试基础设施可运行 | `test-fixtures/golden/` 非空；Cargo.toml 含注入的 dev-deps（L1/L2） |
+
+> **verifier 对抗审查的 Phase A 代码来源**：Phase A 翻译完成后，translator 将 Phase A 的 Rust 代码持久化到 `.rust-migration/intermediate/attempts/{module}-phase-a.rs`；verifier 对抗审查从该路径读取 Phase A 代码执行审查（输入路径完全显式，不依赖"中间态"模糊概念）。Phase A 持久化步骤与 `/migrate run` 序列的对应关系见 [03-execution-model.md § 4.3](./03-execution-model.md)。
 
 **行动指南**：每个 SubAgent 有独立的系统提示，包含其职责边界和可用工具列表。Agent 之间通过 `migration-state.json` 和产出物文件通信。
 
@@ -250,8 +275,18 @@ MVP 中 SubAgent 的实现基于 Claude Code 的标准 agent 定义机制：
 
 **错误传播**：
 - SubAgent 的输出文本返回给 Skill（即主对话上下文中的 Claude）
-- Skill 根据 SubAgent 的输出文本判断成功/失败——检查关键产出物文件是否存在且有效
-- 失败时 Skill 根据 SKILL.md 的分步指令决定重试或降级
+- Skill **不解析 SubAgent 输出文本来判断成功**，仅检查关键产出物文件是否存在（L1）且通过 Schema 校验（L2，见上方接口表「Schema 校验规则」列与 § 10.5 产出物有效性分级）
+- 失败时 Skill 根据 SKILL.md 的分步指令决定重试或降级（见 § 10.2.2）
+
+### 10.2.2 失败恢复机制
+
+每次 SubAgent 调用后、后续 SubAgent 启动前，Skill 显式校验产出物并按以下三步处理失败：
+
+1. **记录调用**：每次 SubAgent 调用（含超时或产出物校验失败）记录到 `migration-state.json` 的 `subagent_calls` 数组（字段见 § 10.5），用于诊断卡死与统计重试次数。超时阈值由 `.rustmigrate.toml` `[orchestration].subagent_timeout_secs` 控制（默认 600s）。
+2. **诊断 + 重试**：校验失败时生成诊断报告（缺失字段 / 无效 JSON / 数据范围错误 / 超时），若重试次数 < `max_retries_per_step`（默认 2）且总耗时未超全局预算，提示用户选择「重试单个 SubAgent」（按 `retry_backoff_secs` 退避）。
+3. **降级 / 回滚**：重试耗尽后，提示用户三选项——「重试」「部分跳过」（调用降级逻辑 Plan B2，将该模块标记 `degrade_*`）「完整回滚」（删除该 Sprint/该步的产出物并重置状态）。
+
+> **诊断报告与错误码**：校验失败的诊断输出采用 CLI 标准 error JSON（见 § 10.7），便于工具解析与重试决策。
 
 ---
 
@@ -315,8 +350,22 @@ Hook 配置遵循 Claude Code 真实 API 格式（`hooks/hooks.json`）：
 > cd "$(cargo locate-project --message-format plain 2>/dev/null | xargs dirname 2>/dev/null || echo .)"
 > cargo fmt 2>&1
 > ```
+>
+> **Hook stdin JSON 格式**：PostToolUse Hook 从 stdin 接收 JSON payload，脚本据此过滤。预期关键字段如下：
+>
+> ```json
+> {
+>   "tool_name": "Edit",                       // 触发的工具名（Edit | Write | Bash）
+>   "tool_input": { "file_path": "/abs/path/to/file.rs", "...": "..." },  // 工具入参，含被修改文件路径
+>   "cwd": "/abs/path/to/project"              // 调用时的工作目录（用于定位 Cargo.toml）
+> }
+> ```
+>
+> **该格式需在 M0 Spike 0 中验证**——若与实际 Claude Code Hook API 不符（字段名/层级变化），需相应调整 `jq` 提取路径。`fmt.sh` 用 `cargo locate-project` 定位最近的 `Cargo.toml`（基于脚本 cwd），多工作区场景下 cwd 由 Hook payload 的 `cwd` 字段确定。
 
 > **file-guard.sh 说明**：PreToolUse Hook，防止 agent 修改源项目文件（`source_root` 下的文件）或关键产出物（如 `KNOWN_DIFFERENCES.md` 中已审批的条目）。脚本通过检查目标文件路径是否在保护范围内来决定是否阻止操作。
+>
+> **并发写入防护**：file-guard.sh 仅做路径级保护，**不能阻止对 `source-graph.db` / `migration-state.json` 的并发写入**。MVP 阶段对这两个文件的写入串行化由 § 10.5「全局并发隔离」保障：(a) 脚本对这两个文件加 `flock` 排他锁（如 `flock -n .rust-migration/source-graph.db.lock`），若锁被占用则阻止 Edit/Write/Bash 操作，防止 SubAgent 与 Skill 主上下文经 CLI 同时写入；(b) SubAgent 间遵守锁协议——analyzer 完成并释放排他锁后，translator 才获取（SKILL.md 显式约定）。SQLite WAL checkpoint 策略与回收条件见 [04-toolchain.md § 5.7.3](./04-toolchain.md#573-持久化存储)。
 
 **F2 和 F3 的实现方式**：
 - **F2（模块完成后验证）**：通过 `hooks/scripts/verify.sh` 独立脚本执行 `cargo nextest run --lib` + `cargo clippy -- -D warnings`。Skill SKILL.md 中指令调用该脚本，但脚本本身是确定性的，agent 无法修改或跳过其内部逻辑。
@@ -363,11 +412,13 @@ Hook 配置遵循 Claude Code 真实 API 格式（`hooks/hooks.json`）：
 | Skill | 调度序列 | 关键产出物 | 说明 |
 |-------|---------|-----------|------|
 | `/migrate analyze` | `analyzer` → `translator`(规则生成) → `scaffolder`(测试搭建) → 写入所有初始化产出物 | migration-state.json, source-graph.db, 迁移规则(porting/), PARITY.md, AGENTS.md, test-fixtures/ | 原 init+plan+test 合并，序列最长（3 次 SubAgent 调用） |
-| `/migrate run` | `translator`(Phase A 忠实翻译) → `verifier`(对抗性审查) → `translator`(Phase B 优化) → `verifier`(测试验证) → 更新状态 | Rust 代码, 审查报告, 测试, MDR | Phase A/B 双阶段翻译 |
+| `/migrate run` | **前置 blocked 检查点** → `translator`(Phase A 忠实翻译) → `verifier`(对抗性审查) → `translator`(Phase B 优化) → `verifier`(测试验证) → 更新状态 | Rust 代码, 审查报告, 测试, MDR | Phase A/B 双阶段翻译 |
 | `/migrate review` | `verifier`(全量验证) → 生成报告 → 更新 PARITY.md + 状态仪表板输出 | sprint-N-report.json, 终端仪表板 | 原 verify+status 合并 |
 | `/migrate graduate` | `verifier`(毕业评估：覆盖率 + unsafe 审计 + 性能基准) → 生成毕业报告 | graduation-report.json, unsafe-audit.json | 原 graduate+unsafe-audit 合并 |
 
 > **注意**：`/migrate analyze` 的 7 步序列（含 3 次 SubAgent 调用）是 M0 Spike 1 验证的主要对象——如果指令跟随不够可靠，此命令应拆为子步骤（Plan B1 微 Skill 链）。
+
+> **`/migrate run` 前置 blocked 检查点**：执行翻译序列前先遍历 migration-state.json 中所有 `blocked` 模块，对每个模块检查 `blocked_by` 引用的模块是否已进入 `done`/`degrade_*`，若是则自动恢复到 `pre_blocked_status` 并记录日志；同时校验目标模块自身依赖是否就绪，未就绪则中止并将其标记为 blocked。具体伪码与责任边界（MVP 手动 / M2 `validate state` 自动）见 [09-appendix-schemas.md 附录 B § /migrate run 骨架 Step 0.5/0.6](./09-appendix-schemas.md#附录-bmvp-skill-的-skillmd-骨架) 及 [附录 A § 合法状态转换「检测与恢复的责任边界」](./09-appendix-schemas.md#合法状态转换)。
 
 ### MVP 阶段执行模型
 
@@ -404,8 +455,35 @@ SubAgent B (串行)
 **编排机制的本质（MVP 阶段）**：
 - MVP 阶段的编排**依赖 Claude 的指令跟随能力**，而非确定性程序控制。Skill 的 SKILL.md 通过强约束分步指令引导 Claude 的行为（如"第 1 步：调用 analyzer SubAgent；第 2 步：检查产出物；第 3 步：调用 translator SubAgent"）。
 - 这意味着编排的可靠性取决于 LLM 对指令的遵守程度，而非代码级别的 if-else 分支。
-- **M0 验证要求**：在 M0 Spike 1 中验证 Claude 能否可靠执行 `/migrate analyze` 的 7 步序列（含 3 次 SubAgent 串行调用）。如果指令跟随不够可靠，触发 Plan B。
-- **检查点确定性**：SubAgent 间的编排检查点使用确定性文件存在性检查（脚本），不依赖 AI 判断产出物是否"有效"——由校验脚本负责。
+- **M0 验证要求**：在 M0 Spike 1 中验证 Claude 能否可靠执行 `/migrate analyze` 的 7 步序列（含 3 次 SubAgent 串行调用）。验收标准与失败判定规则见 [07-pitfalls-and-risks.md § 12.2 Plan B 体系表](./07-pitfalls-and-risks.md#122-plan-b-体系)（5 次独立测试，>20% 失败率自动触发 Plan B；20%-50% 临界区间追加 5+ 样本重评）。**M0 Spike 1 成功率 < 80%（或 7 步完成率 < 95% / 超时次数 > 2）时强制采用 Plan B3 混合编排，不可选**。
+- **检查点确定性（两级校验）**：SubAgent 间的编排检查点采用两级确定性校验，**Skill 不解析 SubAgent 输出文本来判断成功，只看产出物文件**：
+  - **L1 文件存在性检查**（脚本，毫秒级）：仅检查关键产出物文件是否存在。proceed/halt 决策只依赖此项。
+  - **L2 结构校验**（CLI `rustmigrate validate state` 等，秒级）：若文件存在，对 JSON 产出物执行 JSON Schema 校验、对 SQLite 检查表结构完整性，作为二级验证。
+
+**产出物有效性分级**：
+- **执行成功**（L1）：全部 7 步完成，所有关键产出物文件存在（文件存在性检查）。
+- **结构有效**（L2）：产出物通过 JSON Schema 校验、SQLite 表结构完整（自动化校验）。
+- **语义有效**（L3，M1+ 阶段）：产出物内容正确性由人工样本审视确认（非自动化），包括 source-graph.db 的节点/边关系准确性。
+
+> Spike 1 验收标准仅关注「执行成功」（L1）与「结构有效」（L2）；「语义有效」（L3）在 M1 阶段可接受人工 sampling 而非 100% 自动化。编排可靠性假设的定义模板见 M0 产出的 `DESIGN_ASSUMPTIONS.md`。
+
+**编排超时与失败重试策略（MVP）**：
+
+`.rustmigrate.toml` 的 `[orchestration]` 段定义编排级超时与重试参数（默认值，可覆盖；详见 § 11.1）：
+
+```toml
+[orchestration]
+subagent_timeout_secs = 600       # 单步 SubAgent 调用超时（10 分钟，对应 LLM API 典型超时）
+max_retries_per_step = 2          # 每步最大重试次数（不含初次尝试）
+retry_backoff_secs = [5, 15]      # 梯级退避：第 1 次重试前等 5s，第 2 次等 15s
+```
+
+> **检查点失败处理**：每步检查点失败（L1 文件缺失或 L2 校验不通过）时，自动重试最多 2 次（间隔 5s/15s）；2 次后报错并输出 SubAgent 调用日志（记录于 `migration-state.json` 的 `subagent_calls` 数组，每条 `{step_index, subagent_name, started_at, ended_at, status, error_message}`，Schema 见 [09-appendix-schemas.md](./09-appendix-schemas.md#附录-bmvp-skill-的-skillmd-骨架)）供排查。各步的具体失败行为见 09-appendix-schemas.md 附录 B 的「Checkpoint 失败处理」表。
+
+**全局并发隔离（MVP）**：
+- MVP 阶段保证对 `.rust-migration/` 的**单一进程/Skill 实例独占访问**：同一时刻只有一个 `/migrate` 命令在运行，SubAgent 串行执行。
+- `source-graph.db`（SQLite）与 `migration-state.json` 的写入串行化由两条机制保障：(a) `file-guard.sh` 对这两个文件加排他锁（`flock`），防止 SubAgent 与 Skill 主上下文（经 CLI 写入）同时写入；(b) SKILL.md 显式约定锁协议——后序 SubAgent 启动前确认前序 SubAgent 已释放对 DB 的访问（如 `/migrate analyze` 中 translator 启动前确认 analyzer 已完成并 `migration-state.json` 标记 `graph_build_completed=true`）。SQLite WAL 模式的 checkpoint 策略见 [04-toolchain.md § 5.7.3](./04-toolchain.md#573-持久化存储)。
+- M2 并行编排的文件通信与并发安全协议见下文「M2 扩展：并发文件通信协议」。
 
 **Plan B 具体方案**（M0 Spike 1 失败时触发）：
 
@@ -415,7 +493,24 @@ SubAgent B (串行)
 | **Plan B2: 外部脚本编排** | 用 bash/Python 脚本调用 Claude Code CLI（`claude -p "执行 /migrate ..."`），脚本中做 if-else 分支、文件检查、重试逻辑。编排逻辑 100% 确定性。 | 额外 3-5 人天开发 | 依赖 Claude Code CLI API 的稳定性；需用户安装额外依赖 |
 | **Plan B3: 混合方案** | 简单步骤（1-2 步）用 SKILL.md 指令，复杂编排（3+ 步循环/条件）用外部脚本。取两者优势。 | 额外 2-4 人天开发 | 最可能的实际落地方案 |
 
+> **触发粒度（命令级 vs 步骤级）**：上述 M0 Spike 1 阈值（成功率 < 80% / 7 步完成率 < 95% / 超时 > 2，判定标准以 [07-pitfalls-and-risks.md § 12.2](./07-pitfalls-and-risks.md#122-plan-b-体系) 为权威）是**命令级**整体降级判据；当只有**单一步骤**反复失败（同一步连续触顶 § 「编排超时与失败重试策略」的 `max_retries_per_step`）时，可仅对该步做 **Plan B1 局部拆分**（把该步拆成独立微 Skill）而非整命令升级到 Plan B3，避免过度降级。两者的验收数据均来自 M0 Spike 1，不另设新阈值。
+>
+> PORT-REVIEW 接受（R1-D8-05 medium，未新增独立「编排质量监控指标」表）：审查方案建议的量化表（成功率 ≥ 80% 保持 / 某步失败 2 次拆分 / 串行完成率 < 70% 升级）与本节及 [07 § 12.2](./07-pitfalls-and-risks.md#122-plan-b-体系) 既有阈值（> 20% 失败率、7 步完成率 < 95%、< 80% 强制 Plan B3）实质重叠，新增整张表会引入跨文件阈值冲突（违反 CLAUDE.md「文件权威来源」表与 YAGNI 护栏）。故只就「步骤级 vs 命令级触发粒度」这一真实缺口补一句，阈值仍以 07 § 12.2 为唯一权威。
+
 **未来演进**：M2 阶段引入有限并行（analyzer + scaffolder 可并行），M4 阶段引入完整 DAG 调度。
+
+### M2 扩展：并发文件通信协议（设计预留，不改变 MVP）
+
+MVP（M1）阶段 SubAgent 串行执行，无并发风险。以下为 M2 引入并行时的并发安全设计预留，**不修改 MVP 行为**（M2「并发安全设计」为必做项，工作量见 [08-roadmap-and-reference.md M2 段落](./08-roadmap-and-reference.md)）：
+
+| 共享资源 | M1（MVP）约束 | M2 设计预留 |
+|---------|--------------|------------|
+| `.rust-migration/porting/`（共享规则） | 串行写，无冲突 | CAS（比较并交换）更新；私有中间产物隔离到 `.rust-migration/intermediate/{agent_id}/` |
+| `migration-state.json` | 单写者串行 | 顶层 `metadata` 增加 `version` + `last_modified_by` 字段支持乐观锁；CLI `rustmigrate state update --cas-version V1 ...`，版本不匹配返回冲突 |
+| `source-graph.db`（SQLite） | 单写者；CLI `graph build` 与 analyzer 串行 | analyzer SubAgent 启动时 `PRAGMA query_only=ON` 强制只读；汇总写入集中到单 writer 阶段。详见 [04-toolchain.md § 5.7.3](./04-toolchain.md#573-持久化存储) |
+| 多 agent 工作区 | 单工作区 | 每个 agent 独立 worktree，final 阶段 merge 前检测 conflict |
+
+> **MVP 序列约束的事务防御**：即使 MVP 串行执行，CLI `graph build` 仍用 `BEGIN IMMEDIATE TRANSACTION ... COMMIT` 包装写入，以防御指令跟随失败导致的意外并发并为 M2 并行预留。SKILL.md 的 `/migrate analyze` 序列显式注明「等待 CLI `graph build` 完全释放 DB（检查 `migration-state.json` 中 `graph_build_completed=true`）后，再启动 analyzer SubAgent」。`migration-state.json` 的 `metadata.lock_token` 字段在 MVP 为 `null`，M2 用于分布式锁令牌（Schema 预留见 [09-appendix-schemas.md](./09-appendix-schemas.md)）。
 
 ---
 
@@ -463,6 +558,38 @@ SubAgent B (串行)
 
 ---
 
+## 10.7 错误信息与可调试性（MVP）
+
+CLI 的成功输出为 `{status, data, warnings}`（见 § 10.0.1）。失败时输出标准化 error JSON，使错误可被工具/CI 解析并支撑重试决策：
+
+```json
+{
+  "status": "error",
+  "error_code": "PHASE_A_TRANSLATION_FAILED",   // 稳定错误码（见下方错误码表）
+  "error_context": {
+    "module": "src/auth/session.ts",
+    "attempt_num": 2,
+    "compiler_errors": ["E0382: borrow of moved value: `cfg`"],
+    "suggested_fix": "将 cfg 改为按引用传递或 clone"      // 1-2 行修复建议模板
+  }
+}
+```
+
+**常见迁移错误码（与 SubAgent substatus 对应，完整表见 [09-appendix-schemas.md 附录](./09-appendix-schemas.md)）**：
+
+| error_code | 含义 | 典型修复建议 |
+|-----------|------|------------|
+| `LIFETIME_MISMATCH` | 生命周期不匹配 | 引入显式生命周期标注或调整借用范围 |
+| `MUTEX_SEND_SYNC_VIOLATION` | 跨 `.await` 持有非 Send 类型 | 缩小锁持有范围或换用 `tokio::sync::Mutex` |
+| `TYPE_INFERENCE_FAILED` | 类型推断失败 | 补充类型标注 |
+| `PHASE_A_TRANSLATION_FAILED` | Phase A 忠实翻译编译失败 | 见 `error_context.compiler_errors` |
+
+> **Hook 失败输出一致性**：`verify.sh` 和 `full-verify.sh` 失败时，输出格式须与上述 CLI error JSON 兼容——脚本内部调用的 cargo/clippy 诊断自动转换为 `{error_code, suggested_fix}` 结构，便于 Skill 与 CI 统一解析。
+>
+> **范围**：MVP 仅做「错误可被工具解析」（标准 error JSON + 错误码表）。诊断指南库（`skills/migrate/references/diagnostics/`）与 SubAgent 系统提示中嵌入「生成修复建议」要求为 M2+ 后置项，避免过度设计。
+
+---
+
 # 十一、工作流灵活性与扩展
 
 ## 11.1 .rustmigrate.toml 配置文件
@@ -489,12 +616,16 @@ migration_motives = ["performance", "memory_safety"]  # performance | memory_saf
 parallel_strategy = "feature_freeze" # feature_freeze | dual_track | strangler_fig
 max_concurrent_agents = 3
 max_retry_rounds = 3                 # 翻译失败最大重试轮数
+auto_confirm_intent = false          # 跳过内循环 Step 2.5 意图确认门禁（默认 false=须人类确认；/goal 自主循环与 Workflow 批量模式默认跳过）
 degrade_strategy = "ffi"             # ffi | manual | skip
 
 [tools]
 tier0 = true                         # 硬性门禁（不可关闭）
-tier1 = true                         # 推荐工具
+tier1 = true                         # 推荐工具（启用规则见 04 § 5.3：proptest/insta 由画像强制，cargo-llvm-cov 不可关闭）
 tier2 = false                        # 高级工具（默认关闭）
+# 禁用任一被画像强制的 Tier 1 工具须在此记录原因，会打印进验证画像（04 § 5.3）
+tier1_exceptions = []                # 例：[{ tool = "proptest", reason = "no_pure_functions" }]
+petgraph_fallback_threshold = { critical_issues_open = 6, maintainer_inactive_months = 6 }  # 触阈则切自建邻接表回退（04 § 5.7.2）
 
 [tools.tier2_override]
 cargo_fuzz = false
@@ -509,14 +640,33 @@ coverage_threshold = 80              # 覆盖率门槛（百分比）
 proptest_cases = 256                 # 属性测试用例数
 fuzz_duration_secs = 60              # 模糊测试时长
 benchmark_tolerance = 0.10           # 性能回归容忍度（10%）
+nextest_threads = "auto"             # auto | 1 | N；CPU 数为默认。跨模块迁移或 FFI 测试推荐 1（串行，确保测试隔离，见 04 § 5.2）
+
+[parser]
+ast_engine = "tree-sitter"           # tree-sitter | ts-compiler-api（Spike 3 Plan B 回退，见 04 § 5.7.4）
 
 [context]
-max_tokens_per_translation = 100000  # 每次翻译上下文预算
+max_tokens_per_translation = 100000  # 每次翻译上下文预算（拆分/降级策略见 02 § 3.5.1）
 module_summary_strategy = "interface_only"  # interface_only | full
+budget_check_mode = "warn"           # strict（超预算即暂停）| warn（>95K 提示确认）| ignore
+enable_auto_split = true             # 超预算时是否按 02 § 3.5.1 决策树自动拆分
 
 [workspace]
 cargo_workspace = true               # 使用 Cargo workspace
 crate_naming = "kebab-case"          # 子 crate 命名风格
+
+[orchestration]                      # 编排级超时/重试（见 § 10.5）
+subagent_timeout_secs = 600          # 单步 SubAgent 调用超时（10 分钟）
+max_retries_per_step = 2             # 每步最大重试次数（不含初次尝试）
+retry_backoff_secs = [5, 15]         # 梯级退避秒数
+
+# [storage]                          # 可选，SQLite 调优（默认值，通常无需设置）
+# sqlite_busy_timeout_ms = 5000      # 锁等待超时
+# wal_autocheckpoint_frames = 1000   # WAL 自动 checkpoint 阈值（帧）
+
+# [adapter_validation]               # 可选，新语言适配器验收阈值（见 § 11.2）
+# type_precision_threshold = 0.95    # 类型提取精度下限
+# dep_coverage_threshold = 0.90      # 依赖覆盖率下限
 ```
 
 **行动指南**：`/migrate analyze` 自动根据项目画像生成初版配置，用户可手动调整。
@@ -619,6 +769,31 @@ Skill SKILL.md（分步指令）
 - 依赖分析（dependency-cruiser / import-linter / 自建）
 - PORTING 模板（语言专用规则预置）
 - FFI 桥接（napi-rs / PyO3 / bindgen）
+
+### 新语言适配器的工作量拆解
+
+> 工作量总数以 [08-roadmap-and-reference.md](./08-roadmap-and-reference.md) 为唯一权威（TS 适配器 M1 合计 3-5 人天）。下表为该总数的脚本级拆解，供社区贡献者评估：
+
+| 适配器脚本/组件 | TS 基准工作量 | 说明 |
+|----------------|--------------|------|
+| `detect.sh` | 0.5 人天 | 项目特征文件检测 |
+| `extract-types.sh` | 1-2 人天 | 调用语言类型工具，输出统一格式 |
+| `extract-deps.sh` | 1-2 人天 | 依赖图提取，合并入 source-graph.db |
+| `porting-template.md` | 1-1.5 人天 | 语言专用迁移规则预置 |
+| `ffi-bridge.sh`（可选） | 1-2 人天 | FFI 桥接配置 |
+| 测试 | 1 人天 | 适配器端到端验证 |
+
+> **推广系数**：上述基准适用于 Python / C++，但 Python 因 Mypy 类型提取耗时可能 +0.5 人天（动态类型推断更复杂）。社区贡献新适配器的预期周期为 **3-5 个工作日**，通过验收后并入发行版本（贡献流程承诺见 Plugin 仓库 CONTRIBUTING.md）。
+
+### 适配器验收标准（可配置阈值）
+
+适配器精度/覆盖率阈值在 `.rustmigrate.toml` 中可配置（见 § 11.1 `[adapter_validation]` 段），便于 CI 工具化校验：
+
+| 验收项 | 默认阈值 | 校验方式 |
+|--------|---------|---------|
+| `extract-types.sh` 类型提取精度 | `type_precision_threshold = 0.95` | 与人工标注样本对比 |
+| `extract-deps.sh` 依赖覆盖率 | `dep_coverage_threshold = 0.90` | 与已知依赖清单对比 |
+| `adapter.json` Schema 合规 | 必须通过 | CI 自动校验 JSON Schema（见 § 11.2 adapter.json 契约） |
 
 ---
 
