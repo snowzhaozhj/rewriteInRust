@@ -313,13 +313,13 @@ petgraph 是核心数据结构（12 节点 + 12 边，见 § 5.7.1），但 bus 
 
 - **承载操作（load-bearing）**：MVP 真正依赖的 petgraph 能力有限——Kahn 拓扑排序、`FixedBitSet` 的并/交（查询结果集）、`node_weight` 的 O(1) 查找、BFS 遍历。M0 [Spike 3](./08-roadmap-and-reference.md#m0-假设验证周2-3-周)（tree-sitter 精度）顺带核验这些 `StableGraph` / `FixedBitSet` 操作的 API 稳定性（可与图规模对标合并，见 § 5.7.3 注）。
 - **回退设计与成本**：`Vec<Vec<NodeIndex>>` 邻接表 + `HashMap<NodeId, usize>`（O(1) ID 查找）可覆盖 MVP ~95% 需求（拓扑排序、BFS、边遍历）。自建成本预估 **3-5 人天**（不含 Guppy 式三段式 API 的完整复刻）。
-- **触发阈值**：在 `.rustmigrate.toml` 记录 `petgraph_fallback_threshold = { critical_issues_open = 6, maintainer_inactive_months = 6 }`（schema 权威见 [06 § 11.1](./06-plugin-structure.md#111-rustmigratetoml-配置文件)）。M0 后将该决策写入 `DESIGN_ASSUMPTIONS.md`：「若 petgraph 在 M2 前触阈则切回退，成本 3-5 天；若未预置则有 M1 中期返工风险」。
+- **触发阈值与执行时机**：在 `.rustmigrate.toml` 记录 `petgraph_fallback_threshold = { critical_issues_open = 6, maintainer_inactive_months = 6 }`（schema 权威见 [06 § 11.1](./06-plugin-structure.md#111-rustmigratetoml-配置文件)）。该阈值**不做持续自动监控**（无人值守的 issue 计数脚本属过度设计）：MVP 阶段的稳定性由 M0 [Spike 3](./08-roadmap-and-reference.md#m0-假设验证周2-3-周) 顺带核验的 `StableGraph`/`FixedBitSet` API 验收兜底，故 petgraph 风险只在 **M2 启动时一次性评估**该阈值。M0 验收结论按以下格式写入 `DESIGN_ASSUMPTIONS.md`：「petgraph API 验收（Spike 3）：通过/未通过。通过 → 阈值降级为 M2 启动时一次性评估；未通过 → M1 启动自建邻接表回退（成本 3-5 人天，计入 M1 工作量）」。即使 Spike 3 通过，若 M2 真实项目暴露 petgraph 缺陷（命中 MVP 用到的拓扑排序/BFS/FixedBitSet API），改按**项目级回退评估**处理，不再走全局阈值。
 
 ### 5.7.3 持久化存储
 
 > **MVP 与 M2 存储策略分层**（CodeGraph 验证了 SQLite 方案，但其规模未知）：MVP 目标 <5K 行单项目，实际图规模通常 **20-100 节点、100-500 边**（见 § 5.7.1 末注），运行时主结构是内存 petgraph。持久化主存储仍为 SQLite（`.db`，符合断点续传与未来增量更新需求），但 **FTS5 全文搜索、社区检测等高级能力一律延迟到 M2**——MVP 不创建 `nodes_fts` 虚拟表，节省 ~50 行 petgraph→SQLite 同步逻辑 + <5K 项目约 5-10% 的存储开销。**升级触发条件**：项目 > 20K 行、需要跨字段全文检索能力（M2 才出现的用户故事「按 name/type/file 查找相关模块」，CLI 命令清单以 [06 § 10.0.1](./06-plugin-structure.md#1001-cli-工具架构rustmigrate) 为准）、或需要跨项目增量重建。M0 [Spike 3](./08-roadmap-and-reference.md#m0-假设验证周2-3-周) 顺带对 3 个 <5K 行 TS 项目测量节点/边规模与构建耗时，复核此分层假设。MVP/M2 能力对照见 [08 § M1](./08-roadmap-and-reference.md#m1-mvp6-8-周)。
 >
-> **前向兼容权衡（明示）**：对 MVP 的 20-100 节点规模，petgraph + rusqlite 的组合确实**超出最小必需**——MVP 阶段图构建后只读，未用到 StableGraph 的动态增删能力。选择该三层架构是**为 M2 多项目 Workflow 与增量更新预留地基的前向兼容权衡，而非 MVP 功能必需**。代价是 rusqlite 嵌入增加编译时间与二进制体积。因此引入 **crate 集成风险门控**：M0 [Spike 0](./08-roadmap-and-reference.md#m0-假设验证周2-3-周) 增设「crate 集成风险评估」检查点，实测最终 CLI 的编译时间、二进制体积与冷启动感知时间（门禁见 [08 § M1 性能门禁](./08-roadmap-and-reference.md#m1-mvp6-8-周)）。**决策规则**：若 M0 期间 crate 集成实际耗时超出 [08 § M1 估算](./08-roadmap-and-reference.md#m1-mvp6-8-周)上限（即触发预估风险），则 M1 启用 JSON 持久化回退（去掉 rusqlite，断点续传改用 JSON + atomic rename），SQLite 推迟到 M2 再引入。这把「前向兼容假设」转为「带触发条件的门控决策」。
+> **前向兼容权衡（明示）**：对 MVP 的 20-100 节点规模，petgraph + rusqlite 的组合确实**超出最小必需**——MVP 阶段图构建后只读，未用到 StableGraph 的动态增删能力。选择该三层架构是**为 M2 多项目 Workflow 与增量更新预留地基的前向兼容权衡，而非 MVP 功能必需**。代价是 rusqlite 嵌入增加编译时间与二进制体积。因此引入 **crate 集成风险门控**：M0 [Spike 0](./08-roadmap-and-reference.md#m0-假设验证周2-3-周) 增设「crate 集成风险评估」检查点，实测最终 CLI 的三项指标——编译时间（冷启）、二进制体积、首次 `graph build` 冷启动感知时间（门禁见 [08 § M0 Spike 0](./08-roadmap-and-reference.md#m0-假设验证周2-3-周)）。**决策规则（三选一超限即回退）**：Spike 0 在 M0 启动时先实测一组基线值并记入 `DESIGN_ASSUMPTIONS.md`，三项指标中**任一项超出 Spike 0 记录的可接受上限**（具体阈值由 Spike 0 据目标平台敲定、写入验收纪要，而非预先臆造数值），则 Spike 0 判失败，M1 自动启用 JSON 持久化回退（去掉 rusqlite，断点续传改用 JSON + atomic rename），SQLite 推迟到 M2 再引入；三项全通过则 Spike 0 通过、继续后续 Spike。M1 工作量按 [08 § M0→M1 决策检查点](./08-roadmap-and-reference.md#m0--m1-决策检查点)「Spike 0 crate 集成超限」行调整。这把「前向兼容假设」转为「带可测触发条件的门控决策」。
 
 **选型：SQLite（M2 增配 FTS5）**（CodeGraph 验证了此方案的可行性）：
 
@@ -376,12 +376,12 @@ CREATE INDEX idx_edges_target_type ON edges(target, edge_type);
 
 **并发写入策略**（M2+ Workflow 批量模式：多 agent 在独立 worktree 并行迁移、共享单一 `source-graph.db`，见 [03 § 4.2.1](./03-execution-model.md#421-执行模式分层)）：
 
-> **MVP 不需要本节策略**：MVP 单模块串行，所有写操作由单个 CLI writer（如 `graph build`）或单个 SubAgent 顺序执行，无并发锁争夺。analyzer→translator→scaffolder 严格串行（序列见 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径)）。下方的 WAL + `busy_timeout` 策略仅 M2+ 并行模式需要。
+> **MVP 不需要本节策略**：MVP 单模块串行，所有写操作由单个 CLI writer（如 `graph build`）或单个 SubAgent 顺序执行，无并发锁争夺。MVP 期对 `source-graph.db` 的写串行化**不依赖** WAL + `busy_timeout`，而由两层既有机制保障：(a) 每个 `/migrate` 命令在 Step 0 以 `flock -n .rust-migration/.migration-lock` 获取**全局命令锁**，禁止两个 `/migrate` 实例并发（含 Sprint Planning 中调用 `graph build` 增量重建与分析并发，见 [06 § 10.5 多终端并发隔离](./06-plugin-structure.md#105-编排调度路径)）；(b) `file-guard.sh` 对 `source-graph.db` 加 `flock` 排他锁，防御指令跟随失败导致的意外并发（见 [06 § 10.3](./06-plugin-structure.md#103-hooks自动化门禁)）。analyzer→translator→scaffolder 严格串行（序列见 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径)）。下方的 WAL + `busy_timeout` 策略仅 M2+ 并行模式需要。
 
 - **隔离与重试**：SQLite WAL 支持「单 writer + 多 reader」并发。每个连接设 `PRAGMA busy_timeout=5000`；写操作遇 `SQLITE_BUSY` 时按指数退避重试（最多 3 次）后上报。rusqlite 经 libsqlite3 透传上述 PRAGMA 与 busy handler。
 - **写入序列化**：`graph build` / 增量更新的写入由 CLI 侧 writer 排他锁串行化（reader 信号量 ≤ N，writer 独占），避免多 agent 同时改图。M2 多 agent 并发时，analyzer/scaffolder 对 `nodes`/`edges` 表的写入通过 SQLite WAL 串行化（rusqlite 的 `busy_timeout` + 指数退避重试保证一致性）；汇总 agent 在所有并行 agent 完成后负责 WAL checkpoint。
 - **petgraph 副本隔离（M2 无内存竞态）**：petgraph 是进程内内存结构、无 WAL，故 M2 并发**不共享内存图**。各 SubAgent 启动时从 SQLite 加载**独立**的 petgraph 内存副本（`rustmigrate graph build --load-from-db`），进程内只读该副本。新增节点/边先写入 SQLite（经上述 WAL 串行化），后续 agent 启动时从 SQLite 重新加载——以「SQLite 为单一真相源 + 各 agent 内存副本隔离」规避内存竞态，代价是启动加载延迟（可接受，纳入 M2 性能门禁）。这同时回答了「中间态持久化（写 SQLite）/ 副本合并（不合并，各自从 DB 重载）/ 冲突检测（由 SQLite 写串行化兜底，无需独立算法）」三问。
-- **增量更新的原子性**：§ 5.7.5 的 STRUCTURAL 变更需「删除旧节点+边 → 重新解析插入」，必须包在**单个事务**内完成，避免中间态触发外键约束违反（`edges.source/target` 引用 `nodes.id`）。删除按「先边后节点」顺序，插入按「先节点后边」顺序。
+- **增量更新的原子性**（MVP 与 M2 通用，与并发无关）：§ 5.7.5 的 STRUCTURAL 变更需「删除旧节点+边 → 重新解析插入」，必须包在**单个 `BEGIN IMMEDIATE TRANSACTION ... COMMIT` 事务**内完成，避免中间态触发外键约束违反（`edges.source/target` 引用 `nodes.id`）。删除按「先边后节点」顺序，插入按「先节点后边」顺序。MVP 期该事务由单个 `graph build` 进程持有、提交后才写 `metadata.graph_build_completed`（见 [09 附录 A](./09-appendix-schemas.md#附录-amigration-statejson-schema)），保证下游 analyzer 不会读到半成品图。
 - **跨文件一致性**：`migration-state.json` 与 `source-graph.db` 间无分布式事务，采用「先提交 DB 事务并 WAL checkpoint，再用 atomic rename（写临时文件后 `rename`）落 state.json」的顺序，保证 state.json 永不引用尚未持久化的图状态（all-or-nothing 语义）。
 
 > 多 agent 写竞争属于 12.1 风险矩阵「多 agent 冲突」的缓解面；MVP（单模块串行）不涉及并发写，以上为 M2 实现约束。
@@ -435,7 +435,7 @@ CREATE INDEX idx_edges_target_type ON edges(target, edge_type);
 
 **算法复杂度**：Louvain 社区检测时间复杂度约 **O(m log n)**（m=边数、n=节点数），见 Blondel et al. (2008)。import 图是接近 DAG 的稀疏图（边数与节点数同量级，m ≈ O(n)），故实际接近 O(n log n)，对 <500 文件规模可接受。
 
-**35 文件/批的依据**：该数字主要来自**上下文预算约束**而非纯经验值——按 [02 § 3.5](./02-architecture.md#35-llm-上下文窗口管理) 的 ≤100K token 预算，每文件约 2.8K token 时 35 文件 ≈ 98K token，正好贴近上限。UA 经验给出同量级参考。但「35 文件能否达成批内高内聚、低跨批重复」与「批大小 vs LLM 分析质量」两个假设未实测，须在 M0 [Spike 3](./08-roadmap-and-reference.md#m0-假设验证周2-3-周) 的「批大小优化验收」子项中量化（3-5 个中型项目 × 批大小 20/35/50），**指标用与批大小因果强的三项**：批内符号引用覆盖度、同符号跨批重复分析次数、跨批依赖链准确度（不用 proptest 等价率 / clippy 告警数，二者与批大小因果弱）。该验收为 M1 阻塞性交付物，不得因时间压力推迟到 M2。批大小可经 `.rustmigrate.toml` 的 `[analysis] batch_size = "auto"`（或 15-50 固定值，schema 权威见 [06 § 11.1](./06-plugin-structure.md#111-rustmigratetoml-配置文件)）配置；M1 运行时监控实际跨批重复率，> 30% 时告警。
+**35 文件/批的依据**：该数字主要来自**上下文预算约束**而非纯经验值——按 [02 § 3.5](./02-architecture.md#35-llm-上下文窗口管理) 的 ≤100K token 预算，每文件约 2.8K token 时 35 文件 ≈ 98K token，正好贴近上限。UA 经验给出同量级参考。但「35 文件能否达成批内高内聚、低跨批重复」与「批大小 vs LLM 分析质量」两个假设未实测，须在 M0 [Spike 3](./08-roadmap-and-reference.md#m0-假设验证周2-3-周) 的「批大小优化验收」子项中量化（3-5 个中型项目 × 批大小 20/35/50），**指标用与批大小因果强的三项**：批内符号引用覆盖度、同符号跨批重复分析次数、跨批依赖链准确度（不用 proptest 等价率 / clippy 告警数，二者与批大小因果弱）。该验收为 M1 阻塞性交付物，不得因时间压力推迟到 M2；验收失败时的分档决策（批大小调整 / 目录降级 / 自适应分批）见 [08 § Spike 3 补充 a 决策树](./08-roadmap-and-reference.md#m0-假设验证周2-3-周)。批大小可经 `.rustmigrate.toml` 的 `[analysis] batch_size = "auto"`（或 15-50 固定值，schema 权威见 [06 § 11.1](./06-plugin-structure.md#111-rustmigratetoml-配置文件)）配置；M1 运行时监控实际跨批重复率，超过 `[analysis] batch_reuse_rate_threshold`（默认 0.30）时告警并建议启用自适应分批或目录降级。
 
 **退化算法（社区检测失败）**：按顶层目录分组；单组 > 35 文件则递归按子目录细分，最大递归深度 3；仍超限则按文件名排序切片。退化代价：批内内聚性下降，可能使 LLM 跨批重复分析增加约 10-20%。
 
@@ -486,7 +486,7 @@ CLI `rustmigrate graph` 子命令提供以下查询（M1 实现前 4 项）：
 
 | 查询 | 用途 | 算法 | MVP? |
 |------|------|------|------|
-| `topo-sort` | 确定翻译顺序 | Kahn/DFS 拓扑排序（借鉴 Guppy 的 cycle-aware TopoWithCycles） | 是 |
+| `topo-sort` | 确定翻译顺序 | Kahn 拓扑排序（见下注：MVP 不支持有环图） | 是 |
 | `deps <module>` | 某模块的依赖树 | 正向 BFS | 是 |
 | `rdeps <module>` | 谁依赖此模块 | 反向 BFS | M2 |
 | `cycles` | 循环依赖检测 | Kosaraju SCC | M2 |
@@ -494,6 +494,8 @@ CLI `rustmigrate graph` 子命令提供以下查询（M1 实现前 4 项）：
 | `community` | 功能聚类分析 | Louvain 社区检测 | 否 |
 | `path <A> <B>` | 两节点间最短路径 | BFS 最短路径 | 否 |
 | `stats` | 图统计信息 | 节点/边计数、度分布、连通分量 | 是 |
+
+> **MVP topo-sort 有环降级**：MVP 用标准 Kahn 算法，**不支持有环图**。若源码存在循环依赖（含 re-export 间接环），`topo-sort` 返回非零退出码并列出环路径（而非产出无效排序）。`/migrate analyze` 在生成初始状态前会调用 `topo-sort` 探测（见 [09 附录 B Step 2.8](./09-appendix-schemas.md#附录-bmvp-skill-的-skillmd-骨架)），检测到环则暂停并提示用户二选一降级：(a) 在源项目临时打破某条循环导入后重跑 `/migrate analyze`；(b) 跳过环内模块（标记 `requires_manual_review` 降级），人工拆环后再迁移。完整 SCC 环检测见 M2 的 `graph cycles`（流程见 [03 § 4.2 循环依赖处理](./03-execution-model.md#42-外循环sprint-级跨会话天周)）。
 
 ### 5.7.7 可视化
 

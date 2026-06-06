@@ -105,10 +105,14 @@
 | SubAgent 编排可靠 | Spike 1: 3+ 步调度序列测试 | 微 Skill 链（每个 Skill 只做 1 步）/ 外部脚本编排 |
 | rust-analyzer LSP 可靠 | Spike 2: rust-analyzer LSP 诊断反馈延迟和可靠性验证 | 回退到 PostToolUse Hook + cargo check |
 | tree-sitter 精度足够 | Spike 3: TS 项目 AST 精度测试 | TS Compiler API / LLM 直接读源码 |
+| 批大小 35 高内聚低重复 | Spike 3 补充 a: 批大小优化验收 | 启用自适应分批或按目录分组降级；最终批大小记入 DESIGN_ASSUMPTIONS.md（决策树见 [08 § Spike 3 补充 a](./08-roadmap-and-reference.md#m0-假设验证周2-3-周)） |
+| crate 集成开销可接受 | Spike 0: 编译/体积/冷启动实测 | 去 rusqlite 改纯 JSON 持久化，SQLite 推迟 M2（见 [04 § 5.7.3](./04-toolchain.md#573-持久化存储)） |
 | SKILL.md 长指令可跟随 | Spike 4: >2000 字指令跟随率测试 | 拆分为多个短 Skill |
 | 用户愿意学配置 | 用户反馈收集 | 纯约定零配置模式（合理默认值，无 .rustmigrate.toml） |
 
 **Plan B 具体方案**（M0 Spike 1 失败时触发）：详见 [06-plugin-structure.md § 10.5 的 Plan B 表格](./06-plugin-structure.md)，包含 Plan B1（微 Skill 链）、B2（外部脚本编排）、B3（混合方案）三个方案及其工作量估算。
+
+> **触发判定的终局性**（Spike 1 成功率 < 80%）：(a) 判定在 M0 验收会上一次性做出，不允许对 Spike 1 二次重测或重设计；(b) 一旦触发，M1 方案自动锁定为 Plan B3（单一步骤反复失败的局部场景见 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径) 的 Plan B1），工作量按 [08-roadmap-and-reference.md § M0→M1 决策检查点](./08-roadmap-and-reference.md#m0--m1-决策检查点) 表行 2 档位估算。本表降级规则与 08 决策检查点为协同约定，互为权威。
 
 **行动指南**：M0 结束后更新 `DESIGN_ASSUMPTIONS.md`，标记每个假设的状态（verified / plan-b-triggered），后续里程碑据此调整实现方案。
 

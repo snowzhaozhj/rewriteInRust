@@ -232,6 +232,26 @@ degrade_* → translating（通过 /migrate run --module=X --force 恢复）
 
 ## 分步指令
 
+### Step 0: 全局锁获取与陈旧锁恢复（所有 /migrate 命令通用）
+> 本 Step 0 为 `/migrate analyze` 与 `/migrate run` 共用；`/migrate run` 骨架不重复，引用此处。被 [06 § 10.5「多终端并发冲突的强制隔离」](./06-plugin-structure.md#105-编排调度路径) 引用为权威骨架。
+
+```
+锁文件 .rust-migration/.migration-lock 内容 = 单行 JSON {pid, started_at(ISO8601), hostname}
+
+[获取] flock -n .rust-migration/.migration-lock --  # 非阻塞，进程退出时 OS 自动释放 FD
+  - 成功 → 写入本进程 {pid, started_at, hostname}，继续
+  - 失败（锁被占）→ 进入[陈旧检测]
+
+[陈旧检测]（仅在非阻塞获取失败时执行）
+  读取锁文件 JSON：
+  - 同机（hostname 匹配）且 ps -p <pid> 显示进程已死 → 陈旧锁，删除后重试一次获取
+  - 进程仍活 → 真实并发，报错退出（见下方错误信息），不删锁、不退避重试
+  - 跨机 或 PID 不可判定：若 now - started_at > lock_timeout_secs（默认 3600）→ 视为陈旧，
+    报错并提示用户确认无进行中任务后手动删除；否则按真实并发报错退出
+```
+
+> **平台差异与逃生口**：`flock` 在 macOS/Linux 上进程崩溃时由 OS 关闭 FD 自动释放，故正常崩溃**无需**人工清理；`lock_timeout_secs` 仅用于「锁文件残留但 flock 已释放」或跨机场景的兜底判定。用户卡死时的逃生口为**手动删除** `.rust-migration/.migration-lock`（MVP 不新增 CLI 清理子命令以守 11 命令边界）。错误信息须含「如确认无进行中任务，可手动删除 .rust-migration/.migration-lock」。
+
 ### Step 1: 检测项目类型
 读取当前目录的文件结构，识别源语言和框架。
 检查以下文件是否存在：package.json, tsconfig.json, pyproject.toml, go.mod, CMakeLists.txt。
@@ -258,9 +278,17 @@ CLI 构建基础图（contains/imports 边），存储到 `.rust-migration/sourc
                           `rustmigrate graph build`（不进入 analyzer，不轮询等待）
 ```
 
-> **为何无需轮询/超时**：`graph_build_completed` 由 CLI `graph build` 在 `COMMIT` 后、进程退出前同步写入（CLI 自身持有事务，写入是确定性的）。MVP 串行执行下，Step 2 的 `graph build` Bash 调用返回后该字段必然已落盘，故此处只需**单次读取判定**，不存在 busy-loop 或死锁等待。若读到 `false/缺失`，说明 `graph build` 进程异常退出（事务未提交），应作为错误处理而非继续等待。M2 引入真正并行后，若 Spike 1 暴露时序问题，再升级为 `rustmigrate validate state --check-graph-consistency` 显式校验命令（见 [08-roadmap-and-reference.md](./08-roadmap-and-reference.md)）。
+> **为何无需轮询/超时**：`graph_build_completed` 由 CLI `graph build` 在 `COMMIT` 后、进程退出前用 § 10.8 原子写入（CLI 自身持有事务，写入是确定性的）。MVP 串行执行下，Step 2 的 `graph build` Bash 调用返回后该字段必然已落盘，故此处只需**单次读取判定**，不存在 busy-loop 或死锁等待。若读到 `false/缺失`，说明 `graph build` 进程异常退出（事务未提交，或罕见的「DB 已 COMMIT 但标志写入前崩溃」窗口）——两种情况都按错误处理：直接重新执行 `rustmigrate graph build`（其 `BEGIN IMMEDIATE...COMMIT` 写入是覆盖式重建，重跑安全，无需新增 reset 子命令）。graph build 在「已提交后重跑」的幂等性须在 M0 Spike 0 验证并记入 `DESIGN_ASSUMPTIONS.md`。M2 引入真正并行后，若 Spike 1 暴露时序问题，再升级为 `rustmigrate validate state --check-graph-consistency` 显式校验命令（见 [08-roadmap-and-reference.md](./08-roadmap-and-reference.md)）。
 
 然后调用 analyzer SubAgent 做语义增强（补充 calls/uses_type 边、复杂度标注）。
+
+### Step 2.8: 拓扑排序探测（循环依赖前置门禁）
+在生成初始状态前执行 `rustmigrate graph topo-sort`，检查返回值：
+- 退出码 0 → 排序成功，继续 Step 3。
+- 非零退出（检测到循环依赖）→ 输出环路径并**暂停**，提示用户二选一打破循环：
+  (a) 在源项目中临时注释掉环上的某条 import，重新执行 `/migrate analyze`；
+  (b) 跳过环内模块——将其标记为 `requires_manual_review` 降级（见 [附录 A § 合法状态转换](#合法状态转换)），由人工拆环后再迁移。
+完整 SCC 环检测见 M2 `rustmigrate graph cycles`（降级策略见 [03 § 4.2 循环依赖处理](./03-execution-model.md#42-外循环sprint-级跨会话天周)）。
 
 ### Step 3: 生成初始状态
 基于 analyzer 的产出物，生成以下文件：
@@ -342,6 +370,8 @@ CLI 构建基础图（contains/imports 边），存储到 `.rust-migration/sourc
 ```
 
 > MVP 不做自动拓扑排序：A→B→C 多层 blocked 时，本步骤只解除「blocked_by 全部完成」的一层，连续运行会逐层推进（见 [附录 A § 合法状态转换「多模块同时 blocked」注](#合法状态转换)）。但**环形**阻塞（A→B→C→A 或自依赖）无法靠逐层推进解除，故 Step 0.5 在恢复前先做一次 DFS 环检测并报错中止，避免静默死锁。`metadata.last_error` 字段见 [附录 A「metadata 字段说明」](#附录-amigration-statejson-schema)。
+
+> **MVP 实现归属与确定性边界**：上述伪码在 MVP 期由 SKILL.md 通过指令跟随执行（非独立确定性脚本），与 L1/L2 校验的确定性存在割裂——这是 MVP 的已知约束，**不在 M2 之前补 CLI 化**。完整自动化（含 DFS 环检测 + 拓扑排序的程序化实现）推迟到 M2，抽取为 `rustmigrate validate state --check-blocked --auto-unblock`，详见 [08 § M2 状态机程序化实现](./08-roadmap-and-reference.md#m2-质量提升8-12-周)。因此 MVP 验收时，Verifier **必须在测试中实证环检测确实触发并中止**（构造 A↔B 互锁与 A→A 自依赖用例），不得依赖 Skill 的指令跟随行为推定其生效。
 
 ### Step 0.6: 目标模块依赖就绪检查（前置门禁）
 查询目标模块的依赖是否全部完成（通过 `rustmigrate graph deps <module>` 或 migration-state.json）。
@@ -429,6 +459,22 @@ verifier 在对抗性审查时附带校验 Phase A 是否保持了 1:1 结构（
 更新 `PARITY.md` 中该模块的进度行。
 如有架构决策，写入 MDR。
 ```
+
+### 关键检查点的失败恢复规则（Checkpoint 失败处理）
+
+> 被 [06 § 10.2.2](./06-plugin-structure.md#1022-失败恢复机制) 与 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径) 引用的权威表。各检查点的校验级别（L1/L2）以 [06 § 10.2 接口表](./06-plugin-structure.md#102-subagents4-个专职角色) 为准；下表给出失败后的重试与回滚动作。
+
+| 检查点（SubAgent 调用点 / 门禁） | 校验级 | 失败时保留 | 失败时删除 | 重试 | 复位到 | 备注 |
+|------|------|---------|---------|------|--------|------|
+| analyze Step 2.5 graph build 释放门禁 | 前置 | source-ref/ | 不删（DB 已 commit 则保留） | **否** | — | 非步骤失败：报错并提示重跑 `rustmigrate graph build`（见 Step 2.5 注） |
+| analyze Step 2.5→ analyzer 调用 | L1 | source-graph.db | 无 | ≤2 | pre-run | 语义增强失败可重试 |
+| analyze Step 4 translator 规则生成 | L1 | source-graph.db、migration-state.json | porting/ 内本次半成品 | ≤2 | profile | 重试仍败则回滚到 analyzer 完成态 |
+| analyze Step 6 scaffolder 测试搭建 | L1 | 前序全部 | test-fixtures/ 内本次半成品 | ≤2 | translator 完成态 | — |
+| run Step 0.5 引用一致性 | L2（延后） | 全部 | 无 | **否** | — | `BLOCKED_BY_VALIDATION_FAILED`，见 [06 § 10.7](./06-plugin-structure.md#107-错误信息与可调试性mvp) |
+| run Step 1 translator 意图摘要 | L2 | — | 本次 `{module}-intent.md` | ≤2 | 模块 pending | L2 = 6 字段非空（附录 E） |
+| run Step 5 verifier 测试验证 | L1+L2 | Phase A/B 产物 | 测试结果 JSON | ≤2 | reviewing | JSON 产出物做 L2，测试代码做 L1 |
+
+> 通用规则：`intermediate/attempts/*`（含 `*.json` 与 `*-phase-*.rs`）在任何回滚下**始终保留**作诊断证据（见 [06 § 10.2.2](./06-plugin-structure.md#1022-失败恢复机制)）；`validation_tool_error_*`（超时/OOM/Schema 损坏）不计入重试（见 [06 § 10.7](./06-plugin-structure.md#107-错误信息与可调试性mvp)）。
 
 ---
 

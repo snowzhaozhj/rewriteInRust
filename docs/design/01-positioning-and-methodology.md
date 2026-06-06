@@ -83,7 +83,7 @@ UA 52,950 stars 的成功密码：**把 LLM 从"对话伙伴"变成"流水线中
 | 复杂规则生成（~40%） | -- | LLM + 人类审查 |
 | 对抗性审查 / 不等价探测 | -- | verifier SubAgent |
 
-**关键风险揭示**：我们采用了 UA 的「确定性工具 + LLM 分工」原则，但**编排层在 MVP 阶段仍依赖 LLM 指令跟随**（SKILL.md 分步指令驱动 SubAgent 调度，非确定性程序控制，详见 [06-plugin-structure.md § 10.5](./06-plugin-structure.md#105-编排调度路径)）——这是 MVP 的关键可靠性风险，已在 M0 Spike 1 立项验证，Plan B 体系（微 Skill 链 / 外部脚本编排 / 混合方案）已备，触发规则见 [08-roadmap-and-reference.md M0→M1 决策检查点](./08-roadmap-and-reference.md#m0--m1-决策检查点)。
+**关键风险揭示**：我们采用了 UA 的「确定性工具 + LLM 分工」原则，但**编排层在 MVP 阶段仍依赖 LLM 指令跟随**（SKILL.md 分步指令驱动 SubAgent 调度，非确定性程序控制，详见 [06-plugin-structure.md § 10.5](./06-plugin-structure.md#105-编排调度路径)）——这是 MVP 的关键可靠性风险，已在 M0 Spike 1 立项验证，Plan B 体系（微 Skill 链 / 外部脚本编排 / 混合方案）已备，触发规则见 [08-roadmap-and-reference.md M0→M1 决策检查点](./08-roadmap-and-reference.md#m0--m1-决策检查点)（Spike 1 < 80% 时在 M0 验收会上一次性判定、不可推翻、M1 自动锁定 Plan B3，终局性约定见 [07 § 12.2](./07-pitfalls-and-risks.md#122-plan-b-体系)）。
 
 ### 2.2 三层范式：AI-工具-人类
 
@@ -115,6 +115,8 @@ UA 52,950 stars 的成功密码：**把 LLM 从"对话伙伴"变成"流水线中
 翻译内循环拆为两个显式阶段：Phase A 忠实翻译（保持 1:1 对应）→ 对抗性审查 → Phase B 惯用化优化。先保证语义正确，再追求惯用性。1:1 对应通过两条机制保证可审计：(1) Phase A 不做优化（保留死代码/辅助函数/冗余结构，非平凡函数加 PORT NOTE 标注源码行号锚点）；(2) 进入 Phase B 前有一道结构校验门禁（函数数/行数/控制流比例越界则要求重做 Phase A）。详细步骤见 [03-execution-model.md § 4.3](./03-execution-model.md#43-内循环模块级单会话内-phase-ab-双阶段翻译)。
 
 **参考案例**：Bun 将迁移规则融入 CLAUDE.md 和内部文档（虽不独立成文，但源码中引用 30+ 章节 207 次），以及 Claw-Code 的 PARITY.md + Mock Parity Harness 行为验证。
+
+**澄清：Phase A/B 与「原生重塑」的关系**：上文第 3 步「原生重塑」并非单步完成，而在 v0.9 落地为两阶段协同——Phase A（忠实翻译，保留 1:1 结构以便审计和逐步修复）→ 对抗性审查 → Phase B（惯用化重构，追求 idiomatic Rust）。先用 Phase A 的结构保留 + 语义验证锁定正确性，再由 Phase B 实现「原生重塑」的优雅目标，避免一次性重写掩盖语义偏差。
 
 ### 2.4 学术前沿技术集成
 

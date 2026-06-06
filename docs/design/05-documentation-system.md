@@ -141,12 +141,24 @@ confidence: high
 4. `/migrate review` 比对当前规则版本与各模块清单，发现不一致时将模块标记 `rule_version_stale`（migration-state.json substatus），输出待复审列表（落入 `reports/sprint-N-report.json`）；用户可经 `/migrate run --module=X --rule-upgrade-review-only` 选择性复审（而非整体重译）。
 5. 关键规则（如 RULE-11 禁止模式、RULE-12 unsafe 策略）发生 breaking change 时，在 migration-state.json 记录 `affected_modules` 字段，供精准回溯。
 
-> **CLI 边界与配置**：上述比对属确定性计算。MVP（< 50 模块）由 `/migrate review` 的 SubAgent 完成，不新增 CLI 子命令以免突破 11+5 命令清单（命令权威以 06 为准）；M2 提出确定性命令候选 `rustmigrate validate rules --check-module-versions`（解析所有 `_porting_manifest.json` 比对 `porting/changelog.md`，归入 [06 § 10.0.1](./06-plugin-structure.md#1001-cli-工具架构rustmigrate) M2 扩展）。版本追踪开关与升级行为由 `.rustmigrate.toml` `[rules]` 段控制（`version_tracking` / `auto_regenerate_on_rule_upgrade` / `enforce_rule_version_consistency`，定义见 [06 § 11.1](./06-plugin-structure.md#111-rustmigratetoml-配置文件)）。
+> **CLI 边界与配置**：上述比对属确定性计算。MVP（< 50 模块）由 `/migrate review` 的 SubAgent 完成，不新增 CLI 子命令以免突破 11+5 命令清单（命令权威以 06 为准）；M2 提出确定性命令候选 `rustmigrate validate rules --check-module-versions`（解析所有 `_porting_manifest.json` 比对 `porting/changelog.md`）。**`validate rules` 为 M2「备选」，不在 [06 § 10.0.1 表](./06-plugin-structure.md#1001-cli-工具架构rustmigrate) 当前已定的 5 个 M2 扩展命令之内；是否纳入及计入方式由 M2 规划确定**（命令清单权威以 06 为准）。版本追踪开关与升级行为由 `.rustmigrate.toml` `[rules]` 段控制（`version_tracking` / `auto_regenerate_on_rule_upgrade` / `enforce_rule_version_consistency`，定义见 [06 § 11.1](./06-plugin-structure.md#111-rustmigratetoml-配置文件)）。
 
 **行动指南**：
 - MVP 阶段只生成标记"是"的规则
 - 每次翻译失败且原因是规则缺失时，追加新规则并标注"由 Sprint N 失败触发"
 - 规则格式：`## RULE-NN: <名称> (v<N>)` + `源语言模式 → Rust 等价物 + 注意事项 + 示例`
+
+**跨版本冻结规则的升级检测**：项目暂停迁移（如 M1 收尾）时，在 `.rust-migration/.rule-freeze-metadata.json`（专用文件，不混入 changelog.md）记录规则快照：
+
+```json
+{
+  "frozen_at_plugin_version": "0.1.0",
+  "frozen_timestamp": "ISO8601",
+  "core_rules_snapshot": { "RULE-3": "v1.0.0", "RULE-11": "v1.2.0" }
+}
+```
+
+日后 `/migrate analyze` 运行时（如 Plugin 升级到 0.2.0）须：① 检测该文件存在；② 比对 `core_rules_snapshot` 与 `agents/*.md` 当前核心规则版本；③ 若任一规则发生 `major` 升级，输出告警，例：「检测到项目规则在 Plugin v0.1.0 冻结。当前 v0.2.0 中 RULE-3 升级至 v2.0.0 (breaking)。请复审 `.rust-migration/porting/business-logic-rules.md` 中 RULE-3 的定制版本，确认与新版 breaking change 兼容。详见 KNOWN_DIFFERENCES.md KD-NNN。」此机制让陈旧的项目专有规则在升级后显式可见，不引入 `.rustmigrate.toml` 新配置。
 
 **规则维护责任与社区贡献**：规则库三层结构的维护职责与更新周期如下，社区贡献的本地检查要点详见本章下方「社区贡献快速参考」。
 
@@ -164,6 +176,7 @@ confidence: high
 - 何时提交：翻译失败因规则缺失而触发（标注「由 Sprint N 失败触发」），或现有规则在新场景下不适用。
 - 本地检查：规则格式为 `## RULE-NN: <名称> (v<N>)`，并附 frontmatter 元数据（`category` + `target_languages` + `ts_only` 为强制项，分类标准与字段含义见 [08 § 13.1.1(b)](./08-roadmap-and-reference.md#1311-m1m2m3-规则库累积效应分析)）；版本号与变更同步写入 `porting/changelog.md`；涉及 breaking change（major）须在 KNOWN_DIFFERENCES.md 列出受影响范围（见上方「规则版本管理与代码一致性」）。
 - 评审周期：每个 M 阶段 review 一次（核心/参考），项目专有每个 Sprint Review。
+- PR 评审承诺：核心规则与参考指南的 PR 须在提交后 14 日内获得初审反馈；超期自动 escalate 至技术委员会（设计原则：给出预期反馈窗口而非精确到日，保留灵活性）。
 
 **适配器贡献**（新语言）：
 - 工作量预期：3-5 个工作日（来源 [06 § 11.2 新语言适配器的工作量拆解](./06-plugin-structure.md#112-语言扩展架构)）。
@@ -212,6 +225,8 @@ confidence: high
 
 deprecation 仅在 Plugin 主版本（major）更新时生效，并在 CHANGELOG「Breaking Changes」段公告（与 [06 § 10.0.2](./06-plugin-structure.md#1002-版本控制与向后兼容策略) 的兼容性窗口一致）。
 
+**规则变更通知机制**：breaking change（major）发布时在 CHANGELOG 明确列出 `affected_modules` 范围（由 migration-state.json 的 `affected_modules` 字段自动计算，见 [§6.2 规则版本管理与代码一致性](#规则版本管理与代码一致性) 第 5 项），社区可按此评估升级成本。
+
 ---
 
 ## 6.3 PARITY.md — 迁移进度与等价深度跟踪
@@ -243,6 +258,8 @@ deprecation 仅在 Plugin 主版本（major）更新时生效，并在 CHANGELOG
 > **Manual Review 状态列**：取值 `done` / `pending_manual_review`，使 `requires_manual_review` 积压对人类可见（覆盖率判别规则与积压观测见 [03 § 7.5](./03-execution-model.md#75-质量评估分层评分卡) 与 [§ 4.2 Sprint Retrospective](./03-execution-model.md#42-外循环sprint-级跨会话天周)）。
 
 > **验证工具组合列**（验证画像）：为每个模块标注实际采用的验证工具组合，使验证方法对人类透明，例：纯函数 `proptest + insta`，有状态 `insta + 手工测试`（有状态 + 跨语言 FFI 的行为录制框架属 M2，MVP 跳过见 [04 § 5.3](./04-toolchain.md#53-tier-1推荐画像自动启用)）。
+
+> **L3 confidence 列**：以 partial-confidence 形式标注该模块导出函数的纯函数检测置信度分布（如 `67% high + 20% medium`，非离散标签），供 verifier 据 [03 § 7.6.1](./03-execution-model.md#761-库函数-ffi-对比可行性检查清单) 的「模块级 L3 FFI 置信度决策规则」判断是否降级，使 L3 等价证据的可信度对人类可见。
 
 **等价深度标签**（借鉴 Claw-Code 的四级标签，MVP 使用 strong/stub 两级，M2 扩展）：
 
@@ -334,6 +351,7 @@ PARITY.md 与 KNOWN_DIFFERENCES.md 是迁移质量的对外承诺，需具备开
 - **日期**: 2026-06-08
 - **状态**: 已采纳
 - **Sprint**: S1
+- **translated_from_source_commit**: a1b2c3d   # 翻译时锚定的源码 commit，用于双轨开发下追溯源依赖漂移（见 03 § 4.6.1）
 - **背景**: 源项目使用 try/catch 异常处理，需要选择 Rust 错误处理策略
 - **选项**:
   1. anyhow（简单，适合应用层）
@@ -505,6 +523,8 @@ PARITY.md 与 KNOWN_DIFFERENCES.md 是迁移质量的对外承诺，需具备开
 
 **index.json 时机**：§6.12 的 `index.json`（pattern → related_rules 映射）为 **M2 自动生成候选**；MVP 阶段 SKILL.md 按规则类别手工 Read 相关 pattern 文件，不依赖 index.json，避免 MVP 维护未自动化的索引。
 
+**MVP 手工 Read 的触发口径**（消除「按规则类别」无具体指导的歧义，避免 M1 pattern 库膨胀后无法扩展）：translator 在 [03 § 4.3 Step 2](./03-execution-model.md#43-内循环模块级单会话内-phase-ab-双阶段翻译) 生成意图摘要时，基于 PROFILE 已检测的 NodeData 属性（`is_async` / `has_ffi` 等）输出 3-5 个「最可能相关的 pattern 文件名」（如 async 模块 → `references/patterns/async-to-tokio.md`），但不自动 Read。SKILL 编排器据此在 `references/patterns/` 预扫描：若命中 ≤ 3 个文件且总 token < 20K，自动 Read 注入 translator 上下文；否则仅提示「未找到对应 pattern，请关注相关 RULE（如 async → RULE-22）」。此口径为 M2 的 index.json + 语义检索做铺垫，实现成本仅编排器一段逻辑。
+
 **四层生命周期 MVP vs M2+ 成本对标**：
 
 | 维度 | MVP 成本 | M2+ 自动化投入 | ROI 拐点 |
@@ -514,6 +534,12 @@ PARITY.md 与 KNOWN_DIFFERENCES.md 是迁移质量的对外承诺，需具备开
 | L3 检索 | 文件读取（Claude Code 原生） | 语义检索集成约 2-3 人天 | 跨 Sprint 经验复用频繁时正向 |
 
 > **L1 接受/按需启用**：L1 在 MVP 为**可选**而非默认必做。团队若选择跳过 L1（小项目 / 模块少），应在项目 CLAUDE.md 记录「L1 按需启用」。此设计保持理论完整性的同时给 MVP 留灵活性，符合渐进式交付原则。
+
+**L1 启用判据与格式**（让团队可自主决策，而非凭感觉）：
+
+- **触发条件**（满足即值得写 L1）：模块 > 50 行 AND（含异步逻辑 OR FFI 调用 OR 生命周期/借用约束反复）。不满足则跳过，避免与 L2 重复沦为空架子。
+- **强制字段模板**（防 freestyle 流水账）：`module-learnings/{module}.md` 须含「模块名 / 解决的陷阱 / 应对技巧 / 相关规则版本（RULE-NN:vX.Y.Z）」四字段。
+- **SKILL.md Step 1.5 注入指令**（接 [03 § 4.3 Step 1](./03-execution-model.md#43-内循环模块级单会话内-phase-ab-双阶段翻译) 上下文加载后）：检查该模块源码特征，若匹配上述触发条件 AND `.rust-migration/context/module-learnings/{module}.md` 存在，则 Read 注入 translator 上下文；否则跳过（MVP 保持手工 Read，不引入未自动化的索引；index.json 为 M2 候选）。
 
 ### 知识分层存储
 
