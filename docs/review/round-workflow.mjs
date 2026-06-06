@@ -22,6 +22,8 @@ const COMMON = [
   '纪律（务必遵守）：',
   '- 这套设计已过 7+ 轮审查、非常成熟，已显式处理大量问题（HashMap 迭代顺序、整数溢出、UTF-8/16、异步取消安全、Send/Sync 传染、unsafe 分级、断点续传、上下文预算等）。只报真实缺口，别把"已处理项"当问题。',
   '- 本仓库有过 LLM 幻觉先例（虚构案例/工具/论文）。每条结论必须能在文档定位依据，禁止臆造。',
+  '- **不得**提"仅需实现期实证数据(benchmark/实测基准/性能数据/批大小实测/定量验证/可行性实测)"类发现——这类转入 M0 spike 清单，不作为设计缺陷、不要求新增正文。只报真正的设计级缺陷：自相矛盾/定义缺失/选型不当/流程遗漏/跨文件不一致/逻辑漏洞。',
+  '- **R3 起收口**：优先净删除（去重/合并/删冗余），原则上不整段新增；文档已累计注水 ~1288 行需回收。',
   '- 严重度定义见 ' + RP + ' §2；护栏见 §5。',
 ].join('\n')
 
@@ -99,9 +101,9 @@ const BLINDS = [
 function reviewPrompt(item, isBlind) {
   const base = COMMON + '\n\n你是审查者，负责【' + item.key + ' ' + item.title + '】。\n第一步：用 Read 打开 ' + RP + '，读 §0/§2/§3/§5（目标、严重度、你这一维的 lens、护栏）。'
   if (isBlind) {
-    return base + '\n第二步：通读 docs/design/ 下全部 .md，按 §3 中 ' + item.key + ' 的角度，找出 8 个固定维度可能漏掉的问题。\n输出 2-5 个高质量 finding（质量优先，宁缺毋滥），id 形如 R' + ROUND + '-' + item.key + '-01；每条必须给具体可落地的优化方案，location 用 文件:章节。'
+    return base + '\n第二步：通读 docs/design/ 下全部 .md，按 §3 中 ' + item.key + ' 的角度，找出 8 个固定维度可能漏掉的问题。\n输出 0-5 个高质量 finding（质量优先，宁缺毋滥，没有真问题就返回空）。id 形如 ' + item.key + '-01；每条必须给具体可落地的优化方案，location 用 文件:章节。'
   }
-  return base + '\n第二步：用 Read/Grep 重点阅读：' + item.files + '（可交叉印证其他文件）。\n输出 3-6 个高质量 finding（质量优先，宁缺毋滥），id 形如 R' + ROUND + '-' + item.key + '-01；每条必须给具体可落地的优化方案，location 用 文件:章节。'
+  return base + '\n第二步：用 Read/Grep 重点阅读：' + item.files + '（可交叉印证其他文件）。\n输出 0-6 个高质量 finding（质量优先，宁缺毋滥，没有真问题就返回空）。id 形如 ' + item.key + '-01；每条必须给具体可落地的优化方案，location 用 文件:章节。'
 }
 
 function verifyPrompt(f, dim) {
@@ -178,13 +180,13 @@ const reportPayload = JSON.stringify({
   fixes: fixes.filter(Boolean),
 })
 await agent(
-  '把本轮审查写成报告文件，用 Write 写到 docs/review/round-' + ROUND + '-report.md，标题「# 审查轮 ' + ROUND + ' 报告」。按维度分组列出每条 finding：ID / 严重度 / 位置 / 状态(confirmed|adjusted|rejected) / 问题(1-2句) / 优化方案(1-2句)；被 rejected 的也要列并附 verifier 理由（为什么不成立）。末尾附「本轮修复文件清单」。务必简洁——每条 finding 控制在 3-4 行，避免文件过大导致写入卡死。数据(JSON)：\n' + reportPayload,
+  '把本轮审查写成报告文件，用 Write 写到 docs/review/latest-round-report.md，标题「# 本轮审查报告」。按维度分组列出每条 finding：ID / 严重度 / 位置 / 状态(confirmed|adjusted|rejected) / 问题(1-2句) / 优化方案(1-2句)；被 rejected 的也要列并附 verifier 理由（为什么不成立）。末尾附「本轮修复文件清单」与「转 M0 spike 清单」（被排除的实证类诉求，若有）。务必简洁——每条 finding 控制在 3-4 行，避免文件过大导致写入卡死。数据(JSON)：\n' + reportPayload,
   { label: '写轮报告', phase: '报告' }
 )
 
 function countConfirmed(s) { return confirmed.filter(function (f) { return effSev(f) === s }).length }
 return {
-  round: ROUND,
+  round: null,
   counts: {
     raised: all.length,
     confirmed: confirmed.length,
@@ -198,5 +200,5 @@ return {
   rejected: all.filter(function (f) { return f.verdict && f.verdict.verdict === 'rejected' }).map(function (f) { return { id: f.id, title: f.title, reason: f.verdict.reason } }),
   ungrouped: ungrouped.map(slim),
   filesFixed: fileKeys,
-  reportPath: 'docs/review/round-' + ROUND + '-report.md',
+  reportPath: 'docs/review/latest-round-report.md',
 }
