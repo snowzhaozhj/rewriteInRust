@@ -1,6 +1,6 @@
 # Rust 迁移验证工作台 — 项目设计文档
 
-> **版本**: v0.3 | **日期**: 2026-06-06 | **基于**: 18 路深度调研 + 103 agent deep research + 4 路审查反馈 + 3 项补充调研 + 8 条精细审查反馈
+> **版本**: v0.4 | **日期**: 2026-06-06 | **基于**: 18 路深度调研 + 103 agent deep research + 4 路审查反馈 + 3 项补充调研 + 8 条精细审查反馈 + 11 条精准修订
 
 ---
 
@@ -20,6 +20,20 @@
 12. [风险评估](#十二风险评估)
 13. [实施路线图](#十三实施路线图)
 14. [关键数据参考](#十四关键数据参考)
+
+---
+
+> ### 命名约定
+>
+> 本文档使用以下统一术语，避免混淆：
+>
+> | 术语 | 含义 | 示例 |
+> |------|------|------|
+> | **状态（State）** | 编排器状态机中的节点，描述迁移流程的当前位置 | INIT, PROFILE, PLAN, SCAFFOLD, SPRINT_LOOP, GRADUATE |
+> | **里程碑（Milestone, M）** | 实施路线图中的交付阶段，描述产品成熟度 | M0 基础搭建, M1 MVP, M2 质量提升, M3 多语言, M4 完善 |
+> | **Sprint** | SPRINT_LOOP 状态内的迭代循环，每个 Sprint 迁移一批模块 | Sprint 1, Sprint 2, ... |
+>
+> 文档中不再使用 "Phase 0/1/2/..." 等编号表述。
 
 ---
 
@@ -131,10 +145,10 @@ UA 52,950 stars 的成功密码：**把 LLM 从"对话伙伴"变成"流水线中
 │  Tier 2: cargo-fuzz → cargo-mutants → Miri → criterion → loom  │
 │  差异测试框架 → 行为录制 → 不等价证据收集                        │
 ├─────────────────────────────────────────────────────────────────┤
-│                      质量门禁 (Hooks)                            │
-│  PostToolUse: 写入 .rs → cargo check (Tier 0)                   │
-│  TaskCompleted: 模块完成 → 测试套件 (Tier 0+1)                  │
-│  Sprint Review: 集成验证 (Tier 0+1+2 按配置)                    │
+│                      质量门禁                                    │
+│  F1 Hook: PostToolUse 写入 .rs → cargo check (Tier 0)            │
+│  F2 指令: Skill SKILL.md 步骤完成 → 测试套件 (Tier 0+1)          │
+│  F3 Skill: /migrate-verify 手动触发 → 集成验证 (Tier 0+1+2)      │
 ├─────────────────────────────────────────────────────────────────┤
 │                      FFI 桥接层 (增量迁移/降级路径)               │
 │  napi-rs (Node.js) │ PyO3 (Python) │ cxx/bindgen (C/C++)        │
@@ -172,12 +186,12 @@ UA 52,950 stars 的成功密码：**把 LLM 从"对话伙伴"变成"流水线中
 **保留**：依赖图拓扑排序指导迁移顺序（G2 的核心功能）。
 **砍掉**：源/目标代码结构图的"对比验证"——过度设计，测试覆盖已经够用。
 
-#### 3.2.3 Phase 0 与 Phase 1 边界清晰化
+#### 3.2.3 PROFILE 与 PLAN 边界清晰化
 
-| 阶段 | 职责 | 性质 |
+| 状态 | 职责 | 性质 |
 |------|------|------|
-| Phase 0 | 客观事实采集：语言、框架、依赖数、代码行数、测试现状 | 纯自动化，无需人类判断 |
-| Phase 1 | 主观决策：迁移策略、规则制定、优先级排序 | 必须人类审查确认 |
+| PROFILE | 客观事实采集：语言、框架、依赖数、代码行数、测试现状 | 纯自动化，无需人类判断 |
+| PLAN | 主观决策：迁移策略、规则制定、优先级排序 | 必须人类审查确认 |
 
 #### 3.2.4 SubAgent 合并（7 → 4）
 
@@ -207,11 +221,11 @@ UA 52,950 stars 的成功密码：**把 LLM 从"对话伙伴"变成"流水线中
                     └────┬────┘
                          ▼
                     ┌─────────┐
-              ┌─────│ PROFILE │   Phase 0: 客观事实采集
+              ┌─────│ PROFILE │   客观事实采集
               │     └────┬────┘
               │          ▼
          error│     ┌─────────┐
-         recovery   │  PLAN   │   Phase 1: 主观决策
+         recovery   │  PLAN   │   主观决策
               │     └────┬────┘
               │          ▼
               │     ┌─────────┐
@@ -240,6 +254,11 @@ UA 52,950 stars 的成功密码：**把 LLM 从"对话伙伴"变成"流水线中
   → 功能裁剪（协商后移除该功能）
 ```
 
+**降级后依赖级联影响**：当模块 A 降级为 FFI 桥接时，依赖 A 的模块 B 的翻译需要知道 A 的接口类型（FFI 桥接 vs 原生 Rust）。编排器在 A 降级后需要：
+1. 更新 `migration-state.json` 中 A 的状态为 `degrade(ffi)`，并记录 A 的 FFI 接口描述
+2. 后续模块 B 的翻译上下文中注入 A 的接口类型信息——如果 A 是 FFI 桥接，B 需要通过 FFI 调用 A 而非直接 Rust 调用
+3. 如果 A 后来从 FFI 桥接升级为原生 Rust，B 的调用方式也需要同步更新
+
 **断点续传**：`migration-state.json` 记录每个模块的状态和最近一次成功的 checkpoint，重启后从 checkpoint 恢复。
 
 **错误恢复**：每次翻译尝试的输入输出都持久化到 `intermediate/attempts/`，失败后可回溯分析。
@@ -259,9 +278,9 @@ UA 52,950 stars 的成功密码：**把 LLM 从"对话伙伴"变成"流水线中
 
 ## 四、执行模式（Sprint 循环模型）
 
-### 4.1 从线性 Phase 到 Sprint 循环
+### 4.1 从线性阶段到 Sprint 循环
 
-原设计的 Phase 0-5 是线性阶段，实际执行中存在问题：
+原设计的线性阶段划分在实际执行中存在问题：
 - 大项目不可能等所有测试搭好再开始迁移
 - 迁移过程中会发现新规则，需要回头更新 PORTING.md
 - 不同模块可能处于不同阶段
@@ -334,7 +353,7 @@ Work Unit（一个 Claude Code 会话）:
 | F2 测试反馈 | 模块翻译完成 | 分钟级 | 测试失败 + clippy 警告 | AI 分析修复或标记差异 |
 | F3 集成反馈 | Sprint Review | Sprint 级 | 集成测试 + 覆盖率 + 性能基准 | 团队决策是否通过 |
 
-**行动指南**：Hook 配置中，F1 对应 `PostToolUse`，F2 对应 `TaskCompleted`，F3 由 `/migrate-verify` 手动触发。
+**行动指南**：Hook 配置中，F1 对应 `PostToolUse`（真实 Claude Code Hook 事件）；F2 在 Skill 的 SKILL.md 中通过分步指令要求"翻译步骤完成后执行验证命令"；F3 由 `/migrate-verify` Skill 手动触发。
 
 ### 4.5 问题前移矩阵
 
@@ -347,10 +366,10 @@ Work Unit（一个 Claude Code 会话）:
 | 逻辑错误 | — | 是（单元测试） | — |
 | 行为不等价 | — | 是（差异测试） | — |
 | 性能退化 | — | — | 是（benchmark） |
-| 并发 bug | — | — | 是（loom/集成测试） |
+| 并发 bug | 部分（Send/Sync 编译期检查） | — | 是（loom/集成测试） |
 | FFI 边界问题 | — | — | 是（集成测试） |
 | 翻译膨胀 | — | 是（tokei 对比） | — |
-| unsafe 安全性 | — | 是（Miri 单模块） | 是（cargo-geiger 全局） |
+| unsafe 安全性 | — | 否 | 是（Miri 需 Tier 2 启用 + cargo-geiger 全局） |
 
 ### 4.6 并行开发策略
 
@@ -363,14 +382,14 @@ Work Unit（一个 Claude Code 会话）:
 | **Strangler Fig** | 大型项目、长期迁移 | 通过路由层逐模块切换，新旧并行运行 | 架构复杂 |
 
 **行动指南**：
-- 在 Sprint 0（项目画像）中决定并行策略
+- 在 PROFILE 阶段（项目画像）中决定并行策略
 - 功能冻结：在 `migration-state.json` 中锁定源码 commit hash
 - 双轨开发：每个 Sprint 开始前检查源项目变更，必要时更新 PORTING.md
 - Strangler Fig：需要额外配置 FFI 桥接层和路由层
 
-### 4.7 Phase 0.5：原项目可复现基线
+### 4.7 PROFILE → PLAN 中间步骤：原项目可复现基线
 
-在 Phase 0（画像）和 Phase 1（规划）之间，插入一个关键步骤：
+在 PROFILE（画像）和 PLAN（规划）之间，插入一个关键步骤：
 
 1. 锁定源项目版本（git tag/commit hash）
 2. 确认源项目能在本地完整构建和测试
@@ -378,6 +397,26 @@ Work Unit（一个 Claude Code 会话）:
 4. 记录基线指标（测试覆盖率、性能数据、代码行数）
 
 **行动指南**：如果源项目本地构建失败，**停止迁移**——先修复源项目。
+
+### 4.8 项目级止损标准
+
+当迁移进展持续不佳时，需要及时止损而非无限投入。以下阈值为参考值，可在 `.rustmigrate.toml` 的 `[stop_loss]` 节中配置覆盖。
+
+| 指标 | 阈值（默认） | 触发动作 |
+|------|------------|---------|
+| DEGRADE 比例 | >40% 模块降级为 FFI 桥接 | 暂停迁移，评估是否继续——大面积降级意味着 AI 翻译能力不足以处理该项目 |
+| LLM API 成本 | 超出预算 2x | 暂停迁移，评估是优化 prompt/模块粒度还是放弃 |
+| Sprint 停滞 | 连续 3 个 Sprint 未完成任何模块 | 召集团队评审，分析阻塞原因，决定是否继续 |
+
+```toml
+# .rustmigrate.toml 中的止损配置（可选覆盖）
+[stop_loss]
+degrade_ratio_threshold = 0.4        # 降级模块比例阈值
+cost_multiplier_threshold = 2.0      # LLM API 成本超预算倍数
+stalled_sprint_threshold = 3         # 连续停滞 Sprint 数
+```
+
+**行动指南**：`/migrate-status` 在仪表板中展示止损指标的当前值和阈值距离。接近阈值时提前预警。
 
 ---
 
@@ -414,7 +453,7 @@ Work Unit（一个 Claude Code 会话）:
 | 统计 | **tokei + scc** | 代码复杂度对比 | 始终 |
 | 多语言 AST | **tree-sitter** | 源码结构分析 | 始终 |
 | Rust 代码生成 | **syn + quote** | 宏/过程宏 | 需要代码生成时 |
-| 性能基准 | **criterion** | 性能回归检测 | 迁移动机含性能时 |
+| 性能基准 | **criterion** | 性能回归检测 | 默认 Tier 2；当 `migration_motives` 含 `performance` 时自动提升为 Tier 1 |
 | unsafe 审计 | **cargo-geiger** | unsafe 使用统计 | 始终 |
 | 任务运行 | **just** | 任务自动化 | 始终 |
 | 文件监控 | **bacon** | 持续编译反馈 | 本地开发 |
@@ -494,7 +533,7 @@ Work Unit（一个 Claude Code 会话）:
 
 ### 6.2 PORTING.md — 迁移规则宪法（26 类）
 
-参考 Bun 的 576 行 PORTING.md，定义所有翻译规则。**渐进式生成**：Sprint 0 生成必须的核心规则，后续 Sprint 按需追加。
+参考 Bun 的 576 行 PORTING.md，定义所有翻译规则。**渐进式生成**：PLAN 阶段生成必须的核心规则，后续 Sprint 按需追加。
 
 | # | 规则类 | MVP? | 说明 |
 |---|--------|------|------|
@@ -519,7 +558,7 @@ Work Unit（一个 Claude Code 会话）:
 | 19 | 惯用法映射表 | 是 | 源语言惯用法 → Rust 惯用法 |
 | 20 | 不确定性处理 | 是 | 留 TODO，禁止猜测 |
 | 21 | **生命周期与所有权模式** | 否 | 引用生命周期、借用模式映射 |
-| 22 | **异步运行时与并发原语** | 否 | tokio/async-std 选择、Future 映射 |
+| 22 | **异步运行时与并发原语** | 否 | tokio/async-std 选择、Future 映射、取消安全性审查（select!/timeout 中的 Future） |
 | 23 | **序列化/反序列化兼容性** | 否 | JSON/protobuf 字节级兼容 |
 | 24 | **日志/可观测性映射** | 否 | 日志框架 → tracing，格式兼容 |
 | 25 | **平台特定行为映射** | 否 | OS API → cfg 条件编译 |
@@ -673,7 +712,7 @@ Work Unit（一个 Claude Code 会话）:
 | migration-state.json | 核心状态 | 归档 | 不再需要 |
 | test-fixtures/ | 活跃使用 | **长期保留** | 回归测试资产 |
 
-### 6.10 Phase 6：知识固化与迁移毕业
+### 6.10 GRADUATE：知识固化与迁移毕业
 
 迁移不只是"代码转完就结束"。需要一个正式的毕业流程：
 
@@ -705,7 +744,7 @@ Work Unit（一个 Claude Code 会话）:
 | L3 | **E2E 差异测试** | 自建差异框架 | 1 | 整体行为等价 |
 | L4 | 模糊测试 | cargo-fuzz | 2 | 随机输入差异对比 |
 | L5 | 变异测试 | cargo-mutants | 2 | 验证测试真正保护了行为 |
-| L6 | **性能回归** | criterion | 1/2 | 无性能退化 |
+| L6 | **性能回归** | criterion | 2（性能动机时提升为 1） | 无性能退化 |
 | L7 | **并发正确性** | loom / shuttle | 2 | 并发模型正确性 |
 
 **测试执行确定性保障**：
@@ -713,7 +752,7 @@ Work Unit（一个 Claude Code 会话）:
 - cargo-fuzz：corpus 持久化到 `test-fixtures/fuzz-corpus/`
 - criterion：基线数据持久化到 `test-fixtures/benchmarks/`
 
-### 7.2 测试基础设施搭建（Phase 2 修正）
+### 7.2 测试基础设施搭建（SCAFFOLD 阶段修正）
 
 原设计存在循环依赖：Rust 代码不存在时不能写 Rust 测试。
 
@@ -819,7 +858,7 @@ Step 4: 模块迁移完成后，才生成 Rust 测试
 | 并发安全 | 并发热点优先 | loom/shuttle 推荐 | 编译通过 = 无数据竞争 | 否 |
 | 合规 | 外部要求驱动 | cargo-deny 必须 | 审计报告通过 | 否 |
 
-**行动指南**：Phase 0 画像时确认迁移动机（支持多动机，`.rustmigrate.toml` 中 `migration_motives` 数组，首项为主要动机），据此自动配置 Tier 1/2 工具和验收标准。多动机场景下取各动机工具和验收标准的并集。
+**行动指南**：PROFILE 阶段画像时确认迁移动机（支持多动机，`.rustmigrate.toml` 中 `migration_motives` 数组，首项为主要动机），据此自动配置 Tier 1/2 工具和验收标准。多动机场景下取各动机工具和验收标准的并集。
 
 ---
 
@@ -833,7 +872,7 @@ Step 4: 模块迁移完成后，才生成 Rust 测试
 | HashMap 迭代顺序 | Rust HashMap 随机化哈希 | 差异测试 + 需要顺序时用 BTreeMap 或 IndexMap |
 | UTF-8 vs UTF-16 | JS string.length 返回 UTF-16 code units | 专门的字符串语义测试用例 |
 | 整数溢出 | Debug panic, Release wrapping | PORTING.md 中明确溢出策略 |
-| 全局状态 | 模块级变量 → OnceLock/lazy_static | 全局状态审计作为 Phase 0 的一部分 |
+| 全局状态 | 模块级变量 → OnceLock/lazy_static | 全局状态审计作为 PROFILE 阶段的一部分 |
 | 错误处理范式 | 异常冒泡 ≠ Result 传播 | 重新设计错误处理策略（MDR 记录） |
 | 浮点精度 | 不同编译器/平台结果不同 | 数值计算的 epsilon 对比测试 |
 | 析构顺序 | Rust Drop 与 GC finalizer 不同 | 资源清理逻辑的专项测试 |
@@ -854,6 +893,7 @@ Step 4: 模块迁移完成后，才生成 Rust 测试
 | **Promise eager vs Future lazy** | JS Promise 创建即执行 | Rust Future 需要 executor 驱动，不 `.await` 不执行 | 审查所有 async 调用点，确保 Future 被驱动；PORTING.md 规则 22 专项覆盖 |
 | **Send/Sync 约束传染** | 源语言无编译期线程安全标记 | 跨 `.await` 持有的类型必须 Send，共享引用必须 Sync | 迁移后大量类型编译失败；需提前审计并发共享点，选择 Arc/Mutex 或重构 |
 | **可变性传播与架构重组** | 源语言允许多处同时修改对象 | `&mut` 排他借用，同一时刻只能有一个可变引用 | 无法直译多处同时写入的模式；需重构为消息传递、Cell/RefCell 或拆分数据结构 |
+| **异步取消安全性（Cancel Safety）** | JS Promise 创建后无法取消，始终运行到完成 | Rust Future 可在任意 `.await` 点被 drop（取消）；`tokio::select!` / `tokio::time::timeout` 会导致未选中的 Future 被 drop | 如果 Future 持有锁或处于半完成写操作状态，被 drop 会导致数据不一致。迁移时需逐一审查 `select!`/`timeout` 中的 Future 是否取消安全；PORTING.md 规则 22（异步运行时）中专项覆盖取消安全性审查 |
 
 ### 9.3 流程陷阱
 
@@ -925,24 +965,25 @@ Step 4: 模块迁移完成后，才生成 Rust 测试
         "command": "cargo check --message-format=json 2>&1 | head -50",
         "comment": "Tier 0 — cargo check: 每次写入 .rs 文件后自动编译检查 (F1)"
       }
-    ],
-    "TaskCompleted": [
-      {
-        "command": "cargo nextest run --lib 2>&1 | tail -20 && cargo clippy -- -D warnings 2>&1 | tail -10",
-        "comment": "Tier 0 — cargo-nextest + clippy: 模块完成后自动测试 + lint (F2)"
-      }
-    ],
-    "SprintReview": [
-      {
-        "command": "cargo deny check 2>&1 | tail -20 && cargo audit 2>&1 | tail -20",
-        "comment": "Tier 1 — cargo-deny + cargo-audit: Sprint Review 时触发许可证/CVE 审计 (F3)"
-      }
     ]
   }
 }
 ```
 
-**Tier 0 Hook 覆盖确认**：Tier 0 的三个工具（cargo check / clippy / cargo-nextest）均有对应 Hook 触发——cargo check 在 `PostToolUse`（F1），clippy 和 cargo-nextest 在 `TaskCompleted`（F2）。
+**F2 和 F3 的实现方式**：
+- **F2（模块完成后验证）**：不通过 Hook 实现。在各 Skill 的 SKILL.md 中通过分步指令要求"翻译步骤完成后执行 `cargo nextest run --lib` + `cargo clippy -- -D warnings`"。
+- **F3（Sprint Review 集成验证）**：不通过 Hook 实现。由 `/migrate-verify` Skill 手动触发，执行 `cargo deny check` + `cargo audit` 等完整验证管线。
+
+**概念事件 → Claude Code 实际实现机制映射表**：
+
+| 概念事件 | 反馈层级 | Claude Code 实现机制 | 说明 |
+|---------|---------|---------------------|------|
+| 写入 .rs 文件 | F1 | `PostToolUse` Hook（`Write` 事件） | 真实 Claude Code Hook 事件，自动触发 |
+| 模块翻译完成 | F2 | Skill SKILL.md 分步指令 | 在指令中要求 Claude 执行验证命令 |
+| Sprint Review | F3 | `/migrate-verify` Skill 手动触发 | 用户显式调用 |
+| 迁移状态变更 | — | `migration-state.json` 文件写入 | 编排器自行管理 |
+
+**Tier 0 覆盖确认**：Tier 0 的三个工具（cargo check / clippy / cargo-nextest）——cargo check 通过 `PostToolUse` Hook 自动触发（F1），clippy 和 cargo-nextest 通过 Skill SKILL.md 指令在翻译步骤完成后执行（F2）。
 
 ### 10.4 unsafe 分类管理
 
@@ -1004,6 +1045,11 @@ SubAgent B (串行)
 - SubAgent 间**不直接通信**，通过 `.rust-migration/` 下的文件传递数据
 - 每个 SubAgent 的输入/输出文件路径在 Skill 脚本中硬编码
 - 顺序约束：后序 SubAgent 启动前，检查前序产出物文件的存在性和有效性（JSON Schema 校验）
+
+**编排机制的本质（MVP 阶段）**：
+- MVP 阶段的编排**依赖 Claude 的指令跟随能力**，而非确定性程序控制。Skill 的 SKILL.md 通过强约束分步指令引导 Claude 的行为（如"第 1 步：调用 analyzer SubAgent；第 2 步：检查产出物；第 3 步：调用 translator SubAgent"）。
+- 这意味着编排的可靠性取决于 LLM 对指令的遵守程度，而非代码级别的 if-else 分支。
+- **M0 验证要求**：在 M0 阶段需要验证 Claude 能否可靠执行 3+ 步的 SubAgent 调度序列。如果指令跟随不够可靠，需要引入更细粒度的检查点或将长序列拆分为多个短 Skill。
 
 **未来演进**：M2 阶段引入有限并行（analyzer + scaffolder 可并行），M4 阶段引入完整 DAG 调度。
 
@@ -1079,7 +1125,7 @@ cargo_mutants = false
 miri = false
 kani = false
 loom = false
-criterion = true                     # 性能动机时自动开启
+criterion = false                    # 默认 Tier 2；当 migration_motives 含 performance 时自动提升为 Tier 1
 
 [testing]
 coverage_threshold = 80              # 覆盖率门槛（百分比）
@@ -1187,16 +1233,24 @@ crate_naming = "kebab-case"          # 子 crate 命名风格
 2. FFI 边界检测：自动发现跨语言调用点
 3. 迁移策略决策树：先迁移叶子语言，保留核心语言到最后
 
-### 11.4 四级渐进式用户旅程
+### 11.4 五级渐进式用户旅程
 
 | 级别 | 用户动作 | 工具介入深度 | 适用场景 |
 |------|---------|-------------|---------|
 | L1 探索 | `/migrate-init` | 只做画像和分析，不产生 Rust 代码 | 评估可行性 |
 | L2 规划 | `/migrate-plan` | 生成 PORTING.md + PARITY.md | 准备阶段 |
+| L2.5 测试搭建 | `/migrate-test` | 行为录制 + 测试基础设施搭建，不产生 Rust 代码 | 测试准备（L2 的后续子步骤，可选但推荐） |
 | L3 执行 | `/migrate-run` | 逐模块迁移 + 验证 | 实际迁移 |
 | L4 毕业 | `/migrate-graduate` | 评估毕业标准 + 知识固化 | 迁移收尾 |
 
-**行动指南**：用户可以在任意级别停留，不强制推进。L1 的画像报告本身就有价值（评估迁移可行性和成本）。
+**跨级别辅助工具**（可在任意级别使用）：
+
+| 工具 | 用途 | 说明 |
+|------|------|------|
+| `/migrate-verify` | 运行完整验证管线（F3 集成验证） | L3+ 阶段主要使用，但 L2.5 也可用于验证测试基础设施 |
+| `/migrate-status` | 查看迁移进度仪表板 | 任意阶段均可使用，了解当前迁移状态 |
+
+**行动指南**：用户可以在任意级别停留，不强制推进。L1 的画像报告本身就有价值（评估迁移可行性和成本）。L2.5 的测试搭建建议在 L3 执行前完成，但不强制——`/migrate-run` 内循环也会在模块迁移完成后生成测试。
 
 ### 11.5 验证管线 DAG 自定义
 
@@ -1377,31 +1431,31 @@ concurrency = false
 
 ```json
 {
-  "version": "0.3",
-  "phase": "sprint_loop",
-  "phase_history": [
+  "version": "0.4",
+  "state": "sprint_loop",
+  "state_history": [
     {
-      "phase": "init",
+      "state": "init",
       "entered_at": "2026-06-06T10:00:00Z",
       "exited_at": "2026-06-06T10:05:00Z"
     },
     {
-      "phase": "profile",
+      "state": "profile",
       "entered_at": "2026-06-06T10:05:00Z",
       "exited_at": "2026-06-06T11:00:00Z"
     },
     {
-      "phase": "plan",
+      "state": "plan",
       "entered_at": "2026-06-06T11:00:00Z",
       "exited_at": "2026-06-06T14:00:00Z"
     },
     {
-      "phase": "scaffold",
+      "state": "scaffold",
       "entered_at": "2026-06-06T14:00:00Z",
       "exited_at": "2026-06-06T16:00:00Z"
     },
     {
-      "phase": "sprint_loop",
+      "state": "sprint_loop",
       "entered_at": "2026-06-06T16:00:00Z",
       "exited_at": null
     }
@@ -1469,7 +1523,105 @@ concurrency = false
 
 ---
 
-## 附录 B：证据等级说明
+## 附录 B：MVP Skill 的 SKILL.md 骨架
+
+以下为 `/migrate-init` 和 `/migrate-run` 的 SKILL.md 骨架结构示例，展示分步指令格式、上下文加载、SubAgent 调用和检查点的编写方式。
+
+### /migrate-init SKILL.md 骨架
+
+```markdown
+# /migrate-init — 初始化迁移项目
+
+## 前置条件
+- 当前目录是源项目根目录
+- 源项目可构建、可测试
+
+## 分步指令
+
+### Step 1: 检测项目类型
+读取当前目录的文件结构，识别源语言和框架。
+检查以下文件是否存在：package.json, tsconfig.json, pyproject.toml, go.mod, CMakeLists.txt。
+
+### Step 2: 调用 analyzer SubAgent
+使用 analyzer SubAgent 执行项目画像分析。
+输入：项目根目录路径。
+等待产出物：`.rust-migration/intermediate/source-graph.json`。
+
+**检查点**：验证 source-graph.json 存在且包含 `modules` 和 `dependencies` 字段。
+如果验证失败，报告错误并停止。
+
+### Step 3: 生成初始状态
+基于 analyzer 的产出物，生成以下文件：
+- `.rust-migration/migration-state.json`（初始状态：PROFILE）
+- `.rust-migration/.rustmigrate.toml`（默认配置）
+
+**检查点**：验证 migration-state.json 的 state 字段为 "profile"。
+
+### Step 4: 输出摘要
+向用户展示项目画像摘要：源语言、代码行数、模块数、依赖数、建议的迁移策略。
+提示用户下一步执行 `/migrate-plan`。
+```
+
+### /migrate-run SKILL.md 骨架
+
+```markdown
+# /migrate-run — 执行模块迁移
+
+## 前置条件
+- `.rust-migration/migration-state.json` 存在且 state 为 "sprint_loop"
+- `.rust-migration/PORTING.md` 存在
+- 目标模块已在 Sprint 计划中
+
+## 上下文加载
+1. 读取 `migration-state.json`，确认当前 Sprint 和目标模块
+2. 读取 `PORTING.md` 中与目标模块相关的规则（按模块类型筛选）
+3. 读取目标模块源码
+4. 读取依赖模块的接口签名（仅接口，不含实现）
+
+## 分步指令
+
+### Step 1: 语义解构（调用 translator SubAgent）
+调用 translator SubAgent，要求其生成目标模块的意图摘要。
+输入：源码 + 相关 PORTING.md 规则。
+产出物：`.rust-migration/intermediate/{module}-intent.md`。
+
+**检查点**：意图摘要文件存在且非空。
+
+### Step 2: 代码翻译（调用 translator SubAgent）
+调用 translator SubAgent，基于意图摘要生成 Rust 代码。
+输入：意图摘要 + PORTING.md 规则 + 依赖接口。
+产出物：Rust 源文件写入 `rust_root` 对应路径。
+
+**检查点**：Rust 文件存在。
+注意：写入 .rs 文件后 PostToolUse Hook 会自动触发 cargo check（F1 反馈）。
+
+### Step 3: F1 编译反馈循环
+如果 cargo check 失败，将错误信息反馈给 translator SubAgent 修复。
+最多重试 3 轮（由 .rustmigrate.toml 的 max_retry_rounds 控制）。
+3 轮后仍失败 → 进入 DEGRADE 流程。
+
+**检查点**：cargo check 通过。
+
+### Step 4: F2 测试验证
+翻译步骤完成后，执行以下验证命令：
+- `cargo nextest run --lib` — 运行单元测试
+- `cargo clippy -- -D warnings` — lint 检查
+
+如果测试失败：调用 verifier SubAgent 分析失败原因。
+可修复 → 修复后重新执行 Step 4。
+不可修复 → 记录到 KNOWN_DIFFERENCES.md。
+
+**检查点**：测试通过率 ≥ 预期，clippy 无 warning。
+
+### Step 5: 状态更新
+更新 `migration-state.json` 中该模块的状态。
+更新 `PARITY.md` 中该模块的进度行。
+如有架构决策，写入 MDR。
+```
+
+---
+
+## 附录 C：证据等级说明
 
 本文档引用的案例和数据按以下等级标注：
 
