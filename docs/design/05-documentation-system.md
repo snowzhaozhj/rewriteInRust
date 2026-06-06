@@ -389,6 +389,38 @@ confidence: high
 - **PORTING 规则**：每次规则变更记录原因和 Sprint 编号（changelog.md）
 - **patterns / anti-patterns**：模块完成或失败时写入
 
+### 辅助产出物格式模板
+
+**SPRINT_LEARNINGS.md**（每次 Sprint Review 追加）：
+
+```markdown
+## Sprint S1 (2026-06-15)
+
+### 新发现的翻译模式
+- HashMap 迭代顺序差异：所有依赖遍历顺序的逻辑需改用 BTreeMap
+
+### 工具调整
+- proptest seed 需固定到 test-fixtures/，否则 CI 不可复现
+
+### 规则变更
+- PORTING 规则新增：整数溢出策略（由 Sprint S1 失败触发）
+
+### 下一 Sprint 注意事项
+- core/parser 模块的 async 模式需要 tokio 迁移指南
+```
+
+**DESIGN_ASSUMPTIONS.md**（M0 假设验证报告）：
+
+```markdown
+## 假设验证报告
+
+| # | 假设 | Spike | 结论 | Plan B? | 说明 |
+|---|------|-------|------|---------|------|
+| 1 | SubAgent 4 步编排可靠 | Spike 1 | verified (4/5 通过) | 否 | 第 3 次失败因上下文膨胀，缩减 analyzer 输出后稳定 |
+| 2 | rust-analyzer LSP 反馈秒级 | Spike 2 | verified | 否 | 小项目 <1s，中项目 ~3s |
+| 3 | tree-sitter TS 精度 | Spike 3 | plan-b-triggered | 是 | 装饰器解析不完整，改用 ast-grep |
+```
+
 ### 知识复利机制
 
 每次模块迁移完成后，执行知识沉淀步骤：
