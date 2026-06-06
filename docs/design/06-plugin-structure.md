@@ -84,8 +84,13 @@ Plugin 中的确定性计算由独立的 Rust CLI 工具 `rustmigrate` 承担，
 |--------|------|
 | `rustmigrate init` | 初始化 `.rust-migration/` 目录和 `.rustmigrate.toml` 配置文件 |
 | `rustmigrate profile` | 分析源码项目画像（语言检测、框架识别、代码统计） |
-| `rustmigrate graph build` | 使用 tree-sitter 解析源码，构建模块依赖图（输出 `source-graph.json`） |
+| `rustmigrate graph build` | 使用 tree-sitter 解析源码，构建源码图（存储到 `source-graph.db`） |
 | `rustmigrate graph topo-sort` | 对依赖图执行拓扑排序，输出迁移顺序 |
+| `rustmigrate graph deps <module>` | 查询模块的正向依赖树 |
+| `rustmigrate graph rdeps <module>` | 查询谁依赖此模块（反向依赖） |
+| `rustmigrate graph cycles` | 检测循环依赖（Kosaraju SCC 算法） |
+| `rustmigrate graph stats` | 图统计信息（节点/边计数、度分布） |
+| `rustmigrate graph export` | 导出图为 JSON/DOT/Mermaid 格式 |
 | `rustmigrate validate state` | 校验 `migration-state.json` 的合法性（JSON Schema + 状态机约束） |
 | `rustmigrate validate config` | 校验 `.rustmigrate.toml` 配置文件的合法性 |
 | `rustmigrate state get` | 查询指定模块的当前迁移状态 |
@@ -104,7 +109,7 @@ cli/
 ├── crates/
 │   ├── core/               # 核心逻辑（分析、图、状态机、校验）
 │   │   ├── src/
-│   │   │   ├── graph.rs    # 依赖图构建/遍历（petgraph）
+│   │   │   ├── graph.rs    # 图引擎：petgraph StableGraph + SQLite 持久化 + Query→Resolve→Set API
 │   │   │   ├── profile.rs  # 项目画像分析（tree-sitter + tokei）
 │   │   │   ├── state.rs    # 状态机管理
 │   │   │   ├── scaffold.rs # workspace 骨架生成
@@ -141,7 +146,8 @@ SKILL.md 通过 Bash tool 调用 CLI，所有输出为统一 JSON 格式：
 | ast-grep-core | 代码模式搜索/重写 | `profile`（惯用法检测） |
 | tokei | 代码行数统计 | `stats loc`, `stats compare` |
 | syn + quote | Rust 代码生成/分析 | `scaffold workspace` |
-| petgraph | 依赖图数据结构 | `graph build`, `graph topo-sort` |
+| petgraph | 依赖图数据结构（StableGraph + newtype 索引） | `graph build/topo-sort/deps/rdeps/cycles` |
+| rusqlite | SQLite 图持久化 + FTS5 全文搜索 | `graph build`（写入）, `graph export`（查询） |
 | jsonschema | JSON Schema 校验 | `validate state`, `validate config` |
 
 ### 分发方式
@@ -156,12 +162,12 @@ SKILL.md 通过 Bash tool 调用 CLI，所有输出为统一 JSON 格式：
 |------|--------|------|
 | CLI 骨架（clap + JSON 输出） | 1 人天 | workspace 搭建 + clap 路由 + 统一输出格式 |
 | `profile`（tree-sitter + tokei） | 2 人天 | 语言检测 + 框架识别 + 代码统计 |
-| `graph build` + `topo-sort`（petgraph） | 2 人天 | AST 提取模块关系 + 拓扑排序 |
+| `graph build` + 查询命令（petgraph + rusqlite） | 3 人天 | AST 提取 + 图存储 + topo-sort/deps/rdeps/cycles/stats/export |
 | `state` + `validate`（jsonschema） | 1.5 人天 | 状态机 + JSON Schema 校验 |
 | `stats loc` + `compare` | 1 人天 | tokei 封装 + 复杂度对比 |
 | `scaffold workspace` | 1 人天 | Cargo.toml 生成 + dev-deps 注入 |
 | 测试 + CI | 1.5 人天 | 单元测试 + 集成测试 + GitHub Actions |
-| **合计** | **~10 人天** | M1 阶段完成 |
+| **合计** | **~11 人天** | M1 阶段完成 |
 
 ---
 

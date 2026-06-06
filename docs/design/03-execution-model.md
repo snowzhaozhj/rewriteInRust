@@ -60,10 +60,15 @@ Sprint N:
 ```
 Work Unit（一个 Claude Code 会话）:
 
+  Step 0: 源文件保留（首次迁移时执行一次）
+    - 将待迁移模块的源文件复制到 `.rust-migration/source-ref/` 作为参考副本
+    - 锁定源码版本（记录 commit hash 到 migration-state.json）
+    - 原则：源文件保留直到 `/migrate graduate` 毕业（借鉴 Bun 的 .zig/.rs 并存模式）
+
   Step 1: 上下文加载
     - 读取 migration-state.json 确认当前任务
     - 读取 PORTING 规则中相关条目
-    - 读取目标模块源码 + 依赖接口
+    - 读取目标模块源码 + 依赖接口（优先读 source-ref 中的锁定版本）
 
   Step 2: 语义解构
     - AI 生成意图摘要（纯文本，不含源语言语法）
@@ -72,10 +77,11 @@ Work Unit（一个 Claude Code 会话）:
   Step 3: Phase A — 忠实翻译
     - 生成 Rust 代码，优先保持与源码的 1:1 对应（便于 diff 对照审查）
     - Private 方法默认翻译（不省略），保持结构完整性
-    - 标记系统：
-      - TODO(port) — 标记未完成项
+    - 标记系统（借鉴 Bun 的 TODO(port) 纪律——累积 2,327 个标记后统一清理）：
+      - TODO(port) — 标记未完成项（翻译期间允许累积，Sprint Review 时统一清理）
       - PERF(port) — 标记已知性能问题
-      - PORT NOTE — 标记翻译决策
+      - PORT NOTE — 标记翻译决策（说明为什么选择这种翻译方式）
+    - 标记清理规则：每个 Sprint Review 统计 TODO(port) 数量，趋势必须下降；`/migrate review` 报告中包含标记计数
     - F1 反馈：rust-analyzer LSP 自动诊断（秒级）
 
   Step 4: 对抗性审查
@@ -145,6 +151,20 @@ Work Unit（一个 Claude Code 会话）:
 - 功能冻结：在 `migration-state.json` 中锁定源码 commit hash
 - 双轨开发：每个 Sprint 开始前检查源项目变更，必要时更新 PORTING 规则
 - Strangler Fig：需要额外配置 FFI 桥接层和路由层
+
+## 4.7 异步翻译策略
+
+> **设计依据**：Claw-Code（TS→Rust）采用"边界异步、核心同步"策略，大幅降低了翻译复杂度；Pingora（C→Rust）则在 Tokio 之上构建了定制运行时。不同项目需要不同策略。
+
+翻译时的异步处理不应硬性规定通用规则，而是按项目特征决定：
+
+| 源项目特征 | 推荐策略 | 理由 |
+|-----------|---------|------|
+| 纯计算/CLI 工具 | **核心同步**，仅 I/O 边界异步 | 降低翻译复杂度，避免不必要的 async 传染 |
+| Web 服务（Express/Flask） | **按需异步**，路由层 async，业务逻辑可同步 | 匹配 axum/actix 的异步模型 |
+| 高并发运行时（事件循环） | **全栈异步**，须选择运行时并写 MDR | 必须用 tokio/async-std 重新设计并发模型 |
+
+**行动指南**：PROFILE 阶段（项目画像）中评估源项目的异步模式，在 `.rustmigrate.toml` 的 `async_strategy` 字段记录决策。如果选择"全栈异步"，须写 MDR 记录运行时选择（tokio vs async-std）和取消安全性审查计划。
 
 ## 4.7 PROFILE → PLAN 中间步骤：原项目可复现基线
 

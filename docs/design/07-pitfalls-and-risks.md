@@ -87,6 +87,7 @@
 | petgraph 维护风险 | 低 | 中 | 轻量场景可自建 DAG |
 | dependency-cruiser 单人风险 | 低 | 中 | 准备 fork 计划 |
 | 过度设计 | 中 | 高 | **MVP 聚焦 TS 单模块，拒绝 scope creep** |
+| **unsafe 预算失控** | 高 | 中 | 见 12.3 unsafe 策略决策 |
 
 **竞品定位说明**：
 - **RustLift**（C/C++→Rust 控制平面）：理念一致（Approval Token 等机制已借鉴），市场不重叠（他们做 C/C++，我们从 TS 起步）
@@ -114,3 +115,32 @@
 | **Plan B3: 混合方案** | 简单步骤（1-2 步）用 SKILL.md 指令，复杂编排（3+ 步循环/条件）用外部脚本。取两者优势。 | 额外 2-4 人天开发 | 最可能的实际落地方案 |
 
 **行动指南**：M0 结束后更新 `DESIGN_ASSUMPTIONS.md`，标记每个假设的状态（verified / plan-b-triggered），后续里程碑据此调整实现方案。
+
+### 12.3 unsafe 策略决策
+
+> **设计依据**：深度分析了三个真实 Rust 迁移案例的 unsafe 策略，差异极大：
+
+| 案例 | unsafe 数量 | 策略 | 结果 |
+|------|-----------|------|------|
+| **Claw-Code** (TS→Rust, 48.6K 行) | **0** | workspace 级 `unsafe_code = "forbid"` | 零 unsafe，安全性最强 |
+| **Pingora** (C→Rust, 86K 行) | **82** | 允许但集中在 TLS FFI 和系统调用 | unsafe 占比 <0.1%，仅用于语言边界 |
+| **Bun** (Zig→Rust, 75 万行) | **10,000+** | 大规模自动翻译产生 | 社区争议极大，Rust 内存安全优势被削弱 |
+
+**核心教训**：unsafe 数量不是单纯技术细节，而是**迁移路线选择的结果**。AI 大规模自动翻译倾向于产生大量 unsafe（Bun 模式），人工或小规模 AI 辅助翻译可以做到零 unsafe（Claw-Code 模式）。
+
+**本项目的 unsafe 策略**：
+
+按源语言设置 unsafe 预算：
+
+| 源语言 | unsafe 预算 | 理由 |
+|--------|-----------|------|
+| **TypeScript/Python → Rust** | **接近 0** | 源语言本身没有指针/unsafe 概念，翻译不应引入 |
+| **C/C++ → Rust** | **允许局部存在** | FFI 桥接和底层系统调用可能需要，但须逐个审计 |
+| **Zig → Rust** | **严格控制** | Zig 有 comptime 和手动内存管理，翻译时需特别注意 |
+
+**执行机制**：
+- MVP 阶段（TS→Rust）：在 scaffold 命令生成的 Cargo.toml 中默认设置 `unsafe_code = "warn"`
+- verifier SubAgent 的对抗性审查清单中包含 unsafe 审计
+- 每个 unsafe 块必须有 `// SAFETY:` 注释（已在 AGENTS.md 规则中要求）
+- 超出预算（TS→Rust 出现 unsafe）触发人工架构评审，记录为 MDR
+- `/migrate graduate` 毕业标准中包含 unsafe 审计（[见文档体系 > 毕业标准](./05-documentation-system.md#610-graduate知识固化与迁移毕业)）

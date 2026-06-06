@@ -329,32 +329,71 @@ Private 方法默认翻译（不省略），保持结构完整性。
 ### source-graph.json（源码依赖图）
 
 > 独立示例文件：[`schemas/source-graph.example.json`](./schemas/source-graph.example.json)
+> 图数据模型详见 [04-toolchain.md § 5.7.1](./04-toolchain.md#571-图数据模型)
 
 ```json
 {
-  "version": "0.1",
+  "version": "0.2",
   "generated_at": "2026-06-06T10:05:00Z",
-  "modules": [
+  "storage": "sqlite",
+  "db_path": ".rust-migration/source-graph.db",
+  "nodes": [
     {
-      "id": "utils/string",
-      "path": "src/utils/string.ts",
-      "language": "typescript",
-      "loc": 320,
-      "exports": ["capitalize", "slugify", "truncate"],
-      "complexity": "low"
+      "id": "file:src/utils/string.ts",
+      "node_type": "File",
+      "name": "string.ts",
+      "file_path": "src/utils/string.ts",
+      "line_range": [1, 320],
+      "is_exported": false,
+      "complexity": "simple"
+    },
+    {
+      "id": "function:src/utils/string.ts:capitalize",
+      "node_type": "Function",
+      "name": "capitalize",
+      "file_path": "src/utils/string.ts",
+      "line_range": [15, 28],
+      "is_exported": true,
+      "complexity": "simple",
+      "migration_status": "done",
+      "migration_priority": 1
     }
   ],
-  "dependencies": [
+  "edges": [
     {
-      "from": "core/parser",
-      "to": "utils/string",
-      "type": "import",
-      "symbols": ["slugify"]
+      "source": "file:src/utils/string.ts",
+      "target": "function:src/utils/string.ts:capitalize",
+      "edge_type": "contains",
+      "provenance": "tree-sitter",
+      "weight": 1.0
+    },
+    {
+      "source": "file:src/core/parser.ts",
+      "target": "file:src/utils/string.ts",
+      "edge_type": "imports",
+      "provenance": "tree-sitter",
+      "weight": 1.0
+    },
+    {
+      "source": "function:src/core/parser.ts:parseTitle",
+      "target": "function:src/utils/string.ts:capitalize",
+      "edge_type": "calls",
+      "provenance": "ast-grep",
+      "weight": 0.95
     }
   ],
-  "topological_order": ["utils/string", "utils/math", "core/parser", "core/runtime"]
+  "topological_order": ["utils/string", "utils/math", "core/parser", "core/runtime"],
+  "file_fingerprints": {
+    "src/utils/string.ts": {
+      "content_hash": "sha256:a1b2c3...",
+      "structure_hash": "sha256:d4e5f6...",
+      "analyzed_at": "2026-06-06T10:05:00Z"
+    }
+  }
 }
 ```
+
+> **注意**：实际存储使用 SQLite 数据库（`.rust-migration/source-graph.db`），上述 JSON 为导出/调试格式。CLI 子命令 `rustmigrate graph export --format json` 可导出此格式。
 
 ### type-map.json（类型映射表）
 

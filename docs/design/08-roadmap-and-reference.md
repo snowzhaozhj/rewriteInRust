@@ -66,10 +66,10 @@
 | migration-state.json 管理 | 2-3 | Schema 定义 + 状态流转逻辑 + 断点续传 |
 | .rustmigrate.toml | 1 | Schema 定义 + 默认值生成 |
 | 集成测试 + 调试 | 5-8 | 3 个真实项目上的端到端验证 |
-| CLI 核心（11 个子命令） | 8-12 | init/profile/graph/validate/state/stats/scaffold |
-| CLI 嵌入 crate 集成 | 3-4 | tree-sitter + ast-grep-core + tokei + petgraph 绑定 |
+| CLI 核心（16 个子命令） | 9-13 | init/profile/graph(build+topo-sort+deps+rdeps+cycles+stats+export)/validate/state/stats/scaffold |
+| CLI 嵌入 crate 集成 | 4-5 | tree-sitter + ast-grep-core + tokei + petgraph + rusqlite 绑定 |
 | CLI 测试 | 2-3 | 集成测试 + fixtures |
-| **合计** | **35-52** | 1 人约 9-13 周，2 人约 5-7 周 |
+| **合计** | **37-55** | 1 人约 9-14 周，2 人约 5-7 周 |
 
 ### M2: 质量提升（8-12 周）
 
@@ -147,15 +147,16 @@
 
 | 项目 | 规模 | 耗时 | 结果 | 证据等级 | 可参考维度 |
 |------|------|------|------|---------|-----------|
-| Bun (Zig→Rust) | 100 万行 | 11 天 | 99.8% 测试通过 | **商业案例**（Bun 团队博客） | 测试驱动验证流程、大规模迁移节奏 |
-| Claw-Code (TS→Rust) | 48K 行 | 4 天 | 功能完整 | **社区传闻**（GitHub 项目） | AI 辅助翻译工作流、PORTING.md 实践 |
-| Pokemon Showdown (JS→Rust) | 10 万行 | 7 天 | 功能完整 | **社区传闻**（GitHub 项目） | 大型 JS 项目迁移模式、模块拆分策略 |
-| Cloudflare Pingora (C→Rust) | 从零构建 | N/A | CPU-70%, 内存-67% | **商业案例**（Cloudflare 博客） | 性能动机验收标准、FFI 桥接方案 |
-| Discord (Go→Rust) | 单服务 | N/A | 消除 GC 延迟尖刺 | **商业案例**（Discord 博客） | 并发安全动机、GC→所有权模型迁移 |
+| Bun (Zig→Rust) | 75 万行 | 11 天 | 99.8% 测试通过 | **商业案例**（[Anthropic 博客](https://claude.com/blog/a-harness-for-every-task-dynamic-workflows-in-claude-code)） | Dynamic Workflows 并行子代理编排、测试驱动验证 |
+| Claw-Code (TS→Rust) | 48.6K 行 | 4 天 | 功能完整 | **开源项目**（[GitHub](https://github.com/ultraworkers/claw-code)） | Mock Parity Harness 行为验证、PARITY.md 进度跟踪、9-lane 并行推进 |
+| Cloudflare Pingora (C→Rust) | 86K 行 | N/A | CPU-70%, 内存-67% | **商业案例**（[GitHub](https://github.com/cloudflare/pingora)） | 完全重写（非渐进式 FFI）、语义移植、Trait 替代回调函数、分层 crate 架构 |
+| Discord (Go→Rust) | 单服务 | N/A | 消除 GC 延迟尖刺 | **商业案例**（[Discord 博客](https://discord.com/blog/why-discord-is-switching-from-go-to-rust)） | GC→所有权模型迁移动机、**非 AI 辅助**（2020 年手动重写） |
 
-> **注意**：Bun 和 Claw-Code 的极端速度可能包含未公开的前期准备工作，不应作为时间估算基准。
+> **注意**：Bun 和 Claw-Code 的极端速度可能包含未公开的前期准备工作（Bun 由 Anthropic 收购后作为 Dynamic Workflows 标杆案例），不应作为时间估算基准。Bun 迁移产生了 10,000+ 个 unsafe 块，社区对此争议很大。
 
-**Bun PORTING.md 引用说明**：本项目设计中多处引用 Bun 的 576 行 PORTING.md 作为方法论参考（[见文档体系 > 迁移规则体系](./05-documentation-system.md#62-迁移规则体系通用--项目专有)）。该引用**待验证**——需确认 Bun 的 PORTING.md 当前是否仍然公开可访问、内容是否与引用描述一致。M0 阶段应安排验证此引用，如不可验证则调整为其他公开案例或移除具体行数引用。
+> ~~Pokemon Showdown (JS→Rust)~~ — v0.9.3 验证确认**此案例为 LLM 幻觉**，GitHub 和全网搜索均无任何相关仓库、博客或报道。已从参考列表中移除。
+
+**Bun PORTING.md 验证结论**：v0.9.3 通过直接访问 Bun 仓库验证，**确认 Bun 仓库中不存在独立的 PORTING.md 文件**。迁移规则融入了 CLAUDE.md（Bun 的 CLAUDE.md 描述项目为 "written primarily in Rust"）。PR 分支名 `claude/phase-a-port` 暗示使用了类似 Phase A 的翻译阶段概念。本项目设计中对 "Bun 576 行 PORTING.md" 的引用已确认为不准确信息，后续文档中不再引用具体行数。
 
 ### 关键论文
 
