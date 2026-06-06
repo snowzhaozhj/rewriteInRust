@@ -325,6 +325,12 @@ CREATE INDEX idx_edges_target_type ON edges(target, edge_type);
 
 阶段 2 对大项目（>200 文件）按 import 关系做社区检测分批，每批上限 35 文件。这让每批内的文件有上下文关联，提升 LLM 分析质量。退化方案：社区检测失败时按目录分组。
 
+**CLI `graph build` 与适配器 `extract-deps.sh` 的职责关系**：
+
+- **`rustmigrate graph build`**（阶段 2）：使用 tree-sitter 做确定性 AST 解析，产出基础图（contains、imports、exports 边）。这是图的骨架，100% 确定性。
+- **适配器 `extract-deps.sh`**（阶段 2 补充）：使用语言专用工具（如 dependency-cruiser）做精细依赖分析，能发现 tree-sitter 无法覆盖的动态 import、re-export 等场景。
+- **合并策略**：CLI 构建基础图后，适配器输出作为补充合并入图。同一条边如果两者都产出，保留 `provenance: TreeSitter` 版本（确定性优先）；仅适配器发现的边标注 `provenance: AstGrep`。
+
 ### 5.7.5 增量更新策略
 
 **三级变更检测**（借鉴 UA 的结构指纹）：
@@ -370,6 +376,30 @@ CLI `rustmigrate graph` 子命令提供以下查询（M1 实现前 4 项）：
 - `--no-tests` — 排除测试节点
 - `--edge-type <type>` — 按边类型过滤
 - 被过滤节点的边重定向到最近的未被过滤祖先（而非简单删除），保持图连通性
+
+### 5.7.8 可观测性与诊断
+
+> **审查指出的遗漏**：CLI 和 Plugin 自身如何记录操作日志、如何排查编排失败。
+
+**CLI 日志**：
+
+| 日志级别 | 输出目标 | 内容 |
+|---------|---------|------|
+| `error` | stderr | 致命错误（文件不存在、Schema 校验失败） |
+| `warn` | stderr | 非致命警告（可选工具缺失、过期指纹） |
+| `info` | stderr | 命令执行摘要（节点/边数量、耗时） |
+| `debug` | 日志文件 `.rust-migration/logs/rustmigrate.log` | 详细执行步骤（AST 解析耗时、SQL 查询详情） |
+
+通过 `RUST_LOG` 环境变量或 `--verbose` / `-v` 标志控制级别。
+
+**SubAgent 编排诊断**：
+
+当 SubAgent 编排失败时，用户需要知道"在哪一步失败了"和"失败原因是什么"。诊断信息通过以下方式提供：
+- SKILL.md 每个 Step 的检查点失败时，输出明确的错误消息和建议（"source-graph.db 不存在——请先运行 `rustmigrate graph build`"）
+- `migration-state.json` 的 `state_history` 记录每个状态转换的时间戳，可用于定位卡在哪个阶段
+- `--dry-run` 标志（M2）：预演 Skill 的执行步骤而不实际执行，用于调试编排逻辑
+
+---
 
 ## 5.8 工具集成方式分类
 

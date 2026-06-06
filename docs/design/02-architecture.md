@@ -48,7 +48,10 @@
 │  ├── KNOWN_DIFFERENCES.md    # 已知行为差异登记簿               │
 │  ├── AGENTS.md               # AI 行为约束                      │
 │  ├── migration-state.json    # 状态机 + Sprint 元数据           │
-│  ├── .rustmigrate.toml       # 项目配置                         │
+│  ├── source-graph.db         # 源码图 SQLite 数据库             │
+│  ├── source-ref/             # 源文件锁定副本（迁移期间保留）   │
+│  ├── SPRINT_LEARNINGS.md     # Sprint 级知识总结                │
+│  ├── DESIGN_ASSUMPTIONS.md   # M0 假设验证报告                  │
 │  ├── context/                # 项目知识（patterns/anti-patterns）│
 │  ├── decisions/              # MDR 迁移决策记录                  │
 │  ├── intermediate/           # 中间产物                          │

@@ -84,7 +84,7 @@ Plugin 中的确定性计算由独立的 Rust CLI 工具 `rustmigrate` 承担，
 
 | 子命令 | 说明 |
 |--------|------|
-| `rustmigrate init` | 初始化 `.rust-migration/` 目录和 `.rustmigrate.toml` 配置文件 |
+| `rustmigrate init` | 初始化 `.rust-migration/` 目录 + 项目根目录 `.rustmigrate.toml` 配置文件 |
 | `rustmigrate profile` | 分析源码项目画像（语言检测、框架识别、代码统计） |
 | `rustmigrate graph build` | 使用 tree-sitter 解析源码，构建源码图（存储到 `source-graph.db`） |
 | `rustmigrate graph topo-sort` | 对依赖图执行拓扑排序，输出迁移顺序 |
@@ -217,9 +217,22 @@ Plugin 不支持 `rules/` 目录分发，因此采用混合策略将规则按特
 
 | Agent | 职责 | 核心工具 |
 |-------|------|---------|
-| `analyzer` | 源码分析、项目画像、依赖图构建、惯用法检查 | tree-sitter, dependency-cruiser, Mypy, tokei |
+| `analyzer` | 源码分析、项目画像、依赖图语义增强、惯用法检查 | tree-sitter, dependency-cruiser, Mypy, tokei |
 | `translator` | 迁移规则生成、Phase A 忠实翻译 + Phase B 惯用化优化、多候选生成 | LLM, syn+quote, ast-grep |
 | `verifier` | 等价性验证、**模块级测试生成**、Phase A→B 中间的对抗性审查、不等价证据收集、性能对比 | cargo-test, proptest, criterion, Miri |
+
+### SubAgent 输入/输出接口表
+
+> 每个 SubAgent 通过 `.rust-migration/` 目录下的文件通信。以下表格定义各 SubAgent 的输入/输出契约。
+
+| SubAgent | 输入文件 | 输出文件 | 前置条件 | 后置条件 |
+|----------|---------|---------|---------|---------|
+| **analyzer** | 源码目录、`.rustmigrate.toml` | `source-graph.db`（语义增强）、项目画像摘要（stdout JSON） | CLI `rustmigrate graph build` 已完成基础图构建 | `source-graph.db` 含 calls/uses_type 边 |
+| **translator**（规则生成） | `source-graph.db`、适配器 `porting-template.md` | `porting/` 目录（迁移规则文件） | analyzer 已完成 | `porting/` 至少含一个规则文件 |
+| **translator**（代码翻译） | `porting/` 规则、目标模块源码、依赖接口 | Rust 源文件（写入目标目录）、`{module}-intent.md`（意图摘要） | 模块状态为 translating | Rust 文件存在且通过 F1 编译 |
+| **verifier**（对抗审查） | Phase A Rust 产出物、原始源码、迁移规则 | `{module}-review.md`（审查报告） | Phase A 翻译完成 | 审查报告包含差异列表 |
+| **verifier**（测试验证） | Phase B Rust 产出物、黄金文件 | 测试结果 JSON（stdout）、KNOWN_DIFFERENCES.md 追加条目 | Phase B 翻译完成 | 测试通过率 ≥ 预期 |
+| **scaffolder** | `source-graph.db`、模块接口信息 | `test-fixtures/golden/` 测试数据、Cargo.toml dev-deps 注入 | analyzer 已完成 | 测试基础设施可运行 |
 | `scaffolder` | 测试基础设施搭建、行为录制、黄金测试集管理 | insta, cargo-fuzz, mitmproxy |
 
 **行动指南**：每个 SubAgent 有独立的系统提示，包含其职责边界和可用工具列表。Agent 之间通过 `migration-state.json` 和产出物文件通信。
@@ -251,7 +264,7 @@ MVP 中 SubAgent 的实现基于 Claude Code 的标准 agent 定义机制：
 
 ## 10.3 Hooks（自动化门禁）
 
-**关键原则（借鉴 DAE）**：门禁用独立脚本，agent 无法说服自己跳过。
+**关键原则（Deterministic Assertion Enforcement）**：门禁用独立脚本，agent 无法说服自己跳过。
 
 > **v0.9 变更**：F1 编译反馈改为 rust-analyzer LSP 自动诊断，删除原 PostToolUse → cargo check 的 Hook（`check.sh`）。保留 cargo fmt 格式化 Hook + 文件保护 Hook + F2/F3 验证脚本。
 
@@ -422,8 +435,8 @@ SubAgent B (串行)
 ├── AGENTS.md                  # AI 行为约束（含反合理化表）
 ├── SPRINT_LEARNINGS.md        # Sprint 级知识总结（每次 Review 追加）
 ├── DESIGN_ASSUMPTIONS.md      # M0 假设验证报告
-├── .rustmigrate.toml          # 项目级配置（[见插件结构 > 配置文件](./06-plugin-structure.md#111-rustmigratetoml-配置文件)）
 ├── migration-state.json       # 状态机 + Sprint 元数据
+├── source-graph.db            # 源码图 SQLite 数据库（主存储）
 ├── porting/                   # 项目专有迁移规则
 │   ├── dependency-mapping.md  # 项目特有的依赖映射
 │   ├── business-logic-rules.md # 业务逻辑翻译策略
@@ -434,9 +447,7 @@ SubAgent B (串行)
 │   ├── anti-patterns/         # 项目特有的失败教训
 │   └── module-learnings/      # 模块级翻译经验
 ├── intermediate/              # 中间分析产物
-│   ├── source-graph.json      # 源码依赖图
-│   ├── type-map.json          # 类型映射
-│   ├── call-graph.json        # 调用图
+│   ├── type-map.json          # 类型映射（M2 产出物，MVP 阶段类型映射信息在 porting/ 规则中）
 │   └── attempts/              # 翻译尝试历史（断点续传用）
 ├── test-fixtures/             # 行为录制测试集
 │   ├── golden/                # 黄金文件 (input/output 对)
