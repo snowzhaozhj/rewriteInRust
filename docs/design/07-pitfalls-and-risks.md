@@ -107,13 +107,7 @@
 | SKILL.md 长指令可跟随 | Spike 4: >2000 字指令跟随率测试 | 拆分为多个短 Skill |
 | 用户愿意学配置 | 用户反馈收集 | 纯约定零配置模式（合理默认值，无 .rustmigrate.toml） |
 
-**Plan B 具体方案**（M0 Spike 1 失败时触发）：
-
-| 方案 | 实现方式 | 代价 | 用户体验退化 |
-|------|---------|------|-------------|
-| **Plan B1: 微 Skill 链** | 将 `/migrate run` 拆为 `/migrate-translate`、`/migrate-check`、`/migrate-test-gen` 等微命令，每个 Skill 只做 1 步（1 次 SubAgent 调用）。状态通过 `migration-state.json` 在微 Skill 间传递。用户手动或脚本串联。 | 额外 2-3 人天开发 | 用户需手动执行更多命令，但每步更可控 |
-| **Plan B2: 外部脚本编排** | 用 bash/Python 脚本调用 Claude Code CLI（`claude -p "执行 /migrate run ..."`），脚本中做 if-else 分支、文件检查、重试逻辑。编排逻辑 100% 确定性。 | 额外 3-5 人天开发 | 依赖 Claude Code CLI API 的稳定性；需用户安装额外依赖 |
-| **Plan B3: 混合方案** | 简单步骤（1-2 步）用 SKILL.md 指令，复杂编排（3+ 步循环/条件）用外部脚本。取两者优势。 | 额外 2-4 人天开发 | 最可能的实际落地方案 |
+**Plan B 具体方案**（M0 Spike 1 失败时触发）：详见 [06-plugin-structure.md § 10.5 的 Plan B 表格](./06-plugin-structure.md)，包含 Plan B1（微 Skill 链）、B2（外部脚本编排）、B3（混合方案）三个方案及其工作量估算。
 
 **行动指南**：M0 结束后更新 `DESIGN_ASSUMPTIONS.md`，标记每个假设的状态（verified / plan-b-triggered），后续里程碑据此调整实现方案。
 

@@ -6,7 +6,7 @@
 
 ## 十三、实施路线图
 
-### M0: 假设验证周（1-2 周）
+### M0: 假设验证周（2-3 周）
 
 **目标**：验证 6 个关键技术假设，产出假设验证报告，而非项目骨架
 
@@ -61,7 +61,7 @@
 | 4 个 SubAgent agent.md | 3-4 | 系统提示编写 + 职责边界定义 |
 | 2 个 Hook 脚本（fmt.sh + verify.sh） | 1 | check.sh 被 rust-analyzer 替代，减少 1 个 |
 | 文件保护 Hook（file-guard.sh） | 0.5 | PreToolUse 文件保护 |
-| 通用规则文件（.claude/rules/） | 2-3 | TS 通用规则拆分为独立文件 |
+| SubAgent 核心规则 + 参考指南 | 2-3 | agents/*.md 内嵌核心规则 + skills/migrate/references/ 参考指南编写 |
 | TS 语言适配器 | 3-5 | detect.sh + extract-types.sh + extract-deps.sh + porting-template.md |
 | Plugin 打包结构 | 1-2 | plugin.json + 目录组织 |
 | migration-state.json 管理 | 2-3 | Schema 定义 + 状态流转逻辑 + 断点续传 |

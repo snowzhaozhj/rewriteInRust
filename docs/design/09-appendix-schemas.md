@@ -326,8 +326,9 @@ Private 方法默认翻译（不省略），保持结构完整性。
 > 以下为 `.rust-migration/intermediate/` 目录下关键中间产物的简化 JSON 结构示例。完整 JSON Schema 在 M1 阶段补充。
 > 独立 JSON 示例文件见 [`schemas/`](./schemas/) 目录。
 
-### source-graph.json（源码依赖图）
+### source-graph 导出格式（JSON）
 
+> **主存储**为 SQLite（`.rust-migration/source-graph.db`），以下为 `rustmigrate graph export --format json` 的导出格式。
 > 独立示例文件：[`schemas/source-graph.example.json`](./schemas/source-graph.example.json)
 > 图数据模型详见 [04-toolchain.md § 5.7.1](./04-toolchain.md#571-图数据模型)
 
@@ -395,7 +396,7 @@ Private 方法默认翻译（不省略），保持结构完整性。
 
 > **注意**：实际存储使用 SQLite 数据库（`.rust-migration/source-graph.db`），上述 JSON 为导出/调试格式。CLI 子命令 `rustmigrate graph export --format json` 可导出此格式。
 
-### type-map.json（类型映射表）
+### type-map.json（类型映射表）【M2 参考，MVP 不使用】
 
 > 独立示例文件：[`schemas/type-map.example.json`](./schemas/type-map.example.json)
 
@@ -429,9 +430,10 @@ Private 方法默认翻译（不省略），保持结构完整性。
 }
 ```
 
-### call-graph.json（调用图）
+### call-graph.json（调用图）【M2 参考，MVP 不使用】
 
 > 独立示例文件：[`schemas/call-graph.example.json`](./schemas/call-graph.example.json)
+> **与 source-graph 的关系**：source-graph.db 中的 `calls` 边已包含调用关系数据。call-graph.json 是调用关系的扁平化视图，由 `rustmigrate graph export --view calls` 导出（M2 命令），用于人类阅读和外部工具消费。MVP 阶段不需要独立维护此文件。
 
 ```json
 {

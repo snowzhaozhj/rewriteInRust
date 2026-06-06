@@ -20,12 +20,7 @@
 
 ### 格式选型原则
 
-| 格式 | 适用场景 | 文件示例 |
-|------|---------|---------|
-| **JSON** | 机器状态、程序读写 | `migration-state.json`、`source-graph.json`、`type-map.json`、报告文件 |
-| **TOML** | 项目配置、人类可编辑 | `.rustmigrate.toml` |
-| **YAML frontmatter + Markdown** | 知识/模式文件（需元数据 + 正文） | `patterns/*.md`、`anti-patterns/*.md`、`references/*.md` |
-| **纯 Markdown** | 人类文档（规则、记录、差异） | `PORTING rules`、`MDR`、`KNOWN_DIFFERENCES.md`、`SPRINT_LEARNINGS.md` |
+> 完整的格式约定表见 [README.md > 存储格式约定](./README.md#存储格式约定)。
 
 知识/模式文件的 YAML frontmatter 格式示例：
 

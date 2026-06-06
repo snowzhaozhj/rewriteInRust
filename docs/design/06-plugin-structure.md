@@ -369,7 +369,7 @@ Hook 配置遵循 Claude Code 真实 API 格式（`hooks/hooks.json`）：
 
 | Skill | 调度序列 | 关键产出物 | 说明 |
 |-------|---------|-----------|------|
-| `/migrate analyze` | `analyzer` → `translator`(规则生成) → `scaffolder`(测试搭建) → 写入所有初始化产出物 | migration-state.json, source-graph.json, PORTING 规则, PARITY.md, AGENTS.md, test-fixtures/ | 原 init+plan+test 合并，序列最长（4 步） |
+| `/migrate analyze` | `analyzer` → `translator`(规则生成) → `scaffolder`(测试搭建) → 写入所有初始化产出物 | migration-state.json, source-graph.db, 迁移规则(porting/), PARITY.md, AGENTS.md, test-fixtures/ | 原 init+plan+test 合并，序列最长（3 次 SubAgent 调用） |
 | `/migrate run` | `translator`(Phase A 忠实翻译) → `verifier`(对抗性审查) → `translator`(Phase B 优化) → `verifier`(测试验证) → 更新状态 | Rust 代码, 审查报告, 测试, MDR | Phase A/B 双阶段翻译 |
 | `/migrate review` | `verifier`(全量验证) → 生成报告 → 更新 PARITY.md + 状态仪表板输出 | sprint-N-report.json, 终端仪表板 | 原 verify+status 合并 |
 | `/migrate graduate` | `verifier`(毕业评估：覆盖率 + unsafe 审计 + 性能基准) → 生成毕业报告 | graduation-report.json, unsafe-audit.json | 原 graduate+unsafe-audit 合并 |
@@ -605,7 +605,7 @@ Skill SKILL.md（分步指令）
   │     └── Bash tool → extract-types.sh → 输出 type-map.json 到 intermediate/
   │
   ├── Step: "使用 Bash tool 执行 adapters/{language}/extract-deps.sh <source_root>"
-  │     └── Bash tool → extract-deps.sh → 输出 source-graph.json 到 intermediate/
+  │     └── Bash tool → extract-deps.sh → 输出依赖 JSON → 合并到 source-graph.db
   │
   └── Step: "读取 adapters/{language}/porting-template.md 作为 PORTING 规则初始模板"
         └── Read tool → porting-template.md → 注入 translator SubAgent 上下文
