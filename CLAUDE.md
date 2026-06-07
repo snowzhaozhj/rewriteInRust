@@ -112,29 +112,32 @@ cargo nextest run -p rustmigrate-core    # 单元/集成测试
 cargo run -- graph build --root fixtures/linear-deps  # 手动验证
 ```
 
-## 质量门（`/gate` 一键执行）
+## 质量门
 
-任务标 done 前通过 4 层：
+每个任务标记 done 前必须通过 4 层检查：
 1. **代码级**：`just fmt-check && just lint` 全过
 2. **行为级**：fixture ground-truth 偏序约束满足
 3. **集成级**：`just test` 全过（含下游命令）
-4. **设计对照**：按 `.claude/agents/design-checker.md` 映射表逐项核对实现与设计文档
+4. **审查级**：实现与 `docs/design/` 对应章节逐项一致（字段、枚举、schema、默认值）
+
+可通过 Skill 工具调用 `/gate` 一键执行以上 4 层检查。
 
 ## 阶段交付流程
 
-每个阶段（Sprint/Phase/Worker）完成后：`/gate` → 更新 STATUS.md → 独立分支提 PR → `/pr-review-toolkit:review-pr`（含 design-checker 维度）→ 修复 critical/important 后通知用户。
+每个阶段（Sprint / Phase / Worker）完成后：
+
+1. 质量门：调用 `/gate` skill 确认 4 层全过
+2. 更新 `docs/STATUS.md`
+3. commit 引用任务 ID（如 `feat(M1-GRAPH): 图构建模块`）
+4. 独立分支提 PR
+5. PR 审查：调用 `/pr-review-toolkit:review-pr`，额外运行 `design-checker` agent 检查设计文档一致性
+6. 修复 critical/important issues 后通知用户审阅
 
 禁止合并多阶段为一个 PR。
 
 ## 续接快速参考
 
 **新会话开始**：读 CLAUDE.md → `docs/STATUS.md` → `docs/PLAN.md` 对应任务
-
-**任务完成前**：
-1. `/gate`（4 层质量门）
-2. 更新 `docs/STATUS.md`
-3. commit 引用任务 ID（如 `feat(M1-GRAPH): 图构建模块`）
-4. 按阶段交付流程提 PR + 自动审查
 
 ## 设计文档一致性检查
 
