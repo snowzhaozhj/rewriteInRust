@@ -117,9 +117,9 @@ M0 收尾时依据 `DESIGN_ASSUMPTIONS.md` 的 Spike 结论，按下表确定进
 | 三项目端到端验证 + 规则缺陷回修 | 5-6 | 含规则缺陷发现→回修 agents/translator.md→重测的 1-2 轮迭代；含性能基准数据采集与环境标准化 0.5-1 天（环境元信息记录 + 写入 sprint-N-report.json，见下方 § 13.1.2） |
 | 批大小优化验收（原 Spike 3 补充 a，非阻断） | 2-3 | M1 前 2 周执行，可与 TS 适配器并行；使用 3 个公开中型 TS 项目（列入 `.rustmigrate.toml` fixture）；在批大小 20/35/50 上测量批内符号引用覆盖度/跨批重复/依赖链准确度，结论写入 `DESIGN_ASSUMPTIONS.md`。**非 M1 阻断**：MVP <5K 行不触发批处理（>200 文件才激活），时间压力下可推迟到 M2 前 2 周合并执行 |
 | proptest 集成与 seed 管理 | 1-2 | 纯函数 L2 等价测试基础设施（strategy 模板 + regression 文件管理），不含 FFI 等价管线 |
-| CLI 核心（11 个 MVP 子命令） | 10-14 | init/profile/graph(build+topo-sort+deps+stats)/validate-state/state(get+transition)/stats-loc/scaffold |
+| CLI 核心（13 个 MVP 子命令） | 12-16 | init/profile/graph(build+topo-sort+deps+interfaces+stats)/validate-state/state(get+transition)/stats-loc/stats-compare/scaffold |
 | CLI 嵌入 crate 集成 | 5-7 | tree-sitter 绑定(~2d) + ast-grep-core(~1.5d) + tokei(~1d) + petgraph(~1d) + rusqlite(~1.5d) + 跨平台编译/调试。**风险**：rusqlite 嵌入抬高编译时间与二进制体积，若实测触上限（见 M0 Spike 0 crate 集成风险评估）则 M1 切 JSON 持久化回退、SQLite 推迟到 M2（决策见 [04 § 5.7.3](./04-toolchain.md#573-持久化存储)前向兼容权衡） |
-| CLI 测试 | 3-4 | 集成测试 + fixtures + 1 个自建微型项目（dogfooding fixture：50-100 行 TS 输入 + 手写期望 Rust 输出，0.5 天；`dogfooding.yml` workflow，1 天，仅验证到 Tier 0，见 [03 § 4.11.4](./03-execution-model.md#4114-项目自验证dogfooding-m2-概念设计)） |
+| CLI 测试 | 3-4 | 集成测试 + fixtures + stdout JSON 格式快照测试 + 1 个自建微型项目（dogfooding fixture：50-100 行 TS 输入 + 手写期望 Rust 输出，0.5 天；`dogfooding.yml` workflow，1 天，仅验证到 Tier 0，见 [03 § 4.11.4](./03-execution-model.md#4114-项目自验证dogfooding-m2-概念设计)） |
 | 可复现性脚本与 CI 集成 | 1.5-2 | 规范补充（排除规则 / 环境快照 JSON Schema / 哈希工具标准化）0.5 天 + 脚本实现 1-1.5 天：`verify-reproducibility.sh`（环境快照 + 过滤后 `sha256sum -b` 比对）+ GitHub Actions 集成（见 [03 § 4.11.3](./03-execution-model.md#4113-可复现性保证)） |
 | Plan B 缓冲（单 Spike） | 2-5 | **仅**单个 Spike 触发时的额外开发量；多 Spike 失败（尤其 Spike 1+4 同时失败需重设计编排层）见上方决策检查点行「+5-10 人天」与下方场景 B，**不在本行覆盖** |
 | **合计** | **50-70** | 1 人约 12-18 周，2 人约 6-9 周 |
@@ -127,7 +127,7 @@ M0 收尾时依据 `DESIGN_ASSUMPTIONS.md` 的 Spike 结论，按下表确定进
 > **M0 假设验证周**（5-10 人天）不在上述 M1 估算中，应单独核算。
 > **与 v0.9.2 估算的差异**：集成测试（+4 天）、CLI graph build（+3 天）、crate 集成（+2 天）、Plan B 缓冲（+3 天）。详见可行性审查报告。
 >
-> **估算透明度说明**：CLI 12 个命令（11-15 天）按每命令 ≈0.9-1.3 天（纯命令逻辑）+ 1-2 天 graph 子命令共享开销（petgraph 初始化）折算，crate 集成风险（见上表「CLI 嵌入 crate 集成」行）与集成测试 fixture（见「CLI 测试」行）已**单列不重复计入**本行；表内人天含同行评审 + 1 轮集成测试 fixture（dogfooding），纯开发时间约为估算的 60%。M0 Spike 0 的 crate 风险评估直接喂给 M1 决策——若 rusqlite + tree-sitter 触编译/体积上限，M1 执行 JSON 回退（见 Spike 0 回退表），CLI 开销约 -2 天但图持久化推迟 M2。
+> **估算透明度说明**：CLI 13 个命令（12-16 天）按每命令 ≈0.9-1.3 天（纯命令逻辑）+ 1-2 天 graph 子命令共享开销（petgraph 初始化）折算，crate 集成风险（见上表「CLI 嵌入 crate 集成」行）与集成测试 fixture（见「CLI 测试」行）已**单列不重复计入**本行；表内人天含同行评审 + 1 轮集成测试 fixture（dogfooding），纯开发时间约为估算的 60%。M0 Spike 0 的 crate 风险评估直接喂给 M1 决策——若 rusqlite + tree-sitter 触编译/体积上限，M1 执行 JSON 回退（见 Spike 0 回退表），CLI 开销约 -2 天但图持久化推迟 M2。
 
 > **场景 A / B 对比**（**实际范围取决于 M0 验收结果**）：
 > - **基线 M1**（所有 Spike 验证通过，无 Plan B）：**50-65 人天**。
@@ -216,17 +216,7 @@ M0 收尾时依据 `DESIGN_ASSUMPTIONS.md` 的 Spike 结论，按下表确定进
 路线图各阶段并非孤立——M1 产出的规则库是 M2/M3 的输入，这条隐含的演化路径在此显式化，避免把 MVP 误读为"零规则即开箱即用"。
 
 - **(a) M1 → M2/M3 规则累积**：M1 在 3 个 <5K 项目迁移中发现的项目规则（写入 `.rust-migration/porting/`），作为 M2「多候选排序」的打分依据与 M3 Python 适配器的初始模板来源。预期 M1 发现 **15-25 条新通用规则**（覆盖 TS→Rust 常见陷阱，对应 [07-pitfalls-and-risks.md § 9.2 跨语言语义陷阱](./07-pitfalls-and-risks.md#92-跨语言语义陷阱补充) 与 [03-execution-model.md § 7.7 不等价探测维度](./03-execution-model.md#77-不等价证据探测维度清单)）。
-- **(b) M1 规则库分类与复用评估**：消除「通用陷阱规则 vs 项目专有规则」混淆——每条规则带分类元数据，使 M2/M3 复用率可评估而非拍脑袋。规则文件 frontmatter 约定：
-  ```yaml
-  ---
-  id: RULE-N
-  category: [TypeMapping|LanguageSemantics|ProjectPolicy|NamingConvention]
-  target_languages: [ts, py, c]   # 适用的源语言集合
-  source: [§9.2陷阱序号 | §7.7探测维度 | 实战发现]
-  ts_only: false                  # true=仅 TS→Rust 有效（不可跨语言复用）
-  ---
-  ```
-  `TypeMapping`/`LanguageSemantics` 多为跨语言通用陷阱（如 Promise eager、闭包引用捕获）；`ProjectPolicy`/`NamingConvention` 多为项目专有（如禁用 deprecated `foo()`）。分类即决定 M3 可复用性。
+- **(b) M1 规则库分类与复用评估**：消除「通用陷阱规则 vs 项目专有规则」混淆——每条规则带分类元数据（frontmatter schema 权威定义见 [05 § 6.2 社区贡献快速参考](./05-documentation-system.md#社区贡献快速参考)），使 M2/M3 复用率可评估而非拍脑袋。`TypeMapping`/`LanguageSemantics` 多为跨语言通用陷阱（如 Promise eager、闭包引用捕获）；`ProjectPolicy`/`NamingConvention` 多为项目专有（如禁用 deprecated `foo()`）。分类即决定 M3 可复用性。
 - **(c) M1 验收检查表（规则库维度，不阻断验收）**：
   1. **分类完成度**：全部规则已标注 `category` + `target_languages` + `ts_only`；
   2. **覆盖率报告**：对照 § 9.2 的 8 类陷阱与 § 7.7 的 8 维度，计算有规则覆盖的比例，**目标 ≥ 60%**；缺失维度列入 M2 补充计划并记录理由；

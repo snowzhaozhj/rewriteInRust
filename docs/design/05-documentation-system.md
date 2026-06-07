@@ -174,7 +174,16 @@ confidence: high
 
 **规则贡献**（核心规则 / 参考指南 / 项目专有）：
 - 何时提交：翻译失败因规则缺失而触发（标注「由 Sprint N 失败触发」），或现有规则在新场景下不适用。
-- 本地检查：规则格式为 `## RULE-NN: <名称> (v<N>)`，并附 frontmatter 元数据（`category` + `target_languages` + `ts_only` 为强制项，分类标准与字段含义见 [08 § 13.1.1(b)](./08-roadmap-and-reference.md#1311-m1m2m3-规则库累积效应分析)）；版本号与变更同步写入 `porting/changelog.md`；涉及 breaking change（major）须在 KNOWN_DIFFERENCES.md 列出受影响范围（见上方「规则版本管理与代码一致性」）。
+- 本地检查：规则格式为 `## RULE-NN: <名称> (v<N>)`，并附 frontmatter 元数据（`category` + `target_languages` + `ts_only` 为强制项）；版本号与变更同步写入 `porting/changelog.md`；涉及 breaking change（major）须在 KNOWN_DIFFERENCES.md 列出受影响范围（见上方「规则版本管理与代码一致性」）。规则分类元数据 frontmatter 约定（权威定义）：
+  ```yaml
+  ---
+  id: RULE-N
+  category: [TypeMapping|LanguageSemantics|ProjectPolicy|NamingConvention]
+  target_languages: [ts, py, c]   # 适用的源语言集合
+  source: [§9.2陷阱序号 | §7.7探测维度 | 实战发现]
+  ts_only: false                  # true=仅 TS→Rust 有效（不可跨语言复用）
+  ---
+  ```
 - 评审周期：每个 M 阶段 review 一次（核心/参考），项目专有每个 Sprint Review。
 - PR 评审承诺：核心规则与参考指南的 PR 须在提交后 14 日内获得初审反馈；超期自动 escalate 至技术委员会（设计原则：给出预期反馈窗口而非精确到日，保留灵活性）。
 
@@ -642,7 +651,7 @@ related_rules: [RULE-3, RULE-22] # 关联规则类，供影响分析
 related_mdrs: [MDR-001]          # 关联决策记录
 ```
 
-**新鲜度管理**：每 6 个月（或按 Sprint 周期配置），verifier 在 `/migrate review` 执行时将到期 pattern 标记 `needs-review`；translator/verifier 在引用时若遇 `needs-review`，须确认仍适用（更新 `last_verified`）或标记 `deprecated`。
+**新鲜度管理**：每 6 个月，verifier 在 `/migrate review` 执行时将到期 pattern 标记 `needs-review`；translator/verifier 在引用时若遇 `needs-review`，须确认仍适用（更新 `last_verified`）或标记 `deprecated`。
 
 **关联索引**：`.rust-migration/context/` 的 `index.json` 记录 `pattern → related_rules / related_mdrs / 使用模块` 的映射，供按模块特征（如 `is_async=true`）只注入相关且 `status=active` 的 pattern，避免全量加载占用上下文预算。**实施时机**：index.json 为 M2 自动生成候选（见 [§6.11.1](#6111-四层知识的-mvp-vs-m2-分阶段实施)）；MVP 阶段 SKILL.md 按规则类别手工 Read 相关 pattern，不依赖 index.json。
 

@@ -80,7 +80,9 @@ Plugin 中的确定性计算由独立的 Rust CLI 工具 `rustmigrate` 承担，
 
 ### CLI 命令概览
 
-**MVP（M1）— 12 个命令**：
+> 各命令 `data` 字段的完整 Schema 随 M1 CLI 实现落地，纳入 insta 快照回归测试（见 [08 § CLI 测试](./08-roadmap-and-reference.md)）。
+
+**MVP（M1）— 13 个命令**：
 
 | 子命令 | 说明 |
 |--------|------|
@@ -89,22 +91,22 @@ Plugin 中的确定性计算由独立的 Rust CLI 工具 `rustmigrate` 承担，
 | `rustmigrate graph build` | 使用 tree-sitter 解析源码，构建源码图（存储到 `source-graph.db`）；`--profile` 输出性能画像 JSON（见 [04 § 5.7.4.1](./04-toolchain.md#5741-性能基准与扩展性)） |
 | `rustmigrate graph topo-sort` | 对依赖图执行拓扑排序，输出迁移顺序（MVP 用 Kahn 算法，不支持有环图；检测到环则非零退出并列出环路径，完整 SCC 检测见 M2 `graph cycles`，降级流程见 [04 § 5.7.6](./04-toolchain.md#576-图查询能力清单)） |
 | `rustmigrate graph deps <module>` | 查询模块的正向依赖树 |
-| `rustmigrate graph interfaces <module>` | 输出模块的导出接口签名文本（查询 source-graph.db 中 `is_exported=true` 节点，按 `line_range` 从 source-ref/ 提取）；`--deps-of <target>` 批量输出 target 所有依赖的接口；含每条签名的 token 估算（bytes/4） |
+| `rustmigrate graph interfaces <module>` | 输出模块的导出接口签名文本（查询 source-graph.db 中 `is_exported=true` 节点，按 `line_range` 从 source-ref/ 提取）；`--deps-of <target>` 批量输出 target 的直接依赖模块（imports 边的 1-hop 邻居）的导出接口签名（区别于 `graph deps` 的 BFS 传递闭包）；含每条签名的 token 估算（bytes/4） |
 | `rustmigrate graph stats` | 图统计信息（节点/边计数、度分布） |
 | `rustmigrate validate state` | 校验 `migration-state.json` 的合法性（JSON Schema + 状态机约束） |
 | `rustmigrate state get` | 查询指定模块的当前迁移状态 |
 | `rustmigrate state transition` | 执行状态转换（带状态机合法性前置条件检查：校验当前状态→目标状态为合法转换路径） |
 | `rustmigrate stats loc` | 统计源码和 Rust 代码行数（嵌入 tokei） |
+| `rustmigrate stats compare` | 源码与 Rust 结构复杂度对比（函数数量比、代码行数比、控制流嵌套层级）——复用 tokei + tree-sitter 函数计数，作为 Phase A 结构校验门禁（见 03 § 4.3 Step 4.5） |
 | `rustmigrate scaffold workspace` | 生成 Cargo workspace 骨架（注入 dev-dependencies） |
 
-**M2 扩展 — 6 个命令**：
+**M2 扩展 — 5 个命令**：
 
 | 子命令 | 说明 | 推迟理由 |
 |--------|------|---------|
 | `rustmigrate graph rdeps <module>` | 反向依赖查询 | MVP 阶段 deps 正向查询够用 |
 | `rustmigrate graph cycles` | 循环依赖检测 | MVP 目标是 <5K 行单项目，环少见 |
 | `rustmigrate graph export` | 导出为 JSON/DOT/Mermaid | MVP 阶段 stats 输出够用 |
-| `rustmigrate stats compare` | 源码与 Rust 复杂度对比 | MVP 阶段手动 tokei 对比即可 |
 | `rustmigrate validate config` | 校验 `.rustmigrate.toml` | MVP 阶段 TOML 解析时隐式校验即可 |
 | `rustmigrate state update` | 乐观锁状态更新（`--cas-version` 比较并写入，版本不匹配返回冲突） | MVP 单写者串行无需 CAS |
 
@@ -299,7 +301,8 @@ Plugin 不支持 `rules/` 目录分发，因此采用混合策略将规则按特
 |----------|---------|---------|---------|---------|------------------------------|
 | **analyzer** | 源码目录、`.rustmigrate.toml` | `source-graph.db`（语义增强）、项目画像摘要（stdout JSON） | CLI `rustmigrate graph build` 已完成基础图构建 | `source-graph.db` 含 calls/uses_type 边 | 必须含 calls/uses_type 边；节点数 ≥ 5；边数 ≥ 5（L3 语义检查，M1 可人工 sampling） |
 | **translator**（规则生成） | `source-graph.db`、适配器 `porting-template.md` | `porting/` 目录（迁移规则文件） | analyzer 已完成 | `porting/` 至少含一个规则文件 | **L1 存在性**：`porting/` 存在、非空、至少一个 `.md` 规则文件大小 > 0、含关键标题（Markdown 产出物无 JSON Schema，仅做 L1） |
-| **translator**（代码翻译） | `porting/` 规则、目标模块源码、依赖接口 | Rust 源文件（写入 `rust_root/` 目录，由 `.rustmigrate.toml` 配置）、`{module}-intent.md`（意图摘要） | 模块状态为 translating | Rust 文件存在且通过 F1 编译 | **L1 存在性**：Rust 文件存在且 F1 编译通过、`{module}-intent.md` 非空且含关键标题（均为代码/Markdown 产出物，仅做 L1） |
+| **translator**（意图摘要） | `porting/` 规则、目标模块源码 | `{module}-intent.md`（意图摘要） | 模块 pending 或 translating（substatus=null） | 意图摘要非空且含 7 字段 | **L2**（附录 E Schema） |
+| **translator**（Phase A/B） | `{module}-intent.md` + 规则 + 依赖接口 | Rust 源文件（写入 `rust_root/` 目录，由 `.rustmigrate.toml` 配置） | 模块 translating 且意图已确认（Step 1.5 人类确认门禁通过） | Rust 文件存在且通过 F1 编译 | **L1 存在性**：Rust 文件存在且 F1 编译通过 |
 | **verifier**（对抗审查） | `.rust-migration/intermediate/attempts/{module}-phase-a.rs`（Phase A 持久化代码）、原始源码（`source-ref/`）、迁移规则 | `{module}-review.md`（审查报告） | Phase A 翻译完成并已持久化 | 审查报告包含差异列表 | **L1 存在性**：`{module}-review.md` 存在、非空且含差异列表标题（Markdown 产出物，仅做 L1） |
 | **verifier**（测试验证） | Phase B Rust 产出物、黄金文件 | 测试结果 JSON（stdout）、KNOWN_DIFFERENCES.md 追加条目 | Phase B 翻译完成 | 测试通过率 ≥ 预期；TODO(port) 计数 = 0（否则标记 incomplete，见 [03 § 4.3 Step 3](./03-execution-model.md#43-内循环模块级单会话内-phase-ab-双阶段翻译)） | **L2 结构校验**：测试结果 JSON 格式合法、通过率字段非空且在 [0,1] 范围（JSON 产出物，做 L2） |
 | **scaffolder** | `source-graph.db`、模块接口信息 | `test-fixtures/golden/` 测试数据、Cargo.toml dev-deps 注入、`test-fixtures/ffi-bridge/`（若检测到 purity_confidence=high 的纯函数） | analyzer 已完成 | 测试基础设施可运行；FFI bridge round-trip 对 ≥1 纯函数验证通过（若适用） | **L1 存在性**：`test-fixtures/golden/` 非空、Cargo.toml 含注入的 dev-deps（文件/配置产出物，仅做 L1） |
@@ -697,6 +700,8 @@ rust_root = "./rust-src"
 source_commit = "abc123"             # 锁定源码版本
 
 # 排除不参与迁移的路径（glob 模式）
+# 注：非排除文件 import 排除路径时，graph build 跳过该边（无 FK 违反）并记入
+# build 输出的 excluded_imports 数组（见 04 §5.7.4）；/migrate run Step 1 会对此输出警告
 exclude = [
   "src/vendor/**",                   # 第三方代码
   "src/**/*.test.ts",                # 源语言测试文件
@@ -710,7 +715,7 @@ migration_motives = ["performance", "memory_safety"]  # performance | memory_saf
 parallel_strategy = "feature_freeze" # feature_freeze | dual_track | strangler_fig
 max_concurrent_agents = 3
 max_retry_rounds = 3                 # 翻译失败最大重试轮数
-auto_confirm_intent = false          # 跳过内循环 Step 2.5 意图确认门禁（默认 false=须人类确认；/goal 自主循环与 Workflow 批量模式默认跳过）
+auto_confirm_intent = false          # 意图确认门禁（默认 false=须人类确认；各模式默认值见 03 §4.3.1）
 degrade_strategy = "ffi"             # ffi | manual | skip
 
 [tools]
@@ -847,7 +852,7 @@ skills/migrate/adapters/
     "extract_deps":   { "type": "string", "description": "依赖图提取脚本路径" },
     "porting_template": { "type": "string", "description": "PORTING 模板文件路径" },
     "ffi_bridge":     { "type": ["string", "null"], "description": "FFI 桥接脚本路径（可选）" },
-    "analysis_tools": { "type": "string", "description": "分析工具配置文件路径" },
+    "analysis_tools": { "type": "string", "description": "分析工具配置文件路径；格式：JSON 数组，每项 {tool_id, display_name, min_version, install_hint, required}" },
     "adapter_last_updated": { "type": "string", "format": "date-time", "description": "可选；适配器最后验证与核心规则对齐的时间戳，供 M2 检测该适配器是否已过期" }
   }
 }

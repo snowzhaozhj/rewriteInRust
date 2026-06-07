@@ -173,7 +173,7 @@
   → 适用场景：PORTING 规则更新后、LLM 能力提升后、人工提供了额外指导后
 ```
 
-> **Phase A/B 与状态机的映射**：状态机图中的 `TRANSLATE` 是单一概念状态，但其内部包含 [03 § 4.3](./03-execution-model.md#43-内循环模块级单会话内-phase-ab-双阶段翻译) 的 Phase A（忠实翻译）→ 对抗性审查 → Phase B（惯用化优化）三个子步骤。Phase A/B 是 `TRANSLATE` 状态内的**内部子步骤**，状态转换只在 Phase B 完成且 `cargo check` 通过后才发生（`translating` → `compile_fixing` → `testing` → `reviewing`，映射见 [09 附录](./09-appendix-schemas.md#状态机概念名--json-字段值映射)）。对抗性审查在 TRANSLATE 内部执行（Step 3），不触发状态转移；VERIFY 的 `reviewing` 子状态为测试通过后的最终签批门禁（TODO(port) 清零 + 验收）。
+> **Phase A/B 与状态机的映射**：状态机图中的 `TRANSLATE` 是单一概念状态，但其内部包含 [03 § 4.3](./03-execution-model.md#43-内循环模块级单会话内-phase-ab-双阶段翻译) 的 Phase A（忠实翻译）→ 对抗性审查 → Phase B（惯用化优化）三个子步骤。Phase A/B 是 `TRANSLATE` 状态内的**内部子步骤**，状态转换在 Phase B 首次产出代码后发生：`cargo check` 通过则 `translating` → `testing`；失败则 `translating` → `compile_fixing` 进入重试循环，通过后 `compile_fixing` → `testing` → `reviewing`（映射见 [09 附录](./09-appendix-schemas.md#状态机概念名--json-字段值映射)）。对抗性审查在 TRANSLATE 内部执行（Step 3），不触发状态转移；VERIFY 的 `reviewing` 子状态为测试通过后的最终签批门禁（TODO(port) 清零 + 验收）。
 >
 > PORT-REVIEW 接受（BS3-01）：本注与 [09 substatus 约定](./09-appendix-schemas.md#状态机概念名--json-字段值映射)已自洽说明 Phase A 失败停留在 `translating` 的 `phase_a_complete_awaiting_review` 子态、断点续传重入点，02 内无矛盾；Step 4/Step 5 的 checkpoint 入口细节属 03 § 4.3 执行流程，由其就地补注，不在 02（状态机定义权威）重复以免膨胀。
 

@@ -158,7 +158,7 @@ UA 52,950 stars 的成功密码：**把 LLM 从"对话伙伴"变成"流水线中
 
 | 案例 | 可参考维度 | 证据等级 |
 |------|-----------|---------|
-| Bun (Zig->Rust, 100 万行, 11 天) | 测试驱动验证流程、大规模迁移节奏 | 商业案例 |
+| Bun (Zig->Rust, 75 万行, 11 天) | 测试驱动验证流程、大规模迁移节奏 | 商业案例 |
 | Claw-Code (TS->Rust, 48K 行, 4 天) | PARITY.md + Mock Parity Harness 行为验证 | 开源项目 |
 | Cloudflare Pingora (C->Rust) | 性能动机验收标准、FFI 桥接方案 | 商业案例 |
 | Discord (Go->Rust) | 并发安全动机、GC->所有权模型迁移 | 商业案例 |
