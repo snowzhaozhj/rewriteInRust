@@ -23,6 +23,8 @@ pub struct FileAnalysis {
     pub imports: Vec<ImportInfo>,
     /// 文件内的函数调用（用于构建跨文件 Calls 边）。
     pub calls: Vec<CallInfo>,
+    /// 所有导出名称（含 re-export、type-only export、default）。
+    pub exported_names: std::collections::HashSet<String>,
 }
 
 /// 导入信息。

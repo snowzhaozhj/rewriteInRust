@@ -109,6 +109,7 @@ impl LanguageAdapter for TypeScriptAdapter {
             edges: ctx.edges,
             imports: ctx.imports,
             calls: ctx.calls,
+            exported_names: ctx.exported_names,
         })
     }
 }
@@ -139,21 +140,42 @@ fn collect_exports(node: Node, source: &str, exports: &mut std::collections::Has
         let count = node.child_count();
         for i in 0..count {
             if let Some(child) = node.child(i) {
-                if child.kind() == "export_clause" {
-                    let cc = child.child_count();
-                    for j in 0..cc {
-                        if let Some(spec) = child.child(j) {
-                            if spec.kind() == "export_specifier" {
-                                let name = spec
-                                    .child_by_field_name("alias")
-                                    .or_else(|| spec.child_by_field_name("name"))
-                                    .map(|n| text(n, source));
-                                if let Some(n) = name {
-                                    exports.insert(n);
+                match child.kind() {
+                    "export_clause" => {
+                        let cc = child.child_count();
+                        for j in 0..cc {
+                            if let Some(spec) = child.child(j) {
+                                if spec.kind() == "export_specifier" {
+                                    let name = spec
+                                        .child_by_field_name("alias")
+                                        .or_else(|| spec.child_by_field_name("name"))
+                                        .map(|n| text(n, source));
+                                    if let Some(n) = name {
+                                        exports.insert(n);
+                                    }
                                 }
                             }
                         }
                     }
+                    "*" => {
+                        let src = get_source_string(node, source);
+                        let label = match src {
+                            Some(s) => format!("*<-{s}"),
+                            None => "*".to_string(),
+                        };
+                        exports.insert(label);
+                    }
+                    "namespace_export" => {
+                        let nc = child.child_count();
+                        for j in 0..nc {
+                            if let Some(id) = child.child(j) {
+                                if id.kind() == "identifier" {
+                                    exports.insert(text(id, source));
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -240,6 +262,20 @@ fn walk_ast(node: Node, ctx: &mut AnalysisContext) {
     }
 }
 
+fn walk_ast_calls_only(node: Node, ctx: &mut AnalysisContext) {
+    match node.kind() {
+        "call_expression" => extract_call(node, ctx),
+        "new_expression" => extract_new(node, ctx),
+        _ => {}
+    }
+    let count = node.child_count();
+    for i in 0..count {
+        if let Some(child) = node.child(i) {
+            walk_ast_calls_only(child, ctx);
+        }
+    }
+}
+
 fn extract_function(node: Node, ctx: &mut AnalysisContext) {
     if let Some(name_node) = node.child_by_field_name("name") {
         let name = text(name_node, ctx.source);
@@ -302,15 +338,12 @@ fn extract_class(node: Node, ctx: &mut AnalysisContext) {
     // extends / implements
     extract_heritage(node, &class_id, ctx);
 
-    // 递归处理 body 内的其他声明
+    // 递归处理 body 内所有子节点（方法体内的 call/new 也要提取）
     if let Some(body) = node.child_by_field_name("body") {
         let count = body.child_count();
         for i in 0..count {
             if let Some(child) = body.child(i) {
-                if child.kind() != "method_definition" && child.kind() != "public_field_definition"
-                {
-                    walk_ast(child, ctx);
-                }
+                walk_ast_calls_only(child, ctx);
             }
         }
     }
