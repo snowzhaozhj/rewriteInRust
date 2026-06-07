@@ -10,7 +10,7 @@
 
 **目标**：验证 6 个关键技术假设，产出假设验证报告，而非项目骨架
 
-**6 个 Spike（每个 1-2 天，Spike 0 最先执行，Spike 3/5 可并行执行以缩短总时长）**：
+**6 个 Spike（每个 0.5-2 天，均值约 1 天；Spike 0 最先执行，Spike 3/5 可并行执行以缩短总时长）**：
 - [ ] **Spike 0: Plugin API 骨架验证** — 用最小 Plugin（1 个 Skill + 1 个 SubAgent + 1 个 Hook）验证 Claude Code Plugin 的完整加载路径。确认 `plugin.json`、`agents/` 自动发现、`hooks/hooks.json` 格式、SubAgent 通过 Agent tool 调用等核心机制的实际行为与设计假设一致。这是所有后续 Spike 的前提。**附加：crate 集成风险评估** — 编译含 tree-sitter + ast-grep-core + tokei + petgraph + rusqlite 的最小 CLI，**先记录环境基线**（OS / CPU / Rust 版本）再实测编译时间、二进制体积、冷启动感知时间三项，写入 `DESIGN_ASSUMPTIONS.md` 的 **Spike 0 crate 集成**节（测量**后**回填，不在测量前预填阈值；此处「Spike 0 节」是假设报告的小节，与 Tier 0 反馈循环 F1/F2/F3 无关）。回退按下表分级触发、**逐级裁剪 crate**（Plan B：回退到纯 CLAUDE.md + slash commands 的非 Plugin 方案）：
 
   | 指标 | 测量方法 | 回退触发条件 | 回退动作（按序裁剪） | 返工估算 |
