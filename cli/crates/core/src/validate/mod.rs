@@ -163,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_合法init状态() {
+    fn test_validate_valid_init_state() {
         let state = minimal_init_state();
         let result = validate_state(&state);
         assert!(result.is_ok());
@@ -171,7 +171,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_version为空() {
+    fn test_validate_empty_version() {
         let mut state = minimal_init_state();
         state.version = String::new();
         let result = validate_state(&state);
@@ -185,7 +185,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_history为空() {
+    fn test_validate_empty_history() {
         let mut state = minimal_init_state();
         state.state_history.clear();
         let result = validate_state(&state);
@@ -193,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_history末尾不一致() {
+    fn test_validate_history_tail_mismatch() {
         let mut state = minimal_init_state();
         state.state = ProjectState::Profile;
         // history 仍然是 Init
@@ -208,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_plan阶段无project() {
+    fn test_validate_plan_without_project() {
         let now = Timestamp::new("2024-01-01T00:00:00Z");
         let state = MigrationStateFile {
             version: "1.0.0".to_owned(),
@@ -236,7 +236,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_scaffold阶段无graph() {
+    fn test_validate_scaffold_without_graph() {
         let now = Timestamp::new("2024-01-01T00:00:00Z");
         let state = MigrationStateFile {
             version: "1.0.0".to_owned(),
@@ -275,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_sprint_loop阶段有警告() {
+    fn test_validate_sprint_loop_warnings() {
         let now = Timestamp::new("2024-01-01T00:00:00Z");
         let state = MigrationStateFile {
             version: "1.0.0".to_owned(),
@@ -312,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_profile阶段无project() {
+    fn test_validate_profile_without_project() {
         let now = Timestamp::new("2024-01-01T00:00:00Z");
         let state = MigrationStateFile {
             version: "1.0.0".to_owned(),

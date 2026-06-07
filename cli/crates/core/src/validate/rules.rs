@@ -215,7 +215,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validation_rule_创建和执行() {
+    fn test_validation_rule_create_and_run() {
         let rule =
             ValidationRule::new("test_rule", ValidationTier::Tier0, |_path| Ok((true, None)));
         assert_eq!(rule.name, "test_rule");
@@ -227,7 +227,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validation_rule_失败返回消息() {
+    fn test_validation_rule_failure_returns_message() {
         let rule = ValidationRule::new("fail_rule", ValidationTier::Tier0, |_path| {
             Ok((false, Some("编译失败".to_owned())))
         });
@@ -237,7 +237,7 @@ mod tests {
     }
 
     #[test]
-    fn test_default_rules_包含所有层级() {
+    fn test_default_rules_all_tiers() {
         let rules = default_rules();
         assert!(rules.len() >= 4);
 
@@ -263,14 +263,14 @@ mod tests {
     }
 
     #[test]
-    fn test_rules_for_tier_筛选() {
+    fn test_rules_for_tier_filter() {
         let rules = default_rules();
         let tier0 = rules_for_tier(&rules, ValidationTier::Tier0);
         assert!(tier0.iter().all(|r| r.tier == ValidationTier::Tier0));
     }
 
     #[test]
-    fn test_run_rules_up_to_tier_层级过滤() {
+    fn test_run_rules_up_to_tier_filter() {
         let rules = vec![
             ValidationRule::new("t0", ValidationTier::Tier0, |_| Ok((true, None))),
             ValidationRule::new("t1", ValidationTier::Tier1, |_| Ok((true, None))),
@@ -295,7 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rule_result_序列化() {
+    fn test_rule_result_serialize() {
         let result = RuleResult {
             name: "cargo_check".to_owned(),
             tier: ValidationTier::Tier0,
@@ -312,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rule_result_失败时含message序列化() {
+    fn test_rule_result_failure_serialize() {
         let result = RuleResult {
             name: "clippy".to_owned(),
             tier: ValidationTier::Tier0,

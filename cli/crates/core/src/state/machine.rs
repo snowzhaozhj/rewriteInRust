@@ -172,7 +172,7 @@ mod tests {
     }
 
     #[test]
-    fn test_init_new_设置正确初始状态() {
+    fn test_init_new_correct_initial_state() {
         let m = new_machine();
         assert_eq!(m.current_state(), ProjectState::Init);
         assert_eq!(m.state_file().version, "1.0.0");
@@ -183,7 +183,7 @@ mod tests {
     }
 
     #[test]
-    fn test_合法转换_init_到_profile() {
+    fn test_valid_transition_init_to_profile() {
         let mut m = new_machine();
         assert!(m.transition(ProjectState::Profile).is_ok());
         assert_eq!(m.current_state(), ProjectState::Profile);
@@ -196,7 +196,7 @@ mod tests {
     }
 
     #[test]
-    fn test_全链路转换() {
+    fn test_full_chain_transition() {
         let mut m = new_machine();
         let steps = [
             ProjectState::Profile,
@@ -213,7 +213,7 @@ mod tests {
     }
 
     #[test]
-    fn test_非法转换_init_到_plan() {
+    fn test_invalid_transition_init_to_plan() {
         let mut m = new_machine();
         let result = m.transition(ProjectState::Plan);
         assert!(result.is_err());
@@ -229,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn test_非法转换_跳过阶段() {
+    fn test_invalid_transition_skip_phase() {
         let mut m = new_machine();
         assert!(m.transition(ProjectState::Scaffold).is_err());
         assert!(m.transition(ProjectState::SprintLoop).is_err());
@@ -237,14 +237,14 @@ mod tests {
     }
 
     #[test]
-    fn test_非法转换_回退() {
+    fn test_invalid_transition_backward() {
         let mut m = new_machine();
         m.transition(ProjectState::Profile).unwrap();
         assert!(m.transition(ProjectState::Init).is_err());
     }
 
     #[test]
-    fn test_保存和加载() {
+    fn test_save_and_load() {
         let m = new_machine();
         let tmp = NamedTempFile::new().expect("创建临时文件失败");
         let path = tmp.path().to_owned();
@@ -262,7 +262,7 @@ mod tests {
     }
 
     #[test]
-    fn test_保存后转换再加载() {
+    fn test_save_transition_reload() {
         let mut m = new_machine();
         m.transition(ProjectState::Profile).unwrap();
         let tmp = NamedTempFile::new().expect("创建临时文件失败");
@@ -275,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn test_加载不存在的文件() {
+    fn test_load_nonexistent_file() {
         let result = MigrationStateMachine::load(Path::new("/tmp/不存在的文件.json"));
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -287,7 +287,7 @@ mod tests {
     }
 
     #[test]
-    fn test_加载非法json() {
+    fn test_load_invalid_json() {
         let mut tmp = NamedTempFile::new().expect("创建临时文件失败");
         tmp.write_all(b"not json").unwrap();
         tmp.flush().unwrap();
@@ -300,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn test_save创建父目录() {
+    fn test_save_creates_parent_dir() {
         let dir = tempfile::tempdir().expect("创建临时目录失败");
         let nested = dir.path().join("sub").join("dir").join("state.json");
         let m = new_machine();
