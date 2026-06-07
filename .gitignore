@@ -1,0 +1,26 @@
+# Rust
+cli/target/
+**/*.rs.bk
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Claude Code (session-local)
+.claude/
+
+# Coverage
+lcov.info
+*.profraw
+
+# Node (fixtures)
+fixtures/*/node_modules/
+fixtures/*/dist/
+
+# Lock (review loop)
+docs/review/.loop-lock

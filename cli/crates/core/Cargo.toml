@@ -1,0 +1,22 @@
+[package]
+name = "rustmigrate-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+petgraph.workspace = true
+rusqlite.workspace = true
+tree-sitter.workspace = true
+tree-sitter-typescript.workspace = true
+tokei.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+jsonschema.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+insta.workspace = true

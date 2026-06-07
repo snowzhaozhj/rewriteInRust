@@ -1,0 +1,7 @@
+{
+  "name": "rust-migrate",
+  "version": "0.1.0",
+  "description": "Rust 迁移验证工作台 — AI 辅助的代码迁移 + 验证管线",
+  "author": "rewriteInRust",
+  "skills": "./skills/"
+}
