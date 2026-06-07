@@ -141,7 +141,7 @@ confidence: high
 4. `/migrate review` 比对当前规则版本与各模块清单，发现不一致时将模块标记 `rule_version_stale`（migration-state.json substatus），输出待复审列表（落入 `reports/sprint-N-report.json`）；用户可经 `/migrate run --module=X --rule-upgrade-review-only` 选择性复审（而非整体重译）。
 5. 关键规则（如 RULE-11 禁止模式、RULE-12 unsafe 策略）发生 breaking change 时，在 migration-state.json 记录 `affected_modules` 字段，供精准回溯。
 
-> **CLI 边界与配置**：上述比对属确定性计算。MVP（< 50 模块）由 `/migrate review` 的 SubAgent 完成，不新增 CLI 子命令以免突破 11+5 命令清单（命令权威以 06 为准）；M2 提出确定性命令候选 `rustmigrate validate rules --check-module-versions`（解析所有 `_porting_manifest.json` 比对 `porting/changelog.md`）。**`validate rules` 为 M2「备选」，不在 [06 § 10.0.1 表](./06-plugin-structure.md#1001-cli-工具架构rustmigrate) 当前已定的 5 个 M2 扩展命令之内；是否纳入及计入方式由 M2 规划确定**（命令清单权威以 06 为准）。版本追踪开关与升级行为由 `.rustmigrate.toml` `[rules]` 段控制（`version_tracking` / `auto_regenerate_on_rule_upgrade` / `enforce_rule_version_consistency`，定义见 [06 § 11.1](./06-plugin-structure.md#111-rustmigratetoml-配置文件)）。
+> **CLI 边界与配置**：上述比对属确定性计算。MVP（< 50 模块）由 `/migrate review` 的 SubAgent 完成，不新增 CLI 子命令以免突破 12+6 命令清单（命令权威以 06 为准）；M2 提出确定性命令候选 `rustmigrate validate rules --check-module-versions`（解析所有 `_porting_manifest.json` 比对 `porting/changelog.md`）。**`validate rules` 为 M2「备选」，不在 [06 § 10.0.1 表](./06-plugin-structure.md#1001-cli-工具架构rustmigrate) 当前已定的 6 个 M2 扩展命令之内；是否纳入及计入方式由 M2 规划确定**（命令清单权威以 06 为准）。版本追踪开关与升级行为由 `.rustmigrate.toml` `[rules]` 段控制（`version_tracking` / `auto_regenerate_on_rule_upgrade` / `enforce_rule_version_consistency`，定义见 [06 § 11.1](./06-plugin-structure.md#111-rustmigratetoml-配置文件)）。
 
 **行动指南**：
 - MVP 阶段只生成标记"是"的规则
@@ -368,6 +368,7 @@ PARITY.md 与 KNOWN_DIFFERENCES.md 是迁移质量的对外承诺，需具备开
 - Cargo workspace 结构
 - FFI 桥接方案选择
 - 功能裁剪决策
+- 源码 bug 复刻决策（Phase A 识别的源码 bug，须人工确认修复或接受）
 - **Phase B 三类允许改动**（边界定义见 [03 § 4.3 Step 5](./03-execution-model.md#43-内循环模块级单会话内-phase-ab-双阶段翻译)），按类别填必填字段，供 verifier Step 6 核对未超界：
 
 | 改动类别 | MDR 必填字段 |
@@ -375,6 +376,7 @@ PARITY.md 与 KNOWN_DIFFERENCES.md 是迁移质量的对外承诺，需具备开
 | 并发模式选择 | `原内部同步原语` → `新原语`；声明「对外接口/错误流程/可观测副作用未变」 |
 | 取消安全性重构 | `涉及的 .await 点 / select!/timeout`；`Future drop 时如何保证状态一致`；声明「业务逻辑未变」 |
 | 局部性能优化 | `函数名`（单函数内）；`原算法复杂度` → `新复杂度`；声明「函数签名/数据结构对外契约未变」 |
+| 源码 bug 复刻 | `bug_replica: true`；`source_bug_location`；`human_decision: fix/accept_replica` |
 
 ---
 
@@ -629,7 +631,7 @@ PARITY.md 与 KNOWN_DIFFERENCES.md 是迁移质量的对外承诺，需具备开
 
 ## 6.12 知识生命周期与维护政策
 
-L0-L3 四层知识中的长期产出物（patterns/anti-patterns、SPRINT_LEARNINGS.md）若只增不维护，会随规则演进与时间推移变成"死文档"。本节定义其新鲜度、关联与失效机制。patterns 与 §6.2 规则同样经历版本化与 deprecation，保持两者一致。
+L0-L3 四层知识中的长期产出物 patterns/anti-patterns 若只增不维护，会随规则演进与时间推移变成"死文档"。本节定义其新鲜度、关联与失效机制。patterns 与 §6.2 规则同样经历版本化与 deprecation，保持两者一致。SPRINT_LEARNINGS.md 按 Sprint 编号天然带时间戳，属追加式记录，不需要 deprecation 机制；读者可交叉引用 porting/changelog.md 确认某条历史经验是否仍适用。
 
 **Frontmatter 扩展**：pattern/anti-pattern 的 YAML frontmatter 在 §6.1 基础字段外增加：
 

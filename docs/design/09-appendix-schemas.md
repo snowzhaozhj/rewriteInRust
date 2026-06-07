@@ -246,6 +246,9 @@ degrade_* → translating（通过 /migrate run --module=X --force 恢复）
 
 ## 分步指令
 
+### Step -1: Bootstrap（幂等初始化）
+若 `.rust-migration/` 目录不存在，执行 `rustmigrate init`（创建 `.rust-migration/` 目录 + 初始 `migration-state.json`（state=init）+ 项目根目录 `.rustmigrate.toml`）。若目录已存在则跳过（幂等）。
+
 ### Step 0: 全局锁获取与陈旧锁恢复（所有 /migrate 命令通用）
 > 本 Step 0 为 `/migrate analyze` 与 `/migrate run` 共用；`/migrate run` 骨架不重复，引用此处。被 [06 § 10.5「多终端并发冲突的强制隔离」](./06-plugin-structure.md#105-编排调度路径) 引用为权威骨架。
 
@@ -264,7 +267,7 @@ degrade_* → translating（通过 /migrate run --module=X --force 恢复）
     报错并提示用户确认无进行中任务后手动删除；否则按真实并发报错退出
 ```
 
-> **平台差异与逃生口**：`flock` 在 macOS/Linux 上进程崩溃时由 OS 关闭 FD 自动释放，故正常崩溃**无需**人工清理；`lock_timeout_secs` 仅用于「锁文件残留但 flock 已释放」或跨机场景的兜底判定。用户卡死时的逃生口为**手动删除** `.rust-migration/.migration-lock`（MVP 不新增 CLI 清理子命令以守 11 命令边界）。错误信息须含「如确认无进行中任务，可手动删除 .rust-migration/.migration-lock」。
+> **平台差异与逃生口**：`flock` 在 macOS/Linux 上进程崩溃时由 OS 关闭 FD 自动释放，故正常崩溃**无需**人工清理；`lock_timeout_secs` 仅用于「锁文件残留但 flock 已释放」或跨机场景的兜底判定。用户卡死时的逃生口为**手动删除** `.rust-migration/.migration-lock`（MVP 不新增 CLI 清理子命令以守 12 命令边界）。错误信息须含「如确认无进行中任务，可手动删除 .rust-migration/.migration-lock」。
 
 ### Step 1: 检测项目类型
 读取当前目录的文件结构，识别源语言和框架。
@@ -304,10 +307,8 @@ CLI 构建基础图（contains/imports 边），存储到 `.rust-migration/sourc
   (b) 跳过环内模块——将其标记为 `requires_manual_review` 降级（见 [附录 A § 合法状态转换](#合法状态转换)），由人工拆环后再迁移。
 完整 SCC 环检测见 M2 `rustmigrate graph cycles`（降级策略见 [03 § 4.2 循环依赖处理](./03-execution-model.md#42-外循环sprint-级跨会话天周)）。
 
-### Step 3: 生成初始状态
-基于 analyzer 的产出物，生成以下文件：
-- `.rust-migration/migration-state.json`（初始状态：PROFILE）
-- `.rustmigrate.toml`（默认配置，项目根目录）
+### Step 3: 更新迁移状态
+基于 analyzer 的产出物，更新 migration-state.json（将 state 从 init 转为 profile 并填充 project/modules/sprint 字段；保留 Step 2 已写入的 metadata.graph_build_completed）。
 
 **检查点**：验证 migration-state.json 的 state 字段为 "profile"。
 
@@ -349,11 +350,26 @@ CLI 构建基础图（contains/imports 边），存储到 `.rust-migration/sourc
 1. 读取 `migration-state.json`，确认当前 Sprint 和目标模块
 2. 读取 `.rust-migration/porting/` 目录中与目标模块相关的迁移规则（按模块类型筛选）
 3. 读取目标模块源码
-4. 读取依赖模块的接口签名（仅接口，不含实现）
+4. 执行 `rustmigrate graph interfaces --deps-of <target>` 获取依赖模块的导出接口签名（仅接口，不含实现）
 
 > **单 Skill 可行性 / token 成本预估**：调用 translator 前先按「源码大小 + 相关规则 + 依赖接口（interface_only）→ ≤ 100K tokens」预估单次 Work Unit 的 context 预算，> 95K 提示拆分、> 100K 走降级路径——映射公式、各成分 token 量级与降级行为以 [02-architecture.md § 3.5.1 上下文预算运行时检查与拆分策略](./02-architecture.md#351-上下文预算运行时检查与拆分策略) 为权威。本骨架的每个 `**检查点**` 即为「指令段 → 文件存在性检查点 → 下一指令段」的实例编码：单步检查点失败按 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径) 的 `max_retries_per_step` 重试，不回滚已通过的前序步骤。
 
 ## 分步指令
+
+### Step 0.3: 目标模块状态路由（断点续传入口）
+读取 `modules[target].status` 与 `substatus`，确定性路由至对应入口步：
+
+```
+- done / degrade_* (无 --force)  → 报错退出「模块已完成/已降级，若需重做请加 --force」
+- paused                         → 报错退出「模块暂停中，请先 --degrade=... 确认降级方式」
+- translating + substatus 含 phase_a_complete → 跳至 Step 3（Phase A 已持久化，直接进入对抗审查）
+- translating + substatus 含 phase_b_failed   → 跳至 Step 4（等同 --retry）
+- compile_fixing                 → 跳至 Step 4（编译修正循环继续）
+- testing / reviewing            → 跳至 Step 5（测试验证继续）
+- pending / translating(substatus=null) → 正常从 Step 0.5 开始
+```
+
+> 本路由段实现 [06 § 10.6「恢复逻辑据此判断崩溃发生在哪个 Phase」](./06-plugin-structure.md#106-产出物目录结构)所描述的断点续传入口。
 
 ### Step 0.5: 自动解除可解除的 blocked 模块
 读取 migration-state.json 中所有 status='blocked' 的模块，逐个检查其阻塞源是否已解决：
@@ -430,7 +446,7 @@ Private 方法默认翻译（不省略），保持结构完整性。
 **检查点**：审查报告文件存在且非空。
 
 ### Step 3.5: Phase A 结构校验门禁（在进入行为对抗审查后、Phase B 前）
-verifier 在对抗性审查时附带校验 Phase A 是否保持了 1:1 结构（确认翻译器未提前优化）：
+Skill 主上下文调用 `rustmigrate stats compare`（确定性脚本门禁）校验 Phase A 是否保持了 1:1 结构（确认翻译器未提前优化）：
 - 函数数量比 0.9x–2.0x（与 [03 § 7.5 质量记分卡](./03-execution-model.md#75-质量评估分层评分卡)告警阈值一致）
 - 代码行数比 1.2x–3.0x（同上）
 - 主控制流（循环、条件分支）数量/嵌套层级按源码 AST 结构大致对应
@@ -439,7 +455,7 @@ verifier 在对抗性审查时附带校验 Phase A 是否保持了 1:1 结构（
 
 **状态写入**：校验通过/失败后写入 `modules[module].phase_a_audit_passed = true/false` 及 `phase_a_version = 当前 Phase A 文件 content hash`。
 
-**检查点**：结构比例在界内，或已重做 Phase A 通过校验。
+**检查点**：结构比例在界内，或已重做 Phase A 通过校验；重做后仍越界则 paused + `requires_manual_review`。
 
 ### Step 4: Phase B — 编译修正 + 惯用化优化（调用 translator SubAgent）
 基于审查报告修正语义偏差。
@@ -487,7 +503,7 @@ verifier 在对抗性审查时附带校验 Phase A 是否保持了 1:1 结构（
 | analyze Step 4 translator 规则生成 | L1 | source-graph.db、migration-state.json | porting/ 内本次半成品 | ≤2 | profile | 重试仍败则回滚到 analyzer 完成态 |
 | analyze Step 6 scaffolder 测试搭建 | L1 | 前序全部 | test-fixtures/ 内本次半成品 | ≤2 | translator 完成态 | — |
 | run Step 0.5 引用一致性 | L2（延后） | 全部 | 无 | **否** | — | `BLOCKED_BY_VALIDATION_FAILED`，见 [06 § 10.7](./06-plugin-structure.md#107-错误信息与可调试性mvp) |
-| run Step 1 translator 意图摘要 | L2 | — | 本次 `{module}-intent.md` | ≤2 | 模块 pending | L2 = 6 字段非空（附录 E） |
+| run Step 1 translator 意图摘要 | L2 | — | 本次 `{module}-intent.md` | ≤2 | 模块 pending | L2 = 7 字段非空（附录 E） |
 | run Step 2 Phase A translator 翻译 | L1 | `{module}-intent.md` + `intermediate/attempts/*` | `rust_root/{module}.rs`（部分写入） | ≤2 | translating（substatus=null，即意图已确认、Phase A 未开始） | 回滚后重入 Step 2 |
 | run Step 3 verifier 对抗审查 | L1 | Phase A `.rs` 文件 | `intermediate/{module}-review.md` | ≤2 | translating/phase_a_complete_awaiting_review | 回滚后重入 Step 3 |
 | run Step 4 Phase B translator 惯用化 | L1 | Phase A `.rs` + review.md + `intermediate/attempts/*-phase-b-*.rs` | `rust_root/{module}.rs`（Phase B 覆写） | 按 max_retry_rounds（3）然后 pause→degrade | translating/phase_a_complete_awaiting_review | 3 轮耗尽走 pause→degrade 路径 |
@@ -640,7 +656,7 @@ verifier 在对抗性审查时附带校验 Phase A 是否保持了 1:1 结构（
 
 ## 附录 E：意图摘要（`{module}-intent.md`）内容规范
 
-> 意图摘要是 Phase A 翻译的语义契约（见 [03 § 4.3 Step 2](./03-execution-model.md#43-内循环模块级单会话内-phase-ab-双阶段翻译)）。translator 生成时必须逐项覆盖以下 6 个核心字段；verifier 对抗审查（[03 § 7.7](./03-execution-model.md#77-不等价证据探测维度清单) 维度 9）逐字段核对 Phase A/B 代码与本摘要的一致性。
+> 意图摘要是 Phase A 翻译的语义契约（见 [03 § 4.3 Step 2](./03-execution-model.md#43-内循环模块级单会话内-phase-ab-双阶段翻译)）。translator 生成时必须逐项覆盖以下 7 个核心字段；verifier 对抗审查（[03 § 7.7](./03-execution-model.md#77-不等价证据探测维度清单) 维度 9）逐字段核对 Phase A/B 代码与本摘要的一致性（其中 `observable_side_effects` 是 Phase B「不得改变可观测副作用顺序」审查清单的比对锚点）。
 
 **Markdown 模板**：
 
@@ -665,6 +681,9 @@ verifier 在对抗性审查时附带校验 Phase A 是否保持了 1:1 结构（
 
 ## 6. 关键边界值处理
 {整数溢出策略（RULE-3）、空集合/null、Unicode、浮点精度等的明确处理}
+
+## 7. 可观测副作用
+{列出本模块的外部可观测 I/O 动作及其相对顺序（如写文件、发网络请求、写日志）；纯函数填「无」}
 ```
 
 **工具化校验 JSON Schema（M1 用于产出物有效性检查，L2）**：
@@ -674,7 +693,8 @@ verifier 在对抗性审查时附带校验 Phase A 是否保持了 1:1 结构（
   "version": "0.1",
   "type": "object",
   "required": ["module", "purpose", "interfaces", "preconditions",
-               "postconditions", "error_model", "concurrency_model", "boundary_handling"],
+               "postconditions", "error_model", "concurrency_model", "boundary_handling",
+               "observable_side_effects"],
   "properties": {
     "module": { "type": "string" },
     "purpose": { "type": "string", "minLength": 1 },
@@ -684,12 +704,13 @@ verifier 在对抗性审查时附带校验 Phase A 是否保持了 1:1 结构（
     "postconditions": { "type": "array", "items": { "type": "string" } },
     "error_model": { "type": "string", "minLength": 1 },
     "concurrency_model": { "type": "string", "minLength": 1 },
-    "boundary_handling": { "type": "string", "minLength": 1 }
+    "boundary_handling": { "type": "string", "minLength": 1 },
+    "observable_side_effects": { "type": "array", "items": { "type": "string" } }
   }
 }
 ```
 
-> verifier 产出物有效性检查（L2）：6 字段全部非空且 `interfaces` 至少一项；缺字段视为意图摘要不完整，要求 translator 重新生成。完整语义形式化验证为 M2+ 扩展。
+> verifier 产出物有效性检查（L2）：7 字段全部非空（`observable_side_effects` 允许空数组表示纯函数）且 `interfaces` 至少一项；缺字段视为意图摘要不完整，要求 translator 重新生成。完整语义形式化验证为 M2+ 扩展。
 
 ---
 

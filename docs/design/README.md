@@ -8,9 +8,9 @@
 
 **给谁用**：想用 AI 做 Rust 迁移、但担心翻译质量的开发者和团队。
 
-**做什么**：Claude Code Plugin，3 个核心命令（`/migrate analyze` → `run` → `review`）自动完成源码分析、逐模块翻译、8 层测试验证。每条命令内部自动编排多个 SubAgent 子步骤，用户只需依次调用三条命令。
+**做什么**：Claude Code Plugin，3 个核心命令（`/migrate analyze` → `run` → `review`）自动完成源码分析、逐模块翻译、分层测试验证（L0-L7）。每条命令内部自动编排多个 SubAgent 子步骤，用户只需依次调用三条命令。
 
-**核心差异**：模块翻译完成时由独立确定性脚本（`verify.sh`）做门禁，AI 无法修改或跳过，门禁不过不进 Phase B。产出物（迁移规则 + KNOWN_DIFFERENCES.md + MDR 决策记录）是团队协作和审计的标准化资产。
+**核心差异**：Phase B 完成后由独立确定性脚本（`verify.sh`）做门禁，AI 无法修改或跳过，门禁不过模块不进入 done。产出物（迁移规则 + KNOWN_DIFFERENCES.md + MDR 决策记录）是团队协作和审计的标准化资产。
 
 **适用范围**：5K+ 行项目性价比显著；<2K 行直接手动迁移更划算。MVP = 路线图 M1（50-70 人天），组件与工作量详见 [01 § 1.3](./01-positioning-and-methodology.md#13-我们做什么) 和 [08 § M1](./08-roadmap-and-reference.md#m1-mvp6-8-周)。
 
@@ -26,7 +26,7 @@
 
 | 维度 | 手动方式（Claude Code + 好 prompt） | 本工具 |
 |------|--------------------------------------|--------|
-| 验证门禁 | 依赖 prompt 指令跟随，AI 可自我说服跳过 | **独立确定性脚本门禁**（Skill 调用 `verify.sh`，脚本内部逻辑 AI 无法修改/跳过），门禁不过不进 Phase B |
+| 验证门禁 | 依赖 prompt 指令跟随，AI 可自我说服跳过 | **独立确定性脚本门禁**（Skill 调用 `verify.sh`，脚本内部逻辑 AI 无法修改/跳过），门禁不过模块不进入 done（Phase B 后执行） |
 | 迁移规则 | 每次手写 PORTING.md，格式不统一 | **26 类规则模板**（通用规则随 Plugin 分发 + 项目专有规则本地生成），渐进式生成，版本化演化 |
 | 差异追踪 | 靠人记忆哪些行为不同 | **KNOWN_DIFFERENCES.md** 自动发现 + 分类 + 人类审批 |
 | 断点续传 | 关闭会话后丢失进度 | **migration-state.json** 完整状态持久化 |

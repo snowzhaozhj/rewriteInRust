@@ -115,7 +115,7 @@ M0 收尾时依据 `DESIGN_ASSUMPTIONS.md` 的 Spike 结论，按下表确定进
 | .rustmigrate.toml | 1 | Schema 定义 + 默认值生成 |
 | 单模块集成测试 | 2 | 单模块路径打通 + 调试 |
 | 三项目端到端验证 + 规则缺陷回修 | 5-6 | 含规则缺陷发现→回修 agents/translator.md→重测的 1-2 轮迭代；含性能基准数据采集与环境标准化 0.5-1 天（环境元信息记录 + 写入 sprint-N-report.json，见下方 § 13.1.2） |
-| 批大小优化验收（原 Spike 3 补充 a） | 2-3 | M1 前 2 周执行，可与 TS 适配器并行；使用 3 个公开中型 TS 项目（列入 `.rustmigrate.toml` fixture）；在批大小 20/35/50 上测量批内符号引用覆盖度/跨批重复/依赖链准确度，结论写入 `DESIGN_ASSUMPTIONS.md` |
+| 批大小优化验收（原 Spike 3 补充 a，非阻断） | 2-3 | M1 前 2 周执行，可与 TS 适配器并行；使用 3 个公开中型 TS 项目（列入 `.rustmigrate.toml` fixture）；在批大小 20/35/50 上测量批内符号引用覆盖度/跨批重复/依赖链准确度，结论写入 `DESIGN_ASSUMPTIONS.md`。**非 M1 阻断**：MVP <5K 行不触发批处理（>200 文件才激活），时间压力下可推迟到 M2 前 2 周合并执行 |
 | proptest 集成与 seed 管理 | 1-2 | 纯函数 L2 等价测试基础设施（strategy 模板 + regression 文件管理），不含 FFI 等价管线 |
 | CLI 核心（11 个 MVP 子命令） | 10-14 | init/profile/graph(build+topo-sort+deps+stats)/validate-state/state(get+transition)/stats-loc/scaffold |
 | CLI 嵌入 crate 集成 | 5-7 | tree-sitter 绑定(~2d) + ast-grep-core(~1.5d) + tokei(~1d) + petgraph(~1d) + rusqlite(~1.5d) + 跨平台编译/调试。**风险**：rusqlite 嵌入抬高编译时间与二进制体积，若实测触上限（见 M0 Spike 0 crate 集成风险评估）则 M1 切 JSON 持久化回退、SQLite 推迟到 M2（决策见 [04 § 5.7.3](./04-toolchain.md#573-持久化存储)前向兼容权衡） |
@@ -127,7 +127,7 @@ M0 收尾时依据 `DESIGN_ASSUMPTIONS.md` 的 Spike 结论，按下表确定进
 > **M0 假设验证周**（5-10 人天）不在上述 M1 估算中，应单独核算。
 > **与 v0.9.2 估算的差异**：集成测试（+4 天）、CLI graph build（+3 天）、crate 集成（+2 天）、Plan B 缓冲（+3 天）。详见可行性审查报告。
 >
-> **估算透明度说明**：CLI 11 个命令（10-14 天）按每命令 ≈0.9-1.3 天（纯命令逻辑）+ 1-2 天 graph 子命令共享开销（petgraph 初始化）折算，crate 集成风险（见上表「CLI 嵌入 crate 集成」行）与集成测试 fixture（见「CLI 测试」行）已**单列不重复计入**本行；表内人天含同行评审 + 1 轮集成测试 fixture（dogfooding），纯开发时间约为估算的 60%。M0 Spike 0 的 crate 风险评估直接喂给 M1 决策——若 rusqlite + tree-sitter 触编译/体积上限，M1 执行 JSON 回退（见 Spike 0 回退表），CLI 开销约 -2 天但图持久化推迟 M2。
+> **估算透明度说明**：CLI 12 个命令（11-15 天）按每命令 ≈0.9-1.3 天（纯命令逻辑）+ 1-2 天 graph 子命令共享开销（petgraph 初始化）折算，crate 集成风险（见上表「CLI 嵌入 crate 集成」行）与集成测试 fixture（见「CLI 测试」行）已**单列不重复计入**本行；表内人天含同行评审 + 1 轮集成测试 fixture（dogfooding），纯开发时间约为估算的 60%。M0 Spike 0 的 crate 风险评估直接喂给 M1 决策——若 rusqlite + tree-sitter 触编译/体积上限，M1 执行 JSON 回退（见 Spike 0 回退表），CLI 开销约 -2 天但图持久化推迟 M2。
 
 > **场景 A / B 对比**（**实际范围取决于 M0 验收结果**）：
 > - **基线 M1**（所有 Spike 验证通过，无 Plan B）：**50-65 人天**。
@@ -138,7 +138,7 @@ M0 收尾时依据 `DESIGN_ASSUMPTIONS.md` 的 Spike 结论，按下表确定进
 
 **目标**：验证管线完整，翻译质量可靠
 
-**交付物**：
+**交付物**（内部排序：状态机程序化 → 多 agent worktree → CLI 扩展；前 2 周见首项标注；详细分期于 M1 验收后产出）：
 - [ ] **上下文预算实证校验（M2 前 2 周，优先）** — 用中等复杂度真实项目实测 [02 § 3.5.1](./02-architecture.md#351-上下文预算运行时检查与拆分策略) 预算表在深嵌套/高依赖模块上的准确度，结果反馈规则库改进（承接 M1 后移的边界场景全面覆盖）
 - [ ] 多候选生成 + 最优选择
 - [ ] 属性测试完整管线（proptest FFI 等价性验证 + 跨模块回归集联动，承接 M1 基础集成）
