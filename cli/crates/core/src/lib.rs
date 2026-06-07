@@ -1,5 +1,6 @@
 pub mod error;
 pub mod graph;
+pub mod lang;
 pub mod profile;
 pub mod response;
 pub mod scaffold;

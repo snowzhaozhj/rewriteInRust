@@ -384,7 +384,7 @@ fn parse_node_extra(extra: Option<&str>) -> (bool, Option<Visibility>, bool, Vec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::build::build_graph;
+    use crate::graph::build::build_graph_ts;
     use std::path::PathBuf;
 
     fn fixtures_dir() -> PathBuf {
@@ -421,7 +421,7 @@ mod tests {
     #[test]
     fn persist_round_trip_linear_deps() {
         let root = fixtures_dir().join("linear-deps/src");
-        let original = build_graph(&root).unwrap();
+        let original = build_graph_ts(&root).unwrap();
         let db_path = temp_db_path("linear");
 
         // 保存
@@ -465,7 +465,7 @@ mod tests {
     #[test]
     fn persist_round_trip_diamond_deps() {
         let root = fixtures_dir().join("diamond-deps/src");
-        let original = build_graph(&root).unwrap();
+        let original = build_graph_ts(&root).unwrap();
         let db_path = temp_db_path("diamond");
 
         save_to_db(&original, &db_path).unwrap();

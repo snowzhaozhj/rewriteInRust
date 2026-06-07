@@ -255,7 +255,7 @@ fn compute_level(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::build::build_graph;
+    use crate::graph::build::build_graph_ts;
     use std::path::PathBuf;
 
     fn fixtures_dir() -> PathBuf {
@@ -277,7 +277,7 @@ mod tests {
     #[test]
     fn topo_sort_linear_deps() {
         let root = fixtures_dir().join("linear-deps/src");
-        let graph = build_graph(&root).unwrap();
+        let graph = build_graph_ts(&root).unwrap();
         let order = topological_sort(&graph).unwrap();
 
         // ground-truth 偏序约束：utils < service < index
@@ -298,7 +298,7 @@ mod tests {
     #[test]
     fn migration_sequence_linear_deps() {
         let root = fixtures_dir().join("linear-deps/src");
-        let graph = build_graph(&root).unwrap();
+        let graph = build_graph_ts(&root).unwrap();
         let seq = migration_sequence(&graph);
 
         assert!(!seq.has_cycles(), "linear-deps 不应有环");
@@ -324,7 +324,7 @@ mod tests {
     #[test]
     fn topo_sort_diamond_deps() {
         let root = fixtures_dir().join("diamond-deps/src");
-        let graph = build_graph(&root).unwrap();
+        let graph = build_graph_ts(&root).unwrap();
         let order = topological_sort(&graph).unwrap();
 
         // ground-truth 偏序约束
@@ -354,7 +354,7 @@ mod tests {
     #[test]
     fn topo_sort_diamond_deps_barrel_constraints() {
         let root = fixtures_dir().join("diamond-deps/src");
-        let graph = build_graph(&root).unwrap();
+        let graph = build_graph_ts(&root).unwrap();
         let order = topological_sort(&graph).unwrap();
 
         // barrel.ts 依赖 types/db/auth，应排在它们后面
@@ -377,7 +377,7 @@ mod tests {
     #[test]
     fn topo_sort_circular_deps_returns_error() {
         let root = fixtures_dir().join("circular-deps/src");
-        let graph = build_graph(&root).unwrap();
+        let graph = build_graph_ts(&root).unwrap();
         let result = topological_sort(&graph);
 
         assert!(
@@ -400,7 +400,7 @@ mod tests {
     #[test]
     fn detect_cycles_circular_deps() {
         let root = fixtures_dir().join("circular-deps/src");
-        let graph = build_graph(&root).unwrap();
+        let graph = build_graph_ts(&root).unwrap();
         let cycles = detect_cycles(&graph);
 
         assert!(!cycles.is_empty(), "应检测到至少一个环");
@@ -422,7 +422,7 @@ mod tests {
     #[test]
     fn migration_sequence_circular_deps() {
         let root = fixtures_dir().join("circular-deps/src");
-        let graph = build_graph(&root).unwrap();
+        let graph = build_graph_ts(&root).unwrap();
         let seq = migration_sequence(&graph);
 
         assert!(seq.has_cycles(), "circular-deps 应标记 has_cycles=true");
@@ -443,7 +443,7 @@ mod tests {
     #[test]
     fn detect_cycles_no_cycles() {
         let root = fixtures_dir().join("linear-deps/src");
-        let graph = build_graph(&root).unwrap();
+        let graph = build_graph_ts(&root).unwrap();
         let cycles = detect_cycles(&graph);
         assert!(cycles.is_empty(), "linear-deps 不应有环");
     }

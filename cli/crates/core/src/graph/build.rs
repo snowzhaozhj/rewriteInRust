@@ -1,87 +1,104 @@
-//! tree-sitter 解析 TS 项目 → SourceGraph 构建。
+//! 源码图构建——语言无关。
+//!
+//! 遍历项目目录，通过 `LanguageAdapter` trait 分析每个文件，
+//! 组装成完整的 `SourceGraph`。不依赖任何特定语言实现。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::error::{MigrateError, Result};
-use crate::ts_extract::{Extraction, TsExtractor};
-use crate::types::common::{NodeId, Span};
-use crate::types::graph::{Dependency, EdgeType, NodeType, Provenance, SourceNode};
+use crate::lang::{FileAnalysis, LanguageAdapter};
+use crate::types::common::NodeId;
+use crate::types::graph::{Dependency, EdgeType, NodeType, Provenance};
 
 use super::SourceGraph;
 
 /// 从项目根目录构建源码图。
 ///
-/// `root` 应指向包含 TS 源码的目录（如 `src/`）。
-/// 扫描所有 `.ts` 文件（排除 `.d.ts`），提取节点和边。
-pub fn build_graph(root: &Path) -> Result<SourceGraph> {
+/// `adapters` 是语言适配器列表，每个文件会尝试匹配第一个能处理它的适配器。
+pub fn build_graph(root: &Path, adapters: &mut [Box<dyn LanguageAdapter>]) -> Result<SourceGraph> {
     let root = root
         .canonicalize()
         .map_err(|_| MigrateError::FileNotFound(root.to_path_buf()))?;
-    let ts_files = collect_ts_files(&root)?;
 
-    if ts_files.is_empty() {
+    let files = collect_source_files(&root, adapters)?;
+    if files.is_empty() {
         return Ok(SourceGraph::new());
     }
 
-    let mut extractor = TsExtractor::new();
     let mut graph = SourceGraph::new();
-    let mut cached_extractions: HashMap<String, Extraction> = HashMap::new();
+    let mut file_analyses: HashMap<String, FileAnalysis> = HashMap::new();
 
-    for file_path in &ts_files {
+    for (file_path, adapter_idx) in &files {
         let rel = make_relative(file_path, &root);
         let source = std::fs::read_to_string(file_path).map_err(MigrateError::Io)?;
 
-        let extraction = match extractor.extract(&source, file_path) {
-            Ok(e) => e,
+        let analysis = match adapters[*adapter_idx].analyze_file(&source, &rel) {
+            Ok(a) => a,
             Err(e) => {
                 graph.warnings.push(format!("解析跳过 {rel}: {e}"));
                 continue;
             }
         };
 
-        let file_node_id = format!("file:{rel}");
-        add_file_node(&mut graph, &file_node_id, &rel);
-        add_symbol_nodes(&mut graph, &source, &rel, &extraction);
-        add_intra_file_edges(&mut graph, &file_node_id, &rel, &extraction);
-        add_export_edges(&mut graph, &file_node_id, &rel, &extraction);
+        for node in &analysis.nodes {
+            graph.add_node(node.clone());
+        }
+        for edge in &analysis.edges {
+            graph.add_edge(edge.clone());
+        }
 
-        cached_extractions.insert(rel.clone(), extraction);
+        file_analyses.insert(rel, analysis);
     }
 
-    add_import_edges(&mut graph, &cached_extractions, &ts_files, &root);
+    // 修正 extends 边的目标 ID（适配器产出时可能用了错误的前缀）
+    fixup_extends_targets(&mut graph);
+
+    // 构建跨文件边（Imports + Calls）
+    let file_rels: Vec<String> = files.iter().map(|(p, _)| make_relative(p, &root)).collect();
+    add_cross_file_edges(&mut graph, &file_analyses, &file_rels);
 
     Ok(graph)
 }
 
-fn collect_ts_files(root: &Path) -> Result<Vec<PathBuf>> {
+/// 便捷函数：用默认 TypeScript adapter 构建图。
+pub fn build_graph_ts(root: &Path) -> Result<SourceGraph> {
+    let mut adapters: Vec<Box<dyn LanguageAdapter>> =
+        vec![Box::new(crate::lang::typescript::TypeScriptAdapter::new())];
+    build_graph(root, &mut adapters)
+}
+
+/// 收集所有可被适配器处理的源文件，返回 (路径, 适配器索引)。
+fn collect_source_files(
+    root: &Path,
+    adapters: &[Box<dyn LanguageAdapter>],
+) -> Result<Vec<(PathBuf, usize)>> {
     let mut files = Vec::new();
-    collect_ts_files_recursive(root, &mut files)?;
-    files.sort();
+    collect_recursive(root, adapters, &mut files)?;
+    files.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(files)
 }
 
-fn collect_ts_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+fn collect_recursive(
+    dir: &Path,
+    adapters: &[Box<dyn LanguageAdapter>],
+    files: &mut Vec<(PathBuf, usize)>,
+) -> Result<()> {
     let entries = std::fs::read_dir(dir).map_err(MigrateError::Io)?;
     for entry in entries {
         let entry = entry.map_err(MigrateError::Io)?;
         let path = entry.path();
         if path.is_dir() {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
-            if name == "node_modules" || name == ".git" || name == "dist" {
+            if name == "node_modules" || name == ".git" || name == "dist" || name == "target" {
                 continue;
             }
-            collect_ts_files_recursive(&path, files)?;
-        } else if is_ts_file(&path) {
-            files.push(path);
+            collect_recursive(&path, adapters, files)?;
+        } else if let Some(idx) = adapters.iter().position(|a| a.can_handle(&path)) {
+            files.push((path, idx));
         }
     }
     Ok(())
-}
-
-fn is_ts_file(path: &Path) -> bool {
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
-    name.ends_with(".ts") && !name.ends_with(".d.ts")
 }
 
 fn make_relative(path: &Path, root: &Path) -> String {
@@ -91,337 +108,36 @@ fn make_relative(path: &Path, root: &Path) -> String {
         .replace('\\', "/")
 }
 
-fn add_file_node(graph: &mut SourceGraph, id: &str, rel: &str) {
-    graph.add_node(SourceNode {
-        id: NodeId::new(id),
-        node_type: NodeType::File,
-        name: rel.to_string(),
-        file_path: rel.to_string(),
-        line_range: None,
-        is_exported: false,
-        complexity: None,
-        is_async: false,
-        visibility: None,
-        is_abstract: false,
-        decorators: Vec::new(),
-        migration_status: None,
-        migration_priority: None,
-        rust_kind: None,
-        rust_path: None,
-        crate_name: None,
-    });
-}
+/// 修正 extends 边：适配器可能用了 `interface:` 前缀，实际目标可能是 class/enum。
+fn fixup_extends_targets(graph: &mut SourceGraph) {
+    let extends_edges: Vec<Dependency> = graph
+        .edges()
+        .filter(|e| e.edge_type == EdgeType::Extends)
+        .cloned()
+        .collect();
 
-fn add_symbol_nodes(graph: &mut SourceGraph, source: &str, rel: &str, extraction: &Extraction) {
-    let mut parser = tree_sitter::Parser::new();
-    if parser
-        .set_language(&tree_sitter_typescript::language_typescript())
-        .is_err()
-    {
-        graph
-            .warnings
-            .push(format!("tree-sitter 语言设置失败: {rel}"));
-        return;
-    }
-    let tree = match parser.parse(source, None) {
-        Some(t) => t,
-        None => {
-            graph.warnings.push(format!("tree-sitter 解析失败: {rel}"));
-            return;
-        }
-    };
-
-    walk_for_symbols(graph, tree.root_node(), source, rel, extraction);
-}
-
-fn walk_for_symbols(
-    graph: &mut SourceGraph,
-    node: tree_sitter::Node,
-    source: &str,
-    rel: &str,
-    extraction: &Extraction,
-) {
-    match node.kind() {
-        "function_declaration" | "generator_function_declaration" => {
-            if let Some(name_node) = node.child_by_field_name("name") {
-                let name = text(name_node, source);
-                let is_async = has_child_kind(node, "async");
-                let is_exported = extraction.exports.contains(&name);
-                let id = format!("function:{rel}:{name}");
-                graph.add_node(SourceNode {
-                    id: NodeId::new(&id),
-                    node_type: NodeType::Function,
-                    name: name.clone(),
-                    file_path: rel.to_string(),
-                    line_range: Some(span(node)),
-                    is_exported,
-                    complexity: None,
-                    is_async,
-                    visibility: None,
-                    is_abstract: false,
-                    decorators: Vec::new(),
-                    migration_status: None,
-                    migration_priority: None,
-                    rust_kind: None,
-                    rust_path: None,
-                    crate_name: None,
-                });
-            }
-        }
-        "class_declaration" | "abstract_class_declaration" => {
-            if let Some(name_node) = node.child_by_field_name("name") {
-                let name = text(name_node, source);
-                let is_exported = extraction.exports.contains(&name);
-                let is_abstract = node.kind() == "abstract_class_declaration";
-                let class_id = format!("class:{rel}:{name}");
-                graph.add_node(SourceNode {
-                    id: NodeId::new(&class_id),
-                    node_type: NodeType::Class,
-                    name: name.clone(),
-                    file_path: rel.to_string(),
-                    line_range: Some(span(node)),
-                    is_exported,
-                    complexity: None,
-                    is_async: false,
-                    visibility: None,
-                    is_abstract,
-                    decorators: Vec::new(),
-                    migration_status: None,
-                    migration_priority: None,
-                    rust_kind: None,
-                    rust_path: None,
-                    crate_name: None,
-                });
-
-                if let Some(body) = node.child_by_field_name("body") {
-                    add_class_methods(graph, body, source, rel, &name);
-                }
-
-                add_extends_edges(graph, node, source, rel, &class_id);
-            }
-            return; // 已递归处理 body
-        }
-        "interface_declaration" => {
-            if let Some(name_node) = node.child_by_field_name("name") {
-                let name = text(name_node, source);
-                let is_exported = extraction.exports.contains(&name);
-                graph.add_node(SourceNode {
-                    id: NodeId::new(format!("interface:{rel}:{name}")),
-                    node_type: NodeType::Interface,
-                    name,
-                    file_path: rel.to_string(),
-                    line_range: Some(span(node)),
-                    is_exported,
-                    complexity: None,
-                    is_async: false,
-                    visibility: None,
-                    is_abstract: false,
-                    decorators: Vec::new(),
-                    migration_status: None,
-                    migration_priority: None,
-                    rust_kind: None,
-                    rust_path: None,
-                    crate_name: None,
-                });
-            }
-        }
-        "enum_declaration" => {
-            if let Some(name_node) = node.child_by_field_name("name") {
-                let name = text(name_node, source);
-                let is_exported = extraction.exports.contains(&name);
-                graph.add_node(SourceNode {
-                    id: NodeId::new(format!("enum:{rel}:{name}")),
-                    node_type: NodeType::Enum,
-                    name,
-                    file_path: rel.to_string(),
-                    line_range: Some(span(node)),
-                    is_exported,
-                    complexity: None,
-                    is_async: false,
-                    visibility: None,
-                    is_abstract: false,
-                    decorators: Vec::new(),
-                    migration_status: None,
-                    migration_priority: None,
-                    rust_kind: None,
-                    rust_path: None,
-                    crate_name: None,
-                });
-            }
-        }
-        "export_statement" => {
-            if let Some(decl) = node.child_by_field_name("declaration") {
-                walk_for_symbols(graph, decl, source, rel, extraction);
-                return;
-            }
-        }
-        _ => {}
-    }
-
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        walk_for_symbols(graph, child, source, rel, extraction);
-    }
-}
-
-fn add_class_methods(
-    graph: &mut SourceGraph,
-    body: tree_sitter::Node,
-    source: &str,
-    rel: &str,
-    class_name: &str,
-) {
-    let mut cursor = body.walk();
-    for child in body.children(&mut cursor) {
-        if child.kind() == "method_definition" || child.kind() == "public_field_definition" {
-            if let Some(name_node) = child.child_by_field_name("name") {
-                let method_name = text(name_node, source);
-                let is_async = has_child_kind(child, "async");
-                let method_id = format!("function:{rel}:{class_name}.{method_name}");
-                let class_id = format!("class:{rel}:{class_name}");
-
-                graph.add_node(SourceNode {
-                    id: NodeId::new(&method_id),
-                    node_type: NodeType::Function,
-                    name: format!("{class_name}.{method_name}"),
-                    file_path: rel.to_string(),
-                    line_range: Some(span(child)),
-                    is_exported: false,
-                    complexity: None,
-                    is_async,
-                    visibility: None,
-                    is_abstract: false,
-                    decorators: Vec::new(),
-                    migration_status: None,
-                    migration_priority: None,
-                    rust_kind: None,
-                    rust_path: None,
-                    crate_name: None,
-                });
-
-                graph.add_edge(Dependency {
-                    source: NodeId::new(&class_id),
-                    target: NodeId::new(&method_id),
-                    edge_type: EdgeType::Contains,
-                    provenance: Provenance::TreeSitter,
-                    weight: 1.0,
-                    sub_kind: None,
-                    mapping_notes: None,
-                });
-            }
-        }
-    }
-}
-
-fn add_extends_edges(
-    graph: &mut SourceGraph,
-    class_node: tree_sitter::Node,
-    source: &str,
-    rel: &str,
-    class_id: &str,
-) {
-    let child_count = class_node.child_count();
-    for i in 0..child_count {
-        let child = match class_node.child(i) {
-            Some(c) => c,
-            None => continue,
-        };
-        if child.kind() == "class_heritage" {
-            let clause_count = child.child_count();
-            for j in 0..clause_count {
-                let clause = match child.child(j) {
-                    Some(c) => c,
-                    None => continue,
-                };
-                if clause.kind() == "extends_clause" || clause.kind() == "implements_clause" {
-                    let is_implements = clause.kind() == "implements_clause";
-                    let tn_count = clause.child_count();
-                    for k in 0..tn_count {
-                        let type_node = match clause.child(k) {
-                            Some(c) => c,
-                            None => continue,
-                        };
-                        if type_node.is_named()
-                            && type_node.kind() != "extends"
-                            && type_node.kind() != "implements"
-                        {
-                            let target_name = text(type_node, source);
-                            if !target_name.is_empty() {
-                                let target_id = find_type_node_id(graph, rel, &target_name);
-                                graph.add_edge(Dependency {
-                                    source: NodeId::new(class_id),
-                                    target: NodeId::new(&target_id),
-                                    edge_type: EdgeType::Extends,
-                                    provenance: Provenance::TreeSitter,
-                                    weight: 1.0,
-                                    sub_kind: if is_implements {
-                                        Some("implements".to_string())
-                                    } else {
-                                        None
-                                    },
-                                    mapping_notes: None,
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn find_type_node_id(graph: &SourceGraph, rel: &str, name: &str) -> String {
-    let candidates = [
-        format!("interface:{rel}:{name}"),
-        format!("class:{rel}:{name}"),
-        format!("enum:{rel}:{name}"),
-    ];
-    for candidate in &candidates {
-        if graph.node_index(&NodeId::new(candidate)).is_some() {
-            return candidate.clone();
-        }
-    }
-    // 跨文件引用时，在全图中按名称搜索
-    for node in graph.nodes() {
-        if node.name == name
-            && matches!(
-                node.node_type,
-                NodeType::Interface | NodeType::Class | NodeType::Enum
-            )
-        {
-            return node.id.as_str().to_string();
-        }
-    }
-    format!("interface:{rel}:{name}")
-}
-
-fn add_export_edges(
-    graph: &mut SourceGraph,
-    file_node_id: &str,
-    rel: &str,
-    extraction: &Extraction,
-) {
-    let file_id = NodeId::new(file_node_id);
-    for export_name in &extraction.exports {
-        if export_name == "default" || export_name.starts_with('*') || export_name.contains("<-") {
+    for edge in extends_edges {
+        if graph.node_index(&edge.target).is_some() {
             continue;
         }
-        let candidates = [
-            format!("function:{rel}:{export_name}"),
-            format!("class:{rel}:{export_name}"),
-            format!("interface:{rel}:{export_name}"),
-            format!("enum:{rel}:{export_name}"),
-        ];
+        let target_str = edge.target.as_str();
+        let parts: Vec<&str> = target_str.splitn(3, ':').collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        let (rel, name) = (parts[1], parts[2]);
+
+        let candidates = [format!("class:{rel}:{name}"), format!("enum:{rel}:{name}")];
         for candidate in &candidates {
             if graph.node_index(&NodeId::new(candidate)).is_some() {
                 graph.add_edge(Dependency {
-                    source: file_id.clone(),
+                    source: edge.source.clone(),
                     target: NodeId::new(candidate),
-                    edge_type: EdgeType::Exports,
-                    provenance: Provenance::TreeSitter,
-                    weight: 1.0,
-                    sub_kind: None,
-                    mapping_notes: None,
+                    edge_type: edge.edge_type,
+                    provenance: edge.provenance,
+                    weight: edge.weight,
+                    sub_kind: edge.sub_kind.clone(),
+                    mapping_notes: edge.mapping_notes.clone(),
                 });
                 break;
             }
@@ -429,130 +145,87 @@ fn add_export_edges(
     }
 }
 
-fn add_intra_file_edges(
+/// 构建跨文件的 Imports 和 Calls 边。
+fn add_cross_file_edges(
     graph: &mut SourceGraph,
-    file_node_id: &str,
-    rel: &str,
-    extraction: &Extraction,
+    analyses: &HashMap<String, FileAnalysis>,
+    file_rels: &[String],
 ) {
-    let file_id = NodeId::new(file_node_id);
-    for call in &extraction.calls {
-        if let Some(callee) = call.strip_prefix("call:") {
-            let target_id = format!("function:{rel}:{callee}");
-            graph.add_edge(Dependency {
-                source: file_id.clone(),
-                target: NodeId::new(&target_id),
-                edge_type: EdgeType::Calls,
-                provenance: Provenance::TreeSitter,
-                weight: 1.0,
-                sub_kind: None,
-                mapping_notes: None,
-            });
-        } else if let Some(ctor) = call.strip_prefix("new:") {
-            let target_id = format!("class:{rel}:{ctor}");
-            graph.add_edge(Dependency {
-                source: file_id.clone(),
-                target: NodeId::new(&target_id),
-                edge_type: EdgeType::Calls,
-                provenance: Provenance::TreeSitter,
-                weight: 1.0,
-                sub_kind: Some("constructor".to_string()),
-                mapping_notes: None,
-            });
-        }
-    }
-}
+    for (rel, analysis) in analyses {
+        let file_id = NodeId::new(format!("file:{rel}"));
 
-fn add_import_edges(
-    graph: &mut SourceGraph,
-    cached_extractions: &HashMap<String, Extraction>,
-    ts_files: &[PathBuf],
-    root: &Path,
-) {
-    let file_rels: Vec<String> = ts_files.iter().map(|f| make_relative(f, root)).collect();
-
-    let import_data: Vec<(String, Vec<String>)> = cached_extractions
-        .iter()
-        .map(|(rel, ext)| (rel.clone(), ext.imports.iter().cloned().collect()))
-        .collect();
-
-    for (rel, imports) in &import_data {
-        let file_id = format!("file:{rel}");
-        for imp in imports {
-            if let Some(target_rel) = resolve_import(imp, rel, &file_rels) {
-                let target_file_id = format!("file:{target_rel}");
+        // Imports 边
+        for import in &analysis.imports {
+            if let Some(target_rel) = resolve_import(&import.module_path, rel, file_rels) {
+                let target_file_id = NodeId::new(format!("file:{target_rel}"));
                 graph.add_edge(Dependency {
-                    source: NodeId::new(&file_id),
-                    target: NodeId::new(&target_file_id),
+                    source: file_id.clone(),
+                    target: target_file_id,
                     edge_type: EdgeType::Imports,
                     provenance: Provenance::TreeSitter,
                     weight: 1.0,
                     sub_kind: None,
                     mapping_notes: None,
                 });
+            }
+        }
 
-                add_cross_file_call_edges(graph, &file_id, &target_rel, imp);
+        // Calls 边（跨文件：从当前文件指向其他文件的函数/类）
+        for call in &analysis.calls {
+            if call.is_constructor {
+                let target_id = format!("class:{rel}:{}", call.callee);
+                let resolved = if graph.node_index(&NodeId::new(&target_id)).is_some() {
+                    Some(NodeId::new(&target_id))
+                } else {
+                    graph
+                        .nodes()
+                        .find(|n| n.name == call.callee && n.node_type == NodeType::Class)
+                        .map(|n| n.id.clone())
+                };
+                if let Some(target) = resolved {
+                    graph.add_edge(Dependency {
+                        source: file_id.clone(),
+                        target,
+                        edge_type: EdgeType::Calls,
+                        provenance: Provenance::TreeSitter,
+                        weight: 1.0,
+                        sub_kind: Some("constructor".to_string()),
+                        mapping_notes: None,
+                    });
+                }
+            } else {
+                let target_id = format!("function:{rel}:{}", call.callee);
+                if graph.node_index(&NodeId::new(&target_id)).is_some() {
+                    graph.add_edge(Dependency {
+                        source: file_id.clone(),
+                        target: NodeId::new(&target_id),
+                        edge_type: EdgeType::Calls,
+                        provenance: Provenance::TreeSitter,
+                        weight: 1.0,
+                        sub_kind: None,
+                        mapping_notes: None,
+                    });
+                }
             }
         }
     }
 }
 
-fn add_cross_file_call_edges(
-    graph: &mut SourceGraph,
-    source_file_id: &str,
-    target_rel: &str,
-    import_spec: &str,
-) {
-    let parts: Vec<&str> = import_spec.split("<-").collect();
-    if parts.len() < 2 {
-        return;
-    }
-    let symbol_part = parts[0];
-
-    let symbols: Vec<&str> = if let Some((_, after)) = symbol_part.split_once(':') {
-        vec![after]
-    } else {
-        vec![symbol_part]
-    };
-
-    for sym in symbols {
-        if sym.is_empty() || sym == "*" || sym == "default" || sym.starts_with("type:") {
-            continue;
-        }
-        let target_fn_id = format!("function:{target_rel}:{sym}");
-        if graph.node_index(&NodeId::new(&target_fn_id)).is_some() {
-            graph.add_edge(Dependency {
-                source: NodeId::new(source_file_id),
-                target: NodeId::new(&target_fn_id),
-                edge_type: EdgeType::Calls,
-                provenance: Provenance::TreeSitter,
-                weight: 1.0,
-                sub_kind: None,
-                mapping_notes: None,
-            });
-        }
-    }
-}
-
-fn resolve_import(import_spec: &str, current_rel: &str, file_rels: &[String]) -> Option<String> {
-    let parts: Vec<&str> = import_spec.split("<-").collect();
-    if parts.len() < 2 {
-        return None;
-    }
-    let module_path = parts[parts.len() - 1];
-
+fn resolve_import(module_path: &str, current_rel: &str, file_rels: &[String]) -> Option<String> {
     if !module_path.starts_with('.') {
         return None;
     }
 
     let current_dir = Path::new(current_rel).parent().unwrap_or(Path::new(""));
     let resolved = current_dir.join(module_path);
-
     let normalized = normalize_path(&resolved);
 
     let candidates = [
         format!("{normalized}.ts"),
         format!("{normalized}/index.ts"),
+        format!("{normalized}.py"),
+        format!("{normalized}.c"),
+        format!("{normalized}.go"),
         normalized.clone(),
     ];
 
@@ -581,30 +254,13 @@ fn normalize_path(path: &Path) -> String {
     parts.join("/")
 }
 
-fn text(node: tree_sitter::Node, source: &str) -> String {
-    source.get(node.byte_range()).unwrap_or("").to_string()
-}
-
-fn span(node: tree_sitter::Node) -> Span {
-    Span {
-        start_line: node.start_position().row as u32 + 1,
-        end_line: node.end_position().row as u32 + 1,
-    }
-}
-
-fn has_child_kind(node: tree_sitter::Node, kind: &str) -> bool {
-    let mut c = node.walk();
-    let found = node.children(&mut c).any(|ch| ch.kind() == kind);
-    found
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn fixtures_dir() -> PathBuf {
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        // cli/crates/core -> cli/crates -> cli -> repo root
         let repo_root = manifest.ancestors().nth(3).unwrap();
         repo_root.join("fixtures")
     }
@@ -612,30 +268,39 @@ mod tests {
     #[test]
     fn build_linear_deps() {
         let root = fixtures_dir().join("linear-deps/src");
-        let graph = build_graph(&root).unwrap();
+        let graph = build_graph_ts(&root).unwrap();
 
         assert!(
-            graph
-                .node_index(&NodeId::new("file:src/utils.ts"))
-                .is_some()
-                || graph.node_index(&NodeId::new("file:utils.ts")).is_some(),
-            "should have utils.ts node, nodes: {:?}",
+            graph.node_index(&NodeId::new("file:utils.ts")).is_some(),
+            "should have utils.ts, nodes: {:?}",
             graph.nodes().map(|n| n.id.as_str()).collect::<Vec<_>>()
         );
+
+        let stats = graph.stats();
+        assert!(stats.total_nodes >= 3, "at least 3 file nodes");
+        assert!(stats.total_edges > 0, "should have edges");
     }
 
     #[test]
     fn build_empty_dir() {
         let dir = std::env::temp_dir().join("rustmigrate_empty_test");
         let _ = std::fs::create_dir_all(&dir);
-        let graph = build_graph(&dir).unwrap();
+        let graph = build_graph_ts(&dir).unwrap();
         assert_eq!(graph.node_count(), 0);
         let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]
     fn build_nonexistent_dir() {
-        let result = build_graph(Path::new("/nonexistent/path"));
+        let result = build_graph_ts(Path::new("/nonexistent/path"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn build_with_no_adapters() {
+        let root = fixtures_dir().join("linear-deps/src");
+        let mut adapters: Vec<Box<dyn LanguageAdapter>> = vec![];
+        let graph = build_graph(&root, &mut adapters).unwrap();
+        assert_eq!(graph.node_count(), 0);
     }
 }

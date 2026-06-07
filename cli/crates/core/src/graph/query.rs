@@ -124,7 +124,7 @@ impl SourceGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::build::build_graph;
+    use crate::graph::build::build_graph_ts;
     use std::path::{Path, PathBuf};
 
     fn fixtures_dir() -> PathBuf {
@@ -136,7 +136,7 @@ mod tests {
     #[test]
     fn query_neighbors() {
         let root = fixtures_dir().join("linear-deps/src");
-        let graph = build_graph(&root).unwrap();
+        let graph = build_graph_ts(&root).unwrap();
         let files = graph.file_nodes();
         assert!(files.len() >= 3, "should have at least 3 file nodes");
     }
@@ -144,7 +144,7 @@ mod tests {
     #[test]
     fn query_stats() {
         let root = fixtures_dir().join("linear-deps/src");
-        let graph = build_graph(&root).unwrap();
+        let graph = build_graph_ts(&root).unwrap();
         let stats = graph.stats();
         assert!(stats.total_nodes > 0);
         assert!(stats.total_edges > 0);
@@ -154,7 +154,7 @@ mod tests {
     #[test]
     fn query_nodes_by_type() {
         let root = fixtures_dir().join("linear-deps/src");
-        let graph = build_graph(&root).unwrap();
+        let graph = build_graph_ts(&root).unwrap();
         let functions = graph.nodes_by_type(NodeType::Function);
         assert!(!functions.is_empty(), "should have function nodes");
     }
@@ -162,7 +162,7 @@ mod tests {
     #[test]
     fn query_subgraph() {
         let root = fixtures_dir().join("linear-deps/src");
-        let graph = build_graph(&root).unwrap();
+        let graph = build_graph_ts(&root).unwrap();
         let file_ids: Vec<NodeId> = graph.file_nodes().iter().map(|n| n.id.clone()).collect();
         let sub = graph.subgraph(&file_ids);
         assert_eq!(sub.node_count(), graph.file_nodes().len());
