@@ -7,7 +7,7 @@
 | Tier | 含义 | 触发方式 | 失败影响 |
 |------|------|---------|---------|
 | **Tier 0 硬性门禁** | 每次写入/提交必须通过 | LSP 自动（F1）+ 脚本门禁（F2） | 阻塞继续 |
-| **Tier 1 推荐** | 画像自动启用，可按需关闭 | Sprint Review 触发 | 警告但不阻塞 |
+| **Tier 1 推荐** | 画像自动启用，可按需关闭 | Sprint Review 触发 | 默认警告；条件强制时阻塞（见 §5.3 启用规则 + [03 §7.1.1](./03-execution-model.md#711-模块类型--测试层要求矩阵) 矩阵 + [03 §7.5](./03-execution-model.md#75-覆盖率门禁) 覆盖率门禁） |
 | **Tier 2 高级** | 用户显式启用 | 手动触发 | 可选 |
 
 ## 5.2 Tier 0：硬性门禁
@@ -47,7 +47,7 @@ disallowed-methods = [
 
    M0 [Spike 1](./08-roadmap-and-reference.md#m0-假设验证周2-3-周)（SubAgent 编排可靠性）顺带采集规则可行性指标：可用 `clippy.toml` 表达的规则占比、误报/漏报率、规则维护成本——该占比由上述 translator 标注（Y/N）自动统计，若需语义判断的规则 > 30% 则在 M2 规划中升级为自定义 lint crate。M2 阶段若 M1 确认需要 > 15 条规则，再实现自定义 lint crate 架构（工作量见 [08 § M2](./08-roadmap-and-reference.md#m2-质量提升8-12-周)）。
 
-**clippy 规则与目标 Cargo.toml 解耦**：生成的 `clippy.toml` 应放在 `.rust-migration/`（不直接注入用户的 `Cargo.toml`），保持迁移规则与目标项目构建配置分离。`verify.sh` 通过 `cargo clippy` 在目标项目根目录读取该配置（Rust 工具链默认从工作目录向上查找 `clippy.toml`，或经 `CLIPPY_CONF_DIR` 指定目录）。
+**clippy 规则与目标 Cargo.toml 解耦**：生成的 `clippy.toml` 应放在 `.rust-migration/`（不直接注入用户的 `Cargo.toml`），保持迁移规则与目标项目构建配置分离。`verify.sh` 通过 `cargo clippy` 读取该配置（因 `.rust-migration/` 不是 `rust_root` 的祖先目录，默认向上查找无法命中，须经 `CLIPPY_CONF_DIR` 指定目录）。
 
 **Tier 0 执行机制：双层递送**（F1 + F2，互补而非二选一）：
 
@@ -384,14 +384,14 @@ CREATE INDEX idx_edges_target_type ON edges(target, edge_type);
 > **MVP 不需要本节策略**：MVP 单模块串行，所有写操作由单个 CLI writer（如 `graph build`）或单个 SubAgent 顺序执行，无并发锁争夺。MVP 期对 `source-graph.db` 的写串行化**不依赖** WAL + `busy_timeout`，而由两层既有机制保障：(a) 每个 `/migrate` 命令在 Step 0 以 `flock -n .rust-migration/.migration-lock` 获取**全局命令锁**，禁止两个 `/migrate` 实例并发（含 Sprint Planning 中调用 `graph build` 增量重建与分析并发，见 [06 § 10.5 多终端并发隔离](./06-plugin-structure.md#105-编排调度路径)）；(b) `file-guard.sh` 对 `source-graph.db` 加 `flock` 排他锁，防御指令跟随失败导致的意外并发（见 [06 § 10.3](./06-plugin-structure.md#103-hooks自动化门禁)）。analyzer→translator→scaffolder 严格串行（序列见 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径)）。下方的 WAL + `busy_timeout` 策略仅 M2+ 并行模式需要。
 
 - **隔离与重试**：SQLite WAL 支持「单 writer + 多 reader」并发。每个连接设 `PRAGMA busy_timeout=5000`；写操作遇 `SQLITE_BUSY` 时按指数退避重试（最多 3 次）后上报。rusqlite 经 libsqlite3 透传上述 PRAGMA 与 busy handler。
-- **写入序列化**：`graph build` / 增量更新的写入由 CLI 侧 writer 排他锁串行化（reader 信号量 ≤ N，writer 独占），避免多 agent 同时改图。M2 多 agent 并发时，analyzer/scaffolder 对 `nodes`/`edges` 表的写入通过 SQLite WAL 串行化（rusqlite 的 `busy_timeout` + 指数退避重试保证一致性）；汇总 agent 在所有并行 agent 完成后负责 WAL checkpoint。
+- **写入序列化**：`graph build` / 增量更新的写入由 CLI 侧 writer 排他锁串行化（reader 信号量 ≤ N，writer 独占），避免多 agent 同时改图。M2 多 agent 并发时，默认策略为 analyzer/scaffolder 对 `nodes`/`edges` 表的写入通过 SQLite WAL 串行化（rusqlite 的 `busy_timeout` + 指数退避重试保证一致性）；若 M2 实测写锁等待 >50ms，降级为「SubAgent 只读 + 集中 writer」模型（见 [06 §10.5 M2 扩展表](./06-plugin-structure.md#105-编排调度路径) 与 [08 §M2 图并发写策略](./08-roadmap-and-reference.md#m2-质量提升8-12-周)）。汇总 agent 在所有并行 agent 完成后负责 WAL checkpoint。
 - **petgraph 副本隔离（M2 无内存竞态）**：petgraph 是进程内内存结构、无 WAL，故 M2 并发**不共享内存图**。各 SubAgent 启动时从 SQLite 加载**独立**的 petgraph 内存副本（`rustmigrate graph build --load-from-db`），进程内只读该副本。新增节点/边先写入 SQLite（经上述 WAL 串行化），后续 agent 启动时从 SQLite 重新加载——以「SQLite 为单一真相源 + 各 agent 内存副本隔离」规避内存竞态，代价是启动加载延迟（可接受，纳入 M2 性能门禁）。这同时回答了「中间态持久化（写 SQLite）/ 副本合并（不合并，各自从 DB 重载）/ 冲突检测（由 SQLite 写串行化兜底，无需独立算法）」三问。
 - **增量更新的原子性**（MVP 与 M2 通用，与并发无关）：§ 5.7.5 的 STRUCTURAL 变更需「删除旧节点+边 → 重新解析插入」，必须包在**单个 `BEGIN IMMEDIATE TRANSACTION ... COMMIT` 事务**内完成，避免中间态触发外键约束违反（`edges.source/target` 引用 `nodes.id`）。删除按「先边后节点」顺序，插入按「先节点后边」顺序。MVP 期该事务由单个 `graph build` 进程持有、提交后才写 `metadata.graph_build_completed`（见 [09 附录 A](./09-appendix-schemas.md#附录-amigration-statejson-schema)），保证下游 analyzer 不会读到半成品图。
 - **跨文件一致性**：`migration-state.json` 与 `source-graph.db` 间无分布式事务，采用「先提交 DB 事务并 WAL checkpoint，再用 atomic rename（写临时文件后 `rename`）落 state.json」的顺序，保证 state.json 永不引用尚未持久化的图状态（all-or-nothing 语义）。
 
 > 多 agent 写竞争属于 12.1 风险矩阵「多 agent 冲突」的缓解面；MVP（单模块串行）不涉及并发写，以上为 M2 实现约束。
 
-**存储位置**：`.rust-migration/source-graph.db`（与 `migration-state.json` 同目录）
+**存储位置**：`.rust-migration/source-graph.db`（与 `migration-state.json` 同目录）。M2 多 agent 共享的 `source-graph.db` 固定位于**主 worktree** 的 `.rust-migration/source-graph.db`，各 agent worktree 通过 `.rustmigrate.toml` 的 `[workspace] shared_db_path`（绝对路径，由 Workflow 启动脚本注入）引用。
 
 ### 5.7.4 图构建管线
 
@@ -423,7 +423,7 @@ CREATE INDEX idx_edges_target_type ON edges(target, edge_type);
 >
 > 混合策略（部分文件 tree-sitter、部分 TS Compiler API）对 MVP 属过度设计，推迟到 M2。AST 引擎经 `.rustmigrate.toml` 的 `[parser] ast_engine`（`tree-sitter` | `ts-compiler-api`，schema 权威见 [06 § 11.1](./06-plugin-structure.md#111-rustmigratetoml-配置文件)）切换为 TS Compiler API 回退（对应 Spike 3 的 Plan B）。
 - **适配器 `extract-deps.sh`**（阶段 2 补充）：使用语言专用工具（如 dependency-cruiser）做精细依赖分析，能发现 tree-sitter 无法覆盖的动态 import、re-export 等场景。
-- **合并策略**：CLI 构建基础图后，适配器输出作为补充合并入图。同一条边如果两者都产出，保留 `provenance: TreeSitter` 版本（确定性优先）；仅适配器发现的边标注 `provenance: ToolAssisted`。CLI 内嵌 ast-grep-core 产出的边同样标注 `provenance: ToolAssisted`；同一对节点若 tree-sitter 和 ast-grep-core 均产出 `calls` 边，保留 TreeSitter 版本。
+- **合并策略**：CLI 构建基础图后，适配器输出作为补充合并入图。同一条边如果两者都产出，保留 `provenance: TreeSitter` 版本（确定性优先）；仅适配器发现的边标注 `provenance: ToolAssisted`。CLI 内嵌 ast-grep-core 产出的边同样标注 `provenance: ToolAssisted`。
 
 #### 5.7.4.1 性能基准与扩展性
 

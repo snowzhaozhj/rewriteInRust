@@ -98,7 +98,7 @@ M0 收尾时依据 `DESIGN_ASSUMPTIONS.md` 的 Spike 结论，按下表确定进
 - **M0 内**：Spike 0（Plugin 骨架）是前置，必须最先通过；Spike 1/2/3/4/5 在 Spike 0 通过后可并行。
 - **M1 内串行链**：`analyzer SubAgent` → `translator 生成 porting 规则`（**按项目即时生成，非预训练**，规则随 3 个真实项目迁移逐步产出）→ `TS 适配器 detect/extract` 脚本对接。三者非循环——适配器脚本提供输入，analyzer 消费图，translator 据图与陷阱清单生成规则。
 - 可并行项：Hook 脚本、`.rustmigrate.toml`、Plugin 打包结构与 CLI 核心命令开发互不阻塞，可与上述链并行推进。
-- **运行时串行边界（显式锁定）**：MVP 运行时 analyzer/scaffolder **严格串行执行**（`/migrate analyze` 的 3 次 SubAgent 调用顺序见 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径)），Spike 1 验证的正是这条串行路径的可靠性，**不预期 MVP 内并行**；analyzer + scaffolder 并行属 M2 范围（图并发写策略见下方 M2 段落）。上述「可并行项」指开发期任务可并行，与运行时 SubAgent 串行无关。
+- **运行时串行边界（显式锁定）**：MVP 运行时 analyzer/scaffolder **严格串行执行**（`/migrate analyze` 的 3 次 SubAgent 调用顺序见 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径)），Spike 1 验证的正是这条串行路径的可靠性，**不预期 MVP 内并行**；跨模块并行属 M2 范围（图并发写策略见下方 M2 段落）。上述「可并行项」指开发期任务可并行，与运行时 SubAgent 串行无关。
 
 **M1 工作量分解（粗估）**：
 
@@ -119,10 +119,12 @@ M0 收尾时依据 `DESIGN_ASSUMPTIONS.md` 的 Spike 结论，按下表确定进
 | proptest 集成与 seed 管理 | 1-2 | 纯函数 L2 等价测试基础设施（strategy 模板 + regression 文件管理），不含 FFI 等价管线 |
 | CLI 核心（13 个 MVP 子命令） | 12-16 | init/profile/graph(build+topo-sort+deps+interfaces+stats)/validate-state/state(get+transition)/stats-loc/stats-compare/scaffold |
 | CLI 嵌入 crate 集成 | 5-7 | tree-sitter 绑定(~2d) + ast-grep-core(~1.5d) + tokei(~1d) + petgraph(~1d) + rusqlite(~1.5d) + 跨平台编译/调试。**风险**：rusqlite 嵌入抬高编译时间与二进制体积，若实测触上限（见 M0 Spike 0 crate 集成风险评估）则 M1 切 JSON 持久化回退、SQLite 推迟到 M2（决策见 [04 § 5.7.3](./04-toolchain.md#573-持久化存储)前向兼容权衡） |
-| CLI 测试 | 3-4 | 集成测试 + fixtures + stdout JSON 格式快照测试 + 1 个自建微型项目（dogfooding fixture：50-100 行 TS 输入 + 手写期望 Rust 输出，0.5 天；`dogfooding.yml` workflow，1 天，仅验证到 Tier 0，见 [03 § 4.11.4](./03-execution-model.md#4114-项目自验证dogfooding-m2-概念设计)） |
+| CLI 测试 | 3-4 | 集成测试 + fixtures + stdout JSON 格式快照测试 + 1 个自建微型项目（dogfooding fixture：50-100 行 TS 输入 + 手写期望 Rust 输出，0.5 天；`dogfooding.yml` workflow，1 天，仅验证到 Tier 0，见 [03 § 4.11.4](./03-execution-model.md#4114-项目自验证dogfooding-m2-概念设计)）；含 `ci.yml` PR workflow：`cargo fmt --check` + `cargo clippy -- -D warnings` + `cargo nextest run` + `cargo audit`（advisory-only）；矩阵 = `{MSRV, stable}` × `{ubuntu-latest, macos-latest}`；覆盖率 informational M1、≥70% target M2 |
 | 可复现性脚本与 CI 集成 | 1.5-2 | 规范补充（排除规则 / 环境快照 JSON Schema / 哈希工具标准化）0.5 天 + 脚本实现 1-1.5 天：`verify-reproducibility.sh`（环境快照 + 过滤后 `sha256sum -b` 比对）+ GitHub Actions 集成（见 [03 § 4.11.3](./03-execution-model.md#4113-可复现性保证)） |
 | Plan B 缓冲（单 Spike） | 2-5 | **仅**单个 Spike 触发时的额外开发量；多 Spike 失败（尤其 Spike 1+4 同时失败需重设计编排层）见上方决策检查点行「+5-10 人天」与下方场景 B，**不在本行覆盖** |
 | **合计** | **50-70** | 1 人约 12-18 周，2 人约 6-9 周 |
+
+> **优先级削减顺序**（工期超预算时）：显式标记「非阻断」的项（批大小优化、可扩展性检验）最先推迟；其次为 proptest 集成、Plan B 缓冲（未触发时归零）；核心串行链（SubAgent agent.md → TS 适配器 → 端到端验证）不可削减。
 
 > **M0 假设验证周**（5-10 人天）不在上述 M1 估算中，应单独核算。
 > **与 v0.9.2 估算的差异**：集成测试（+4 天）、CLI graph build（+3 天）、crate 集成（+2 天）、Plan B 缓冲（+3 天）。详见可行性审查报告。
@@ -164,7 +166,7 @@ M0 收尾时依据 `DESIGN_ASSUMPTIONS.md` 的 Spike 结论，按下表确定进
 - [ ] CI/CD 集成（`rustmigrate` 在 GitHub Actions 中使用；落地设计见 [03-execution-model.md § 4.11](./03-execution-model.md#411-cicd-集成m2-范围)）
 - [ ] Dogfooding fixture 编写与 CI workflow 完成（承接 M1 备料的 fixture，落地 `dogfooding.yml` 并按验收标准升级为 required，0.5-1 天，见 [03 § 4.11.4](./03-execution-model.md#4114-项目自验证dogfooding-m2-概念设计)）
 
-> **图并发写策略（analyzer + scaffolder 并行阶段）**：M2 的有限并行仅限 analyzer + scaffolder 两个 SubAgent（见 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径)），但两者最终都写入共享的 `source-graph.db`（单 SQLite，同一时刻仅一个写者）。除上方「SQLite 并发写冲突率」门禁外，M2 规划阶段还需实测这两个 agent 对 `nodes`/`edges` 表的并发写在 WAL 模式（[04 § 5.7.3](./04-toolchain.md#573-持久化存储)已选用）下的写锁等待：若单次 ≤ 20ms，记为「WAL 足够，记录锁行为」；若 > 50ms，采用「共享只读图 + 写批量化」或「每 agent 写分片后合并」并记录权衡。此为 M2 规划项，不进 M0 Spike（M0 Spike 仅验证 MVP 串行关键路径）。状态机程序化 + schema 向后兼容框架合计 +3–5 人天。
+> **图并发写策略（跨模块并行阶段）**：M2 的跨模块并行下，并发 SubAgent 实例共享 `source-graph.db`（见 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径)），单 SQLite 同一时刻仅一个写者。除上方「SQLite 并发写冲突率」门禁外，M2 规划阶段还需实测并发 agent 对 `nodes`/`edges` 表的并发写在 WAL 模式（[04 § 5.7.3](./04-toolchain.md#573-持久化存储)已选用）下的写锁等待：若单次 ≤ 20ms，记为「WAL 足够，记录锁行为」；若 > 50ms，采用「共享只读图 + 写批量化」或「每 agent 写分片后合并」并记录权衡。此为 M2 规划项，不进 M0 Spike（M0 Spike 仅验证 MVP 串行关键路径）。状态机程序化 + schema 向后兼容框架合计 +3–5 人天。
 
 **验收指标**：
 - 在 3 个真实 TS 中型项目（5K-20K 行）中完成多模块迁移
@@ -232,7 +234,7 @@ M0 收尾时依据 `DESIGN_ASSUMPTIONS.md` 的 Spike 结论，按下表确定进
 衔接 M1/M2 性能门禁，明确「基准如何建立、如何持久化、如何检测回归、与质量评分如何协调」，避免门禁数字悬空：
 
 1. **测试环境标准化**：性能数据采集时须记录环境元信息（CI runner 型号 / Rust 版本 / tree-sitter 版本），以便跨 Sprint 对比时对齐环境变量；M1 基准即作为 M2「相对 M1 基线波动 ≤ ±10%」回归对比的起点（同环境复测，环境不一致时须重采基准）。
-2. **性能数据持久化**：复用 `sprint-N-report.json` 的 `quality_scores`，新增**可选**字段 `performance_metrics: {env_info, build_time, module_throughput, context_utilization}`（schema 权威见 [09 附录 F](./09-appendix-schemas.md#附录-f评分报告-sprint-n-reportjson-schema)），不引入额外文件格式。
+2. **性能数据持久化**：复用 `sprint-N-report.json` 的 `quality_scores`，新增**可选**字段 `performance_metrics: {env_info, build_time, module_throughput, context_utilization}`（M1 实现时追加到 [09 附录 F](./09-appendix-schemas.md#附录-f评分报告-sprint-n-reportjson-schema) schema，当前为计划字段），不引入额外文件格式。
 3. **回归检测框架**（非独立 CLI 子命令）：对比相邻 Sprint 的 `performance_metrics`，超阈值时采 criterion 的 `relative_difference` + P99 延迟双指标定位，结果由 verifier 在 `/migrate review` 报告中呈现（M2 范围，跨 Sprint 趋势检测口径见 [03 § 7.5 M1/M2 时序划分](./03-execution-model.md#75-质量评估分层评分卡) 与 § 4.9 回归阈值）。
 4. **与质量评分协调**：当 `migration_motives` 含 `performance` 时，[03 § 7.5](./03-execution-model.md#75-质量评估分层评分卡) 评分卡的 L6 性能回归（criterion）结果作为 `final_score` 的**可选加权项**纳入（非性能动机时不计权），与既有「性能动机时 L6 必须」一致。
 5. **工作量**：M1 工作量表「三项目端到端验证」行已含「性能基准数据采集与环境标准化 0.5-1 天」。

@@ -10,7 +10,7 @@
 
 **做什么**：Claude Code Plugin，3 个核心命令（`/migrate analyze` → `run` → `review`）自动完成源码分析、逐模块翻译、分层测试验证（L0-L7）。每条命令内部自动编排多个 SubAgent 子步骤，用户只需依次调用三条命令。
 
-**核心差异**：Phase B 完成后由独立确定性脚本（`verify.sh`）做门禁，AI 无法修改或跳过，门禁不过模块不进入 done。产出物（迁移规则 + KNOWN_DIFFERENCES.md + MDR 决策记录）是团队协作和审计的标准化资产。
+**核心差异**：Phase B 完成后由独立确定性脚本（`verify.sh`）做门禁，脚本内部逻辑 AI 无法修改或跳过；MVP 阶段门禁调用由 SKILL.md 指令编排保证（M2 升级为程序化状态机强制，见 06 § 10.5）。产出物（迁移规则 + KNOWN_DIFFERENCES.md + MDR 决策记录）是团队协作和审计的标准化资产。
 
 **适用范围**：5K+ 行项目性价比显著；<2K 行直接手动迁移更划算。MVP = 路线图 M1（50-70 人天），组件与工作量详见 [01 § 1.3](./01-positioning-and-methodology.md#13-我们做什么) 和 [08 § M1](./08-roadmap-and-reference.md#m1-mvp6-8-周)。
 

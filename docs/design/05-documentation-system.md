@@ -141,7 +141,7 @@ confidence: high
 4. `/migrate review` 比对当前规则版本与各模块清单，发现不一致时将模块标记 `rule_version_stale`（migration-state.json substatus），输出待复审列表（落入 `reports/sprint-N-report.json`）；用户可经 `/migrate run --module=X --rule-upgrade-review-only` 选择性复审（而非整体重译）。
 5. 关键规则（如 RULE-11 禁止模式、RULE-12 unsafe 策略）发生 breaking change 时，在 migration-state.json 记录 `affected_modules` 字段，供精准回溯。
 
-> **CLI 边界与配置**：上述比对属确定性计算。MVP（< 50 模块）由 `/migrate review` 的 SubAgent 完成，不新增 CLI 子命令以免突破 12+6 命令清单（命令权威以 06 为准）；M2 提出确定性命令候选 `rustmigrate validate rules --check-module-versions`（解析所有 `_porting_manifest.json` 比对 `porting/changelog.md`）。**`validate rules` 为 M2「备选」，不在 [06 § 10.0.1 表](./06-plugin-structure.md#1001-cli-工具架构rustmigrate) 当前已定的 6 个 M2 扩展命令之内；是否纳入及计入方式由 M2 规划确定**（命令清单权威以 06 为准）。版本追踪开关与升级行为由 `.rustmigrate.toml` `[rules]` 段控制（`version_tracking` / `auto_regenerate_on_rule_upgrade` / `enforce_rule_version_consistency`，定义见 [06 § 11.1](./06-plugin-structure.md#111-rustmigratetoml-配置文件)）。
+> **CLI 边界与配置**：上述比对属确定性计算。MVP（< 50 模块）由 `/migrate review` 的 SubAgent 完成，不新增 CLI 子命令以免突破 13+5 命令清单（命令权威以 06 为准）；M2 提出确定性命令候选 `rustmigrate validate rules --check-module-versions`（解析所有 `_porting_manifest.json` 比对 `porting/changelog.md`）。**`validate rules` 为 M2「备选」，不在 [06 § 10.0.1 表](./06-plugin-structure.md#1001-cli-工具架构rustmigrate) 当前已定的 5 个 M2 扩展命令之内；是否纳入及计入方式由 M2 规划确定**（命令清单权威以 06 为准）。版本追踪开关与升级行为由 `.rustmigrate.toml` `[rules]` 段控制（`version_tracking` / `auto_regenerate_on_rule_upgrade` / `enforce_rule_version_consistency`，定义见 [06 § 11.1](./06-plugin-structure.md#111-rustmigratetoml-配置文件)）。
 
 **行动指南**：
 - MVP 阶段只生成标记"是"的规则
@@ -160,7 +160,7 @@ confidence: high
 
 日后 `/migrate analyze` 运行时（如 Plugin 升级到 0.2.0）须：① 检测该文件存在；② 比对 `core_rules_snapshot` 与 `agents/*.md` 当前核心规则版本；③ 若任一规则发生 `major` 升级，输出告警，例：「检测到项目规则在 Plugin v0.1.0 冻结。当前 v0.2.0 中 RULE-3 升级至 v2.0.0 (breaking)。请复审 `.rust-migration/porting/business-logic-rules.md` 中 RULE-3 的定制版本，确认与新版 breaking change 兼容。详见 KNOWN_DIFFERENCES.md KD-NNN。」此机制让陈旧的项目专有规则在升级后显式可见，不引入 `.rustmigrate.toml` 新配置。
 
-**规则维护责任与社区贡献**：规则库三层结构的维护职责与更新周期如下，社区贡献的本地检查要点详见本章下方「社区贡献快速参考」。
+**规则维护责任与社区贡献**：本设计中「Plugin 维护者」「Plugin Lead」「核心维护者」指同一角色池（项目核心 committers）；「技术委员会」与「社区维护委员会」为同一治理机构的不同称谓，具体组成与选举规则在项目 GOVERNANCE.md 定义。规则库三层结构的维护职责与更新周期如下，社区贡献的本地检查要点详见本章下方「社区贡献快速参考」。
 
 | 层级 | 维护责任 | 更新周期 | 外部对齐 |
 |------|---------|---------|---------|

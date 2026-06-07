@@ -36,7 +36,7 @@ cd docs/design && python3 -m http.server 8765
 - 术语必须与 README.md 的命名约定一致（State/Milestone/Sprint/Phase A-B）
 - 修改某个文件后检查是否有其他文件引用了相同概念（`grep -rn "关键词" docs/design/`）
 - 版本号在 README.md 第 3 行和 index.html 中需同步更新
-- MVP CLI 为 13 个命令（v0.9.4 裁剪后），M2 扩展 6 个，以 06-plugin-structure.md 为准
+- MVP CLI 为 13 个命令（v0.9.4 裁剪后），M2 扩展 5 个，以 06-plugin-structure.md 为准
 - 工作量估算以 08-roadmap-and-reference.md 为唯一权威来源
 - source-graph 主存储是 SQLite（.db），JSON 是导出格式；文档中不应出现 `source-graph.json` 作为主存储路径
 - 配置文件 `.rustmigrate.toml` 位于项目根目录（不在 `.rust-migration/` 内）
