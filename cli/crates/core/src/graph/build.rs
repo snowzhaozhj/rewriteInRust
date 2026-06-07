@@ -26,7 +26,7 @@ pub fn build_graph(root: &Path) -> Result<SourceGraph> {
 
     let mut extractor = TsExtractor::new();
     let mut graph = SourceGraph::new();
-    let mut file_exports: HashMap<String, Vec<String>> = HashMap::new();
+    let mut cached_extractions: HashMap<String, Extraction> = HashMap::new();
 
     for file_path in &ts_files {
         let rel = make_relative(file_path, &root);
@@ -42,15 +42,14 @@ pub fn build_graph(root: &Path) -> Result<SourceGraph> {
 
         let file_node_id = format!("file:{rel}");
         add_file_node(&mut graph, &file_node_id, &rel);
-        add_symbol_nodes(&mut graph, &source, file_path, &rel, &extraction);
-
-        let exported_names: Vec<String> = extraction.exports.iter().cloned().collect();
-        file_exports.insert(rel.clone(), exported_names);
-
+        add_symbol_nodes(&mut graph, &source, &rel, &extraction);
         add_intra_file_edges(&mut graph, &file_node_id, &rel, &extraction);
+        add_export_edges(&mut graph, &file_node_id, &rel, &extraction);
+
+        cached_extractions.insert(rel.clone(), extraction);
     }
 
-    add_import_edges(&mut graph, &file_exports, &ts_files, &root);
+    add_import_edges(&mut graph, &cached_extractions, &ts_files, &root);
 
     Ok(graph)
 }
@@ -107,23 +106,29 @@ fn add_file_node(graph: &mut SourceGraph, id: &str, rel: &str) {
         decorators: Vec::new(),
         migration_status: None,
         migration_priority: None,
+        rust_kind: None,
+        rust_path: None,
+        crate_name: None,
     });
 }
 
-fn add_symbol_nodes(
-    graph: &mut SourceGraph,
-    source: &str,
-    _file_path: &Path,
-    rel: &str,
-    extraction: &Extraction,
-) {
+fn add_symbol_nodes(graph: &mut SourceGraph, source: &str, rel: &str, extraction: &Extraction) {
     let mut parser = tree_sitter::Parser::new();
-    parser
+    if parser
         .set_language(&tree_sitter_typescript::language_typescript())
-        .expect("TS language");
+        .is_err()
+    {
+        graph
+            .warnings
+            .push(format!("tree-sitter 语言设置失败: {rel}"));
+        return;
+    }
     let tree = match parser.parse(source, None) {
         Some(t) => t,
-        None => return,
+        None => {
+            graph.warnings.push(format!("tree-sitter 解析失败: {rel}"));
+            return;
+        }
     };
 
     walk_for_symbols(graph, tree.root_node(), source, rel, extraction);
@@ -157,6 +162,9 @@ fn walk_for_symbols(
                     decorators: Vec::new(),
                     migration_status: None,
                     migration_priority: None,
+                    rust_kind: None,
+                    rust_path: None,
+                    crate_name: None,
                 });
             }
         }
@@ -180,6 +188,9 @@ fn walk_for_symbols(
                     decorators: Vec::new(),
                     migration_status: None,
                     migration_priority: None,
+                    rust_kind: None,
+                    rust_path: None,
+                    crate_name: None,
                 });
 
                 if let Some(body) = node.child_by_field_name("body") {
@@ -208,6 +219,9 @@ fn walk_for_symbols(
                     decorators: Vec::new(),
                     migration_status: None,
                     migration_priority: None,
+                    rust_kind: None,
+                    rust_path: None,
+                    crate_name: None,
                 });
             }
         }
@@ -229,6 +243,9 @@ fn walk_for_symbols(
                     decorators: Vec::new(),
                     migration_status: None,
                     migration_priority: None,
+                    rust_kind: None,
+                    rust_path: None,
+                    crate_name: None,
                 });
             }
         }
@@ -277,6 +294,9 @@ fn add_class_methods(
                     decorators: Vec::new(),
                     migration_status: None,
                     migration_priority: None,
+                    rust_kind: None,
+                    rust_path: None,
+                    crate_name: None,
                 });
 
                 graph.add_edge(Dependency {
@@ -327,7 +347,7 @@ fn add_extends_edges(
                         {
                             let target_name = text(type_node, source);
                             if !target_name.is_empty() {
-                                let target_id = find_type_node_id(rel, &target_name);
+                                let target_id = find_type_node_id(graph, rel, &target_name);
                                 graph.add_edge(Dependency {
                                     source: NodeId::new(class_id),
                                     target: NodeId::new(&target_id),
@@ -350,8 +370,63 @@ fn add_extends_edges(
     }
 }
 
-fn find_type_node_id(rel: &str, name: &str) -> String {
+fn find_type_node_id(graph: &SourceGraph, rel: &str, name: &str) -> String {
+    let candidates = [
+        format!("interface:{rel}:{name}"),
+        format!("class:{rel}:{name}"),
+        format!("enum:{rel}:{name}"),
+    ];
+    for candidate in &candidates {
+        if graph.node_index(&NodeId::new(candidate)).is_some() {
+            return candidate.clone();
+        }
+    }
+    // 跨文件引用时，在全图中按名称搜索
+    for node in graph.nodes() {
+        if node.name == name
+            && matches!(
+                node.node_type,
+                NodeType::Interface | NodeType::Class | NodeType::Enum
+            )
+        {
+            return node.id.as_str().to_string();
+        }
+    }
     format!("interface:{rel}:{name}")
+}
+
+fn add_export_edges(
+    graph: &mut SourceGraph,
+    file_node_id: &str,
+    rel: &str,
+    extraction: &Extraction,
+) {
+    let file_id = NodeId::new(file_node_id);
+    for export_name in &extraction.exports {
+        if export_name == "default" || export_name.starts_with('*') || export_name.contains("<-") {
+            continue;
+        }
+        let candidates = [
+            format!("function:{rel}:{export_name}"),
+            format!("class:{rel}:{export_name}"),
+            format!("interface:{rel}:{export_name}"),
+            format!("enum:{rel}:{export_name}"),
+        ];
+        for candidate in &candidates {
+            if graph.node_index(&NodeId::new(candidate)).is_some() {
+                graph.add_edge(Dependency {
+                    source: file_id.clone(),
+                    target: NodeId::new(candidate),
+                    edge_type: EdgeType::Exports,
+                    provenance: Provenance::TreeSitter,
+                    weight: 1.0,
+                    sub_kind: None,
+                    mapping_notes: None,
+                });
+                break;
+            }
+        }
+    }
 }
 
 fn add_intra_file_edges(
@@ -390,44 +465,18 @@ fn add_intra_file_edges(
 
 fn add_import_edges(
     graph: &mut SourceGraph,
-    _file_exports: &HashMap<String, Vec<String>>,
+    cached_extractions: &HashMap<String, Extraction>,
     ts_files: &[PathBuf],
     root: &Path,
 ) {
     let file_rels: Vec<String> = ts_files.iter().map(|f| make_relative(f, root)).collect();
 
-    let mut import_warnings: Vec<String> = Vec::new();
-    let cloned_edges: Vec<(String, Vec<String>)> = {
-        let mut result = Vec::new();
-        let file_nodes: Vec<String> = graph
-            .nodes()
-            .filter(|n| n.node_type == NodeType::File)
-            .map(|n| n.file_path.clone())
-            .collect();
-        for rel in &file_nodes {
-            let ts_file_path = root.join(rel);
-            let source = match std::fs::read_to_string(&ts_file_path) {
-                Ok(s) => s,
-                Err(e) => {
-                    import_warnings.push(format!("import 分析跳过 {rel}: {e}"));
-                    continue;
-                }
-            };
-            let mut extractor = TsExtractor::new();
-            let extraction = match extractor.extract(&source, &ts_file_path) {
-                Ok(e) => e,
-                Err(e) => {
-                    import_warnings.push(format!("import 解析跳过 {rel}: {e}"));
-                    continue;
-                }
-            };
-            result.push((rel.clone(), extraction.imports.into_iter().collect()));
-        }
-        result
-    };
-    graph.warnings.extend(import_warnings);
+    let import_data: Vec<(String, Vec<String>)> = cached_extractions
+        .iter()
+        .map(|(rel, ext)| (rel.clone(), ext.imports.iter().cloned().collect()))
+        .collect();
 
-    for (rel, imports) in &cloned_edges {
+    for (rel, imports) in &import_data {
         let file_id = format!("file:{rel}");
         for imp in imports {
             if let Some(target_rel) = resolve_import(imp, rel, &file_rels) {

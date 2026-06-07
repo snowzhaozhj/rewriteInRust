@@ -125,9 +125,38 @@ impl MigrationStateMachine {
         &self.state_file
     }
 
-    /// 获取内部状态文件的可变引用。
-    pub fn state_file_mut(&mut self) -> &mut MigrationStateFile {
-        &mut self.state_file
+    /// 标记 graph 构建完成。
+    pub fn set_graph_build_completed(&mut self) {
+        let now = Timestamp::new(chrono::Utc::now().to_rfc3339());
+        let metadata = self.state_file.metadata.get_or_insert(MigrationMetadata {
+            graph_build_completed: false,
+            graph_build_completed_at: None,
+            last_error: None,
+            lock_token: None,
+        });
+        metadata.graph_build_completed = true;
+        metadata.graph_build_completed_at = Some(now);
+    }
+
+    /// 更新模块状态。
+    pub fn update_module(&mut self, name: &str, module: crate::types::state::ModuleState) {
+        self.state_file.modules.insert(name.to_owned(), module);
+    }
+
+    /// 设置 sprint 信息。
+    pub fn set_sprint(&mut self, sprint: crate::types::state::SprintState) {
+        self.state_file.sprint = Some(sprint);
+    }
+
+    /// 设置最后错误信息。
+    pub fn set_last_error(&mut self, error: Option<String>) {
+        let metadata = self.state_file.metadata.get_or_insert(MigrationMetadata {
+            graph_build_completed: false,
+            graph_build_completed_at: None,
+            last_error: None,
+            lock_token: None,
+        });
+        metadata.last_error = error;
     }
 }
 

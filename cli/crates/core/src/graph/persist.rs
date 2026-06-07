@@ -150,6 +150,9 @@ pub fn load_from_db(db_path: &Path) -> Result<SourceGraph> {
                 decorators,
                 migration_status: r.migration_status,
                 migration_priority: r.migration_priority,
+                rust_kind: None,
+                rust_path: None,
+                crate_name: None,
             });
         }
     }
@@ -497,6 +500,9 @@ mod tests {
             decorators: vec!["deprecated".to_string()],
             migration_status: Some("pending".to_string()),
             migration_priority: Some(1),
+            rust_kind: None,
+            rust_path: None,
+            crate_name: None,
         });
 
         let db_path = temp_db_path("attrs");
@@ -545,6 +551,9 @@ mod tests {
             decorators: Vec::new(),
             migration_status: None,
             migration_priority: None,
+            rust_kind: None,
+            rust_path: None,
+            crate_name: None,
         });
         graph.add_node(SourceNode {
             id: NodeId::new("file:b.ts"),
@@ -560,6 +569,9 @@ mod tests {
             decorators: Vec::new(),
             migration_status: None,
             migration_priority: None,
+            rust_kind: None,
+            rust_path: None,
+            crate_name: None,
         });
         graph.add_edge(Dependency {
             source: NodeId::new("file:a.ts"),
@@ -606,6 +618,9 @@ mod tests {
             decorators: Vec::new(),
             migration_status: None,
             migration_priority: None,
+            rust_kind: None,
+            rust_path: None,
+            crate_name: None,
         });
         save_to_db(&g1, &db_path).unwrap();
 
@@ -625,6 +640,9 @@ mod tests {
             decorators: Vec::new(),
             migration_status: None,
             migration_priority: None,
+            rust_kind: None,
+            rust_path: None,
+            crate_name: None,
         });
         g2.add_node(SourceNode {
             id: NodeId::new("file:new2.ts"),
@@ -640,6 +658,9 @@ mod tests {
             decorators: Vec::new(),
             migration_status: None,
             migration_priority: None,
+            rust_kind: None,
+            rust_path: None,
+            crate_name: None,
         });
         save_to_db(&g2, &db_path).unwrap();
 

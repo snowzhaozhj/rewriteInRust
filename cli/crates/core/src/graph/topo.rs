@@ -24,10 +24,15 @@ pub struct MigrationSequence {
     pub order: Vec<NodeId>,
     /// 可并行迁移的分组（同组内节点无依赖关系）。
     pub parallel_groups: Vec<Vec<NodeId>>,
-    /// 是否存在循环依赖。
-    pub has_cycles: bool,
     /// 所有检测到的环。
     pub cycles: Vec<Vec<NodeId>>,
+}
+
+impl MigrationSequence {
+    /// 是否存在循环依赖。
+    pub fn has_cycles(&self) -> bool {
+        !self.cycles.is_empty()
+    }
 }
 
 /// 对文件级节点做拓扑排序（仅考虑 Imports 边）。
@@ -111,7 +116,6 @@ pub fn migration_sequence(graph: &SourceGraph) -> MigrationSequence {
     MigrationSequence {
         order,
         parallel_groups,
-        has_cycles,
         cycles,
     }
 }
@@ -297,7 +301,7 @@ mod tests {
         let graph = build_graph(&root).unwrap();
         let seq = migration_sequence(&graph);
 
-        assert!(!seq.has_cycles, "linear-deps 不应有环");
+        assert!(!seq.has_cycles(), "linear-deps 不应有环");
         assert!(seq.cycles.is_empty());
         assert!(!seq.order.is_empty());
         assert!(!seq.parallel_groups.is_empty());
@@ -421,7 +425,7 @@ mod tests {
         let graph = build_graph(&root).unwrap();
         let seq = migration_sequence(&graph);
 
-        assert!(seq.has_cycles, "circular-deps 应标记 has_cycles=true");
+        assert!(seq.has_cycles(), "circular-deps 应标记 has_cycles=true");
         assert!(!seq.cycles.is_empty(), "应包含环信息");
         // 即使有环也应生成排序
         assert!(!seq.order.is_empty(), "有环时仍应生成尽力排序");
@@ -450,7 +454,7 @@ mod tests {
         let seq = migration_sequence(&graph);
         assert!(seq.order.is_empty());
         assert!(seq.parallel_groups.is_empty());
-        assert!(!seq.has_cycles);
+        assert!(!seq.has_cycles());
         assert!(seq.cycles.is_empty());
     }
 }
