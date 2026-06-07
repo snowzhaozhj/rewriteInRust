@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Rust 迁移验证工作台**：Claude Code Plugin + `rustmigrate` CLI，帮助开发者将 TS/Python/C 项目迁移到 Rust。
 
-**当前阶段**：M0 假设验证（即将开始）。设计文档 v0.9.4 已完成 9 轮对抗审查收敛，项目脚手架已初始化。
+**当前阶段**：M1 MVP（Phase 0 合约已冻结）。设计文档 v0.9.4 已完成 9 轮对抗审查收敛。
 
 ## 多会话续接（重要）
 
@@ -112,22 +112,32 @@ cargo nextest run -p rustmigrate-core    # 单元/集成测试
 cargo run -- graph build --root fixtures/linear-deps  # 手动验证
 ```
 
-## 质量门（任务完成检查）
+## 质量门
 
 每个任务标记 done 前必须通过 4 层检查：
 1. **代码级**：`just fmt-check && just lint` 全过
 2. **行为级**：fixture ground-truth 偏序约束满足
 3. **集成级**：`just test` 全过（含下游命令）
-4. **审查级**：与 `docs/design/` 对应章节一致
+4. **审查级**：实现与 `docs/design/` 对应章节逐项一致（字段、枚举、schema、默认值）
+
+可通过 Skill 工具调用 `/gate` 一键执行以上 4 层检查。
+
+## 阶段交付流程
+
+每个阶段（Sprint / Phase / Worker）完成后：
+
+1. 质量门：调用 `/gate` skill 确认 4 层全过
+2. 更新 `docs/STATUS.md`
+3. commit 引用任务 ID（如 `feat(M1-GRAPH): 图构建模块`）
+4. 独立分支提 PR
+5. PR 审查：调用 `/pr-review-toolkit:review-pr`，额外运行 `design-checker` agent 检查设计文档一致性
+6. 修复 critical/important issues 后通知用户审阅
+
+禁止合并多阶段为一个 PR。
 
 ## 续接快速参考
 
 **新会话开始**：读 CLAUDE.md → `docs/STATUS.md` → `docs/PLAN.md` 对应任务
-
-**任务完成前**：
-1. `just fmt-check && just lint && just test`
-2. 更新 `docs/STATUS.md`
-3. commit 引用任务 ID（如 `feat(M1-GRAPH): 图构建模块`）
 
 ## 设计文档一致性检查
 

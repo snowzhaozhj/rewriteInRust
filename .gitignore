@@ -13,6 +13,9 @@ Thumbs.db
 
 # Claude Code (session-local)
 .claude/
+!.claude/agents/
+!.claude/skills/
+!.claude/settings.json
 
 # Coverage
 lcov.info
