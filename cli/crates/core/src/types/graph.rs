@@ -139,6 +139,15 @@ pub struct SourceNode {
     pub migration_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub migration_priority: Option<MigrationPriority>,
+    /// RustTarget 节点的 Rust 类型种类（Struct/Enum/Trait/Function/Module/Crate）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rust_kind: Option<String>,
+    /// RustTarget 节点的 Rust 模块路径。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rust_path: Option<String>,
+    /// RustTarget 节点所属的 crate 名称。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crate_name: Option<String>,
 }
 
 /// 源码图边（依赖关系）。

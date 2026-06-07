@@ -8,6 +8,6 @@ pub mod graph;
 pub mod state;
 
 pub use common::*;
-pub use config::{BudgetCheckMode, DegradeStrategy, MigrateConfig};
+pub use config::{AsyncStrategy, BudgetCheckMode, DegradeStrategy, FfiCoverageMode, MigrateConfig};
 pub use graph::*;
 pub use state::*;

@@ -149,6 +149,9 @@ pub struct SprintEntry {
     pub completed_modules: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+    /// 本 Sprint 使用的 PORTING.md 版本号。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub porting_md_version: Option<String>,
 }
 
 /// Sprint 状态。
