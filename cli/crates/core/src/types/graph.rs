@@ -60,17 +60,17 @@ impl std::fmt::Display for NodeType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EdgeType {
-    /// 父子包含（File/Class → Function/Class）。
+    /// 父子包含（Class → Function）。
     Contains,
     /// 导入依赖（File → File）。
     Imports,
-    /// 函数调用（Function → Function）。
+    /// 函数调用（File → Function/Class）。
     Calls,
-    /// 继承/实现（Class → Class/Interface）。
+    /// 继承/实现（Class → Interface/Class）。
     Extends,
     /// 类型引用（Function → Class/Interface/Enum）。
     UsesType,
-    /// 对外导出（Module → Function/Class）。
+    /// 对外导出（File → Function/Class/Interface/Enum）。
     Exports,
     /// 迁移映射（源节点 → RustTarget）。
     MapsTo,
