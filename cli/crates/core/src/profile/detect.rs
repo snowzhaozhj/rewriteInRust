@@ -2,6 +2,7 @@
 //!
 //! 基于 tokei 扫描项目目录，按代码行数判定主语言和复杂度等级。
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use tokei::{Config, LanguageType, Languages};
@@ -9,17 +10,26 @@ use tokei::{Config, LanguageType, Languages};
 use crate::error::{MigrateError, Result};
 use crate::types::common::{Complexity, SourceLang};
 
+/// 单语言统计。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LangStats {
+    /// 文件数。
+    pub files: usize,
+    /// 代码行数。
+    pub lines: u64,
+}
+
 /// 项目画像信息。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProjectProfile {
-    /// 检测到的主语言。
-    pub language: SourceLang,
+    /// 检测到的主语言（代码行数最多的）。
+    pub primary_language: SourceLang,
+    /// 按语言分组的统计。
+    pub languages: HashMap<SourceLang, LangStats>,
     /// 总文件数。
     pub total_files: usize,
     /// 总代码行数。
     pub total_lines: u64,
-    /// TypeScript 文件数（.ts + .tsx）。
-    pub ts_files: usize,
     /// 复杂度等级（按行数阈值判定）。
     pub complexity: Complexity,
 }
@@ -104,10 +114,7 @@ pub fn profile_project(root: &Path) -> Result<ProjectProfile> {
 
     let mut total_files: usize = 0;
     let mut total_lines: u64 = 0;
-    let mut ts_files: usize = 0;
-
-    // 按代码行数聚合到 SourceLang
-    let mut lang_lines: Vec<(SourceLang, u64)> = Vec::new();
+    let mut lang_map: HashMap<SourceLang, LangStats> = HashMap::new();
 
     for (lang_type, lang) in &languages {
         if lang.is_empty() {
@@ -119,33 +126,28 @@ pub fn profile_project(root: &Path) -> Result<ProjectProfile> {
         total_files += file_count;
         total_lines += code_lines;
 
-        // 统计 TS 文件数
-        if matches!(lang_type, LanguageType::TypeScript | LanguageType::Tsx) {
-            ts_files += file_count;
-        }
-
         if let Some(source_lang) = map_language(lang_type) {
-            if let Some(entry) = lang_lines.iter_mut().find(|(sl, _)| *sl == source_lang) {
-                entry.1 += code_lines;
-            } else {
-                lang_lines.push((source_lang, code_lines));
-            }
+            let entry = lang_map
+                .entry(source_lang)
+                .or_insert(LangStats { files: 0, lines: 0 });
+            entry.files += file_count;
+            entry.lines += code_lines;
         }
     }
 
-    let language = lang_lines
-        .into_iter()
-        .max_by_key(|(_, lines)| *lines)
-        .map(|(lang, _)| lang)
+    let primary_language = lang_map
+        .iter()
+        .max_by_key(|(_, stats)| stats.lines)
+        .map(|(lang, _)| *lang)
         .ok_or_else(|| MigrateError::Config("未检测到支持的源语言".to_string()))?;
 
     let complexity = assess_complexity(total_lines);
 
     Ok(ProjectProfile {
-        language,
+        primary_language,
+        languages: lang_map,
         total_files,
         total_lines,
-        ts_files,
         complexity,
     })
 }
@@ -229,10 +231,12 @@ mod tests {
         write_file(tmp.path(), "src/index.ts", &ts_code(50));
 
         let profile = profile_project(tmp.path()).unwrap();
-        assert_eq!(profile.language, SourceLang::TypeScript);
+        assert_eq!(profile.primary_language, SourceLang::TypeScript);
         assert!(profile.total_files >= 1);
         assert!(profile.total_lines >= 50);
-        assert!(profile.ts_files >= 1);
+        let ts = profile.languages.get(&SourceLang::TypeScript).unwrap();
+        assert!(ts.files >= 1);
+        assert!(ts.lines >= 50);
         assert_eq!(profile.complexity, Complexity::Simple);
     }
 
