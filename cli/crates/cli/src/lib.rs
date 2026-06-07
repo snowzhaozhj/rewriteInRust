@@ -110,45 +110,27 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> anyhow::Result<()> {
             )?;
             Ok(())
         }
-        Commands::Profile => {
-            rustmigrate_core::profile::analyze();
-            Ok(())
-        }
+        Commands::Profile => todo!("Phase 2: profile 命令集成"),
         Commands::Graph { action } => match action {
-            GraphCommands::Build => {
-                rustmigrate_core::graph::build();
-                Ok(())
-            }
-            GraphCommands::TopoSort => todo!("M1-TOPO"),
-            GraphCommands::Deps { .. } => todo!("M1-DEPS"),
-            GraphCommands::Interfaces { .. } => todo!("M1-INTERFACES"),
-            GraphCommands::Stats => todo!("M1-STATS"),
+            GraphCommands::Build => todo!("Phase 2: graph build 命令集成"),
+            GraphCommands::TopoSort => todo!("Phase 2: graph topo-sort 命令集成"),
+            GraphCommands::Deps { .. } => todo!("Phase 2: graph deps 命令集成"),
+            GraphCommands::Interfaces { .. } => todo!("Phase 2: graph interfaces 命令集成"),
+            GraphCommands::Stats => todo!("Phase 2: graph stats 命令集成"),
         },
         Commands::Validate { action } => match action {
-            ValidateCommands::State => {
-                rustmigrate_core::validate::validate_state();
-                Ok(())
-            }
+            ValidateCommands::State => todo!("Phase 2: validate state 命令集成"),
         },
         Commands::State { action } => match action {
-            StateCommands::Get { .. } => {
-                rustmigrate_core::state::get();
-                Ok(())
-            }
-            StateCommands::Transition { .. } => {
-                rustmigrate_core::state::transition();
-                Ok(())
-            }
+            StateCommands::Get { .. } => todo!("Phase 2: state get 命令集成"),
+            StateCommands::Transition { .. } => todo!("Phase 2: state transition 命令集成"),
         },
         Commands::Stats { action } => match action {
-            StatsCommands::Loc => todo!("M1-LOC"),
-            StatsCommands::Compare => todo!("M1-COMPARE"),
+            StatsCommands::Loc => todo!("Phase 2: stats loc 命令集成"),
+            StatsCommands::Compare => todo!("Phase 2: stats compare 命令集成"),
         },
         Commands::Scaffold { action } => match action {
-            ScaffoldCommands::Workspace => {
-                rustmigrate_core::scaffold::workspace();
-                Ok(())
-            }
+            ScaffoldCommands::Workspace => todo!("Phase 2: scaffold workspace 命令集成"),
         },
     }
 }
