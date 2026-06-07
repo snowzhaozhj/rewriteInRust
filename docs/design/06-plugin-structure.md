@@ -100,7 +100,7 @@ Plugin 中的确定性计算由独立的 Rust CLI 工具 `rustmigrate` 承担，
 | `rustmigrate stats compare` | 源码与 Rust 结构复杂度对比（函数数量比、代码行数比、控制流嵌套层级）——复用 tokei + tree-sitter 函数计数，作为 Phase A 结构校验门禁（见 03 § 4.3 Step 4.5） |
 | `rustmigrate scaffold workspace` | 生成 Cargo workspace 骨架（注入 dev-dependencies） |
 
-**M2 扩展 — 5 个命令**：
+**M2 扩展 — 6 个命令**：
 
 | 子命令 | 说明 | 推迟理由 |
 |--------|------|---------|
