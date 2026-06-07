@@ -1,0 +1,18 @@
+{
+  "description": "边界情况: 空文件不崩溃、语法错误容错提取、纯类型文件无 calls 边",
+  "nodes": [
+    { "id": "file:src/empty.ts", "type": "File" },
+    { "id": "file:src/syntax-error.ts", "type": "File" },
+    { "id": "file:src/pure-types.ts", "type": "File" },
+    { "id": "function:src/syntax-error.ts:broken", "type": "Function", "is_exported": true, "note": "may or may not be extracted depending on error recovery" },
+    { "id": "interface:src/pure-types.ts:Config", "type": "Interface", "is_exported": true },
+    { "id": "enum:src/pure-types.ts:LogLevel", "type": "Enum", "is_exported": true }
+  ],
+  "edges": [],
+  "topo_order_constraints": [],
+  "expectations": {
+    "empty_file": "produces 1 File node, 0 child nodes, no crash",
+    "syntax_error": "tree-sitter produces partial AST with ERROR nodes; graph build succeeds with warning",
+    "pure_types": "no calls/imports edges; only interface/enum nodes"
+  }
+}

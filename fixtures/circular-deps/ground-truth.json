@@ -1,0 +1,25 @@
+{
+  "description": "循环依赖: event-bus -> handler -> emitter -> event-bus；shared 是无环入口",
+  "nodes": [
+    { "id": "file:src/shared.ts", "type": "File" },
+    { "id": "file:src/event-bus.ts", "type": "File" },
+    { "id": "file:src/handler.ts", "type": "File" },
+    { "id": "file:src/emitter.ts", "type": "File" },
+    { "id": "interface:src/shared.ts:EventPayload", "type": "Interface", "is_exported": true },
+    { "id": "class:src/event-bus.ts:EventBus", "type": "Class", "is_exported": true },
+    { "id": "class:src/handler.ts:Handler", "type": "Class", "is_exported": true },
+    { "id": "class:src/emitter.ts:Emitter", "type": "Class", "is_exported": true }
+  ],
+  "edges": [
+    { "source": "file:src/event-bus.ts", "target": "file:src/shared.ts", "type": "imports", "note": "type-only" },
+    { "source": "file:src/event-bus.ts", "target": "file:src/handler.ts", "type": "imports" },
+    { "source": "file:src/handler.ts", "target": "file:src/shared.ts", "type": "imports", "note": "type-only" },
+    { "source": "file:src/handler.ts", "target": "file:src/emitter.ts", "type": "imports" },
+    { "source": "file:src/emitter.ts", "target": "file:src/shared.ts", "type": "imports", "note": "type-only" },
+    { "source": "file:src/emitter.ts", "target": "file:src/event-bus.ts", "type": "imports" }
+  ],
+  "topo_sort": {
+    "expect_error": true,
+    "cycle_contains": ["file:src/event-bus.ts", "file:src/handler.ts", "file:src/emitter.ts"]
+  }
+}

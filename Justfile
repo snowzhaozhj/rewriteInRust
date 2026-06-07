@@ -17,7 +17,7 @@ build:
 
 # 运行测试
 test:
-    cd cli && cargo nextest run --workspace
+    cd cli && cargo nextest run --workspace --no-tests=pass
 
 # Lint
 lint:

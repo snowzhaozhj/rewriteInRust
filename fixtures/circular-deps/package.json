@@ -1,0 +1,5 @@
+{
+  "name": "circular-deps",
+  "private": true,
+  "type": "module"
+}

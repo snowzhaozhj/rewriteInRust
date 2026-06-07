@@ -1,226 +1,662 @@
 # rustmigrate 实施计划
 
-> 本文件是项目执行的**唯一权威计划**。新会话读 CLAUDE.md → STATUS.md → 本文件即可接续执行。
-> 结构:事务(Workstream) → Sprint(粗粒度目标+验收) → 任务(Sprint 开始时细化)。
+> 本文件是项目执行的唯一权威计划。新会话读 CLAUDE.md → STATUS.md → 本文件即可接续执行。
 
 ---
 
-## 一、事务(Workstream)划分
+## §1 项目结构蓝图
 
-本项目的工作分为 **6 条并行事务流**,贯穿整个生命周期:
-
-| # | 事务 | 说明 | 产出物 |
-|---|------|------|--------|
-| W1 | **CLI 工具开发** | Rust CLI `rustmigrate` 的所有命令实现 | `cli/` 源码 + 测试 |
-| W2 | **Plugin 开发** | SKILL.md + SubAgent + Hooks + 适配器 | `plugin/` 全部内容 |
-| W3 | **验证与测试** | 单元测试 + 集成测试 + 真实项目端到端 + 性能基准 | fixtures/ + CI green + 性能数据 |
-| W4 | **质量保障** | code review + 交叉验证 + 回归检测 + 设计一致性 | 每 Sprint 的质量报告 |
-| W5 | **知识沉淀** | 开发中发现的 learning/decision/pattern 持久化 | docs/learnings/ + docs/decisions/ |
-| W6 | **项目管理** | Sprint 规划 + STATUS.md 维护 + 风险追踪 + 多会话续接 | PLAN.md + STATUS.md |
-
-**任何 Sprint 的交付都必须同时覆盖 W3(验证) + W4(质量) + W5(知识)**,不能只有 W1/W2 的编码。
-
----
-
-## 二、Sprint 总览与里程碑
+### Core Crate 目录结构
 
 ```
-Sprint 0 (M0 假设验证)     ─────→ GATE: 设计假设全部验证,M1 方案确定
-Sprint 1 (M1 基础设施)     ─────→ GATE: CLI 核心命令 + Plugin 骨架可用
-Sprint 2 (M1 核心流程)     ─────→ GATE: /migrate analyze 端到端跑通
-Sprint 3 (M1 迁移循环)     ─────→ GATE: /migrate run + review 跑通单模块
-Sprint 4 (M1 验收)         ─────→ GATE: 3 项目验收通过 = M1 交付
-Sprint 5+ (M2 质量提升)    ─────→ GATE: 验证管线完整,翻译质量可靠
-Sprint N+ (M3/M4)          ─────→ 多语言 + 完善
+cli/crates/core/src/
+├── lib.rs              # pub mod 声明 + re-export
+├── types/
+│   ├── mod.rs          # 类型模块入口
+│   ├── common.rs       # NodeId, EdgeId, Span, SourceLang 等基础类型
+│   ├── graph.rs        # SourceNode, Dependency, SourceGraph 结构
+│   ├── state.rs        # MigrationState, Phase, ModuleStatus 枚举/结构
+│   └── config.rs       # MigrateConfig, ProfileConfig, ThresholdConfig
+├── error.rs            # thiserror 统一错误类型 MigrateError
+├── response.rs         # JSON 输出结构 Response<T> { status, data, warnings }
+├── graph/
+│   ├── mod.rs          # 图模块入口（模块职责注释）
+│   ├── build.rs        # tree-sitter 解析 → SourceGraph 构建
+│   ├── query.rs        # 图查询（neighbors, paths, subgraph）
+│   ├── topo.rs         # 拓扑排序 + 迁移序列生成
+│   └── persist.rs      # SQLite 读写（source-graph.db）
+├── state/
+│   ├── mod.rs          # 状态机入口
+│   ├── machine.rs      # 状态转换逻辑
+│   └── validate.rs     # 状态合法性校验 + 前置条件检查
+├── profile/
+│   ├── mod.rs          # 项目分析入口
+│   └── detect.rs       # 语言检测 + 复杂度评估
+├── scaffold/
+│   ├── mod.rs          # 脚手架生成入口
+│   └── template.rs     # Cargo.toml / mod 结构模板
+├── stats/
+│   ├── mod.rs          # 统计入口
+│   └── coverage.rs     # 迁移进度 + 覆盖率统计
+└── validate/
+    ├── mod.rs          # 验证入口
+    └── rules.rs        # 验证规则（Tier 0/1/2）
+```
+
+### 模块依赖 DAG
+
+```
+types ← error ← response
+  ↑        ↑
+  │    ┌───┴───────┐
+  │    │           │
+graph/build   state/machine
+graph/query   state/validate
+graph/topo        ↑
+  │               │
+  ↓               │
+graph/persist  profile → scaffold
+                         stats
+                         validate
+```
+
+**核心规则**：
+- `graph/build`, `graph/query`, `graph/topo` 不依赖 `graph/persist`（纯计算与 IO 分离）
+- `state` 不依赖 `graph`（仅依赖 `types::graph` 中的类型定义）
+- `persist` 是唯一接触文件系统/数据库的模块
+
+### 文件所有权规则（并行开发时）
+
+| 文件/目录 | Owner | 说明 |
+|-----------|-------|------|
+| `types/` | Phase 0 统一 | 合约冻结后只读 |
+| `error.rs`, `response.rs` | Phase 0 统一 | 合约冻结后只读 |
+| `graph/*` | Worker A | Phase 1 独占 |
+| `state/*`, `validate/*` | Worker B | Phase 1 独占 |
+| `profile/*`, `scaffold/*`, `stats/*` | Worker C | Phase 1 独占 |
+| `plugin/hooks/*` | Worker D | Phase 1 独占 |
+| `lib.rs` | 仅追加 mod 声明 | 任何 Worker 可追加，不删改已有行 |
+| `main.rs` | Phase 2 集成 | Phase 1 禁改 |
+| `Cargo.toml` | 各 Worker 加自己的 dep | 冲突时协调 |
+
+---
+
+## §2 测试 Harness
+
+### Fixture 项目
+
+| Fixture | 场景 | 覆盖验证点 |
+|---------|------|-----------|
+| `linear-deps` | A→B→C 线性依赖 | 拓扑排序基础正确性、单链迁移序列 |
+| `diamond-deps` | A→B,A→C,B→D,C→D | 菱形依赖处理、并行度识别 |
+| `circular-deps` | A↔B 循环引用 | 环检测、错误报告、强连通分量 |
+| `edge-cases` | re-export/type-only/dynamic-import/namespace | 边界情况健壮性 |
+
+每个 fixture 包含：
+- `src/` — TypeScript 源码
+- `ground-truth.json` — 期望输出（偏序约束格式）
+- `README.md` — 场景说明
+
+### ground-truth.json 偏序约束格式
+
+```json
+{
+  "nodes_must_exist": ["src/a.ts", "src/b.ts"],
+  "edges_must_exist": [["src/a.ts", "src/b.ts", "import"]],
+  "topo_order_constraints": [
+    { "before": "src/b.ts", "after": "src/a.ts" }
+  ],
+  "node_count_range": [3, 5],
+  "edge_count_range": [2, 6]
+}
+```
+
+偏序而非全序：只约束必须满足的顺序关系，允许实现选择等价节点的排列。
+
+### Insta 快照策略
+
+```rust
+// settings 全局配置
+insta::Settings::new()
+    .set_snapshot_suffix("cli")
+    .redact("[timestamp]", insta::dynamic_redaction(|v, _| "[TIMESTAMP]"))
+    .redact("[absolute_path]", |v, _| "[PATH]")
+    .redact("[hash]", |v, _| "[HASH]");
+```
+
+- 所有时间戳 → `[TIMESTAMP]`
+- 绝对路径 → `[PATH]`
+- 内容哈希 → `[HASH]`
+- DB 文件不做快照，只快照 JSON 输出
+
+### CI 配置
+
+```yaml
+# just ci 等价流程
+steps:
+  - cargo fmt --check
+  - cargo clippy -D warnings
+  - cargo nextest run
+  - cargo deny check
+  - shellcheck plugin/hooks/scripts/*.sh
 ```
 
 ---
 
-## 三、Sprint 详细规划
+## §3 执行架构
 
-### Sprint 0: 假设验证（M0,预计 1-2 周）
+### Phase 定义与时序
 
-**目标**:验证 6 个技术假设,产出决策,确定 M1 执行路径。
+```
+Phase 0 (合约冻结)    ───→ types/ + error + response + schema.sql 就绪
+    │
+    ▼
+Phase 1 (4路并行)     ───→ 各模块独立实现 + 单元测试
+    │  Worker A: graph
+    │  Worker B: state + validate
+    │  Worker C: profile + scaffold + stats
+    │  Worker D: Plugin hooks
+    │
+    ▼
+Phase 2 (集成)        ───→ main.rs 路由 + Thin E2E 通过
+    │
+    ▼
+Phase 3 (并行Plugin)  ───→ SubAgent + SKILL.md analyze
+    │
+    ▼
+Phase 4 (收敛)        ───→ 翻译循环 + MVP 验收
+```
 
-**事务覆盖**:
-- W3: 每个 Spike 有明确 pass/fail 标准
-- W4: Spike 结果交叉验证(同一 Spike 跑多次确认可复现)
-- W5: 结论写入 `DESIGN_ASSUMPTIONS.md`
-- W6: M0-GATE 决策写入 STATUS.md
+### 并行规则
 
-| Spike | 验证内容 | 依赖 | Pass 标准 | Fail → Plan B |
-|-------|---------|------|-----------|---------------|
-| S0 | Plugin 加载 + crate 编译 | 无 | skill/agent/hook 三者 work；二进制 <50MB | 回退非 Plugin |
-| S1 | SubAgent 3 次串行可靠性 | S0 | ≥4/5 完成全部步骤 | Plan B3 混合编排 |
-| S2 | rust-analyzer LSP | S0 | 秒级诊断反馈 | PostToolUse Hook |
-| S3 | tree-sitter TS 精度 | S0 | exports/imports/calls ≥90% | TS Compiler API |
-| S4 | SKILL.md 长指令跟随 | S0 | >2000 字遗漏率 ≤20% | 拆短 Skill |
-| S5 | Beads/AgentMemory | S0 | 评估结论 | 不用,走纯文件 |
+1. Phase 1 各 Worker 只改自己所有权范围内的文件
+2. `main.rs` 在 Phase 1 期间**禁止修改**
+3. `types/` 在 Phase 0 冻结后，变更需走合约变更协议
+4. `lib.rs` 仅允许追加 `pub mod xxx;` 行
+5. `Cargo.toml` 的 `[dependencies]` 各 Worker 可加，冲突时最后集成方解决
 
-**Sprint 0 GATE 验收**:
-- [ ] `DESIGN_ASSUMPTIONS.md` 已写,每个 Spike 有结论
-- [ ] M1 方案已确定(基线 or Plan B3)
-- [ ] 发现的 Plan B 触发项已更新到 PLAN.md
+### 合约变更协议
 
----
+当需要修改已冻结的 `types/` 或 `error.rs` 时：
 
-### Sprint 1: M1 基础设施（预计 2-3 周）
+1. 提出方在 `docs/decisions/` 创建 MDR（Migration Decision Record）
+2. MDR 中说明：变更内容、影响范围、向后兼容性
+3. 所有 Worker 确认无冲突（或描述适配方案）
+4. 合并变更，各 Worker 适配
+5. 非破坏性追加（新增字段/变体）可快速通过，破坏性变更需全量评估
 
-**目标**:CLI 核心命令可用 + Plugin 基础骨架可加载 + 开发工具链就绪。这是**并行度最高的 Sprint**——CLI 和 Plugin 完全独立开发。
+### Workflow / Background Agent 使用方式
 
-**事务覆盖**:
-- W1: CLI 13 个命令的基础实现(graph build 是关键路径)
-- W2: Plugin hooks 实战化 + SKILL.md 框架
-- W3: CLI 每个命令有 insta 快照测试；CI green
-- W4: code review(对照 guppy/ast-grep 源码交叉验证实现质量)
-- W5: 记录 crate 集成中的坑到 `docs/learnings/`
+| Phase | 机制 | 原因 |
+|-------|------|------|
+| Phase 1 | Workflow + worktree | 4 路并行编码，文件隔离避免冲突 |
+| Phase 3 | Background agents | Plugin 开发与 CLI 独立，无文件冲突 |
+| Phase 2/4 | 单线程顺序 | 集成工作需全局视角，不可并行 |
 
-**关键交付**:
-| 事务 | 交付物 | 验收标准 |
-|------|--------|---------|
-| W1 | CLI 13 命令全部实现 | `cargo nextest` 全过；insta 快照覆盖 |
-| W2 | Plugin hooks 实战 + SKILL.md 框架 | hook fire 可观测；SKILL.md 可加载 |
-| W3 | CI pipeline green | `.github/workflows/ci.yml` 全过 |
-| W4 | 实现质量 review 报告 | 无 blocker/high |
+### 续接协议
 
-**Sprint 1 GATE 验收**:
-- [ ] `rustmigrate graph build` 对真实 TS 项目产出有效 `source-graph.db`
-- [ ] `rustmigrate graph topo-sort` 输出正确迁移顺序
-- [ ] CI 全绿(check + test + clippy + deny)
-- [ ] Plugin 安装后 hook 可 fire
+**写入方（会话结束前 4 步）**：
+1. 更新 `docs/STATUS.md`：当前 Phase / in-progress 任务 / 下一步 / 阻塞项
+2. 已完成任务在本文件标 `[x]`
+3. commit message 引用任务 ID（如 `feat(M1-GRAPH): graph build 实现`）
+4. 若有未完成的并行任务，记录各 Worker 进度到 STATUS.md
 
----
-
-### Sprint 2: M1 核心流程——`/migrate analyze`（预计 2 周）
-
-**目标**:`/migrate analyze` 端到端跑通(从空项目到产出 source-graph + 规则 + 测试基础设施)。
-
-**事务覆盖**:
-- W1: CLI 无新增(Sprint 1 已完成)
-- W2: analyzer + translator(规则) + scaffolder SubAgent 实现 + SKILL.md analyze 完整版
-- W3: 对 fixture TS 项目跑 analyze,验证产出物完整性
-- W4: SubAgent 产出物 Schema 校验 + 交叉验证(多次跑看一致性)
-- W5: 记录 SubAgent 编排中的 learning
-
-**关键交付**:
-| 事务 | 交付物 | 验收标准 |
-|------|--------|---------|
-| W2 | 3 个 SubAgent(analyzer/translator-rule/scaffolder) | 各产出物符合 06 §10.2 接口表 |
-| W2 | SKILL.md analyze 完整版 | 7 步序列可靠执行(≥80%) |
-| W2 | TS 语言适配器 | detect/extract-types/extract-deps 对 fixture 项目 work |
-| W3 | fixture 项目 analyze 通过 | source-graph.db + porting/ + test-fixtures/ 非空 |
-
-**Sprint 2 GATE 验收**:
-- [ ] `/migrate analyze` 对 fixture 项目产出完整的 `.rust-migration/` 目录
-- [ ] `migration-state.json` 状态正确(scaffold 完成)
-- [ ] 5 次独立执行,成功率 ≥80%
+**读取方（新会话开始 4 步）**：
+1. 读 `CLAUDE.md` → 项目概览 + 约束 + 命令
+2. 读 `docs/STATUS.md` → "我在哪"（当前 Phase + 进度）
+3. 读本文件对应 Phase/Sprint 段 → "要做什么，怎么算完"
+4. 如果任务需要设计细节 → 读 `docs/design/` 对应章节
 
 ---
 
-### Sprint 3: M1 迁移循环——`/migrate run` + `/migrate review`（预计 2-3 周）
+## §4 Sprint 0：假设验证（M0，2-3 天）
 
-**目标**:单模块迁移内循环(Phase A/B + 验证)跑通；review 仪表板可用。
+精简为 2 个核心 Spike，只验证最高风险假设。
 
-**事务覆盖**:
-- W2: translator(翻译模式) + verifier SubAgent + SKILL.md run/review 完整版
-- W3: 对 fixture 项目的一个纯函数模块完成迁移 + Tier 0 通过
-- W4: verifier 对抗审查质量验证(人工抽检是否真的在找不等价)
-- W5: 翻译过程中发现的 pattern/anti-pattern 写入 references/
+### Spike S0：Plugin 加载 + crate 编译
 
-**关键交付**:
-| 事务 | 交付物 | 验收标准 |
-|------|--------|---------|
-| W2 | translator(翻译) + verifier SubAgent | Phase A/B 双阶段 + 对抗审查 |
-| W2 | SKILL.md run + review 完整版 | 断点续传 work；降级路径 work |
-| W3 | 1 个模块迁移完成 | Rust 代码 + Tier 0 通过 + PARITY.md 更新 |
-| W3 | `/migrate review` 输出 | 仪表板可读,覆盖率数据正确 |
+| 维度 | 内容 |
+|------|------|
+| **Goal** | 验证 Claude Code Plugin 能正常加载，skill/agent/hook 三者 work；Rust CLI 可编译到合理体积 |
+| **Steps** | 1. 创建最小 plugin.json + 一个 skill<br>2. 注册一个 SubAgent（echo）<br>3. 注册一个 hook（onFileCreate）<br>4. `cargo build --release` 观察二进制大小 |
+| **Pass** | skill 可触发 + agent 可调用 + hook fire 可观测；release binary < 50MB |
+| **Fail→PlanB** | 回退非 Plugin 方案（纯 CLI + 手动协调） |
+| **产出物** | `plugin/.claude-plugin/plugin.json` 最小版 + `docs/decisions/001-plugin-viability.md` |
+| **Done** | 输入: 空项目 / 命令: 安装 plugin 后触发 skill / 产物: hook 日志 + agent 响应 / 阈值: 三者均 work |
 
-**Sprint 3 GATE 验收**:
-- [ ] 至少 1 个纯函数模块从 TS 迁移到 Rust,Tier 0 全过
-- [ ] 断点续传验证:中断后恢复不丢状态
-- [ ] `/migrate review` 正确展示 PARITY.md + 覆盖率
+### Spike S3：tree-sitter TS 精度
 
----
+| 维度 | 内容 |
+|------|------|
+| **Goal** | 验证 tree-sitter-typescript 对 TS 源码的 exports/imports/calls 提取精度 |
+| **Steps** | 1. 准备 20 个 TS 代码片段（覆盖 named/default/re-export/dynamic）<br>2. 用 tree-sitter 提取三类关系<br>3. 与手工标注对比计算 precision/recall |
+| **Pass** | exports/imports/calls 三项 F1 ≥ 0.90 |
+| **Fail→PlanB** | 降级到 TypeScript Compiler API（通过 `ts-morph` 或子进程调用 `tsc`） |
+| **产出物** | `fixtures/ts-precision-bench/` + 精度报告 + `docs/decisions/002-parser-choice.md` |
+| **Done** | 输入: 20 段 TS 代码 / 命令: `cargo test -p rustmigrate-core tree_sitter` / 产物: 精度表 / 阈值: F1 ≥ 0.90 |
 
-### Sprint 4: M1 验收（预计 1-2 周）
+### Sprint 0 GATE
 
-**目标**:3 个真实 TS 项目端到端验收,满足所有 M1 验收指标。
-
-**事务覆盖**:
-- W3: 3 项目 × 各 ≥1 模块迁移 + 全量验收指标跑通
-- W4: 性能门禁(图构建 <10s,全流程 <40min) + 边界测试(上下文溢出、降级)
-- W5: 总结 M1 开发经验写入 `docs/learnings/m1-retrospective.md`
-- W6: 更新 PLAN.md 标记 M1 完成,规划 M2 Sprint
-
-**Sprint 4 GATE 验收(= M1 交付)**:
-- [ ] 3 个 TS <5K 行项目,每项目 ≥1 模块迁移完成
-- [ ] 含 ≥1 个 15-25 依赖的模块
-- [ ] Tier 0 全过 + insta 快照 100%
-- [ ] 图构建 <10s (100 文件)；全流程 <40min
-- [ ] 断点续传验证通过
-- [ ] 上下文溢出触发拆分路径(边界验证)
+- [ ] 2 个 Spike 全部有结论（Pass 或 触发 PlanB）
+- [ ] 决策文档写入 `docs/decisions/`
+- [ ] M1 执行路径已确定
 
 ---
 
-### Sprint 5+: M2 质量提升（粗线条,Sprint 4 后细化）
+## §5 Phase 0：冻结合约（M1-TYPES，1 天）
 
-| Sprint | 目标 | 关键交付 |
-|--------|------|---------|
-| 5 | 验证管线增强 | proptest 完整版 + cargo-fuzz + 行为录制框架 |
-| 6 | 高级功能 | 多候选生成 + 降级路径(FFI) + graduate |
-| 7 | 并行与规模 | Workflow 批量 + worktree 隔离 + M2 CLI 命令 |
-| 8 | M2 验收 | 3 个 5K-20K 项目多模块迁移 |
+**目标**：定义所有公共类型、错误、响应格式和数据库 schema，作为 Phase 1 并行开发的稳定合约。
 
-### Sprint N+: M3/M4（M2 后细化）
+### 任务清单
 
-- M3: Python 适配器 + PyO3 + 统一差异测试
-- M4: C/C++ + Go + Kani + 社区生态
+| 任务 ID | 内容 | 文件 |
+|---------|------|------|
+| M1-TYPES-01 | 基础类型定义 | `types/common.rs` |
+| M1-TYPES-02 | 图相关类型 | `types/graph.rs` |
+| M1-TYPES-03 | 状态相关类型 | `types/state.rs` |
+| M1-TYPES-04 | 配置相关类型 | `types/config.rs` |
+| M1-TYPES-05 | 统一错误类型 | `error.rs` |
+| M1-TYPES-06 | JSON 响应结构 | `response.rs` |
+| M1-TYPES-07 | SQLite schema | `schema.sql`（嵌入 `persist.rs` 或独立文件） |
 
----
+### 四元组 Done
 
-## 四、质量保障机制（W4,每个 Sprint 必须）
-
-| 机制 | 做什么 | 频率 |
-|------|--------|------|
-| **CI 全绿** | check + clippy + nextest + deny + shellcheck | 每次 push |
-| **Code Review** | 重要模块完成后跑多维度 review(正确性+惯用性+设计一致性) | 每个 PR/每个模块 |
-| **对照验证** | 对照 guppy/ast-grep/codegraph 源码验证实现是否合理 | CLI 核心模块完成时 |
-| **设计一致性检查** | 实现是否与 docs/design/ 一致(接口/命名/行为) | 每个 Sprint GATE |
-| **回归测试** | insta 快照 + CI nextest | 每次 push |
-| **性能基准** | 图构建/全流程/上下文预算 三个硬指标 | Sprint 1+ 每个 GATE |
-| **Dogfooding** | 用我们的工具迁移 fixture 项目 | Sprint 2+ |
-
----
-
-## 五、多会话续接协议
-
-### 写入方(会话结束前)
-
-1. 更新 `docs/STATUS.md`:当前 Sprint / in-progress 任务 / 下一步 / 阻塞项
-2. 已完成的任务在本文件标 `[x]`
-3. commit message 引用任务 ID(如 `feat(M1-CLI-03): graph build`)
-
-### 读取方(新会话开始)
-
-1. 读 `CLAUDE.md` → 了解项目+约束+开发命令
-2. 读 `docs/STATUS.md` → 知道"我在哪"
-3. 读本文件对应 Sprint 段 → 知道"要做什么,怎么算完"
-4. 如果任务需要细节 → 读 `docs/design/` 对应章节
-
-### 粒度规则
-
-- **粗粒度(本文件)**:Sprint 目标 + GATE 验收(全局视角,不经常变)
-- **细粒度(STATUS.md)**:具体当前任务 + 进度(每次会话更新)
-- **设计细节(docs/design/)**:按需查阅,不重复搬运到本文件
-
----
-
-## 六、风险追踪
-
-| 风险 | 影响 | 缓解 | 状态 |
+| 输入 | 命令 | 产物 | 阈值 |
 |------|------|------|------|
-| Plugin API 不如预期 | 全部 | Spike 0 验证 | 待验证 |
-| SubAgent 编排不可靠 | Sprint 2+ | Plan B3 备选 | 待验证 |
-| tree-sitter 精度不够 | CLI graph build | Spike 3 + OXC 备选 | 待验证 |
-| 真实 TS 项目太复杂 | Sprint 4 验收 | 先选简单项目,逐步升级 | 待选 |
-| 上下文预算溢出 | Sprint 3 | 拆分策略已设计 | 待验证 |
+| 设计文档 §04/§09 | `cargo check` | types/ + error.rs + response.rs 编译通过 | 零 warning；所有 pub 类型有 doc comment |
+
+### 完成标志
+
+- [ ] `cargo check` 通过，无 warning
+- [ ] 所有 pub struct/enum 有 `///` 文档注释
+- [ ] `schema.sql` 包含 nodes/edges/metadata/schema_versions 四表
+- [ ] 各类型与 `docs/design/09-appendix-schemas.md` 一致
+
+---
+
+## §6 Phase 1：四路并行实现（M1 核心，5-7 天）
+
+### Worker A：Graph 模块（M1-GRAPH）
+
+**目标**：完整的源码图构建、查询、拓扑排序和持久化。
+
+**文件所有权**：`graph/build.rs`, `graph/query.rs`, `graph/topo.rs`, `graph/persist.rs`, `graph/mod.rs`
+
+| 子任务 | 内容 |
+|--------|------|
+| M1-GRAPH-01 | `build.rs`：tree-sitter 解析 TS → SourceGraph（petgraph StableGraph） |
+| M1-GRAPH-02 | `query.rs`：neighbors / paths / subgraph / stats 查询 |
+| M1-GRAPH-03 | `topo.rs`：拓扑排序 + 环检测 + 迁移序列生成 |
+| M1-GRAPH-04 | `persist.rs`：SQLite 读写（rusqlite） |
+
+**四元组 Done**：
+
+| 输入 | 命令 | 产物 | 阈值 |
+|------|------|------|------|
+| `fixtures/linear-deps/` | `cargo nextest -p rustmigrate-core` | 全部 graph 测试通过 + insta 快照 | ground-truth 偏序约束 100% 满足 |
+| `fixtures/diamond-deps/` | 同上 | 菱形依赖正确处理 | 拓扑序满足偏序约束 |
+| `fixtures/circular-deps/` | 同上 | 环检测 + 错误报告 | 检测到环并报告涉及节点 |
+
+**验证命令**：
+```bash
+cargo nextest run -p rustmigrate-core --filter-expr 'test(graph::)'
+```
+
+### Worker B：State + Validate 模块（M1-STATE）
+
+**目标**：迁移状态机 + 状态转换校验 + 验证规则引擎。
+
+**文件所有权**：`state/machine.rs`, `state/validate.rs`, `state/mod.rs`, `validate/rules.rs`, `validate/mod.rs`
+
+| 子任务 | 内容 |
+|--------|------|
+| M1-STATE-01 | `machine.rs`：状态机（INIT→PROFILE→PLAN→SCAFFOLD→SPRINT_LOOP→GRADUATE） |
+| M1-STATE-02 | `validate.rs`：状态转换前置条件检查 |
+| M1-STATE-03 | `validate/rules.rs`：Tier 0/1/2 验证规则定义 |
+
+**四元组 Done**：
+
+| 输入 | 命令 | 产物 | 阈值 |
+|------|------|------|------|
+| 状态转换序列（合法+非法） | `cargo nextest -p rustmigrate-core` | state 测试全过 | 合法转换成功；非法转换返回明确错误 |
+
+**验证命令**：
+```bash
+cargo nextest run -p rustmigrate-core --filter-expr 'test(state::) | test(validate::)'
+```
+
+### Worker C：Profile + Scaffold + Stats 模块（M1-PROFILE）
+
+**目标**：项目分析、Rust 脚手架生成、迁移进度统计。
+
+**文件所有权**：`profile/detect.rs`, `profile/mod.rs`, `scaffold/template.rs`, `scaffold/mod.rs`, `stats/coverage.rs`, `stats/mod.rs`
+
+| 子任务 | 内容 |
+|--------|------|
+| M1-PROFILE-01 | `profile/detect.rs`：语言检测 + 文件统计 + 复杂度评估 |
+| M1-PROFILE-02 | `scaffold/template.rs`：生成 Cargo.toml + src/ 骨架 |
+| M1-PROFILE-03 | `stats/coverage.rs`：模块迁移进度 + 覆盖率计算 |
+
+**四元组 Done**：
+
+| 输入 | 命令 | 产物 | 阈值 |
+|------|------|------|------|
+| `fixtures/linear-deps/` | `cargo nextest -p rustmigrate-core` | profile + scaffold + stats 测试全过 | 检测到 TS 语言；scaffold 产出可编译的 Cargo.toml |
+
+**验证命令**：
+```bash
+cargo nextest run -p rustmigrate-core --filter-expr 'test(profile::) | test(scaffold::) | test(stats::)'
+```
+
+### Worker D：Plugin Hooks（M1-HOOK）
+
+**目标**：Plugin hooks 实战化，覆盖关键生命周期事件。
+
+**文件所有权**：`plugin/hooks/hooks.json`, `plugin/hooks/scripts/*`
+
+| 子任务 | 内容 |
+|--------|------|
+| M1-HOOK-01 | `hooks.json` 定义（onFileCreate/onFileEdit/postToolUse） |
+| M1-HOOK-02 | `scripts/on-rust-file-create.sh`：新 .rs 文件自动 clippy |
+| M1-HOOK-03 | `scripts/post-build.sh`：cargo check 结果反馈 |
+
+**四元组 Done**：
+
+| 输入 | 命令 | 产物 | 阈值 |
+|------|------|------|------|
+| 创建 .rs 文件 | 触发 hook | hook 日志显示 fire + clippy 输出 | hook 在 5s 内 fire；脚本 exit 0 |
+
+**验证命令**：
+```bash
+shellcheck plugin/hooks/scripts/*.sh
+# 手动：在 Claude Code 中创建 .rs 文件观察 hook 是否 fire
+```
+
+---
+
+## §7 Phase 2：集成验证（M1-INTEGRATE，2-3 天）
+
+**目标**：将 Phase 1 各模块合并到 `main.rs`，实现全命令路由，跑通 Thin E2E。
+
+### 任务清单
+
+| 任务 ID | 内容 |
+|---------|------|
+| M1-INTEG-01 | `main.rs` 全命令路由（clap subcommands: init/graph-build/graph-topo/profile/scaffold/stats/validate） |
+| M1-INTEG-02 | Thin E2E：`init → graph build → graph topo` 链路端到端通过 |
+| M1-INTEG-03 | 所有命令输出符合 JSON 格式规范 |
+| M1-INTEG-04 | `just ci` 全量通过 |
+
+### 四元组 Done
+
+| 输入 | 命令 | 产物 | 阈值 |
+|------|------|------|------|
+| `fixtures/linear-deps/` | `cargo run -- init . && cargo run -- graph build && cargo run -- graph topo` | 三步链路成功输出 JSON | 每步 status:"ok"；topo 结果满足 ground-truth 偏序 |
+
+### 完成标志
+
+- [ ] `main.rs` 包含全部命令路由
+- [ ] `just ci` 全绿
+- [ ] Thin E2E（init→build→topo）在 fixture 项目上通过
+- [ ] 所有命令输出 `{"status":"ok|error", "data":{...}, "warnings":[...]}` 格式
+
+---
+
+## §8 Phase 3：并行 Plugin 实现（M1-PLUGIN，3-5 天）
+
+**目标**：SubAgent 完善 + SKILL.md analyze 完整实现，可对真实项目执行分析。
+
+### 任务清单
+
+| 任务 ID | 内容 |
+|---------|------|
+| M1-PLG-01 | analyzer SubAgent：调用 CLI graph build + 产出分析报告 |
+| M1-PLG-02 | translator-rule SubAgent：生成翻译规则 JSON |
+| M1-PLG-03 | scaffolder SubAgent：调用 CLI scaffold + 验证产出 |
+| M1-PLG-04 | SKILL.md analyze 完整流程（7 步序列） |
+| M1-PLG-05 | 至少 1 次对 fixture 项目的真实执行验证 |
+
+### SubAgent 产出物
+
+| SubAgent | 输入 | 产出 |
+|----------|------|------|
+| analyzer | 项目路径 | `source-graph.db` + 分析报告 JSON |
+| translator-rule | source-graph + 模块列表 | 翻译规则 JSON（type mappings + idiom rules） |
+| scaffolder | 项目路径 + profile | Rust 项目骨架（Cargo.toml + src/ 结构） |
+
+### 四元组 Done
+
+| 输入 | 命令 | 产物 | 阈值 |
+|------|------|------|------|
+| `fixtures/linear-deps/` | `/migrate analyze`（在 Claude Code 中） | `.rust-migration/` 目录含 source-graph.db + state.json + porting/ | 至少 1 次完整执行成功 |
+
+### 完成标志
+
+- [ ] 3 个 SubAgent 各自可独立调用
+- [ ] SKILL.md analyze 7 步序列至少 1 次完整通过
+- [ ] 产出物结构符合 `docs/design/06-plugin-structure.md` §10.2
+
+---
+
+## §9 Phase 4：翻译循环 + MVP 验收（M1-TRANSLATE，5-7 天）
+
+**目标**：实现翻译循环（Phase A/B + verifier），完成 MVP 验收。
+
+### 任务清单
+
+| 任务 ID | 内容 |
+|---------|------|
+| M1-TRANS-01 | translator SubAgent Phase A：忠实翻译（逐行对应） |
+| M1-TRANS-02 | translator SubAgent Phase B：惯用化优化（Rust 惯用写法） |
+| M1-TRANS-03 | verifier SubAgent：对抗审查（等价性检查） |
+| M1-TRANS-04 | SKILL.md `run` 完整实现 |
+| M1-TRANS-05 | SKILL.md `review` 完整实现（仪表板） |
+| M1-TRANS-06 | 3 项目 MVP 验收 |
+
+### 翻译循环流程
+
+```
+Phase A（忠实翻译）→ Tier 0 验证 → Phase B（惯用化）→ Tier 0+1 验证
+                                                          │
+                                                          ▼
+                                                   verifier 对抗审查
+                                                          │
+                                                          ▼
+                                                   PARITY.md 更新
+```
+
+### MVP 验收指标（3 项目）
+
+| 指标 | 标准 |
+|------|------|
+| 功能正确 | cargo check + clippy 零 error |
+| 自动测试 | 每个迁移模块 ≥1 个自动测试通过 |
+| 结构可识别 | Rust 代码结构与原 TS 模块可对应（人工可读） |
+
+### 四元组 Done
+
+| 输入 | 命令 | 产物 | 阈值 |
+|------|------|------|------|
+| 3 个 TS fixture 项目 | `/migrate run` + `/migrate review` | Rust 代码 + 测试 + PARITY.md | cargo check pass + clippy pass + ≥1 test + 结构可识别 |
+
+### 完成标志
+
+- [ ] 3 个 fixture 项目各 ≥1 模块完成迁移
+- [ ] 每个迁移模块：cargo check + clippy + ≥1 自动测试
+- [ ] `/migrate review` 展示正确的进度仪表板
+- [ ] 断点续传验证通过（中断后恢复不丢状态）
+
+---
+
+## §10 M2 模块级规划（质量提升，Sprint 5-8）
+
+### Sprint 5：验证管线增强
+
+| 任务 | 内容 | 验收 |
+|------|------|------|
+| M2-VER-01 | proptest 属性测试：图操作不变量 | 1000 次 fuzz 无 panic |
+| M2-VER-02 | cargo-fuzz：解析器健壮性 | 24h 无 crash |
+| M2-VER-03 | 行为录制框架：TS 运行时行为 → 测试用例 | 可自动生成 Rust 测试 |
+
+### Sprint 6：高级功能
+
+| 任务 | 内容 | 验收 |
+|------|------|------|
+| M2-ADV-01 | 多候选生成：同一模块 ≥2 种翻译方案 | verifier 可比对选优 |
+| M2-ADV-02 | 降级 FFI：无法纯 Rust 翻译时生成 FFI binding | FFI 调用正确 |
+| M2-ADV-03 | graduate 命令：模块毕业（锁定+移除 TS 源） | 状态机正确转换 |
+
+### Sprint 7：并行与规模
+
+| 任务 | 内容 | 验收 |
+|------|------|------|
+| M2-SCALE-01 | Workflow 批量翻译：多模块并行迁移 | 5 模块并行无冲突 |
+| M2-SCALE-02 | worktree 隔离：每个翻译任务独立 worktree | 互不影响 |
+| M2-SCALE-03 | 增量图更新：仅重建变更文件的子图 | 增量 < 全量时间 50% |
+
+### Sprint 8：M2 验收
+
+**M2 验收标准**：
+- [ ] 3 个 5K-20K 行 TS 项目，每项目 ≥3 模块迁移完成
+- [ ] 含 ≥1 个有循环依赖的模块（降级 FFI）
+- [ ] proptest + fuzz 验证通过
+- [ ] 图构建 < 10s（500 文件）
+- [ ] 全流程 < 60min（含多模块）
+
+---
+
+## §11 M3-M4 方向级规划
+
+### M3：多语言支持（Python 优先）
+
+| 方向 | 内容 |
+|------|------|
+| Python 适配器 | tree-sitter-python + 语言 trait 实现 |
+| PyO3 翻译规则 | Python → Rust（PyO3 binding）模式库 |
+| 统一差异测试 | Python runtime 行为录制 → Rust 测试 |
+| 验收 | 1 个 <3K 行 Python 项目 ≥1 模块迁移 |
+
+### M4：生态完善
+
+| 方向 | 内容 |
+|------|------|
+| C/C++ 适配器 | tree-sitter-c + unsafe Rust 翻译 |
+| Go 适配器 | tree-sitter-go + 并发模型映射 |
+| Kani 形式验证 | 关键路径数学等价性证明 |
+| 社区生态 | 文档 + 示例 + Plugin marketplace 发布 |
+
+---
+
+## §12 M1 预留约束（面向未来的设计决策）
+
+以下约束在 M1 实现时必须遵守，为后续里程碑留出扩展空间：
+
+| 约束 | 原因 | 实现方式 |
+|------|------|---------|
+| Language trait 可扩展 | M3 需要 Python/C 适配器 | 定义 `trait LanguageAdapter { fn detect(); fn extract_deps(); fn extract_types(); }` |
+| schema_versions 表 | M2 需要 schema 升级 | SQLite 建表时包含 `schema_versions(version, applied_at)` |
+| StableGraph | M2 增量更新需要稳定 NodeIndex | `petgraph::stable_graph::StableGraph` 而非 `Graph` |
+| 配置文件向后兼容 | 所有版本需可读旧配置 | `config.rs` 中 `#[serde(default)]` + 版本字段 |
+| Plugin JSON 通信 | CLI 与 Plugin 解耦 | 所有 CLI 输出为 JSON，不依赖 Plugin 存在 |
+
+---
+
+## §13 质量门模板（4 层）
+
+每个任务完成时需通过对应层级的质量门：
+
+### Level 1：代码级
+
+- [ ] `cargo clippy -D warnings` 零 warning
+- [ ] `cargo fmt --check` 通过
+- [ ] 无 `.unwrap()`（测试代码除外）
+- [ ] 每个 pub 函数有负例测试（输入非法时返回 Error）
+- [ ] 无 `todo!()` / `unimplemented!()`（M1 交付时）
+
+### Level 2：行为级
+
+- [ ] ground-truth.json 偏序约束 100% 满足
+- [ ] 所有命令输出符合 JSON 格式：`{"status":"ok|error", "data":{...}, "warnings":[...]}`
+- [ ] 错误信息包含上下文（哪个文件、哪行、什么操作）
+
+### Level 3：集成级
+
+- [ ] 下游可消费：Plugin 能正确解析 CLI 的 JSON 输出
+- [ ] `just ci` 全部通过
+- [ ] Thin E2E 在所有 fixture 上通过
+
+### Level 4：审查级
+
+- [ ] 实现与 `docs/design/` 对应章节一致（接口/命名/行为）
+- [ ] 无逻辑错误（状态机不可能到达的状态、未处理的边界）
+- [ ] 模块边界清晰（无循环依赖、职责单一）
+
+---
+
+## §14 知识沉淀规范
+
+### 四层知识体系
+
+| 层 | 载体 | 内容 | 时机 |
+|----|------|------|------|
+| 代码自解释 | 命名 + 类型签名 | 函数做什么、参数/返回值含义 | 编码时 |
+| 测试即文档 | `#[test]` + fixture | 预期行为 + 边界条件 | 编码时 |
+| 模块注释 | `mod.rs` 顶部 `//!` | 模块职责 + 设计决策 + 依赖关系 | 模块完成时 |
+| 决策记录 | `docs/decisions/NNN-*.md` | 重要选择的 why + tradeoff + 替代方案 | 关键决策时 |
+
+### 规范要求
+
+- 知识沉淀**非阻塞**：不因缺少文档而阻塞合并
+- 但 reviewer 会检查：关键模块无 `mod.rs` 注释时标记 TODO
+- `docs/decisions/` 格式：标题 + 背景 + 决策 + 理由 + 替代方案 + 后果
+- 编号连续：`001-plugin-viability.md`, `002-parser-choice.md`, ...
+
+---
+
+## §15 风险与缓冲
+
+### 已知风险表
+
+| # | 风险 | 概率 | 影响 | 缓解措施 | 触发条件 |
+|---|------|------|------|---------|---------|
+| R1 | Plugin API 不如预期 | 中 | 高（全局影响） | Spike S0 验证；PlanB: 纯 CLI | S0 Fail |
+| R2 | SubAgent 编排不可靠 | 中 | 中（Phase 3+） | Plan B3 混合编排；降低自动化比例 | 成功率 < 60% |
+| R3 | tree-sitter TS 精度不够 | 低 | 中（graph 质量） | Spike S3 验证；PlanB: tsc API | S3 F1 < 0.90 |
+| R4 | 真实项目复杂度超预期 | 中 | 中（验收延迟） | 先选简单项目；MVP 标准已降低 | 3 项目全失败 |
+| R5 | 上下文窗口溢出 | 高 | 低（已有对策） | 拆分策略 + 续接协议 | 单次会话无法完成一个模块 |
+| R6 | 并行开发合并冲突 | 低 | 低（已有机制） | 文件所有权表 + 合约变更协议 | Phase 1 |
+
+### 时间线估算
+
+```
+Sprint 0 (M0)     ▓▓░░░░░░░░░░░░░░░░░░░░░░  2-3 天
+Phase 0 (合约)    ░░▓░░░░░░░░░░░░░░░░░░░░░░  1 天
+Phase 1 (并行)    ░░░▓▓▓▓▓░░░░░░░░░░░░░░░░░  5-7 天
+Phase 2 (集成)    ░░░░░░░░▓▓░░░░░░░░░░░░░░░  2-3 天
+Phase 3 (Plugin)  ░░░░░░░░░░▓▓▓░░░░░░░░░░░░  3-5 天
+Phase 4 (翻译)    ░░░░░░░░░░░░░▓▓▓▓▓░░░░░░░  5-7 天
+缓冲              ░░░░░░░░░░░░░░░░░░▓▓░░░░░░  ~2 周
+                  ├── M1 约 4-5 周 ──┤缓冲├
+                  ├────── 总计 ~6-7 周到 M1 ──────┤
+
+M2 (质量)         ░░░░░░░░░░░░░░░░░░░░▓▓▓▓░░  4-5 周
+                  ├────── 总计 ~10-12 周到 M2 ─────────┤
+```
+
+### 关键路径
+
+```
+Sprint 0 → Phase 0 → Phase 1(Worker A: graph) → Phase 2 → Phase 4
+                              ↑ 关键路径                    ↑ 关键路径
+```
+
+**关键路径说明**：
+- `graph` 模块是 Phase 2 集成的前置依赖（Thin E2E 需要 graph build + topo）
+- Phase 4 翻译循环依赖 Phase 2 集成完成
+- Phase 3（Plugin）与 Phase 2 可部分并行（Plugin 不依赖 main.rs 路由）
+
+### 缓冲使用规则
+
+- 缓冲时间仅用于：风险触发的 PlanB 实施 / 意外技术障碍 / 验收不通过返工
+- 不用于：新功能 / 范围蔓延 / 完美主义优化
+- 若 Phase 1 超期 > 3 天，触发范围缩减（砍 stats 模块，后移到 Phase 3）

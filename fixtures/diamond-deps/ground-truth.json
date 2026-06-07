@@ -1,0 +1,44 @@
+{
+  "description": "菱形依赖: index -> auth -> db -> types; index -> db -> types; auth -> types (type-only); barrel re-exports all",
+  "nodes": [
+    { "id": "file:src/types.ts", "type": "File" },
+    { "id": "file:src/db.ts", "type": "File" },
+    { "id": "file:src/auth.ts", "type": "File" },
+    { "id": "file:src/barrel.ts", "type": "File" },
+    { "id": "file:src/index.ts", "type": "File" },
+    { "id": "interface:src/types.ts:User", "type": "Interface", "is_exported": true },
+    { "id": "interface:src/types.ts:Session", "type": "Interface", "is_exported": true },
+    { "id": "enum:src/types.ts:Role", "type": "Enum", "is_exported": true },
+    { "id": "interface:src/types.ts:Serializable", "type": "Interface", "is_exported": true },
+    { "id": "function:src/db.ts:findUser", "type": "Function", "is_exported": true, "is_async": true },
+    { "id": "function:src/db.ts:saveUser", "type": "Function", "is_exported": true, "is_async": true },
+    { "id": "function:src/db.ts:generateId", "type": "Function", "is_exported": true, "is_async": false },
+    { "id": "class:src/auth.ts:AuthService", "type": "Class", "is_exported": true },
+    { "id": "function:src/auth.ts:AuthService.authenticate", "type": "Function", "is_async": true },
+    { "id": "function:src/auth.ts:AuthService.serialize", "type": "Function", "is_async": false },
+    { "id": "function:src/index.ts:login", "type": "Function", "is_exported": true, "is_async": true }
+  ],
+  "edges": [
+    { "source": "file:src/db.ts", "target": "file:src/types.ts", "type": "imports", "note": "type-only" },
+    { "source": "file:src/auth.ts", "target": "file:src/types.ts", "type": "imports", "note": "type-only" },
+    { "source": "file:src/auth.ts", "target": "file:src/db.ts", "type": "imports" },
+    { "source": "file:src/barrel.ts", "target": "file:src/types.ts", "type": "imports" },
+    { "source": "file:src/barrel.ts", "target": "file:src/db.ts", "type": "imports" },
+    { "source": "file:src/barrel.ts", "target": "file:src/auth.ts", "type": "imports" },
+    { "source": "file:src/index.ts", "target": "file:src/auth.ts", "type": "imports" },
+    { "source": "file:src/index.ts", "target": "file:src/db.ts", "type": "imports" },
+    { "source": "file:src/index.ts", "target": "file:src/types.ts", "type": "imports", "note": "type-only" },
+    { "source": "class:src/auth.ts:AuthService", "target": "interface:src/types.ts:Serializable", "type": "extends", "sub_kind": "implements" },
+    { "source": "file:src/auth.ts", "target": "function:src/db.ts:findUser", "type": "calls" },
+    { "source": "file:src/auth.ts", "target": "function:src/db.ts:generateId", "type": "calls" },
+    { "source": "file:src/index.ts", "target": "function:src/auth.ts:AuthService.authenticate", "type": "calls" }
+  ],
+  "topo_order_constraints": [
+    ["file:src/types.ts", "file:src/db.ts"],
+    ["file:src/types.ts", "file:src/auth.ts"],
+    ["file:src/db.ts", "file:src/auth.ts"],
+    ["file:src/auth.ts", "file:src/index.ts"],
+    ["file:src/auth.ts", "file:src/barrel.ts"],
+    ["file:src/db.ts", "file:src/barrel.ts"]
+  ]
+}

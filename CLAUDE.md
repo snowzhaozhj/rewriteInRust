@@ -93,6 +93,42 @@ scope: M0-S0 / M1-CLI-03 / M1-PLG-01 等（引用 PLAN.md 任务 ID）
 - 实施计划 → `docs/PLAN.md`
 - 当前状态 → `docs/STATUS.md`
 
+## Fixture 与测试
+
+4 个 TS fixture 项目用于验证 CLI 准确性：
+```
+fixtures/
+  linear-deps/    线性依赖（基本 topo-sort）
+  diamond-deps/   菱形 + type-only + barrel + implements + calls
+  circular-deps/  循环依赖（环检测）
+  edge-cases/     空文件 / 语法错误 / 纯类型
+```
+
+每个 fixture 含 `ground-truth.json`（偏序约束格式），CLI 输出必须满足其中的约束。
+
+验证命令：
+```bash
+cargo nextest run -p rustmigrate-core    # 单元/集成测试
+cargo run -- graph build --root fixtures/linear-deps  # 手动验证
+```
+
+## 质量门（任务完成检查）
+
+每个任务标记 done 前必须通过 4 层检查：
+1. **代码级**：`just fmt-check && just lint` 全过
+2. **行为级**：fixture ground-truth 偏序约束满足
+3. **集成级**：`just test` 全过（含下游命令）
+4. **审查级**：与 `docs/design/` 对应章节一致
+
+## 续接快速参考
+
+**新会话开始**：读 CLAUDE.md → `docs/STATUS.md` → `docs/PLAN.md` 对应任务
+
+**任务完成前**：
+1. `just fmt-check && just lint && just test`
+2. 更新 `docs/STATUS.md`
+3. commit 引用任务 ID（如 `feat(M1-GRAPH): 图构建模块`）
+
 ## 设计文档一致性检查
 
 修改 `docs/design/` 后运行：

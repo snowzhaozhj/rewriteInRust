@@ -1,0 +1,25 @@
+{
+  "description": "线性依赖: index -> service -> utils",
+  "nodes": [
+    { "id": "file:src/utils.ts", "type": "File" },
+    { "id": "file:src/service.ts", "type": "File" },
+    { "id": "file:src/index.ts", "type": "File" },
+    { "id": "function:src/utils.ts:clamp", "type": "Function", "is_exported": true, "is_async": false },
+    { "id": "function:src/utils.ts:fetchData", "type": "Function", "is_exported": true, "is_async": true },
+    { "id": "interface:src/utils.ts:Range", "type": "Interface", "is_exported": true },
+    { "id": "class:src/service.ts:NumberService", "type": "Class", "is_exported": true },
+    { "id": "function:src/service.ts:NumberService.normalize", "type": "Function", "is_exported": false },
+    { "id": "function:src/service.ts:NumberService.load", "type": "Function", "is_exported": false, "is_async": true }
+  ],
+  "edges": [
+    { "source": "file:src/service.ts", "target": "file:src/utils.ts", "type": "imports" },
+    { "source": "file:src/index.ts", "target": "file:src/service.ts", "type": "imports" },
+    { "source": "file:src/index.ts", "target": "file:src/utils.ts", "type": "imports" },
+    { "source": "file:src/service.ts", "target": "function:src/utils.ts:clamp", "type": "calls" },
+    { "source": "file:src/service.ts", "target": "function:src/utils.ts:fetchData", "type": "calls" }
+  ],
+  "topo_order_constraints": [
+    ["file:src/utils.ts", "file:src/service.ts"],
+    ["file:src/service.ts", "file:src/index.ts"]
+  ]
+}
