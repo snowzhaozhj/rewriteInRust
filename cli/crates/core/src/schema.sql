@@ -3,7 +3,7 @@
 
 -- 版本追踪（M2 schema 升级时使用）
 CREATE TABLE IF NOT EXISTS schema_versions (
-    version    TEXT NOT NULL,
+    version    TEXT PRIMARY KEY,
     applied_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

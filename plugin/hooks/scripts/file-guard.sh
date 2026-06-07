@@ -13,7 +13,8 @@ if [[ -z "$FILE_PATH" ]]; then
 fi
 
 # 允许的目录：.rust-migration/ 和 rust-src/
-if [[ "$FILE_PATH" == */.rust-migration/* ]] || [[ "$FILE_PATH" == */rust-src/* ]]; then
+if [[ "$FILE_PATH" == */.rust-migration/* ]] || [[ "$FILE_PATH" == .rust-migration/* ]] \
+   || [[ "$FILE_PATH" == */rust-src/* ]] || [[ "$FILE_PATH" == rust-src/* ]]; then
   exit 0
 fi
 

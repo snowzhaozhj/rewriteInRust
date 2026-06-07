@@ -153,21 +153,14 @@ pub fn default_rules() -> Vec<ValidationRule> {
         ValidationRule::new(
             "coverage_threshold",
             ValidationTier::Tier1,
-            |_project_root: &Path| {
-                // M1 阶段暂不实际计算覆盖率，标记为跳过
-                Ok((true, Some("覆盖率检查暂未实现，默认通过".to_owned())))
-            },
+            |_project_root: &Path| Ok((false, Some("覆盖率检查暂未实现，已跳过".to_owned()))),
         ),
         // Tier2: proptest/fuzz（占位检查）
         ValidationRule::new(
             "proptest_fuzz",
             ValidationTier::Tier2,
             |_project_root: &Path| {
-                // M1 阶段暂不实际运行 proptest/fuzz
-                Ok((
-                    true,
-                    Some("proptest/fuzz 检查暂未实现，默认通过".to_owned()),
-                ))
+                Ok((false, Some("proptest/fuzz 检查暂未实现，已跳过".to_owned())))
             },
         ),
     ]

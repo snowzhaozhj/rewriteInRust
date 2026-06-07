@@ -11,7 +11,7 @@ use crate::types::state::{MigrationStateFile, ProjectState};
 ///
 /// 检查项：
 /// - version 非空
-/// - state_history 非空且首条状态与当前一致或有合法链
+/// - state_history 非空且末条状态与当前状态一致
 /// - 前置条件：各状态要求的数据字段是否存在
 pub fn validate_state(state_file: &MigrationStateFile) -> Result<Vec<String>> {
     let mut warnings: Vec<String> = Vec::new();

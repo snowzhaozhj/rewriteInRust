@@ -100,7 +100,7 @@ pub fn migration_sequence(graph: &SourceGraph) -> MigrationSequence {
         }
     } else {
         // 有环：用 tarjan_scc 获取尽力排序。
-        // tarjan_scc 返回逆拓扑序的 SCC，反转后叶节点在前。
+        // tarjan_scc 本身返回逆拓扑序的 SCC（叶节点在前），无需反转。
         let sccs = algo::tarjan_scc(&file_graph);
         sccs.into_iter()
             .flat_map(|scc| {

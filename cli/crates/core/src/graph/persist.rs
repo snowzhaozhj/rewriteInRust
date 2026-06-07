@@ -19,6 +19,7 @@ use super::SourceGraph;
 /// 使用 `schema.sql` 建表，先清空旧数据再插入，全程事务保护。
 pub fn save_to_db(graph: &SourceGraph, db_path: &Path) -> Result<()> {
     let mut conn = Connection::open(db_path)?;
+    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
 
     // 建表（IF NOT EXISTS，幂等）
     conn.execute_batch(include_str!("../schema.sql"))?;
@@ -90,6 +91,7 @@ pub fn load_from_db(db_path: &Path) -> Result<SourceGraph> {
     }
 
     let conn = Connection::open(db_path)?;
+    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
     let mut graph = SourceGraph::new();
 
     // 加载节点

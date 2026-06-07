@@ -37,10 +37,13 @@ pub fn build_graph(root: &Path, adapters: &mut [Box<dyn LanguageAdapter>]) -> Re
 
         let analysis = match adapters[*adapter_idx].analyze_file(&source, &rel) {
             Ok(a) => a,
-            Err(e) => {
-                graph.warnings.push(format!("解析跳过 {rel}: {e}"));
+            Err(MigrateError::Parse { .. }) => {
+                graph
+                    .warnings
+                    .push(format!("解析跳过 {rel}: tree-sitter 解析失败"));
                 continue;
             }
+            Err(e) => return Err(e),
         };
 
         for node in &analysis.nodes {
@@ -346,5 +349,44 @@ mod tests {
         let mut adapters: Vec<Box<dyn LanguageAdapter>> = vec![];
         let graph = build_graph(&root, &mut adapters).unwrap();
         assert_eq!(graph.node_count(), 0);
+    }
+
+    #[test]
+    fn resolve_import_parent_dir() {
+        let files = vec!["utils.ts".to_string(), "sub/service.ts".to_string()];
+        assert_eq!(
+            resolve_import("../utils", "sub/service.ts", &files),
+            Some("utils.ts".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_import_sibling() {
+        let files = vec!["a/foo.ts".to_string(), "a/bar.ts".to_string()];
+        assert_eq!(
+            resolve_import("./bar", "a/foo.ts", &files),
+            Some("a/bar.ts".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_import_index_barrel() {
+        let files = vec!["shared/index.ts".to_string()];
+        assert_eq!(
+            resolve_import("./shared", "app.ts", &files),
+            Some("shared/index.ts".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_import_non_relative_returns_none() {
+        let files = vec!["express.ts".to_string()];
+        assert_eq!(resolve_import("express", "app.ts", &files), None);
+    }
+
+    #[test]
+    fn resolve_import_above_root_no_match() {
+        let files = vec!["utils.ts".to_string()];
+        assert_eq!(resolve_import("../../escape", "utils.ts", &files), None);
     }
 }
