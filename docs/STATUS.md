@@ -1,44 +1,35 @@
 # 项目状态快照
 
-> 每次会话结束前更新。新会话读此文件即可知道"在哪、做什么、下一步"。
+> 每次会话结束前更新。新会话读此文件 → 找到 PLAN.md 对应 Sprint → 继续执行。
 
-## 当前阶段
+## 当前位置
 
-**M0 假设验证** — 尚未开始（脚手架刚完成）
+- **Milestone**: M0 假设验证
+- **Sprint**: Sprint 0
+- **进度**: 未开始（脚手架已完成,即将执行 Spike 0）
 
-## 已完成
-
-- [x] 设计文档 v0.9.4（9 轮对抗审查收敛，docs/design/）
-- [x] 项目脚手架（CLI Cargo workspace + Plugin 骨架 + CI + Justfile）
-- [x] GitHub 仓库初始化 (snowzhaozhj/rewriteInRust)
-
-## 进行中
+## 进行中的任务
 
 _无_
 
-## 下一步（按优先级）
+## 下一步
 
-1. **M0 Spike 0**: 最小 Plugin 骨架验证（plugin/ 目录安装到 Claude Code,确认 skill/agent/hook 三件套 work）
-2. **M0 Spike 1-4**: 并行验证（SubAgent 编排 / LSP 反馈 / tree-sitter 精度 / 指令跟随）
-3. **CLI `graph build`**: 核心命令,依赖 tree-sitter + petgraph + rusqlite
+1. 执行 **M0-S0**（Plugin 加载验证 + crate 编译风险）
+   - 将 `plugin/` 安装到 Claude Code,验证 skill/agent/hook 三件套
+   - 确认 cli/ 嵌入 crate 编译后二进制大小 <50MB
 
 ## 阻塞项
 
 _无_
 
-## 关键决策待定
+## 最近完成
 
-- Spike 0 失败时:走纯 CLAUDE.md + 项目级 agents/(不打包 Plugin) 还是等 Claude Code 更新?
-- 集成验证用哪 3 个 <5K 行 TS 项目?(待选)
+| 时间 | 任务 | commit |
+|------|------|--------|
+| 2026-06-07 | 项目脚手架初始化 | 559da00 |
+| 2026-06-07 | PLAN.md + CLAUDE.md + STATUS.md | (本次) |
 
-## 仓库结构
+## 待决策
 
-```
-cli/          Rust CLI workspace (cargo check ✓)
-plugin/       Claude Code Plugin 骨架
-docs/design/  设计文档 v0.9.4
-docs/review/  审查循环产物(9 轮)
-docs/learnings/  开发知识沉淀(待填充)
-docs/decisions/  项目自身 MDR(待填充)
-fixtures/     验证用 TS 项目(待填充)
-```
+- [ ] 集成验证用的 3 个 TS <5K 行项目待选
+- [ ] Spike 0 失败时的回退方案确认

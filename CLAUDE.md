@@ -4,84 +4,101 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-这是 **Rust 迁移验证工作台** 的设计文档仓库（当前阶段：纯设计，尚未进入实现）。目标产出物是一个 Claude Code Plugin + `rustmigrate` CLI，帮助开发者将 TS/Python/C 项目迁移到 Rust。
+**Rust 迁移验证工作台**：Claude Code Plugin + `rustmigrate` CLI，帮助开发者将 TS/Python/C 项目迁移到 Rust。
+
+**当前阶段**：M0 假设验证（即将开始）。设计文档 v0.9.4 已完成 9 轮对抗审查收敛，项目脚手架已初始化。
+
+## 多会话续接（重要）
+
+新会话启动后按以下顺序读取上下文：
+1. **本文件**（CLAUDE.md）→ 项目概览 + 约束 + 命令
+2. **`docs/STATUS.md`** → 当前位置（哪个 Sprint、进行中任务、下一步）
+3. **`docs/PLAN.md`** → 对应 Sprint 的目标和验收标准
 
 ## 仓库结构
 
-- `docs/design/` — 设计文档主体（v0.9.4，10 个 Markdown 子文件 + schemas/ + index.html）
-- `docs/design/README.md` — 主索引和 TL;DR，**从这里开始阅读**
-- `docs/design/schemas/` — JSON Schema 示例文件（migration-state、source-graph、type-map、call-graph）
-- `PROJECT_DESIGN.md` — 重定向到 docs/design/README.md
-- `PROJECT_DESIGN.legacy.md` — v0.8.1 单文件归档（106KB，勿修改）
-
-## 文档查看
-
-```bash
-cd docs/design && python3 -m http.server 8765
-# 浏览器打开 http://localhost:8765/index.html
+```
+cli/                  Rust CLI workspace（rustmigrate-core + rustmigrate）
+  crates/core/        核心逻辑（graph/state/profile/validate/scaffold）
+  crates/cli/         CLI 入口（clap）
+plugin/               Claude Code Plugin
+  .claude-plugin/     plugin.json
+  skills/migrate/     SKILL.md + analyze/run/review
+  agents/             4 个 SubAgent（analyzer/translator/verifier/scaffolder）
+  hooks/              hooks.json + scripts/
+docs/design/          设计文档 v0.9.4（10 个 Markdown 子文件）
+docs/PLAN.md          实施计划（Sprint 分解 + 依赖 + 验收）
+docs/STATUS.md        当前状态快照（每次会话结束更新）
+docs/learnings/       开发知识沉淀
+docs/decisions/       项目自身 MDR
+docs/review/          设计审查循环产物（9 轮历史）
+fixtures/             验证用 TS 项目
 ```
 
-## 核心术语
+## 开发命令
 
-- **State**：编排器状态机节点（INIT/PROFILE/PLAN/SCAFFOLD/SPRINT_LOOP/GRADUATE）
-- **Milestone (M)**：实施路线图阶段（M0 验证/M1 MVP/M2 质量/M3 多语言/M4 完善）
-- **Sprint**：SPRINT_LOOP 内的迭代循环
-- **Phase A/B**：模块级翻译阶段（忠实翻译 vs 惯用化优化），与路线图阶段无关
-- **迁移规则**：存储在 `.rust-migration/porting/` 目录下的规则文件（不再使用 "PORTING.md" 单文件称谓）
-- **source-graph.db**：源码图的主存储（SQLite），JSON 为导出格式
-
-## 编辑设计文档的注意事项
-
-- 跨文件引用使用相对路径链接（如 `[见 04 § 5.7](./04-toolchain.md#57-图存储与查询架构)`）
-- 术语必须与 README.md 的命名约定一致（State/Milestone/Sprint/Phase A-B）
-- 修改某个文件后检查是否有其他文件引用了相同概念（`grep -rn "关键词" docs/design/`）
-- 版本号在 README.md 第 3 行和 index.html 中需同步更新
-- MVP CLI 为 13 个命令（v0.9.4 裁剪后），M2 扩展 5 个，以 06-plugin-structure.md 为准
-- 工作量估算以 08-roadmap-and-reference.md 为唯一权威来源
-- source-graph 主存储是 SQLite（.db），JSON 是导出格式；文档中不应出现 `source-graph.json` 作为主存储路径
-- 配置文件 `.rustmigrate.toml` 位于项目根目录（不在 `.rust-migration/` 内）
+```bash
+just check      # cargo check
+just test       # cargo nextest
+just lint       # cargo clippy -D warnings
+just fmt        # cargo fmt
+just ci         # 全量 CI 本地模拟（fmt-check + lint + test + deny + shellcheck）
+just build      # cargo build
+```
 
 ## Commit 规范
 
 ```
-docs: vX.Y.Z 简要描述
+<type>(<scope>): 简要描述
+
+类型: feat / fix / docs / refactor / test / chore
+scope: M0-S0 / M1-CLI-03 / M1-PLG-01 等（引用 PLAN.md 任务 ID）
 ```
-- 前缀固定为 `docs:`（纯设计文档仓库）
-- 包含版本号变化时标注 vX.Y.Z
-- commit message 用中文，Co-Authored-By 行自动添加
+- commit message 用中文
+- Co-Authored-By 行自动添加
+- 设计文档修改仍用 `docs:` 前缀
+
+## 核心术语
+
+- **Milestone (M)**：M0 验证 / M1 MVP / M2 质量 / M3 多语言 / M4 完善
+- **Sprint**：实施计划中的迭代单位（见 docs/PLAN.md）
+- **State**：编排器状态机节点（INIT/PROFILE/PLAN/SCAFFOLD/SPRINT_LOOP/GRADUATE）
+- **Phase A/B**：模块级翻译阶段（忠实翻译 vs 惯用化优化）
+- **source-graph.db**：源码图主存储（SQLite），JSON 为导出格式
+
+## 编码约束
+
+- CLI 输出统一 JSON 格式：`{"status":"ok|error|warning", "data":{...}, "warnings":[...]}`
+- Rust 代码遵循 clippy -D warnings
+- CLI 与 Plugin 通过文件系统 + JSON 通信,不直接耦合
+- 设计细节以 `docs/design/` 为唯一权威（实现时对照,不二次文档化）
+
+## 开源参考（~/workspace/explore/）
+
+| 参考项目 | 学什么 |
+|---------|--------|
+| guppy | petgraph 封装（图引擎实现时对照） |
+| ast-grep | tree-sitter 集成 + CLI workspace 结构 |
+| codegraph | SQLite 图存储 |
+| cargo-modules | CLI 输出格式 |
+| OpenSpec | Plugin 结构参考 |
+| claw-code | PARITY.md + 迁移方法论 |
+| Understand-Anything | SKILL.md 组织 |
 
 ## 文件权威来源
 
-同一信息在多个文件中出现时，以下文件为唯一权威：
-- CLI 命令列表 → `06-plugin-structure.md`
-- 工作量估算 → `08-roadmap-and-reference.md`
-- 图数据模型 → `04-toolchain.md § 5.7.1`
-- 迁移案例参考 → `08-roadmap-and-reference.md § 14`
-- 产出物目录结构 → `06-plugin-structure.md § 10.6`
-- 状态机定义 → `02-architecture.md § 3.4` + `09-appendix-schemas.md`
-- 迁移规则体系（26 类规则列表）→ `05-documentation-system.md § 6.2`
-- 规则分层策略（核心/参考/项目专有）→ `06-plugin-structure.md § 10.1.1`
-- Plugin 目录结构 → `06-plugin-structure.md § 10.0`
+- CLI 命令列表 → `docs/design/06-plugin-structure.md`
+- 图数据模型 → `docs/design/04-toolchain.md § 5.7.1`
+- 状态机定义 → `docs/design/02-architecture.md § 3.4` + `09-appendix-schemas.md`
+- 实施计划 → `docs/PLAN.md`
+- 当前状态 → `docs/STATUS.md`
 
-## 调研与审查方法论
+## 设计文档一致性检查
 
-- 开源项目 clone 到 `~/workspace/explore/` 统一管理
-- LLM 调研结果必须交叉验证（已确认的幻觉：Pokemon Showdown JS→Rust、act101/Holonic/ShiftCodex、Bun 576 行 PORTING.md）
-- 多维度审查用并行 subAgent（可行性/架构合理性/架构明确性/文档质量），每个维度 10 分制打分
-- 修复后必须重新审查确认分数提升，不能自评
-- subAgent 写大文件容易卡住，用轻量方案替代（分段写入或直接编辑）
-
-## 设计文档一致性检查清单
-
-修改设计文档后，运行以下检查避免跨文件矛盾（本次会话的四轮审查中反复出现这些问题）：
-
+修改 `docs/design/` 后运行：
 ```bash
-# 检查 source-graph.json 残留（主存储应为 .db）
 grep -rn "source-graph\.json" docs/design/ --include="*.md"
-# 检查 PORTING.md 单文件残留（应为 porting/ 目录）
 grep -rn "PORTING\.md" docs/design/ --include="*.md"
-# 检查 .claude/rules/ 残留（Plugin 不支持 rules/ 分发）
 grep -rn "\.claude/rules" docs/design/ --include="*.md"
-# 检查 "4 步" 残留（应为"3 次 SubAgent 调用"或"7 步序列"）
 grep -rn "4 步\|4步" docs/design/ --include="*.md"
 ```
