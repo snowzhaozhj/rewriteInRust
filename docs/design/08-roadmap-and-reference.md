@@ -23,8 +23,7 @@
 - [ ] **Spike 1: SubAgent 编排可靠性** — 验证 Claude 能否可靠执行 `/migrate analyze` 的 7 步序列（含 3 次 SubAgent 串行调用）。验收标准：5 次独立测试中成功率 ≥ 80%（即 ≥4 次完成全部步骤且产出物有效）。低于阈值触发 Plan B（微 Skill 链 / 外部脚本编排）。**附加：编排性能基线**（并行于可靠性验收，零额外测试）— 同 5 次测试记录各步骤耗时，算单步均值与占比，写入 `DESIGN_ASSUMPTIONS.md`，明确编排层（SKILL.md 步骤调度 + SubAgent 间通信）开销阈值：单步 < 2s、全编排 < 5 分钟（占单模块 30-40 分钟流程的 12-17%），作为「增加 SubAgent/SKILL.md 步骤时性能是否退化」的边际成本基线（M2 门禁复用，见下方 M2 性能门禁）。
 - [ ] **Spike 2: rust-analyzer LSP 验证** — 验证 rust-analyzer LSP Plugin 在写入 .rs 文件后的诊断反馈延迟和可靠性（Plan B：回退到 PostToolUse Hook + cargo check）
 - [ ] **Spike 3: tree-sitter 精度** — 验证 tree-sitter 对 TS 项目的 AST 解析精度是否满足模块拆分需求。须用**现代 TS 语法语料**（装饰器、泛型约束、const 断言）实测**按语法类别分桶**的解析错误率并在 `DESIGN_ASSUMPTIONS.md` 记录，声明通过阈值（≤ 1% 误差为通过，否则触发 Plan B；分档降级流程见 [04 § 5.7.4](./04-toolchain.md#574-图构建管线)）（Plan B：TS Compiler API / LLM 直接读源码）
-  - [ ] **Spike 3 补充 a：批大小优化验收**（**M1 阻塞性交付物，不得推迟 M2**；其目的是确保 M1 结束前已有中型项目的性能/上下文基线，规避 M2 重新发现批大小瓶颈）— 在 3-5 个中型项目 × 批大小 20/35/50 上测量「批内符号引用覆盖度 / 同符号跨批重复分析次数 / 跨批依赖链准确度」，按下方决策树确定最优批大小并写入 `.rustmigrate.toml` 的 `[analysis] batch_size`（依据见 [04 § 5.7.4.1](./04-toolchain.md#5741-性能基准与扩展性)）。
-    - **M0 → M1 决策树**（仿 [04 § 5.7.4](./04-toolchain.md#574-图构建管线) 的 tree-sitter 分档模式，**只定流程不预设绝对阈值**）：①测三项指标 → ②对标 § 5.7.4.1 已知实践值区间 → ③三项均达区间中位数及以上 → 以 `batch_size=35` 进入 M1；④任一项低于区间下四分位 → 回到决策：调 `batch_size`（试 20 或 50）重测，或采混合策略（核心模块大批、外围模块小批）→ 重测达标后进入 M1；⑤各项目最终选定值 + 判定依据写入 `DESIGN_ASSUMPTIONS.md`（测量**后**回填，不预填阈值）。
+  - [ ] **Spike 3 补充 a** — 移至 M1 首 2 周独立任务（见 M1 工作量表「批大小优化验收」行）；M0 Spike 3 仅验证 tree-sitter 解析精度本身。
   - [ ] **Spike 3 补充 b：增量更新常数验证** — 实测「import 链深度 > 3 文件占比 / 反向 BFS 耗时 @100/300/500 文件 / > 50 直接导入者占比」三项，回填 [04 § 5.7.5 实测校准表](./04-toolchain.md#575-增量更新策略)，将「深度 ≤ 3 / 熔断 = 50」的最终值或调整规则写入 `DESIGN_ASSUMPTIONS.md`。
 - [ ] **Spike 4: SKILL.md 跟随边界** — 验证 SKILL.md 长指令（>2000 字）的指令跟随率和遗漏率（Plan B：拆分为多个短 Skill）
 - [ ] **Spike 5: Beads/AgentMemory 集成评估** — 评估 Beads（任务状态持久化）和 AgentMemory（知识记忆）的集成可行性
@@ -62,10 +61,11 @@ M0 收尾时依据 `DESIGN_ASSUMPTIONS.md` 的 Spike 结论，按下表确定进
 - [ ] `migration-state.json` 状态管理 + 断点续传
 - [ ] PARITY.md 自动更新
 - [ ] 基础 MDR 模板
+- [ ] proptest 基础集成（纯函数 L2 等价测试 + seed 管理，不含完整 FFI 等价管线与行为录制）
 
 **MVP 不包含（后续迭代）**：
 - 多候选生成
-- 属性测试 / 模糊测试
+- 模糊测试（cargo-fuzz）/ 变异测试（cargo-mutants）
 - 多 agent 并行
 - 行为录制框架
 - `/migrate graduate`（含 unsafe 审计）
@@ -79,7 +79,7 @@ M0 收尾时依据 `DESIGN_ASSUMPTIONS.md` 的 Spike 结论，按下表确定进
 - 用户从 `/migrate analyze` 到 `/migrate review` 的完整流程可在 30 分钟内走通（单模块）
 - 断点续传验证：中断会话后恢复，不丢失 migration-state.json 状态
 - **边界降级确认**：至少 1 个**故意超出上下文预算**的模块被验证可触发拆分或降级路径（非静默失败）——本项验证 fallback 机制本身能工作，不要求边界场景全部通过翻译
-- **可扩展性初步检验**（不阻断验收，仅采基线避免「M0 有 Spike 但 M1 验收不反映」的信息丢失）：在 Spike 3 补充 a 已用的 3-5 个中型项目上复用其优化参数，额外记录三项指标——图构建耗时 @200+ 行/文件、单模块上下文峰值分布、编排稳定性样本——写入 `DESIGN_ASSUMPTIONS.md` 的「M1 可扩展性基线」节，作为 M2 中型项目验收的对比起点（而非依赖隐含的 Spike 结论）
+- **可扩展性初步检验**（不阻断验收，仅采基线避免「M0 有 Spike 但 M1 验收不反映」的信息丢失）：在 M1 批大小优化验收使用的 3 个中型项目上复用其优化参数，额外记录三项指标——图构建耗时 @200+ 行/文件、单模块上下文峰值分布、编排稳定性样本——写入 `DESIGN_ASSUMPTIONS.md` 的「M1 可扩展性基线」节，作为 M2 中型项目验收的对比起点（而非依赖隐含的 Spike 结论）
 
 **性能门禁（量化，作为"是否可升级 M2"的客观依据）**：
 
@@ -91,7 +91,7 @@ M0 收尾时依据 `DESIGN_ASSUMPTIONS.md` 的 Spike 结论，按下表确定进
 
 > 性能门禁仅约束 MVP 范围内的串行单 agent 路径。多 agent 并行吞吐属 M2 指标（见下），M1 不要求。
 >
-> 基准项目（~5K 行、约 150 行/文件）属"平均"分布；中型项目（5-20K 行、200-300 行/文件）的图构建/上下文性能校准见 Spike 3 补充 a 结论，在 M1 结束前回填上表（即上方「可扩展性初步检验」采集的基线）。M2 验收需复测同类项目确认无退化。
+> 基准项目（~5K 行、约 150 行/文件）属"平均"分布；中型项目（5-20K 行、200-300 行/文件）的图构建/上下文性能校准见 M1 批大小优化验收结论，在 M1 结束前回填上表（即上方「可扩展性初步检验」采集的基线）。M2 验收需复测同类项目确认无退化。
 
 **关键路径与依赖排序（避免误读为可全并行）**：
 
@@ -115,6 +115,8 @@ M0 收尾时依据 `DESIGN_ASSUMPTIONS.md` 的 Spike 结论，按下表确定进
 | .rustmigrate.toml | 1 | Schema 定义 + 默认值生成 |
 | 单模块集成测试 | 2 | 单模块路径打通 + 调试 |
 | 三项目端到端验证 + 规则缺陷回修 | 5-6 | 含规则缺陷发现→回修 agents/translator.md→重测的 1-2 轮迭代；含性能基准数据采集与环境标准化 0.5-1 天（环境元信息记录 + 写入 sprint-N-report.json，见下方 § 13.1.2） |
+| 批大小优化验收（原 Spike 3 补充 a） | 2-3 | M1 前 2 周执行，可与 TS 适配器并行；使用 3 个公开中型 TS 项目（列入 `.rustmigrate.toml` fixture）；在批大小 20/35/50 上测量批内符号引用覆盖度/跨批重复/依赖链准确度，结论写入 `DESIGN_ASSUMPTIONS.md` |
+| proptest 集成与 seed 管理 | 1-2 | 纯函数 L2 等价测试基础设施（strategy 模板 + regression 文件管理），不含 FFI 等价管线 |
 | CLI 核心（11 个 MVP 子命令） | 10-14 | init/profile/graph(build+topo-sort+deps+stats)/validate-state/state(get+transition)/stats-loc/scaffold |
 | CLI 嵌入 crate 集成 | 5-7 | tree-sitter 绑定(~2d) + ast-grep-core(~1.5d) + tokei(~1d) + petgraph(~1d) + rusqlite(~1.5d) + 跨平台编译/调试。**风险**：rusqlite 嵌入抬高编译时间与二进制体积，若实测触上限（见 M0 Spike 0 crate 集成风险评估）则 M1 切 JSON 持久化回退、SQLite 推迟到 M2（决策见 [04 § 5.7.3](./04-toolchain.md#573-持久化存储)前向兼容权衡） |
 | CLI 测试 | 3-4 | 集成测试 + fixtures + 1 个自建微型项目（dogfooding fixture：50-100 行 TS 输入 + 手写期望 Rust 输出，0.5 天；`dogfooding.yml` workflow，1 天，仅验证到 Tier 0，见 [03 § 4.11.4](./03-execution-model.md#4114-项目自验证dogfooding-m2-概念设计)） |
@@ -139,7 +141,7 @@ M0 收尾时依据 `DESIGN_ASSUMPTIONS.md` 的 Spike 结论，按下表确定进
 **交付物**：
 - [ ] **上下文预算实证校验（M2 前 2 周，优先）** — 用中等复杂度真实项目实测 [02 § 3.5.1](./02-architecture.md#351-上下文预算运行时检查与拆分策略) 预算表在深嵌套/高依赖模块上的准确度，结果反馈规则库改进（承接 M1 后移的边界场景全面覆盖）
 - [ ] 多候选生成 + 最优选择
-- [ ] 属性测试（proptest 等价性验证）
+- [ ] 属性测试完整管线（proptest FFI 等价性验证 + 跨模块回归集联动，承接 M1 基础集成）
 - [ ] 模糊测试（cargo-fuzz 差异对比）
 - [ ] 变异测试（cargo-mutants 测试质量验证）
 - [ ] 覆盖率门禁（cargo-llvm-cov）

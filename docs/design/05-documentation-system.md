@@ -640,7 +640,7 @@ related_rules: [RULE-3, RULE-22] # 关联规则类，供影响分析
 related_mdrs: [MDR-001]          # 关联决策记录
 ```
 
-**新鲜度管理**：每 6 个月（或按 Sprint 周期配置）自动将到期 pattern 标记 `needs-review`；translator/verifier 在引用时若遇 `needs-review`，须确认仍适用（更新 `last_verified`）或标记 `deprecated`。
+**新鲜度管理**：每 6 个月（或按 Sprint 周期配置），verifier 在 `/migrate review` 执行时将到期 pattern 标记 `needs-review`；translator/verifier 在引用时若遇 `needs-review`，须确认仍适用（更新 `last_verified`）或标记 `deprecated`。
 
 **关联索引**：`.rust-migration/context/` 的 `index.json` 记录 `pattern → related_rules / related_mdrs / 使用模块` 的映射，供按模块特征（如 `is_async=true`）只注入相关且 `status=active` 的 pattern，避免全量加载占用上下文预算。**实施时机**：index.json 为 M2 自动生成候选（见 [§6.11.1](#6111-四层知识的-mvp-vs-m2-分阶段实施)）；MVP 阶段 SKILL.md 按规则类别手工 Read 相关 pattern，不依赖 index.json。
 

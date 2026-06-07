@@ -94,7 +94,9 @@
       "test_pass_rate": "18/22",
       "coverage": 76,
       "known_differences": 1,
-      "risk": "medium"
+      "risk": "medium",
+      "phase_a_version": "sha256:a1b2c3d4",
+      "phase_a_audit_passed": true
     },
     "core/runtime": {
       "status": "blocked",
@@ -110,6 +112,9 @@
     }
   },
   "config_ref": ".rustmigrate.toml",
+  "subagent_calls": [
+    { "step_index": 1, "subagent_name": "translator", "started_at": "2026-06-14T09:05:00Z", "ended_at": "2026-06-14T09:08:30Z", "status": "success", "error_message": null }
+  ],
   "metadata": {
     "graph_build_completed": true,
     "graph_build_completed_at": "2026-06-06T16:05:00Z",
@@ -128,13 +133,15 @@
 | `last_error` | `string \| null` | 最近一次 run 中止的结构化错误原因（如 Step 0.5 检测到循环依赖时记录环路径），便于用户排查；正常运行为 `null` |
 | `lock_token` | `string \| null` | MVP 恒为 `null`；M2 用于分布式锁令牌（见 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径)） |
 
+**`subagent_calls` 字段说明**：顶层 append-only 数组，每次 SubAgent 调用（含重试）追加一条 `{step_index, subagent_name, started_at, ended_at, status, error_message}`，用于诊断卡死与统计重试次数（见 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径)）。
+
 ### 状态机概念名 → JSON 字段值映射
 
 | 状态机图（[见架构设计 > 状态机](./02-architecture.md#34-编排器状态机设计)） | migration-state.json `status` 值 | 说明 |
 |-------------------|----------------------------------|------|
 | TRANSLATE | `translating` | 翻译中 |
 | CHECK | `compile_fixing` | 编译修复中 |
-| VERIFY | `testing` + `reviewing` | 测试 → 对抗审查两个子步骤 |
+| VERIFY | `testing` + `reviewing` | 测试 → 最终签批两个子步骤 |
 | PAUSE | `paused` | 暂停等待人类降级决策 |
 | DEGRADE | `degrade_ffi` / `degrade_manual` / `degrade_skip` | 三种降级方式 |
 | GRADUATE | `done` | 完成（项目级毕业由 `/migrate graduate` 评估） |
@@ -149,7 +156,7 @@
 | `translating` | 翻译中 | translator SubAgent 正在生成 Rust 代码 |
 | `compile_fixing` | 编译修复中 | F1 反馈循环中，正在修复编译错误 |
 | `testing` | 测试验证中 | F2 阶段，verifier SubAgent 正在生成和运行测试 |
-| `reviewing` | 对抗审查中 | verifier SubAgent 正在执行对抗性审查（不等价证据探测） |
+| `reviewing` | 最终签批中 | 测试通过后执行 TODO(port) 清零检查与最终验收签批 |
 | `done` | 完成 | 翻译和验证全部通过 |
 | `degrade_ffi` | 降级为 FFI 桥接 | 翻译失败，保持原实现，Rust 端通过 FFI 调用 |
 | `degrade_manual` | 降级为人工处理 | 翻译失败，标记 TODO 等待人工处理 |
@@ -174,6 +181,13 @@
 | `done` | `null` | 无需额外说明 |
 
 `substatus` 无枚举约束，由 SubAgent 或人工自行填写，仅用于辅助沟通，不参与状态机流转判断。
+
+**Phase A 解耦字段**（用于 verifier 责任归因，见 [02 § 3.2.4](./02-architecture.md#324-subagent-合并7--4)）：
+
+| 字段 | 类型 | 含义 |
+|------|------|------|
+| `phase_a_version` | `string \| null` | 当前 Phase A 持久化文件（`intermediate/attempts/{module}-phase-a.rs`）的内容 hash；未进入翻译时为 `null` |
+| `phase_a_audit_passed` | `boolean \| null` | Step 3.5 结构校验结果（`true`/`false`）；未校验时为 `null` |
 
 > **Phase A/B 子步骤的 substatus 约定**：02-architecture.md § 3.4 注明「Phase A/B 是 TRANSLATE 状态内的内部子步骤，不占用状态机节点」。MVP 通过上述 `translating` 的 substatus（`phase_a_complete_awaiting_review` / `phase_b_optimization_in_progress` / `phase_b_failed_at_round_N`）在 `migration-state.json` 中表达 Phase 级进度，使中间崩溃可定位到具体 Phase 而无需新增状态机节点。Phase A 完成时间戳记录在模块的 `attempts[].timestamp`，恢复逻辑据此判断哪个 Phase 失败。
 
@@ -364,7 +378,7 @@ CLI 构建基础图（contains/imports 边），存储到 `.rust-migration/sourc
   若所有阻塞源都已进入 'done' 或 'degrade_*'：
     - 将 M.status 恢复为 M.pre_blocked_status
     - 写入日志："解除对 module M 的阻塞：所有阻塞源已解决"
-    - 写回 migration-state.json
+    - 通过 `rustmigrate state transition --module <M> --to <pre_blocked_status> --reason 'blocked_by resolved'` 写回状态（确保 tmp-fsync-rename 原子写入）
   否则：
     - 保持 blocked 状态，将当前未完成的阻塞源记入 M.substatus
 ```
@@ -423,6 +437,8 @@ verifier 在对抗性审查时附带校验 Phase A 是否保持了 1:1 结构（
 
 若结构比例越界 → 标记为「Phase A 疑似已优化」，**要求 translator 以忠实保留模式重做 Phase A**，再进入 Step 4。这是一道门禁而非软提示。
 
+**状态写入**：校验通过/失败后写入 `modules[module].phase_a_audit_passed = true/false` 及 `phase_a_version = 当前 Phase A 文件 content hash`。
+
 **检查点**：结构比例在界内，或已重做 Phase A 通过校验。
 
 ### Step 4: Phase B — 编译修正 + 惯用化优化（调用 translator SubAgent）
@@ -455,7 +471,7 @@ verifier 在对抗性审查时附带校验 Phase A 是否保持了 1:1 结构（
 **检查点**：测试通过率 ≥ 预期，clippy 无 warning，TODO(port) 计数 = 0（否则标记 incomplete）。
 
 ### Step 6: 状态更新
-更新 `migration-state.json` 中该模块的状态。
+通过 `rustmigrate state transition --module <M> --to done` 更新该模块状态（确保 tmp-fsync-rename 原子写入，见 [06 § 10.8](./06-plugin-structure.md#108-持久化与崩溃安全mvp)）。
 更新 `PARITY.md` 中该模块的进度行。
 如有架构决策，写入 MDR。
 ```
@@ -472,6 +488,9 @@ verifier 在对抗性审查时附带校验 Phase A 是否保持了 1:1 结构（
 | analyze Step 6 scaffolder 测试搭建 | L1 | 前序全部 | test-fixtures/ 内本次半成品 | ≤2 | translator 完成态 | — |
 | run Step 0.5 引用一致性 | L2（延后） | 全部 | 无 | **否** | — | `BLOCKED_BY_VALIDATION_FAILED`，见 [06 § 10.7](./06-plugin-structure.md#107-错误信息与可调试性mvp) |
 | run Step 1 translator 意图摘要 | L2 | — | 本次 `{module}-intent.md` | ≤2 | 模块 pending | L2 = 6 字段非空（附录 E） |
+| run Step 2 Phase A translator 翻译 | L1 | `{module}-intent.md` + `intermediate/attempts/*` | `rust_root/{module}.rs`（部分写入） | ≤2 | translating（substatus=null，即意图已确认、Phase A 未开始） | 回滚后重入 Step 2 |
+| run Step 3 verifier 对抗审查 | L1 | Phase A `.rs` 文件 | `intermediate/{module}-review.md` | ≤2 | translating/phase_a_complete_awaiting_review | 回滚后重入 Step 3 |
+| run Step 4 Phase B translator 惯用化 | L1 | Phase A `.rs` + review.md + `intermediate/attempts/*-phase-b-*.rs` | `rust_root/{module}.rs`（Phase B 覆写） | 按 max_retry_rounds（3）然后 pause→degrade | translating/phase_a_complete_awaiting_review | 3 轮耗尽走 pause→degrade 路径 |
 | run Step 5 verifier 测试验证 | L1+L2 | Phase A/B 产物 | 测试结果 JSON | ≤2 | reviewing | JSON 产出物做 L2，测试代码做 L1 |
 
 > 通用规则：`intermediate/attempts/*`（含 `*.json` 与 `*-phase-*.rs`）在任何回滚下**始终保留**作诊断证据（见 [06 § 10.2.2](./06-plugin-structure.md#1022-失败恢复机制)）；`validation_tool_error_*`（超时/OOM/Schema 损坏）不计入重试（见 [06 § 10.7](./06-plugin-structure.md#107-错误信息与可调试性mvp)）。
@@ -540,7 +559,7 @@ verifier 在对抗性审查时附带校验 Phase A 是否保持了 1:1 结构（
       "source": "function:src/core/parser.ts:parseTitle",
       "target": "function:src/utils/string.ts:capitalize",
       "edge_type": "calls",
-      "provenance": "ast-grep",
+      "provenance": "tool-assisted",
       "weight": 0.95
     }
   ],

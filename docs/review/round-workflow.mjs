@@ -141,7 +141,7 @@ const reviewed = await pipeline(
   }
 )
 
-const all = reviewed.reduce(function (acc, r) { return acc.concat(r.findings) }, [])
+const all = reviewed.filter(Boolean).reduce(function (acc, r) { return r && r.findings ? acc.concat(r.findings) : acc }, [])
 function effSev(f) { return (f.verdict && f.verdict.adjusted_severity) ? f.verdict.adjusted_severity : f.severity }
 const confirmed = all.filter(function (f) { return f.verdict && (f.verdict.verdict === 'confirmed' || f.verdict.verdict === 'adjusted') })
 

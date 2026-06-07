@@ -1,7 +1,7 @@
 # Findings Ledger
 
 > 审查循环跨轮状态台账。格式见 [REVIEW_LOOP.md §6](./REVIEW_LOOP.md#6-findings-ledgermd-格式)。
-> **完成轮数 = 3（R1+R2+R3 已修，待独立复验）**。第 1 轮由用户执行 `/goal` 启动并验证；兜底 routine 在完成轮数=0 时不会自动开跑（见 REVIEW_LOOP.md §9）。
+> **完成轮数 = 4（R1+R2+R3+R4 已修，待独立复验）**。第 1 轮由用户执行 `/goal` 启动并验证；兜底 routine 在完成轮数=0 时不会自动开跑（见 REVIEW_LOOP.md §9）。
 
 ## 轮次汇总
 
@@ -11,6 +11,7 @@
 | 1 | 24 | 0 | 0(已修待复验) | 31(已修待复验) | 7(已修待复验) | no |
 | 2 | 6 | 0 | 20 | 37 | 2 | no |
 | 3 | 1 | 0 | 11 | 29 | 11 | no |
+| 4 | 4 | 0 | 4 | 19 | 7 | no |
 
 ## Findings
 
@@ -20,7 +21,7 @@
 | R1-D1-02 | D1 | high | 03-execution-model.md | verifier 双职责致测试与 Phase B 代码时序歧义 | fixed | 1 | 1 |
 | R1-D1-03 | D1 | medium | 03-execution-model.md | Phase B 并发/内存重写晚于测试，测试可能不匹配 | reopened | 1 | 3 |
 | R1-D1-04 | D1 | high | 01-positioning-and-methodology.md | Phase A 1:1 对应无机制保证，diff 审查失效 | fixed | 1 | 1 |
-| R1-D1-05 | D1 | low | 02-architecture.md | 100K 预算超预算拆分标准未定义 | fixed | 1 | 1 |
+| R1-D1-05 | D1 | low | 02-architecture.md | 100K 预算超预算拆分标准未定义 | reopened | 1 | 4 |
 | R1-D1-06 | D1 | high | 03-execution-model.md | 缺模块类型×测试层矩阵，测试深度自由裁量 | fixed | 1 | 1 |
 | R1-D2-01 | D2 | high | 03-execution-model.md | FFI 比对纯函数/有状态边界与性能成本未界定 | reopened | 1 | 3 |
 | R1-D2-02 | D2 | high | 03-execution-model.md | L3 简化隐含单模块假设，未处理依赖链路一致性 | reopened | 1 | 3 |
@@ -55,14 +56,14 @@
 | R1-D7-01 | D7 | high | 05-documentation-system.md | 规则体系无社区贡献/评审/版本化/冲突仲裁 | reopened | 1 | 3 |
 | R1-D7-02 | D7 | high | 06-plugin-structure.md | 适配器扩展工程成本/验收标准/复用率缺失 | reopened | 1 | 3 |
 | R1-D7-03 | D7 | high | 06-plugin-structure.md | Plugin API 变更向后兼容策略缺失 | reopened | 1 | 3 |
-| R1-D7-04 | D7 | medium | 05-documentation-system.md | 知识沉淀缺更新触发/索引/新鲜度，有死文档风险 | reopened | 1 | 3 |
+| R1-D7-04 | D7 | medium | 05-documentation-system.md | 知识沉淀缺更新触发/索引/新鲜度，有死文档风险 | reopened | 1 | 4 |
 | R1-D7-05 | D7 | medium | 06-plugin-structure.md | 跨文档一致性无自动验证，权威来源表不完整 | reopened | 1 | 2 |
 | R1-D7-06 | D7 | medium | 05-documentation-system.md | PARITY/KNOWN_DIFFERENCES 无社区可见性/异议机制 | fixed | 1 | 1 |
 | R1-D8-01 | D8 | medium | 04-toolchain.md | 图存储超 <5K MVP 需求，未量化典型图规模 | reopened | 1 | 3 |
 | R1-D8-02 | D8 | high | 06-plugin-structure.md | MVP 编排依赖指令跟随，README 未表述风险 | fixed | 1 | 1 |
 | R1-D8-03 | D8 | medium | 06-plugin-structure.md | （驳回）CLI 表混淆 11 命令含 5 个 M2 | reopened | 1 | 3 |
 | R1-D8-04 | D8 | medium | 08-roadmap-and-reference.md | M1 估算 Plan B 缓冲不足以覆盖多 Spike 同时失败 | reopened | 1 | 2 |
-| R1-D8-05 | D8 | medium | README.md | 「3 命令 MVP」表述与内部多步复杂度鸿沟 | reopened | 1 | 3 |
+| R1-D8-05 | D8 | medium | README.md | 「3 命令 MVP」表述与内部多步复杂度鸿沟 | reopened | 1 | 4 |
 | R1-D8-06 | D8 | low | 08-roadmap-and-reference.md | M1-M4 目标与工作量无 tie-out（累积/复用） | reopened | 1 | 3 |
 | R1-BS1-01 | BS1 | high | 03-execution-model.md | 缺源文件变更检测/同步，迁移期源演化无法感知 | reopened | 1 | 3 |
 | R1-BS1-02 | BS1 | high | 06-plugin-structure.md | SubAgent 通信缺超时/产出物校验/失败恢复 | fixed | 1 | 1 |
@@ -95,16 +96,41 @@
 | R2-D8-01 | D8 | medium | 01-positioning-and-methodology.md | （驳回）26 规则+SubAgent 分发对 MVP 过细——混淆分布与混乱 | rejected | 2 | 2 |
 | R2-D8-02 | D8 | medium | 03-execution-model.md | 行为录制框架（Tier1 默认）与 <5K 纯函数模块不匹配 | fixed | 2 | 2 |
 | R2-BS1-01 | BS1 | medium | 02-architecture.md | 类型复杂度评估缺定量标准，非 PROFILE 前置预判 | fixed | 2 | 2 |
-| R2-BS2-01 | BS2 | medium | 03-execution-model.md | Dogfooding 为纯概念无交付物/CI 集成/验证标准 | reopened | 2 | 3 |
+| R2-BS2-01 | BS2 | medium | 03-execution-model.md | Dogfooding 为纯概念无交付物/CI 集成/验证标准 | reopened | 2 | 4 |
 | R2-BS2-02 | BS2 | medium | 05-documentation-system.md | Release 流程与产出物版本化不完整（版本同步/CHANGELOG/artifact） | fixed | 2 | 2 |
 | R2-BS3-01 | BS3 | medium | 04-toolchain.md | MVP 图规模节点数三处不一致（13/10/9），违反单一权威 | fixed | 2 | 2 |
 | R3-D1-01 | D1 | medium | 01-positioning-and-methodology.md | §2.3 原生重塑单步原则与 Phase A/B 两阶段张力，新用户认知偏差 | fixed | 3 | 3 |
 | R3-D2-01 | D2 | medium | 02-architecture.md | verify.sh(F2) 失败后改代码/test fixture vs 回 Phase B 分诊不清 | fixed | 3 | 3 |
 | R3-D2-02 | D2 | low | 03-execution-model.md | 纯函数检测验收采样过小、「一致」定义模糊 | fixed | 3 | 3 |
 | R3-D3-01 | D3 | medium | 08-roadmap-and-reference.md | Spike 0 crate 集成回退缺阈值/候选/记录时机 | fixed | 3 | 3 |
-| R3-D6-01 | D6 | medium | 08-roadmap-and-reference.md | M1 验收限<5K 与 Spike 3a 中型项目语义不一致，图构建超时风险 | fixed | 3 | 3 |
+| R3-D6-01 | D6 | medium | 08-roadmap-and-reference.md | M1 验收限<5K 与 Spike 3a 中型项目语义不一致，图构建超时风险 | reopened | 3 | 4 |
 | R3-BS2-01 | BS2 | medium | 06-plugin-structure.md | 预编译二进制分发缺平台矩阵/更新时机/版本一致性检查 | fixed | 3 | 3 |
 | R3-BS3-01 | BS3 | high | 01-positioning-and-methodology.md | Spike 1 <80% 降级终局性跨文件不一致（08/07/06/01） | fixed | 3 | 3 |
 | R3-BS3-02 | BS3 | low | 02-architecture.md | PROFILE/PLAN 边界与 Sprint Planning 选择/重算歧义，README 未映射阶段↔命令 | fixed | 3 | 3 |
 | R3-D5-01 | D5 | high | 06-plugin-structure.md | （驳回）/migrate analyze 缺意图确认门禁——误读 analyze/run 职责 | rejected | 3 | 3 |
 | R3-BS1-01 | BS1 | high | 02-architecture.md | （驳回）预算粗估精度/interface_only 压缩率/M2 超时——属 Spike 实证非设计缺陷 | rejected | 3 | 3 |
+| R4-D1-01 | D1 | medium | 03-execution-model.md | min_applicable_dimensions 阈值方向反转（简单函数高于复杂函数） | fixed | 4 | 4 |
+| R4-D1-02 | D1 | medium | 03-execution-model.md | Phase B 3 轮重试耗尽后升级路径 03 §4.3 缺终态定义 | fixed | 4 | 4 |
+| R4-D1-03 | D1 | low | 06-plugin-structure.md | 多候选生成缺里程碑限定，与 01/08 M2+ 标注不一致 | fixed | 4 | 4 |
+| R4-D2-01 | D2 | low | 06-plugin-structure.md | §10.3「不可跳过」原则与 Skill 级调用机制表述张力 | fixed | 4 | 4 |
+| R4-D2-02 | D2 | medium | 03-execution-model.md | 异步模块 loom 提升规则 04 §5.3 缺失，verifier 面临不可解冲突 | fixed | 4 | 4 |
+| R4-D2-03 | D2 | low | 03-execution-model.md | insta 快照缺与 proptest 对等的基线更新权限策略 | fixed | 4 | 4 |
+| R4-D3-01 | D3 | high | 02-architecture.md | phase_a_version/phase_a_audit_passed 字段 09 附录 A 缺失 | fixed | 4 | 4 |
+| R4-D3-02 | D3 | medium | 09-appendix-schemas.md | reviewing 状态映射表/枚举/执行序列三方自相矛盾 | fixed | 4 | 4 |
+| R4-D3-03 | D3 | medium | 06-plugin-structure.md | §11.5 [pipeline] 与 §11.1 [tools] 控制重叠/命名不一致（含 D7-01） | fixed | 4 | 4 |
+| R4-D4-01 | D4 | medium | 04-toolchain.md | Provenance::AstGrep 语义与实际适配器工具不匹配 | fixed | 4 | 4 |
+| R4-D4-02 | D4 | medium | 04-toolchain.md | syn+quote 嵌入理由与 translator/scaffold 实际需求矛盾 | fixed | 4 | 4 |
+| R4-D4-03 | D4 | low | 04-toolchain.md | Tier1 表残留 scc、tokei 输出含不存在的「复杂度」列 | fixed | 4 | 4 |
+| R4-D5-01 | D5 | medium | 06-plugin-structure.md | subagent_calls 字段 06 声称见 09 但 09 附录 A 无定义 | fixed | 4 | 4 |
+| R4-D5-02 | D5 | medium | 06-plugin-structure.md | /migrate run 调度表遗漏 Step 1 translator + 人类门禁 | fixed | 4 | 4 |
+| R4-D5-03 | D5 | high | 09-appendix-schemas.md | 失败恢复表缺 /migrate run Steps 2/3/4 回滚定义 | fixed | 4 | 4 |
+| R4-D5-04 | D5 | medium | 09-appendix-schemas.md | Step 0.5/6 状态写入未走 CLI 原子写入路径与 §10.8 矛盾 | fixed | 4 | 4 |
+| R4-D6-01 | D6 | medium | 04-toolchain.md | §5.7.6「M1 前 4 项」引导文字与 MVP 列标注矛盾 | fixed | 4 | 4 |
+| R4-D8-01 | D8 | medium | README.md | TL;DR「30 秒理解」实际 ~2300 字符需 3-5 分钟 | fixed | 4 | 4 |
+| R4-D8-02 | D8 | low | 08-roadmap-and-reference.md | （驳回）§13.1.1 路线图预写实现细节——05 已指定 08 为权威来源 | rejected | 4 | 4 |
+| R4-BS1-01 | BS1 | high | 03-execution-model.md | proptest FFI 方向限制：napi-rs 仅 Node→Rust，L2 等价不可实现 | fixed | 4 | 4 |
+| R4-BS1-02 | BS1 | medium | 03-execution-model.md | loom cfg-gated 原语导入无 SubAgent 负责插入 | fixed | 4 | 4 |
+| R4-BS1-03 | BS1 | low | 03-execution-model.md | 翻译前未预检外部 npm 依赖 Rust 映射可用性 | fixed | 4 | 4 |
+| R4-BS2-01 | BS2 | medium | 06-plugin-structure.md | MVP CLI 缺外部工具安装状态检测，失败掩盖真因 | fixed | 4 | 4 |
+| R4-BS3-01 | BS3 | high | 08-roadmap-and-reference.md | 08 M1「不含属性测试」与 03/04 proptest 强制要求矛盾 | fixed | 4 | 4 |
+| R4-BS3-02 | BS3 | medium | 03-execution-model.md | /migrate run 步骤编号 03 与 09 偏移 1 位，跨文件追溯歧义 | fixed | 4 | 4 |
