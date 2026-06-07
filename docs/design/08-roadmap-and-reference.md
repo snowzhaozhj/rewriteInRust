@@ -76,7 +76,7 @@ M0 收尾时依据 `DESIGN_ASSUMPTIONS.md` 的 Spike 结论，按下表确定进
 - 迁移后代码通过 Tier 0 门禁
 - insta 快照测试（即黄金文件测试，L1）100% 通过
 - **质量评分通过线**（§ 7.5 `final_score`，分层）：`done` 状态模块 `final_score ≥ 80`，`degrade_ffi` 状态模块 `≥ 60`（不只靠 Tier 0 通过判定迁移质量）。M1 阶段评分为 **per-module 级别**（确定性指标自动化 + verifier AI 指标），sprint 聚合与跨 Sprint 趋势检测推至 M2（依赖多 Sprint 数据积累）
-- 用户从 `/migrate analyze` 到 `/migrate review` 的完整流程可在 30 分钟内走通（单模块）
+- 用户从 `/migrate analyze` 到 `/migrate review` 的完整流程可在 30-40 分钟内走通（单模块）
 - 断点续传验证：中断会话后恢复，不丢失 migration-state.json 状态
 - **边界降级确认**：至少 1 个**故意超出上下文预算**的模块被验证可触发拆分或降级路径（非静默失败）——本项验证 fallback 机制本身能工作，不要求边界场景全部通过翻译
 - **可扩展性初步检验**（不阻断验收，仅采基线避免「M0 有 Spike 但 M1 验收不反映」的信息丢失）：在 M1 批大小优化验收使用的 3 个中型项目上复用其优化参数，额外记录三项指标——图构建耗时 @200+ 行/文件、单模块上下文峰值分布、编排稳定性样本——写入 `DESIGN_ASSUMPTIONS.md` 的「M1 可扩展性基线」节，作为 M2 中型项目验收的对比起点（而非依赖隐含的 Spike 结论）
@@ -86,7 +86,7 @@ M0 收尾时依据 `DESIGN_ASSUMPTIONS.md` 的 Spike 结论，按下表确定进
 | 指标 | 阈值 | 测试方法 |
 |------|------|---------|
 | 图构建耗时 | `rustmigrate graph build` < 10s（100 文件项目） | 测试环境：M1/M2 Mac 或 4 核 CI runner；测试项目：100 个 `.ts` 文件、约 5K 行；冷启动（无 SQLite 缓存）计时 |
-| 单 agent 完整流程用时 | 单模块 analyze→run→review 在 30-40 分钟内（与上方定性指标一致） | 在 3 个验收项目上各跑 1 个纯函数模块，取耗时区间；不含人工审阅等待 |
+| 单 agent 完整流程用时 | 单模块 analyze→run→review 在 30-40 分钟内 | 在 3 个验收项目上各跑 1 个纯函数模块，取耗时区间；不含人工审阅等待 |
 | 上下文预算利用率 | < 90%（5K 行以下模块的单次 Work Unit） | 记录 Work Unit 峰值上下文 token / 预算上限（≤100K，见 02-architecture.md）；interface_only 加载策略下统计 |
 
 > 性能门禁仅约束 MVP 范围内的串行单 agent 路径。多 agent 并行吞吐属 M2 指标（见下），M1 不要求。
@@ -162,7 +162,7 @@ M0 收尾时依据 `DESIGN_ASSUMPTIONS.md` 的 Spike 结论，按下表确定进
   - [ ] 将 blocked 状态恢复逻辑从 [SKILL.md Step 0.5](./09-appendix-schemas.md#step-05-自动解除可解除的-blocked-模块) 抽取为确定性 CLI 命令 `rustmigrate validate state --check-blocked --auto-unblock`：以 DFS 环检测 + 拓扑排序实现自动逐层解除，返回 JSON `{ "unblocked": [<module>...], "still_blocked": [<module>...], "cycle_detected": <bool>, "cycle_path": [<module>...] | null }`。替代 MVP 期由 SKILL.md 指令跟随驱动的非确定性恢复（1-2 人天，并入上方状态机程序化人天）
 - [ ] migration-state.json 向后兼容框架（`version` 字段 + 自动迁移脚本，集成进 M2 CLI 的 `init`/`validate state` 版本检测与升级）
 - [ ] /goal 自主迁移循环支持
-- [ ] CLI 扩展（search/analyze/report 等 16 个子命令）
+- [ ] CLI 扩展（M2 已定 5 命令：rdeps/cycles/export/validate-config/state-update，权威清单见 [06 § 10.0.1](./06-plugin-structure.md#1001-cli-命令清单)；M2 规划期另有候选命令待评估）
 - [ ] CI/CD 集成（`rustmigrate` 在 GitHub Actions 中使用；落地设计见 [03-execution-model.md § 4.11](./03-execution-model.md#411-cicd-集成m2-范围)）
 - [ ] Dogfooding fixture 编写与 CI workflow 完成（承接 M1 备料的 fixture，落地 `dogfooding.yml` 并按验收标准升级为 required，0.5-1 天，见 [03 § 4.11.4](./03-execution-model.md#4114-项目自验证dogfooding-m2-概念设计)）
 
