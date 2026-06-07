@@ -237,9 +237,9 @@ Phase 4 (收敛)        ───→ 翻译循环 + MVP 验收
 
 ### Sprint 0 GATE
 
-- [ ] 2 个 Spike 全部有结论（Pass 或 触发 PlanB）
-- [ ] 决策文档写入 `docs/decisions/`
-- [ ] M1 执行路径已确定
+- [x] 2 个 Spike 全部有结论（Pass 或 触发 PlanB）
+- [x] 决策文档写入 `docs/decisions/`
+- [x] M1 执行路径已确定
 
 ---
 
