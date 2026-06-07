@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Rust 迁移验证工作台**：Claude Code Plugin + `rustmigrate` CLI，帮助开发者将 TS/Python/C 项目迁移到 Rust。
 
-**当前阶段**：M0 假设验证（即将开始）。设计文档 v0.9.4 已完成 9 轮对抗审查收敛，项目脚手架已初始化。
+**当前阶段**：M1 MVP（Phase 0 合约已冻结）。设计文档 v0.9.4 已完成 9 轮对抗审查收敛。
 
 ## 多会话续接（重要）
 
@@ -120,6 +120,29 @@ cargo run -- graph build --root fixtures/linear-deps  # 手动验证
 3. **集成级**：`just test` 全过（含下游命令）
 4. **审查级**：与 `docs/design/` 对应章节一致
 
+## 阶段交付流程（每个阶段必须遵循）
+
+每个阶段（Sprint / Phase / Worker 任务）完成后执行以下流程：
+
+```
+1. 质量门检查
+   cargo fmt --check && cargo clippy -- -D warnings && cargo test -p rustmigrate-core
+
+2. 更新 STATUS.md
+
+3. 独立分支 + 提 PR
+   git checkout -b feat/<阶段ID>
+   git push -u origin feat/<阶段ID>
+   gh pr create --title "feat(<scope>): 简要描述"
+
+4. 自动审查（PR 创建后立即执行）
+   /pr-review-toolkit:review-pr
+
+5. 修复 critical/important issues 后通知用户审阅
+```
+
+**不要把多个阶段合成一个大 PR。** 每个 PR 应当是一个可独立审阅的单元。
+
 ## 续接快速参考
 
 **新会话开始**：读 CLAUDE.md → `docs/STATUS.md` → `docs/PLAN.md` 对应任务
@@ -128,6 +151,7 @@ cargo run -- graph build --root fixtures/linear-deps  # 手动验证
 1. `just fmt-check && just lint && just test`
 2. 更新 `docs/STATUS.md`
 3. commit 引用任务 ID（如 `feat(M1-GRAPH): 图构建模块`）
+4. 提 PR + 自动审查（见上方「阶段交付流程」）
 
 ## 设计文档一致性检查
 
