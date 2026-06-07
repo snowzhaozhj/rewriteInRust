@@ -124,20 +124,22 @@ fn fixup_extends_in_edges(graph: &SourceGraph, mut edges: Vec<Dependency>) -> Ve
         if graph.node_index(&edge.target).is_some() {
             continue;
         }
-        let target_str = edge.target.as_str().to_owned();
-        let parts: Vec<&str> = target_str.splitn(3, ':').collect();
-        if parts.len() < 3 {
+        let Some(rel) = edge.target.file_path().map(|s| s.to_owned()) else {
             continue;
-        }
-        let rel = parts[1].to_owned();
-        let name = parts[2].to_owned();
+        };
+        let Some(name) = edge.target.symbol_name().map(|s| s.to_owned()) else {
+            continue;
+        };
 
         // 1. 同文件内查找备选类型前缀
-        let same_file = [format!("class:{rel}:{name}"), format!("enum:{rel}:{name}")];
+        let candidates = [
+            NodeId::symbol(NodeType::Class, &rel, &name),
+            NodeId::symbol(NodeType::Enum, &rel, &name),
+        ];
         let mut resolved = false;
-        for candidate in &same_file {
-            if graph.node_index(&NodeId::new(candidate)).is_some() {
-                edge.target = NodeId::new(candidate);
+        for candidate in &candidates {
+            if graph.node_index(candidate).is_some() {
+                edge.target = candidate.clone();
                 resolved = true;
                 break;
             }
@@ -165,12 +167,12 @@ fn add_cross_file_edges(
     file_rels: &[String],
 ) {
     for (rel, analysis) in analyses {
-        let file_id = NodeId::new(format!("file:{rel}"));
+        let file_id = NodeId::file(rel);
 
         // Imports 边
         for import in &analysis.imports {
             if let Some(target_rel) = resolve_import(&import.module_path, rel, file_rels) {
-                let target_file_id = NodeId::new(format!("file:{target_rel}"));
+                let target_file_id = NodeId::file(&target_rel);
                 graph.add_edge(Dependency {
                     source: file_id.clone(),
                     target: target_file_id,
@@ -197,11 +199,11 @@ fn add_cross_file_edges(
         // Calls 边（跨文件：通过 imports 解析调用目标）
         for call in &analysis.calls {
             if call.is_constructor {
-                let target_id = format!("class:{rel}:{}", call.callee);
-                let resolved = if graph.node_index(&NodeId::new(&target_id)).is_some() {
-                    Some(NodeId::new(&target_id))
+                let target_id = NodeId::symbol(NodeType::Class, rel, &call.callee);
+                let resolved = if graph.node_index(&target_id).is_some() {
+                    Some(target_id)
                 } else if let Some(src_file) = import_map.get(&call.callee) {
-                    let cross_id = NodeId::new(format!("class:{src_file}:{}", call.callee));
+                    let cross_id = NodeId::symbol(NodeType::Class, src_file, &call.callee);
                     if graph.node_index(&cross_id).is_some() {
                         Some(cross_id)
                     } else {
@@ -227,11 +229,11 @@ fn add_cross_file_edges(
             } else {
                 let callee_base = call.callee.split('.').next().unwrap_or(&call.callee);
                 // 1. 当前文件的函数
-                let target_id = format!("function:{rel}:{}", call.callee);
-                if graph.node_index(&NodeId::new(&target_id)).is_some() {
+                let target_id = NodeId::symbol(NodeType::Function, rel, &call.callee);
+                if graph.node_index(&target_id).is_some() {
                     graph.add_edge(Dependency {
                         source: file_id.clone(),
-                        target: NodeId::new(&target_id),
+                        target: target_id,
                         edge_type: EdgeType::Calls,
                         provenance: Provenance::TreeSitter,
                         weight: 1.0,
@@ -240,7 +242,7 @@ fn add_cross_file_edges(
                     });
                 } else if let Some(src_file) = import_map.get(callee_base) {
                     // 2. 通过 import 解析到其他文件的函数
-                    let cross_id = NodeId::new(format!("function:{src_file}:{}", call.callee));
+                    let cross_id = NodeId::symbol(NodeType::Function, src_file, &call.callee);
                     if graph.node_index(&cross_id).is_some() {
                         graph.add_edge(Dependency {
                             source: file_id.clone(),

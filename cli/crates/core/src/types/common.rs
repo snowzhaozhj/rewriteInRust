@@ -1,24 +1,58 @@
 //! 基础类型定义：项目级通用标识符、范围、语言枚举。
 
 use serde::{Deserialize, Serialize};
+use strum::{Display, EnumString};
+
+use super::graph::NodeType;
 
 /// 图节点的唯一标识符。
 ///
-/// 格式：`{type}:{file_path}:{name}`，例如 `file:src/utils.ts` 或
-/// `function:src/utils.ts:clamp`。
+/// 格式：`{type}:{file_path}` 或 `{type}:{file_path}:{name}`。
+/// 例如 `file:src/utils.ts`、`function:src/utils.ts:clamp`。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct NodeId(String);
 
 impl NodeId {
-    /// 创建新的节点标识符。
+    /// 创建新的节点标识符（原始字符串）。
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
+    }
+
+    /// 构造文件节点 ID：`file:{rel_path}`。
+    pub fn file(rel_path: &str) -> Self {
+        Self(format!("{}:{rel_path}", NodeType::File))
+    }
+
+    /// 构造符号节点 ID：`{type}:{rel_path}:{name}`。
+    pub fn symbol(node_type: NodeType, rel_path: &str, name: &str) -> Self {
+        Self(format!("{node_type}:{rel_path}:{name}"))
     }
 
     /// 返回内部字符串引用。
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// 解析节点类型前缀。
+    pub fn kind(&self) -> Option<NodeType> {
+        let prefix = self.0.split(':').next()?;
+        prefix.parse().ok()
+    }
+
+    /// 解析文件路径部分。
+    pub fn file_path(&self) -> Option<&str> {
+        let mut parts = self.0.splitn(3, ':');
+        parts.next()?; // type prefix
+        parts.next() // file_path (or file_path:name combined for 2-part IDs)
+    }
+
+    /// 解析符号名称（仅 3 段 ID 有值）。
+    pub fn symbol_name(&self) -> Option<&str> {
+        let mut parts = self.0.splitn(3, ':');
+        parts.next()?; // type prefix
+        parts.next()?; // file_path
+        parts.next() // name
     }
 }
 
@@ -85,8 +119,9 @@ pub struct Span {
 }
 
 /// 源语言枚举。M3+ 扩展 Python/C/Go。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Display, EnumString)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum SourceLang {
     /// TypeScript 源语言。
     TypeScript,
@@ -98,20 +133,10 @@ pub enum SourceLang {
     Go,
 }
 
-impl std::fmt::Display for SourceLang {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::TypeScript => write!(f, "typescript"),
-            Self::Python => write!(f, "python"),
-            Self::C => write!(f, "c"),
-            Self::Go => write!(f, "go"),
-        }
-    }
-}
-
 /// 复杂度等级（由 profile 模块评估）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Display, EnumString)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum Complexity {
     /// 简单模块。
     Simple,

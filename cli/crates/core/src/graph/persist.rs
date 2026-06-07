@@ -9,7 +9,7 @@ use std::path::Path;
 use rusqlite::{params, Connection};
 
 use crate::error::{MigrateError, Result};
-use crate::types::common::{Complexity, NodeId, Span};
+use crate::types::common::{NodeId, Span};
 use crate::types::graph::{Dependency, EdgeType, NodeType, Provenance, SourceNode, Visibility};
 
 use super::SourceGraph;
@@ -43,13 +43,13 @@ pub fn save_to_db(graph: &SourceGraph, db_path: &Path) -> Result<()> {
             let extra = serialize_node_extra(node)?;
             stmt.execute(params![
                 node.id.as_str(),
-                node_type_to_str(node.node_type),
+                node.node_type.to_string(),
                 node.name,
                 node.file_path,
                 node.line_range.map(|s| s.start_line),
                 node.line_range.map(|s| s.end_line),
                 node.is_exported,
-                node.complexity.map(complexity_to_str),
+                node.complexity.map(|c| c.to_string()),
                 node.migration_status,
                 node.migration_priority,
                 extra,
@@ -69,8 +69,8 @@ pub fn save_to_db(graph: &SourceGraph, db_path: &Path) -> Result<()> {
             stmt.execute(params![
                 edge.source.as_str(),
                 edge.target.as_str(),
-                edge_type_to_str(edge.edge_type),
-                provenance_to_str(edge.provenance),
+                edge.edge_type.to_string(),
+                edge.provenance.to_string(),
                 edge.weight,
                 edge.sub_kind,
                 edge.mapping_notes,
@@ -121,7 +121,7 @@ pub fn load_from_db(db_path: &Path) -> Result<SourceGraph> {
         for row in rows {
             let r = row?;
 
-            let node_type = str_to_node_type(&r.node_type).ok_or_else(|| MigrateError::Graph {
+            let node_type: NodeType = r.node_type.parse().map_err(|_| MigrateError::Graph {
                 message: format!("未知节点类型: {}", r.node_type),
                 file: r.file_path.clone(),
             })?;
@@ -134,7 +134,7 @@ pub fn load_from_db(db_path: &Path) -> Result<SourceGraph> {
                 _ => None,
             };
 
-            let complexity = r.complexity.as_deref().and_then(str_to_complexity);
+            let complexity = r.complexity.as_deref().and_then(|s| s.parse().ok());
             let (is_async, visibility, is_abstract, decorators) =
                 parse_node_extra(r.extra.as_deref());
 
@@ -180,16 +180,15 @@ pub fn load_from_db(db_path: &Path) -> Result<SourceGraph> {
         for row in rows {
             let r = row?;
 
-            let edge_type = str_to_edge_type(&r.edge_type).ok_or_else(|| MigrateError::Graph {
+            let edge_type: EdgeType = r.edge_type.parse().map_err(|_| MigrateError::Graph {
                 message: format!("未知边类型: {}", r.edge_type),
                 file: String::new(),
             })?;
 
-            let provenance =
-                str_to_provenance(&r.provenance).ok_or_else(|| MigrateError::Graph {
-                    message: format!("未知 provenance: {}", r.provenance),
-                    file: String::new(),
-                })?;
+            let provenance: Provenance = r.provenance.parse().map_err(|_| MigrateError::Graph {
+                message: format!("未知 provenance: {}", r.provenance),
+                file: String::new(),
+            })?;
 
             graph.add_edge(Dependency {
                 source: NodeId::new(r.source),
@@ -232,106 +231,6 @@ struct EdgeRow {
     weight: f64,
     sub_kind: Option<String>,
     mapping_notes: Option<String>,
-}
-
-// === 类型 ↔ 字符串转换 ===
-
-fn node_type_to_str(nt: NodeType) -> &'static str {
-    match nt {
-        NodeType::File => "File",
-        NodeType::Module => "Module",
-        NodeType::Package => "Package",
-        NodeType::Function => "Function",
-        NodeType::Class => "Class",
-        NodeType::Interface => "Interface",
-        NodeType::Enum => "Enum",
-        NodeType::RustTarget => "RustTarget",
-        NodeType::TestFixture => "TestFixture",
-        NodeType::TypeAlias => "TypeAlias",
-        NodeType::Variable => "Variable",
-        NodeType::Community => "Community",
-    }
-}
-
-fn str_to_node_type(s: &str) -> Option<NodeType> {
-    match s {
-        "File" => Some(NodeType::File),
-        "Module" => Some(NodeType::Module),
-        "Package" => Some(NodeType::Package),
-        "Function" => Some(NodeType::Function),
-        "Class" => Some(NodeType::Class),
-        "Interface" => Some(NodeType::Interface),
-        "Enum" => Some(NodeType::Enum),
-        "RustTarget" => Some(NodeType::RustTarget),
-        "TestFixture" => Some(NodeType::TestFixture),
-        "TypeAlias" => Some(NodeType::TypeAlias),
-        "Variable" => Some(NodeType::Variable),
-        "Community" => Some(NodeType::Community),
-        _ => None,
-    }
-}
-
-fn edge_type_to_str(et: EdgeType) -> &'static str {
-    match et {
-        EdgeType::Contains => "contains",
-        EdgeType::Imports => "imports",
-        EdgeType::Calls => "calls",
-        EdgeType::Extends => "extends",
-        EdgeType::UsesType => "uses_type",
-        EdgeType::Exports => "exports",
-        EdgeType::MapsTo => "maps_to",
-        EdgeType::TestedBy => "tested_by",
-    }
-}
-
-fn str_to_edge_type(s: &str) -> Option<EdgeType> {
-    match s {
-        "contains" => Some(EdgeType::Contains),
-        "imports" => Some(EdgeType::Imports),
-        "calls" => Some(EdgeType::Calls),
-        "extends" => Some(EdgeType::Extends),
-        "uses_type" => Some(EdgeType::UsesType),
-        "exports" => Some(EdgeType::Exports),
-        "maps_to" => Some(EdgeType::MapsTo),
-        "tested_by" => Some(EdgeType::TestedBy),
-        _ => None,
-    }
-}
-
-fn provenance_to_str(p: Provenance) -> &'static str {
-    match p {
-        Provenance::TreeSitter => "tree-sitter",
-        Provenance::ToolAssisted => "tool-assisted",
-        Provenance::Llm => "llm",
-        Provenance::Manual => "manual",
-    }
-}
-
-fn str_to_provenance(s: &str) -> Option<Provenance> {
-    match s {
-        "tree-sitter" => Some(Provenance::TreeSitter),
-        "tool-assisted" => Some(Provenance::ToolAssisted),
-        "llm" => Some(Provenance::Llm),
-        "manual" => Some(Provenance::Manual),
-        _ => None,
-    }
-}
-
-fn complexity_to_str(c: Complexity) -> &'static str {
-    match c {
-        Complexity::Simple => "simple",
-        Complexity::Moderate => "moderate",
-        Complexity::Complex => "complex",
-    }
-}
-
-fn str_to_complexity(s: &str) -> Option<Complexity> {
-    match s {
-        "simple" => Some(Complexity::Simple),
-        "moderate" => Some(Complexity::Moderate),
-        "complex" => Some(Complexity::Complex),
-        _ => None,
-    }
 }
 
 // === 节点扩展属性序列化 ===
@@ -389,6 +288,7 @@ fn parse_node_extra(extra: Option<&str>) -> (bool, Option<Visibility>, bool, Vec
 mod tests {
     use super::*;
     use crate::graph::build::build_graph_ts;
+    use crate::types::common::Complexity;
     use std::path::PathBuf;
 
     fn fixtures_dir() -> PathBuf {

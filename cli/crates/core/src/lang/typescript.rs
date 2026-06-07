@@ -68,7 +68,7 @@ impl LanguageAdapter for TypeScriptAdapter {
 
         // 添加 File 节点
         ctx.nodes.push(SourceNode {
-            id: NodeId::new(format!("file:{rel_path}")),
+            id: NodeId::file(rel_path),
             node_type: NodeType::File,
             name: rel_path.to_string(),
             file_path: rel_path.to_string(),
@@ -90,7 +90,7 @@ impl LanguageAdapter for TypeScriptAdapter {
         walk_ast(tree.root_node(), &mut ctx);
 
         // 生成 Exports 边
-        let file_id = NodeId::new(format!("file:{rel_path}"));
+        let file_id = NodeId::file(rel_path);
         for node in &ctx.nodes {
             if node.is_exported && node.node_type != NodeType::File {
                 ctx.edges.push(Dependency {
@@ -324,7 +324,7 @@ fn extract_function(node: Node, ctx: &mut AnalysisContext) {
         let is_async = has_anon_child(node, "async");
         let is_exported = ctx.exported_names.contains(&name);
         ctx.nodes.push(SourceNode {
-            id: NodeId::new(format!("function:{}:{name}", ctx.rel_path)),
+            id: NodeId::symbol(NodeType::Function, ctx.rel_path, &name),
             node_type: NodeType::Function,
             name,
             file_path: ctx.rel_path.to_string(),
@@ -351,10 +351,10 @@ fn extract_class(node: Node, ctx: &mut AnalysisContext) {
     let name = text(name_node, ctx.source);
     let is_exported = ctx.exported_names.contains(&name);
     let is_abstract = node.kind() == "abstract_class_declaration";
-    let class_id = format!("class:{}:{name}", ctx.rel_path);
+    let class_id = NodeId::symbol(NodeType::Class, ctx.rel_path, &name);
 
     ctx.nodes.push(SourceNode {
-        id: NodeId::new(&class_id),
+        id: class_id.clone(),
         node_type: NodeType::Class,
         name: name.clone(),
         file_path: ctx.rel_path.to_string(),
@@ -374,11 +374,11 @@ fn extract_class(node: Node, ctx: &mut AnalysisContext) {
 
     // 方法
     if let Some(body) = node.child_by_field_name("body") {
-        extract_methods(body, &class_id, &name, ctx);
+        extract_methods(body, class_id.as_str(), &name, ctx);
     }
 
     // extends / implements
-    extract_heritage(node, &class_id, ctx);
+    extract_heritage(node, class_id.as_str(), ctx);
 
     // 递归处理 body 内所有子节点（方法体内的 call/new 也要提取）
     if let Some(body) = node.child_by_field_name("body") {
@@ -496,7 +496,7 @@ fn extract_interface(node: Node, ctx: &mut AnalysisContext) {
         let name = text(name_node, ctx.source);
         let is_exported = ctx.exported_names.contains(&name);
         ctx.nodes.push(SourceNode {
-            id: NodeId::new(format!("interface:{}:{name}", ctx.rel_path)),
+            id: NodeId::symbol(NodeType::Interface, ctx.rel_path, &name),
             node_type: NodeType::Interface,
             name,
             file_path: ctx.rel_path.to_string(),
@@ -521,7 +521,7 @@ fn extract_enum(node: Node, ctx: &mut AnalysisContext) {
         let name = text(name_node, ctx.source);
         let is_exported = ctx.exported_names.contains(&name);
         ctx.nodes.push(SourceNode {
-            id: NodeId::new(format!("enum:{}:{name}", ctx.rel_path)),
+            id: NodeId::symbol(NodeType::Enum, ctx.rel_path, &name),
             node_type: NodeType::Enum,
             name,
             file_path: ctx.rel_path.to_string(),

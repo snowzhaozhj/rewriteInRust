@@ -148,7 +148,7 @@ mod tests {
         let stats = graph.stats();
         assert!(stats.total_nodes > 0);
         assert!(stats.total_edges > 0);
-        assert!(stats.nodes_by_type.contains_key("File"));
+        assert!(stats.nodes_by_type.contains_key("file"));
     }
 
     #[test]

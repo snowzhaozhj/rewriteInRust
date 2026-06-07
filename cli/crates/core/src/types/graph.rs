@@ -4,11 +4,14 @@
 //! `docs/design/09-appendix-schemas.md § 附录 D`。
 
 use serde::{Deserialize, Serialize};
+use strum::{Display, EnumString};
 
 use super::common::{Complexity, MigrationPriority, NodeId, Span, Timestamp};
 
 /// 图节点类型（12 种：MVP 9 + M2 预留 3）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Display, EnumString)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum NodeType {
     /// 源文件。
     File,
@@ -23,6 +26,7 @@ pub enum NodeType {
     /// 接口/trait。
     Interface,
     /// 枚举。
+    #[strum(serialize = "enum")]
     Enum,
     /// Rust 目标节点（迁移映射的目标端）。
     RustTarget,
@@ -36,29 +40,10 @@ pub enum NodeType {
     Community,
 }
 
-impl std::fmt::Display for NodeType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            Self::File => "File",
-            Self::Module => "Module",
-            Self::Package => "Package",
-            Self::Function => "Function",
-            Self::Class => "Class",
-            Self::Interface => "Interface",
-            Self::Enum => "Enum",
-            Self::RustTarget => "RustTarget",
-            Self::TestFixture => "TestFixture",
-            Self::TypeAlias => "TypeAlias",
-            Self::Variable => "Variable",
-            Self::Community => "Community",
-        };
-        write!(f, "{s}")
-    }
-}
-
 /// 图边类型（MVP 8 种）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Display, EnumString)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum EdgeType {
     /// 父子包含（Class → Function）。
     Contains,
@@ -78,25 +63,10 @@ pub enum EdgeType {
     TestedBy,
 }
 
-impl std::fmt::Display for EdgeType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            Self::Contains => "contains",
-            Self::Imports => "imports",
-            Self::Calls => "calls",
-            Self::Extends => "extends",
-            Self::UsesType => "uses_type",
-            Self::Exports => "exports",
-            Self::MapsTo => "maps_to",
-            Self::TestedBy => "tested_by",
-        };
-        write!(f, "{s}")
-    }
-}
-
 /// 边的来源（谁产出了这条边）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Display, EnumString)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum Provenance {
     /// tree-sitter AST 确定性解析。
     TreeSitter,
@@ -110,7 +80,7 @@ pub enum Provenance {
 
 /// 节点可见性。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum Visibility {
     Public,
     Crate,
