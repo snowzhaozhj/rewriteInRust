@@ -15,6 +15,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 2. **`docs/STATUS.md`** → 当前位置（哪个 Sprint、进行中任务、下一步）
 3. **`docs/PLAN.md`** → 对应 Sprint 的目标和验收标准
 
+**Worktree 注意**：EnterWorktree 默认从 `origin/master` 分支，进入 worktree 前先 `git fetch origin` 确保本地远程引用是最新的，否则会丢失已合并到 master 的提交。
+
 ## 仓库结构
 
 ```

@@ -4,6 +4,7 @@ pub mod profile;
 pub mod response;
 pub mod scaffold;
 pub mod state;
+pub mod stats;
 pub mod ts_extract;
 pub mod types;
 pub mod validate;

@@ -5,8 +5,8 @@
 ## 当前位置
 
 - **Milestone**: M1 MVP
-- **Phase**: Phase 0 冻结合约 ✅
-- **下一步**: Phase 1（四路并行实现）
+- **Phase**: Phase 1 四路并行实现 ✅
+- **下一步**: Phase 2（集成验证）
 
 ## 进行中的任务
 
@@ -14,11 +14,11 @@ _无_
 
 ## 下一步
 
-1. 执行 **Phase 1（四路并行实现）**
-   - Worker A: graph 模块（M1-GRAPH-01~04）
-   - Worker B: state + validate 模块（M1-STATE-01~03）
-   - Worker C: profile + scaffold + stats 模块（M1-PROFILE-01~03）
-   - Worker D: Plugin hooks（M1-HOOK-01~03）
+1. 执行 **Phase 2（集成验证）**
+   - M1-INTEG-01: `main.rs` 全命令路由（clap subcommands）
+   - M1-INTEG-02: Thin E2E: init → graph build → graph topo 链路
+   - M1-INTEG-03: 所有命令输出符合 JSON 格式
+   - M1-INTEG-04: `just ci` 全量通过
 
 ## 阻塞项
 
@@ -27,7 +27,20 @@ _无_
 
 ## Handoff Note
 
-**本次完成**：M0 Sprint 0 + Phase 0 冻结合约
+**本次完成**：Phase 1 四路并行实现
+
+### Phase 1 四路并行实现 ✅
+
+4 个 Worker 并行完成，95 个测试全过，clippy 零警告：
+
+| Worker | 模块 | 文件 | 测试数 |
+|--------|------|------|--------|
+| A | graph | build.rs, query.rs, topo.rs, persist.rs, mod.rs | 28 |
+| B | state + validate | machine.rs, mod.rs, rules.rs | 27 |
+| C | profile + scaffold + stats | detect.rs, template.rs, coverage.rs | 23 |
+| D | plugin hooks | hooks.json, on-rust-file-create.sh, post-build.sh, file-guard.sh | shellcheck ✅ |
+
+**之前完成**：M0 Sprint 0 + Phase 0 冻结合约
 
 ### M0 Sprint 0 ✅
 
