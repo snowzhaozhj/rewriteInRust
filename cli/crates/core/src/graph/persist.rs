@@ -60,8 +60,8 @@ pub fn save_to_db(graph: &SourceGraph, db_path: &Path) -> Result<()> {
     {
         let mut stmt = tx.prepare(
             "INSERT OR IGNORE INTO edges \
-             (source, target, edge_type, provenance, weight) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+             (source, target, edge_type, provenance, weight, sub_kind, mapping_notes) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )?;
 
         for edge in graph.edges() {
@@ -71,6 +71,8 @@ pub fn save_to_db(graph: &SourceGraph, db_path: &Path) -> Result<()> {
                 edge_type_to_str(edge.edge_type),
                 provenance_to_str(edge.provenance),
                 edge.weight,
+                edge.sub_kind,
+                edge.mapping_notes,
             ])?;
         }
     }
@@ -154,8 +156,9 @@ pub fn load_from_db(db_path: &Path) -> Result<SourceGraph> {
 
     // 加载边
     {
-        let mut stmt =
-            conn.prepare("SELECT source, target, edge_type, provenance, weight FROM edges")?;
+        let mut stmt = conn.prepare(
+            "SELECT source, target, edge_type, provenance, weight, sub_kind, mapping_notes FROM edges",
+        )?;
 
         let rows = stmt.query_map([], |row| {
             Ok(EdgeRow {
@@ -164,6 +167,8 @@ pub fn load_from_db(db_path: &Path) -> Result<SourceGraph> {
                 edge_type: row.get(2)?,
                 provenance: row.get(3)?,
                 weight: row.get(4)?,
+                sub_kind: row.get(5)?,
+                mapping_notes: row.get(6)?,
             })
         })?;
 
@@ -175,7 +180,11 @@ pub fn load_from_db(db_path: &Path) -> Result<SourceGraph> {
                 file: String::new(),
             })?;
 
-            let provenance = str_to_provenance(&r.provenance).unwrap_or(Provenance::TreeSitter);
+            let provenance =
+                str_to_provenance(&r.provenance).ok_or_else(|| MigrateError::Graph {
+                    message: format!("未知 provenance: {}", r.provenance),
+                    file: String::new(),
+                })?;
 
             graph.add_edge(Dependency {
                 source: NodeId::new(r.source),
@@ -183,8 +192,8 @@ pub fn load_from_db(db_path: &Path) -> Result<SourceGraph> {
                 edge_type,
                 provenance,
                 weight: r.weight,
-                sub_kind: None,
-                mapping_notes: None,
+                sub_kind: r.sub_kind,
+                mapping_notes: r.mapping_notes,
             });
         }
     }
@@ -216,6 +225,8 @@ struct EdgeRow {
     edge_type: String,
     provenance: String,
     weight: f64,
+    sub_kind: Option<String>,
+    mapping_notes: Option<String>,
 }
 
 // === 类型 ↔ 字符串转换 ===

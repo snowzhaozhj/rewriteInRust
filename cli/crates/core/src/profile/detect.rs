@@ -10,7 +10,7 @@ use crate::error::{MigrateError, Result};
 use crate::types::common::{Complexity, SourceLang};
 
 /// 项目画像信息。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProjectProfile {
     /// 检测到的主语言。
     pub language: SourceLang,

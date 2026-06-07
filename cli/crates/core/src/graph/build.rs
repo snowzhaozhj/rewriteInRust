@@ -34,7 +34,10 @@ pub fn build_graph(root: &Path) -> Result<SourceGraph> {
 
         let extraction = match extractor.extract(&source, file_path) {
             Ok(e) => e,
-            Err(_) => continue,
+            Err(e) => {
+                graph.warnings.push(format!("解析跳过 {rel}: {e}"));
+                continue;
+            }
         };
 
         let file_node_id = format!("file:{rel}");
@@ -393,26 +396,36 @@ fn add_import_edges(
 ) {
     let file_rels: Vec<String> = ts_files.iter().map(|f| make_relative(f, root)).collect();
 
+    let mut import_warnings: Vec<String> = Vec::new();
     let cloned_edges: Vec<(String, Vec<String>)> = {
         let mut result = Vec::new();
-        for node in graph.nodes() {
-            if node.node_type == NodeType::File {
-                let rel = &node.file_path;
-                let ts_file_path = root.join(rel);
-                let source = match std::fs::read_to_string(&ts_file_path) {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                };
-                let mut extractor = TsExtractor::new();
-                let extraction = match extractor.extract(&source, &ts_file_path) {
-                    Ok(e) => e,
-                    Err(_) => continue,
-                };
-                result.push((rel.clone(), extraction.imports.into_iter().collect()));
-            }
+        let file_nodes: Vec<String> = graph
+            .nodes()
+            .filter(|n| n.node_type == NodeType::File)
+            .map(|n| n.file_path.clone())
+            .collect();
+        for rel in &file_nodes {
+            let ts_file_path = root.join(rel);
+            let source = match std::fs::read_to_string(&ts_file_path) {
+                Ok(s) => s,
+                Err(e) => {
+                    import_warnings.push(format!("import 分析跳过 {rel}: {e}"));
+                    continue;
+                }
+            };
+            let mut extractor = TsExtractor::new();
+            let extraction = match extractor.extract(&source, &ts_file_path) {
+                Ok(e) => e,
+                Err(e) => {
+                    import_warnings.push(format!("import 解析跳过 {rel}: {e}"));
+                    continue;
+                }
+            };
+            result.push((rel.clone(), extraction.imports.into_iter().collect()));
         }
         result
     };
+    graph.warnings.extend(import_warnings);
 
     for (rel, imports) in &cloned_edges {
         let file_id = format!("file:{rel}");

@@ -5,7 +5,7 @@
 use crate::types::state::{MigrationStateFile, ModuleStatus};
 
 /// 迁移进度统计。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MigrationStats {
     /// 模块总数。
     pub total_modules: usize,

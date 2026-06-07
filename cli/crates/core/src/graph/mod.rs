@@ -20,6 +20,7 @@ use crate::types::graph::{Dependency, SourceNode};
 pub struct SourceGraph {
     pub(crate) graph: StableGraph<SourceNode, Dependency>,
     pub(crate) index: HashMap<NodeId, NodeIndex>,
+    pub(crate) warnings: Vec<String>,
 }
 
 impl SourceGraph {
@@ -27,7 +28,13 @@ impl SourceGraph {
         Self {
             graph: StableGraph::new(),
             index: HashMap::new(),
+            warnings: Vec::new(),
         }
+    }
+
+    /// 构建过程中产生的警告（如文件解析失败被跳过）。
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
     }
 
     /// 添加节点，返回 NodeIndex。重复 NodeId 返回已有索引。

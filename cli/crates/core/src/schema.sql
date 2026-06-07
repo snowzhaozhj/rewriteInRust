@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS edges (
     edge_type TEXT NOT NULL,  -- contains|imports|calls|extends|uses_type|exports|maps_to|tested_by
     provenance TEXT NOT NULL DEFAULT 'tree-sitter',
     weight    REAL DEFAULT 1.0,
+    sub_kind  TEXT,           -- 边的子类型（如 implements / constructor）
+    mapping_notes TEXT,       -- 迁移映射备注
     PRIMARY KEY (source, target, edge_type)
 );
 
