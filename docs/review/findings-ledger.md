@@ -1,7 +1,7 @@
 # Findings Ledger
 
 > 审查循环跨轮状态台账。格式见 [REVIEW_LOOP.md §6](./REVIEW_LOOP.md#6-findings-ledgermd-格式)。
-> **完成轮数 = 5（R1+R2+R3+R4+R5 已修，待独立复验）**。第 1 轮由用户执行 `/goal` 启动并验证；兜底 routine 在完成轮数=0 时不会自动开跑（见 REVIEW_LOOP.md §9）。
+> **完成轮数 = 7（R1+R2+R3+R4+R5+R6+R7 已修，待独立复验）**。第 1 轮由用户执行 `/goal` 启动并验证；兜底 routine 在完成轮数=0 时不会自动开跑（见 REVIEW_LOOP.md §9）。
 
 ## 轮次汇总
 
@@ -13,6 +13,7 @@
 | 3 | 1 | 0 | 11 | 29 | 11 | no |
 | 4 | 4 | 0 | 4 | 19 | 7 | no |
 | 5 | 2 | 0 | 5 | 14 | 6 | no |
+| 7 | 3 | 0 | 3 | 12 | 8 | no |
 
 ## Findings
 
@@ -29,7 +30,7 @@
 | R1-D2-03 | D2 | medium | 04-toolchain.md | nextest 并发共享临时文件/SQLite 竞态致假阴 | fixed | 1 | 1 |
 | R1-D2-04 | D2 | high | 06-plugin-structure.md | Spike1「成功」定义粗糙，缺语义有效性与临界规则 | reopened | 1 | 3 |
 | R1-D2-05 | D2 | medium | 03-execution-model.md | 覆盖率作等价代理的边界未明 | reopened | 1 | 3 |
-| R1-D2-06 | D2 | medium | 04-toolchain.md | Tier1 可关闭与验证可靠性张力未调和 | reopened | 1 | 2 |
+| R1-D2-06 | D2 | medium | 04-toolchain.md | Tier1 可关闭与验证可靠性张力未调和 | reopened | 1 | 7 |
 | R1-D3-01 | D3 | high | 06-plugin-structure.md | file-guard.sh 不防 source-graph.db 并发写 | reopened | 1 | 3 |
 | R1-D3-02 | D3 | medium | 09-appendix-schemas.md | blocked 状态检测/恢复时机与依赖顺序未定义 | fixed | 1 | 1 |
 | R1-D3-03 | D3 | medium | 06-plugin-structure.md | 编排检查点伪码过简，无超时/重试/校验深度 | reopened | 1 | 3 |
@@ -39,7 +40,7 @@
 | R1-D4-01 | D4 | high | 04-toolchain.md | petgraph bus factor=1 风险，fallback 无成本/触发标准 | reopened | 1 | 3 |
 | R1-D4-02 | D4 | low | 04-toolchain.md | SQLite+FTS5 选型无 MVP 规模对标 | fixed | 1 | 1 |
 | R1-D4-03 | D4 | medium | 04-toolchain.md | tree-sitter vs OXC 无精度对比，确定性未量化 | reopened | 1 | 5 |
-| R1-D4-04 | D4 | high | 04-toolchain.md | clippy.toml 作规则执行器表达力有限无 fallback | reopened | 1 | 2 |
+| R1-D4-04 | D4 | high | 04-toolchain.md | clippy.toml 作规则执行器表达力有限无 fallback | reopened | 1 | 7 |
 | R1-D4-05 | D4 | low | 04-toolchain.md | FTS5 已建但 MVP 无全文搜索命令，无 MVP 价值 | fixed | 1 | 1 |
 | R1-D4-06 | D4 | medium | 02-architecture.md | M2 多 agent 共享单 SQLite 写并发未定义 | fixed | 1 | 1 |
 | R1-D5-01 | D5 | medium | 06-plugin-structure.md | MVP 编排全依赖 SKILL.md，Spike1 标准模糊 | fixed | 1 | 1 |
@@ -48,7 +49,7 @@
 | R1-D5-04 | D5 | high | 02-architecture.md | M1→M2 状态格式向后不兼容，无迁移策略 | fixed | 1 | 1 |
 | R1-D5-05 | D5 | medium | 02-architecture.md | 100K 预算无运行时检查/自动拆分/溢出恢复 | reopened | 1 | 3 |
 | R1-D5-06 | D5 | low | 06-plugin-structure.md | SubAgent 文件通信未定义共享文件锁 | reopened | 1 | 3 |
-| R1-D6-01 | D6 | high | 04-toolchain.md | 多 agent 共享 SQLite 事务隔离/一致性/原子化缺失 | reopened | 1 | 3 |
+| R1-D6-01 | D6 | high | 04-toolchain.md | 多 agent 共享 SQLite 事务隔离/一致性/原子化缺失 | reopened | 1 | 7 |
 | R1-D6-02 | D6 | high | 02-architecture.md | 100K+interface_only 在深依赖链下可行性无定量分析 | reopened | 1 | 2 |
 | R1-D6-03 | D6 | medium | 04-toolchain.md | 图构建无性能基准（Louvain/tree-sitter/35 文件批） | reopened | 1 | 3 |
 | R1-D6-04 | D6 | medium | 03-execution-model.md | M1 吞吐无估算，M2 并发度无依据，升级门槛不清 | reopened | 1 | 3 |
@@ -62,11 +63,11 @@
 | R1-D7-06 | D7 | medium | 05-documentation-system.md | PARITY/KNOWN_DIFFERENCES 无社区可见性/异议机制 | fixed | 1 | 1 |
 | R1-D8-01 | D8 | medium | 04-toolchain.md | 图存储超 <5K MVP 需求，未量化典型图规模 | reopened | 1 | 5 |
 | R1-D8-02 | D8 | high | 06-plugin-structure.md | MVP 编排依赖指令跟随，README 未表述风险 | fixed | 1 | 1 |
-| R1-D8-03 | D8 | medium | 06-plugin-structure.md | （驳回）CLI 表混淆 11 命令含 5 个 M2 | reopened | 1 | 5 |
-| R1-D8-04 | D8 | medium | 08-roadmap-and-reference.md | M1 估算 Plan B 缓冲不足以覆盖多 Spike 同时失败 | reopened | 1 | 2 |
+| R1-D8-03 | D8 | medium | 06-plugin-structure.md | （驳回）CLI 表混淆 11 命令含 5 个 M2 | reopened | 1 | 7 |
+| R1-D8-04 | D8 | medium | 08-roadmap-and-reference.md | M1 估算 Plan B 缓冲不足以覆盖多 Spike 同时失败 | reopened | 1 | 7 |
 | R1-D8-05 | D8 | medium | README.md | 「3 命令 MVP」表述与内部多步复杂度鸿沟 | reopened | 1 | 4 |
 | R1-D8-06 | D8 | low | 08-roadmap-and-reference.md | M1-M4 目标与工作量无 tie-out（累积/复用） | reopened | 1 | 5 |
-| R1-BS1-01 | BS1 | high | 03-execution-model.md | 缺源文件变更检测/同步，迁移期源演化无法感知 | reopened | 1 | 3 |
+| R1-BS1-01 | BS1 | high | 03-execution-model.md | 缺源文件变更检测/同步，迁移期源演化无法感知 | reopened | 1 | 7 |
 | R1-BS1-02 | BS1 | high | 06-plugin-structure.md | SubAgent 通信缺超时/产出物校验/失败恢复 | reopened | 1 | 5 |
 | R1-BS1-03 | BS1 | high | 03-execution-model.md | L3 经 FFI 调旧实现，依赖未迁移时管线断掉 | reopened | 1 | 3 |
 | R1-BS1-04 | BS1 | high | 02-architecture.md | 100K 预算深依赖(20+)超预算无应对策略 | fixed | 1 | 1 |
@@ -114,7 +115,7 @@
 | R4-D1-02 | D1 | medium | 03-execution-model.md | Phase B 3 轮重试耗尽后升级路径 03 §4.3 缺终态定义 | fixed | 4 | 4 |
 | R4-D1-03 | D1 | low | 06-plugin-structure.md | 多候选生成缺里程碑限定，与 01/08 M2+ 标注不一致 | fixed | 4 | 4 |
 | R4-D2-01 | D2 | low | 06-plugin-structure.md | §10.3「不可跳过」原则与 Skill 级调用机制表述张力 | fixed | 4 | 4 |
-| R4-D2-02 | D2 | medium | 03-execution-model.md | 异步模块 loom 提升规则 04 §5.3 缺失，verifier 面临不可解冲突 | fixed | 4 | 4 |
+| R4-D2-02 | D2 | medium | 03-execution-model.md | 异步模块 loom 提升规则 04 §5.3 缺失，verifier 面临不可解冲突 | reopened | 4 | 7 |
 | R4-D2-03 | D2 | low | 03-execution-model.md | insta 快照缺与 proptest 对等的基线更新权限策略 | fixed | 4 | 4 |
 | R4-D3-01 | D3 | high | 02-architecture.md | phase_a_version/phase_a_audit_passed 字段 09 附录 A 缺失 | fixed | 4 | 4 |
 | R4-D3-02 | D3 | medium | 09-appendix-schemas.md | reviewing 状态映射表/枚举/执行序列三方自相矛盾 | fixed | 4 | 4 |
@@ -132,13 +133,13 @@
 | R4-BS1-01 | BS1 | high | 03-execution-model.md | proptest FFI 方向限制：napi-rs 仅 Node→Rust，L2 等价不可实现 | fixed | 4 | 4 |
 | R4-BS1-02 | BS1 | medium | 03-execution-model.md | loom cfg-gated 原语导入无 SubAgent 负责插入 | fixed | 4 | 4 |
 | R4-BS1-03 | BS1 | low | 03-execution-model.md | 翻译前未预检外部 npm 依赖 Rust 映射可用性 | fixed | 4 | 4 |
-| R4-BS2-01 | BS2 | medium | 06-plugin-structure.md | MVP CLI 缺外部工具安装状态检测，失败掩盖真因 | fixed | 4 | 4 |
+| R4-BS2-01 | BS2 | medium | 06-plugin-structure.md | MVP CLI 缺外部工具安装状态检测，失败掩盖真因 | reopened | 4 | 7 |
 | R4-BS3-01 | BS3 | high | 08-roadmap-and-reference.md | 08 M1「不含属性测试」与 03/04 proptest 强制要求矛盾 | fixed | 4 | 4 |
 | R4-BS3-02 | BS3 | medium | 03-execution-model.md | /migrate run 步骤编号 03 与 09 偏移 1 位，跨文件追溯歧义 | fixed | 4 | 4 |
 | R5-D1-01 | D1 | medium | 03-execution-model.md | auto_confirm_intent 默认值 Step 2.5 与 §4.3.1 矛盾 | fixed | 5 | 5 |
 | R5-D1-02 | D1 | medium | 03-execution-model.md | MDR 模板缺 bug_replica 字段，03/05 不一致 | fixed | 5 | 5 |
 | R5-D1-03 | D1 | medium | 03-execution-model.md | Phase A 结构校验 redo 缺重试上限和失败降级路径 | fixed | 5 | 5 |
-| R5-D2-01 | D2 | medium | 06-plugin-structure.md | state transition 前置条件检查内容未定义（adjusted） | fixed | 5 | 5 |
+| R5-D2-01 | D2 | medium | 06-plugin-structure.md | state transition 前置条件检查内容未定义（adjusted） | reopened | 5 | 7 |
 | R5-D3-01 | D3 | high | 09-appendix-schemas.md | /migrate analyze SKILL.md 骨架缺 init 调用，依赖目录不存在 | fixed | 5 | 5 |
 | R5-D4-01 | D4 | high | 04-toolchain.md | loom 对 async/tokio 不兼容，选型错误需拆分规则 | fixed | 5 | 5 |
 | R5-D5-01 | D5 | medium | 06-plugin-structure.md | （驳回）state transition 合法转换拒绝行为未规约 | rejected | 5 | 5 |
@@ -147,3 +148,20 @@
 | R5-D7-01 | D7 | low | 06-plugin-structure.md | Release checklist 缺 pattern freshness 检查项 | fixed | 5 | 5 |
 | R5-BS2-01 | BS2 | medium | 06-plugin-structure.md | MSRV 策略未定义，缺 rust-version/CI 矩阵/版本指引 | fixed | 5 | 5 |
 | R5-BS3-01 | BS3 | medium | 03-execution-model.md | Step 4.5 标记门禁却由 AI 执行，违背独立脚本原则 | fixed | 5 | 5 |
+| R7-D1-01 | D1 | low | 03-execution-model.md | Phase B 消除翻译腔边界定义缺失 | fixed | 7 | 7 |
+| R7-D1-02 | D1 | medium | 03-execution-model.md | Phase A 翻译重试耗尽后终端动作未定义 | rejected | 7 | 7 |
+| R7-D1-03 | D1 | medium | 07-pitfalls-and-risks.md | §9.2 缺 OOP 继承/多态→trait 映射专项条目 | rejected | 7 | 7 |
+| R7-D1-04 | D1 | low | 03-execution-model.md | proptest 生成指令 Step 4/6 执行时序歧义 | fixed | 7 | 7 |
+| R7-D3-01 | D3 | high | 09-appendix-schemas.md | SKILL.md 骨架缺 --to testing/reviewing 断点续传不可触发 [R7修] | fixed | 7 | 7 |
+| R7-D3-02 | D3 | medium | 09-appendix-schemas.md | 意图摘要「7 字段」与 Schema 9 required 属性不一致 | fixed | 7 | 7 |
+| R7-D4-01 | D4 | medium | 04-toolchain.md | 分工表排除 tree-sitter calls 边但合并策略含死逻辑 | fixed | 7 | 7 |
+| R7-D5-01 | D5 | high | 09-appendix-schemas.md | flock 全局锁在短命 Bash 进程下逻辑失效 [R7修] | fixed | 7 | 7 |
+| R7-D5-02 | D5 | medium | 09-appendix-schemas.md | Step 0.3 路由遗漏 phase_b_optimization_in_progress | fixed | 7 | 7 |
+| R7-D5-03 | D5 | low | 06-plugin-structure.md | subagent_timeout_secs 仅 post-hoc 分类无主动终止 | rejected | 7 | 7 |
+| R7-D7-01 | D7 | low | 05-documentation-system.md | 6 个治理角色术语未定义相互关系 | fixed | 7 | 7 |
+| R7-D8-01 | D8 | low | 08-roadmap-and-reference.md | M2→M3 升级判据锁定未经验证理论值 | rejected | 7 | 7 |
+| R7-D8-02 | D8 | low | 08-roadmap-and-reference.md | §13.1.2 虚引 09 附录 F performance_metrics | fixed | 7 | 7 |
+| R7-BS1-02 | BS1 | low | 03-execution-model.md | subprocess bridge 类型序列化边界未定义 | fixed | 7 | 7 |
+| R7-BS2-02 | BS2 | medium | 08-roadmap-and-reference.md | rustmigrate 自身开发 CI pipeline 未定义 | fixed | 7 | 7 |
+| R7-BS2-03 | BS2 | medium | 06-plugin-structure.md | rustmigrate 自身无依赖维护策略 | fixed | 7 | 7 |
+| R7-BS3-03 | BS3 | high | 06-plugin-structure.md | M2 并行声明与 scaffolder 前置条件矛盾 [R7修] | fixed | 7 | 7 |
