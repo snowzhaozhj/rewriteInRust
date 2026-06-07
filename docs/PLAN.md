@@ -386,6 +386,7 @@ shellcheck plugin/hooks/scripts/*.sh
 | M1-INTEG-02 | Thin E2E：`init → graph build → graph topo` 链路端到端通过 |
 | M1-INTEG-03 | 所有命令输出符合 JSON 格式规范 |
 | M1-INTEG-04 | `just ci` 全量通过 |
+| M1-INTEG-05 | 边类型方向对齐设计文档：Contains 补 File→Function/Class；Calls 改为 Function→Function（需调整 build.rs 调用归属逻辑）；Exports source 改为 Module 节点 |
 
 ### 四元组 Done
 
