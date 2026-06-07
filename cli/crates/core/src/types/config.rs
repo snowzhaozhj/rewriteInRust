@@ -1,9 +1,56 @@
-/// 配置类型定义（.rustmigrate.toml）。
-///
-/// 参照 `docs/design/06-plugin-structure.md § 11.1`。
+//! 配置类型定义（.rustmigrate.toml）。
+//!
+//! 参照 `docs/design/06-plugin-structure.md § 11.1`。
+
 use serde::{Deserialize, Serialize};
 
 use super::common::SourceLang;
+
+/// 降级策略枚举。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DegradeStrategy {
+    /// 通过 FFI 桥接保留原实现。
+    #[default]
+    Ffi,
+    /// 标记为手动迁移。
+    Manual,
+    /// 跳过该模块。
+    Skip,
+}
+
+impl std::fmt::Display for DegradeStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ffi => write!(f, "ffi"),
+            Self::Manual => write!(f, "manual"),
+            Self::Skip => write!(f, "skip"),
+        }
+    }
+}
+
+/// 上下文预算检查模式。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BudgetCheckMode {
+    /// 严格模式：超预算则拒绝。
+    #[default]
+    Strict,
+    /// 警告模式：超预算仅告警。
+    Warn,
+    /// 忽略模式：不做预算检查。
+    Ignore,
+}
+
+impl std::fmt::Display for BudgetCheckMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Strict => write!(f, "strict"),
+            Self::Warn => write!(f, "warn"),
+            Self::Ignore => write!(f, "ignore"),
+        }
+    }
+}
 
 /// 顶层配置结构（.rustmigrate.toml 反序列化目标）。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -51,9 +98,12 @@ impl Default for ProjectConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StrategyConfig {
+    /// 最大重试轮数。
     pub max_retry_rounds: u32,
+    /// 是否自动确认翻译意图。
     pub auto_confirm_intent: bool,
-    pub degrade_strategy: String,
+    /// 降级策略。
+    pub degrade_strategy: DegradeStrategy,
 }
 
 impl Default for StrategyConfig {
@@ -61,7 +111,7 @@ impl Default for StrategyConfig {
         Self {
             max_retry_rounds: 3,
             auto_confirm_intent: false,
-            degrade_strategy: "ffi".to_string(),
+            degrade_strategy: DegradeStrategy::default(),
         }
     }
 }
@@ -108,8 +158,11 @@ impl Default for OrchestrationConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ContextConfig {
+    /// 单次翻译最大 token 数。
     pub max_tokens_per_translation: u64,
-    pub budget_check_mode: String,
+    /// 预算检查模式。
+    pub budget_check_mode: BudgetCheckMode,
+    /// 是否自动拆分超预算模块。
     pub enable_auto_split: bool,
 }
 
@@ -117,7 +170,7 @@ impl Default for ContextConfig {
     fn default() -> Self {
         Self {
             max_tokens_per_translation: 100_000,
-            budget_check_mode: "strict".to_string(),
+            budget_check_mode: BudgetCheckMode::default(),
             enable_auto_split: true,
         }
     }

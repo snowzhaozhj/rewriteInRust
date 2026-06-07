@@ -1,12 +1,13 @@
-/// 源码图类型定义：节点、边、图结构。
-///
-/// 参照 `docs/design/04-toolchain.md § 5.7.1` 和
-/// `docs/design/09-appendix-schemas.md § 附录 D`。
+//! 源码图类型定义：节点、边、图结构。
+//!
+//! 参照 `docs/design/04-toolchain.md § 5.7.1` 和
+//! `docs/design/09-appendix-schemas.md § 附录 D`。
+
 use serde::{Deserialize, Serialize};
 
 use super::common::{Complexity, MigrationPriority, NodeId, Span, Timestamp};
 
-/// 图节点类型（MVP 9 种）。
+/// 图节点类型（当前 11 种：MVP 9 + M2 预留 2）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum NodeType {
     /// 源文件。
@@ -23,6 +24,10 @@ pub enum NodeType {
     Interface,
     /// 枚举。
     Enum,
+    /// Rust 目标节点（迁移映射的目标端）。
+    RustTarget,
+    /// 测试夹具节点（TestedBy 边的目标端）。
+    TestFixture,
     /// 类型别名（M2 扩展，预留）。
     TypeAlias,
     /// 模块级常量/变量（M2 扩展，预留）。
@@ -39,6 +44,8 @@ impl std::fmt::Display for NodeType {
             Self::Class => "Class",
             Self::Interface => "Interface",
             Self::Enum => "Enum",
+            Self::RustTarget => "RustTarget",
+            Self::TestFixture => "TestFixture",
             Self::TypeAlias => "TypeAlias",
             Self::Variable => "Variable",
         };
@@ -86,7 +93,7 @@ impl std::fmt::Display for EdgeType {
 
 /// 边的来源（谁产出了这条边）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "kebab-case")]
 pub enum Provenance {
     /// tree-sitter AST 确定性解析。
     TreeSitter,

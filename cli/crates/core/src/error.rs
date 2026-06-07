@@ -1,4 +1,5 @@
-/// 统一错误类型。
+//! 统一错误类型。
+
 use std::path::PathBuf;
 
 /// rustmigrate 全局错误类型。

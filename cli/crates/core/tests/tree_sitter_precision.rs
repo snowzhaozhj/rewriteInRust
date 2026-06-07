@@ -208,7 +208,7 @@ fn tree_sitter_precision_benchmark() {
     for truth in &truths {
         let path = bench_dir.join(truth.file);
         let source = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", truth.file));
-        let result = ext.extract(&source);
+        let result = ext.extract(&source, &path).unwrap();
 
         let expected_exports: HashSet<String> =
             truth.exports.iter().map(|s| s.to_string()).collect();
@@ -363,8 +363,9 @@ fn tree_sitter_existing_fixtures() {
 
     let mut ext = TsExtractor::new();
 
-    let linear_index = fs::read_to_string(root.join("fixtures/linear-deps/src/index.ts")).unwrap();
-    let r = ext.extract(&linear_index);
+    let p = root.join("fixtures/linear-deps/src/index.ts");
+    let linear_index = fs::read_to_string(&p).unwrap();
+    let r = ext.extract(&linear_index, &p).unwrap();
     assert!(
         r.imports.contains("NumberService<-./service"),
         "linear index imports: {r:?}"
@@ -374,56 +375,61 @@ fn tree_sitter_existing_fixtures() {
     assert!(r.exports.contains("default"));
     assert!(r.calls.contains("new:NumberService"));
 
-    let linear_utils = fs::read_to_string(root.join("fixtures/linear-deps/src/utils.ts")).unwrap();
-    let r = ext.extract(&linear_utils);
+    let p = root.join("fixtures/linear-deps/src/utils.ts");
+    let linear_utils = fs::read_to_string(&p).unwrap();
+    let r = ext.extract(&linear_utils, &p).unwrap();
     assert!(r.exports.contains("clamp"));
     assert!(r.exports.contains("fetchData"));
     assert!(r.exports.contains("Range"));
     assert!(r.exports.contains("Predicate"));
 
-    let diamond_index =
-        fs::read_to_string(root.join("fixtures/diamond-deps/src/index.ts")).unwrap();
-    let r = ext.extract(&diamond_index);
+    let p = root.join("fixtures/diamond-deps/src/index.ts");
+    let diamond_index = fs::read_to_string(&p).unwrap();
+    let r = ext.extract(&diamond_index, &p).unwrap();
     assert!(r.imports.contains("AuthService<-./auth"));
     assert!(r.imports.contains("findUser<-./db"));
     assert!(r.imports.contains("type:User<-./types"));
     assert!(r.exports.contains("login"));
     assert!(r.exports.contains("AuthService"));
 
-    let diamond_auth = fs::read_to_string(root.join("fixtures/diamond-deps/src/auth.ts")).unwrap();
-    let r = ext.extract(&diamond_auth);
+    let p = root.join("fixtures/diamond-deps/src/auth.ts");
+    let diamond_auth = fs::read_to_string(&p).unwrap();
+    let r = ext.extract(&diamond_auth, &p).unwrap();
     assert!(r.imports.contains("type:User<-./types"));
     assert!(r.imports.contains("findUser<-./db"));
     assert!(r.imports.contains("generateId<-./db"));
     assert!(r.exports.contains("AuthService"));
     assert!(r.calls.contains("call:findUser"));
 
-    let barrel = fs::read_to_string(root.join("fixtures/diamond-deps/src/barrel.ts")).unwrap();
-    let r = ext.extract(&barrel);
+    let p = root.join("fixtures/diamond-deps/src/barrel.ts");
+    let barrel = fs::read_to_string(&p).unwrap();
+    let r = ext.extract(&barrel, &p).unwrap();
     assert!(r.exports.len() >= 6, "barrel re-exports: {:?}", r.exports);
 
-    let circ_bus =
-        fs::read_to_string(root.join("fixtures/circular-deps/src/event-bus.ts")).unwrap();
-    let r = ext.extract(&circ_bus);
+    let p = root.join("fixtures/circular-deps/src/event-bus.ts");
+    let circ_bus = fs::read_to_string(&p).unwrap();
+    let r = ext.extract(&circ_bus, &p).unwrap();
     assert!(r.imports.contains("Handler<-./handler"));
     assert!(r.imports.contains("type:EventName<-./shared"));
     assert!(r.exports.contains("EventBus"));
 
-    let syntax_err =
-        fs::read_to_string(root.join("fixtures/edge-cases/src/syntax-error.ts")).unwrap();
-    let r = ext.extract(&syntax_err);
+    let p = root.join("fixtures/edge-cases/src/syntax-error.ts");
+    let syntax_err = fs::read_to_string(&p).unwrap();
+    let r = ext.extract(&syntax_err, &p).unwrap();
     assert!(
         r.exports.contains("valid") || r.exports.contains("broken"),
         "syntax error file should still extract something: {:?}",
         r.exports
     );
 
-    let empty = fs::read_to_string(root.join("fixtures/edge-cases/src/empty.ts")).unwrap();
-    let r = ext.extract(&empty);
+    let p = root.join("fixtures/edge-cases/src/empty.ts");
+    let empty = fs::read_to_string(&p).unwrap();
+    let r = ext.extract(&empty, &p).unwrap();
     assert!(r.exports.is_empty() && r.imports.is_empty() && r.calls.is_empty());
 
-    let types = fs::read_to_string(root.join("fixtures/edge-cases/src/pure-types.ts")).unwrap();
-    let r = ext.extract(&types);
+    let p = root.join("fixtures/edge-cases/src/pure-types.ts");
+    let types = fs::read_to_string(&p).unwrap();
+    let r = ext.extract(&types, &p).unwrap();
     assert!(r.exports.contains("Config"));
     assert!(r.exports.contains("Handler"));
     assert!(r.exports.contains("LogLevel"));

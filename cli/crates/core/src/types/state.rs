@@ -1,7 +1,8 @@
-/// 迁移状态机类型定义。
-///
-/// 参照 `docs/design/02-architecture.md § 3.4` 和
-/// `docs/design/09-appendix-schemas.md § 附录 A`。
+//! 迁移状态机类型定义。
+//!
+//! 参照 `docs/design/02-architecture.md § 3.4` 和
+//! `docs/design/09-appendix-schemas.md § 附录 A`。
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -11,12 +12,34 @@ use super::common::{RiskLevel, SourceLang, Timestamp};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectState {
+    /// 初始化阶段。
     Init,
+    /// 项目画像分析。
     Profile,
+    /// 迁移计划生成。
     Plan,
+    /// Rust 工程脚手架。
     Scaffold,
+    /// Sprint 循环迁移。
     SprintLoop,
+    /// 毕业（迁移完成）。
     Graduate,
+}
+
+impl ProjectState {
+    /// 检查是否允许从当前状态转换到目标状态。
+    ///
+    /// 合法转换路径：Init → Profile → Plan → Scaffold → SprintLoop → Graduate。
+    pub fn can_transition_to(self, target: Self) -> bool {
+        matches!(
+            (self, target),
+            (Self::Init, Self::Profile)
+                | (Self::Profile, Self::Plan)
+                | (Self::Plan, Self::Scaffold)
+                | (Self::Scaffold, Self::SprintLoop)
+                | (Self::SprintLoop, Self::Graduate)
+        )
+    }
 }
 
 impl std::fmt::Display for ProjectState {

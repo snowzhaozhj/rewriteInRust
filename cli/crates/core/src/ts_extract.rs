@@ -1,10 +1,12 @@
 use std::collections::HashSet;
 use tree_sitter::{Node, Parser};
 
+/// TypeScript 源码提取器，基于 tree-sitter 解析 AST 并提取导出、导入和调用信息。
 pub struct TsExtractor {
     parser: Parser,
 }
 
+/// 单个 TypeScript 文件的提取结果，包含导出、导入和调用三类符号集合。
 #[derive(Debug, Default)]
 pub struct Extraction {
     pub exports: HashSet<String>,
@@ -13,7 +15,7 @@ pub struct Extraction {
 }
 
 fn node_text<'a>(node: Node, source: &'a str) -> &'a str {
-    &source[node.byte_range()]
+    source.get(node.byte_range()).unwrap_or("")
 }
 
 fn has_anonymous_child(node: Node, keyword: &str) -> bool {
@@ -29,6 +31,7 @@ impl Default for TsExtractor {
 }
 
 impl TsExtractor {
+    /// 创建新的提取器实例，初始化 tree-sitter TypeScript 解析器。
     pub fn new() -> Self {
         let mut parser = Parser::new();
         parser
@@ -37,14 +40,23 @@ impl TsExtractor {
         Self { parser }
     }
 
-    pub fn extract(&mut self, source: &str) -> Extraction {
-        let tree = match self.parser.parse(source, None) {
-            Some(t) => t,
-            None => return Extraction::default(),
-        };
+    /// 解析 TypeScript 源码并提取导出、导入和调用信息。
+    ///
+    /// 解析失败时返回 `MigrateError::Parse` 错误。
+    pub fn extract(
+        &mut self,
+        source: &str,
+        path: &std::path::Path,
+    ) -> crate::error::Result<Extraction> {
+        let tree =
+            self.parser
+                .parse(source, None)
+                .ok_or_else(|| crate::error::MigrateError::Parse {
+                    path: path.to_path_buf(),
+                })?;
         let mut result = Extraction::default();
         self.walk(tree.root_node(), source, &mut result);
-        result
+        Ok(result)
     }
 
     fn walk(&self, node: Node, source: &str, result: &mut Extraction) {
@@ -66,8 +78,8 @@ impl TsExtractor {
         let is_default = has_anonymous_child(node, "default");
 
         if let Some(decl) = node.child_by_field_name("declaration") {
-            let name = self.declaration_name(decl, source);
-            if let Some(n) = name {
+            let names = self.declaration_names(decl, source);
+            for n in names {
                 result.exports.insert(n);
             }
             if is_default {
@@ -78,12 +90,6 @@ impl TsExtractor {
 
         if node.child_by_field_name("value").is_some() || is_default {
             result.exports.insert("default".to_string());
-            let mut c = node.walk();
-            for child in node.children(&mut c) {
-                if child.kind() == "export_clause" || child.kind() == "namespace_export" {
-                    break;
-                }
-            }
             return;
         }
 
@@ -111,7 +117,7 @@ impl TsExtractor {
         }
     }
 
-    fn declaration_name(&self, decl: Node, source: &str) -> Option<String> {
+    fn declaration_names(&self, decl: Node, source: &str) -> Vec<String> {
         match decl.kind() {
             "function_declaration"
             | "generator_function_declaration"
@@ -121,7 +127,8 @@ impl TsExtractor {
             | "type_alias_declaration"
             | "enum_declaration" => decl
                 .child_by_field_name("name")
-                .map(|n| node_text(n, source).to_string()),
+                .map(|n| vec![node_text(n, source).to_string()])
+                .unwrap_or_default(),
             "lexical_declaration" | "variable_declaration" => {
                 let mut names = Vec::new();
                 let mut c = decl.walk();
@@ -132,13 +139,9 @@ impl TsExtractor {
                         }
                     }
                 }
-                if names.len() == 1 {
-                    Some(names.into_iter().next().unwrap())
-                } else {
-                    None
-                }
+                names
             }
-            _ => None,
+            _ => Vec::new(),
         }
     }
 
@@ -158,7 +161,9 @@ impl TsExtractor {
     }
 
     fn extract_import(&self, node: Node, source: &str, result: &mut Extraction) {
-        let source_mod = self.get_source_string(node, source).unwrap_or_default();
+        let source_mod = self
+            .get_source_string(node, source)
+            .unwrap_or_else(|| "<unknown>".to_string());
 
         let is_type_only = {
             let mut c = node.walk();
@@ -291,11 +296,20 @@ impl TsExtractor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    /// 测试辅助：用固定路径调用 extract 并 unwrap。
+    fn ex(ext: &mut TsExtractor, source: &str) -> Extraction {
+        ext.extract(source, Path::new("<test>")).unwrap()
+    }
 
     #[test]
     fn export_named_function() {
         let mut ext = TsExtractor::new();
-        let r = ext.extract("export function add(a: number, b: number) { return a + b; }");
+        let r = ex(
+            &mut ext,
+            "export function add(a: number, b: number) { return a + b; }",
+        );
         assert!(r.exports.contains("add"));
         assert!(!r.exports.contains("default"));
     }
@@ -303,7 +317,7 @@ mod tests {
     #[test]
     fn export_default_function() {
         let mut ext = TsExtractor::new();
-        let r = ext.extract("export default function main() {}");
+        let r = ex(&mut ext, "export default function main() {}");
         assert!(r.exports.contains("default"));
         assert!(r.exports.contains("main"));
     }
@@ -311,14 +325,14 @@ mod tests {
     #[test]
     fn export_default_expression() {
         let mut ext = TsExtractor::new();
-        let r = ext.extract("const x = 1;\nexport default x;");
+        let r = ex(&mut ext, "const x = 1;\nexport default x;");
         assert!(r.exports.contains("default"));
     }
 
     #[test]
     fn export_reexport_named() {
         let mut ext = TsExtractor::new();
-        let r = ext.extract("export { foo, bar as baz } from './source';");
+        let r = ex(&mut ext, "export { foo, bar as baz } from './source';");
         assert!(r.exports.contains("foo"));
         assert!(r.exports.contains("baz"));
     }
@@ -326,14 +340,14 @@ mod tests {
     #[test]
     fn export_reexport_star() {
         let mut ext = TsExtractor::new();
-        let r = ext.extract("export * from './source';");
+        let r = ex(&mut ext, "export * from './source';");
         assert!(r.exports.contains("*<-./source"));
     }
 
     #[test]
     fn import_named() {
         let mut ext = TsExtractor::new();
-        let r = ext.extract("import { readFile, writeFile } from 'fs';");
+        let r = ex(&mut ext, "import { readFile, writeFile } from 'fs';");
         assert!(r.imports.contains("readFile<-fs"));
         assert!(r.imports.contains("writeFile<-fs"));
     }
@@ -341,35 +355,35 @@ mod tests {
     #[test]
     fn import_default() {
         let mut ext = TsExtractor::new();
-        let r = ext.extract("import express from 'express';");
+        let r = ex(&mut ext, "import express from 'express';");
         assert!(r.imports.contains("default:express<-express"));
     }
 
     #[test]
     fn import_star() {
         let mut ext = TsExtractor::new();
-        let r = ext.extract("import * as path from 'path';");
+        let r = ex(&mut ext, "import * as path from 'path';");
         assert!(r.imports.contains("*:path<-path"));
     }
 
     #[test]
     fn import_type_only() {
         let mut ext = TsExtractor::new();
-        let r = ext.extract("import type { User } from './types';");
+        let r = ex(&mut ext, "import type { User } from './types';");
         assert!(r.imports.contains("type:User<-./types"));
     }
 
     #[test]
     fn import_side_effect() {
         let mut ext = TsExtractor::new();
-        let r = ext.extract("import './polyfill';");
+        let r = ex(&mut ext, "import './polyfill';");
         assert!(r.imports.contains("<-./polyfill"));
     }
 
     #[test]
     fn call_simple() {
         let mut ext = TsExtractor::new();
-        let r = ext.extract("foo();\nbar(1, 2);");
+        let r = ex(&mut ext, "foo();\nbar(1, 2);");
         assert!(r.calls.contains("call:foo"));
         assert!(r.calls.contains("call:bar"));
     }
@@ -377,7 +391,7 @@ mod tests {
     #[test]
     fn call_method() {
         let mut ext = TsExtractor::new();
-        let r = ext.extract("obj.method();\nconsole.log('hi');");
+        let r = ex(&mut ext, "obj.method();\nconsole.log('hi');");
         assert!(r.calls.contains("call:obj.method"));
         assert!(r.calls.contains("call:console.log"));
     }
@@ -385,19 +399,17 @@ mod tests {
     #[test]
     fn call_constructor() {
         let mut ext = TsExtractor::new();
-        let r = ext.extract("const x = new EventEmitter();");
+        let r = ex(&mut ext, "const x = new EventEmitter();");
         assert!(r.calls.contains("new:EventEmitter"));
     }
 
     #[test]
     fn dynamic_import() {
         let mut ext = TsExtractor::new();
-        let r = ext.extract("const m = import('./module');");
+        let r = ex(&mut ext, "const m = import('./module');");
         assert!(
-            r.imports.contains("dynamic<-./module")
-                || r.imports.contains("dynamic<-'./module'")
-                || !r.imports.is_empty(),
-            "dynamic import: {:?}",
+            r.imports.contains("dynamic<-./module"),
+            "dynamic import should contain 'dynamic<-./module': {:?}",
             r.imports
         );
     }
@@ -405,19 +417,45 @@ mod tests {
     #[test]
     fn export_multiple_const() {
         let mut ext = TsExtractor::new();
-        let r = ext.extract("export const PI = 3.14;\nexport let counter = 0;");
+        let r = ex(&mut ext, "export const PI = 3.14;\nexport let counter = 0;");
         assert!(r.exports.contains("PI"));
         assert!(r.exports.contains("counter"));
     }
 
     #[test]
+    fn export_multi_variable_declaration() {
+        let mut ext = TsExtractor::new();
+        let r = ex(&mut ext, "export const a = 1, b = 2;");
+        assert!(
+            r.exports.contains("a"),
+            "should export 'a': {:?}",
+            r.exports
+        );
+        assert!(
+            r.exports.contains("b"),
+            "should export 'b': {:?}",
+            r.exports
+        );
+    }
+
+    #[test]
     fn export_types() {
         let mut ext = TsExtractor::new();
-        let r = ext.extract(
+        let r = ex(
+            &mut ext,
             "export interface Config { host: string; }\nexport type Handler = () => void;\nexport enum Level { A, B }",
         );
         assert!(r.exports.contains("Config"));
         assert!(r.exports.contains("Handler"));
         assert!(r.exports.contains("Level"));
+    }
+
+    #[test]
+    fn extract_empty_source() {
+        let mut ext = TsExtractor::new();
+        let r = ext.extract("", Path::new("empty.ts")).unwrap();
+        assert!(r.exports.is_empty());
+        assert!(r.imports.is_empty());
+        assert!(r.calls.is_empty());
     }
 }
