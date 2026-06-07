@@ -247,6 +247,7 @@ fn node_type_to_str(nt: NodeType) -> &'static str {
         NodeType::TestFixture => "TestFixture",
         NodeType::TypeAlias => "TypeAlias",
         NodeType::Variable => "Variable",
+        NodeType::Community => "Community",
     }
 }
 
@@ -263,6 +264,7 @@ fn str_to_node_type(s: &str) -> Option<NodeType> {
         "TestFixture" => Some(NodeType::TestFixture),
         "TypeAlias" => Some(NodeType::TypeAlias),
         "Variable" => Some(NodeType::Variable),
+        "Community" => Some(NodeType::Community),
         _ => None,
     }
 }
@@ -678,6 +680,13 @@ mod tests {
     fn load_nonexistent_db_returns_error() {
         let result = load_from_db(Path::new("/nonexistent/path/test.db"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn save_to_invalid_path_returns_error() {
+        let graph = SourceGraph::new();
+        let result = save_to_db(&graph, Path::new("/nonexistent/dir/test.db"));
+        assert!(result.is_err(), "写入不存在的路径应失败");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use clap::Parser;
 use std::io::Write;
 
+/// CLI 顶层入口。
 #[derive(Parser)]
 #[command(name = "rustmigrate", version, about = "Rust 迁移验证工作台 CLI")]
 pub struct Cli {
@@ -8,6 +9,7 @@ pub struct Cli {
     pub command: Commands,
 }
 
+/// 顶层子命令。
 #[derive(clap::Subcommand)]
 pub enum Commands {
     Init,
@@ -34,6 +36,7 @@ pub enum Commands {
     },
 }
 
+/// Graph 子命令。
 #[derive(clap::Subcommand)]
 pub enum GraphCommands {
     Build,
@@ -43,11 +46,13 @@ pub enum GraphCommands {
     Stats,
 }
 
+/// Validate 子命令。
 #[derive(clap::Subcommand)]
 pub enum ValidateCommands {
     State,
 }
 
+/// State 子命令。
 #[derive(clap::Subcommand)]
 pub enum StateCommands {
     Get {
@@ -61,12 +66,14 @@ pub enum StateCommands {
     },
 }
 
+/// Stats 子命令。
 #[derive(clap::Subcommand)]
 pub enum StatsCommands {
     Loc,
     Compare,
 }
 
+/// Scaffold 子命令。
 #[derive(clap::Subcommand)]
 pub enum ScaffoldCommands {
     Workspace,

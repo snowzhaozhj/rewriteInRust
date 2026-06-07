@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::common::{Complexity, MigrationPriority, NodeId, Span, Timestamp};
 
-/// 图节点类型（当前 11 种：MVP 9 + M2 预留 2）。
+/// 图节点类型（12 种：MVP 9 + M2 预留 3）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum NodeType {
     /// 源文件。
@@ -32,6 +32,8 @@ pub enum NodeType {
     TypeAlias,
     /// 模块级常量/变量（M2 扩展，预留）。
     Variable,
+    /// 功能聚类（M2 扩展，Leiden 算法产出）。
+    Community,
 }
 
 impl std::fmt::Display for NodeType {
@@ -48,6 +50,7 @@ impl std::fmt::Display for NodeType {
             Self::TestFixture => "TestFixture",
             Self::TypeAlias => "TypeAlias",
             Self::Variable => "Variable",
+            Self::Community => "Community",
         };
         write!(f, "{s}")
     }

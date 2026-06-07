@@ -163,6 +163,13 @@ mod tests {
     }
 
     #[test]
+    fn test_scaffold_project_with_bin_empty_name() {
+        let tmp = TempDir::new().unwrap();
+        let result = scaffold_project_with_bin("", tmp.path());
+        assert!(result.is_err(), "空名称应返回错误");
+    }
+
+    #[test]
     fn test_scaffold_project_nested_dir() {
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("a").join("b").join("c");

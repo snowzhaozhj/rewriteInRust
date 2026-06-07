@@ -5,7 +5,7 @@
 ## 当前位置
 
 - **Milestone**: M1 MVP
-- **Phase**: Phase 1 四路并行实现 ✅
+- **Phase**: Phase 1 四路并行实现 ✅（含审查修复）
 - **下一步**: Phase 2（集成验证）
 
 ## 进行中的任务
@@ -27,11 +27,39 @@ _无_
 
 ## Handoff Note
 
-**本次完成**：Phase 1 四路并行实现
+**本次完成**：Phase 1 审查修复
+
+### Phase 1 审查修复（2026-06-07）
+
+对照 PLAN.md 全面审查后修复的问题：
+
+**图构建 bug 修复**：
+- re-export（`export { x } from './module'`）现在正确生成 import 边
+- `export type` re-export 正确标记 `is_type_only`
+- 跨文件 calls 边通过 import 映射正确解析（`service.ts:clamp → utils.ts:clamp`）
+- extends 边跨文件查找修复（`AuthService implements Serializable` 目标在不同文件时）
+- extends 边的添加时序改为两阶段（先添节点后修正边，避免 add_edge 静默丢弃）
+
+**测试覆盖补全**：
+- 新增 ground-truth 通用验证 harness（19 个测试），自动读取 ground-truth.json 验证节点/边/拓扑约束
+- 覆盖全部 4 个 fixture（linear-deps、diamond-deps、circular-deps、edge-cases）
+- 补充 save_to_db / scaffold_project_with_bin 负例测试
+- 已知限制标注在 ground-truth.json（泛型调用 `f<T>()` / 方法调用类型推断）
+
+**设计一致性**：
+- 补全 Community NodeType（M2 预留，12 种对齐设计文档）
+- 更新 schema.sql、persist.rs 映射
+
+**代码质量**：
+- 全部 pub 类型添加 doc comment
+- precision benchmark ground-truth 更新（re-export import 的正确处理）
+- 修复 query.rs unused import 警告
+
+**最终状态**: 105 测试全过 | clippy 零警告 | fmt 通过
 
 ### Phase 1 四路并行实现 ✅
 
-4 个 Worker 并行完成，95 个测试全过，clippy 零警告：
+4 个 Worker 并行完成：
 
 | Worker | 模块 | 文件 | 测试数 |
 |--------|------|------|--------|

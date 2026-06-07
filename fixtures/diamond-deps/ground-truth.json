@@ -31,7 +31,7 @@
     { "source": "class:src/auth.ts:AuthService", "target": "interface:src/types.ts:Serializable", "type": "extends", "sub_kind": "implements" },
     { "source": "file:src/auth.ts", "target": "function:src/db.ts:findUser", "type": "calls" },
     { "source": "file:src/auth.ts", "target": "function:src/db.ts:generateId", "type": "calls" },
-    { "source": "file:src/index.ts", "target": "function:src/auth.ts:AuthService.authenticate", "type": "calls" }
+    { "source": "file:src/index.ts", "target": "function:src/auth.ts:AuthService.authenticate", "type": "calls", "note": "requires type inference: service.authenticate() needs to resolve local variable type" }
   ],
   "topo_order_constraints": [
     ["file:src/types.ts", "file:src/db.ts"],

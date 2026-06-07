@@ -28,7 +28,9 @@ pub fn build_graph(root: &Path, adapters: &mut [Box<dyn LanguageAdapter>]) -> Re
 
     let mut graph = SourceGraph::new();
     let mut file_analyses: HashMap<String, FileAnalysis> = HashMap::new();
+    let mut all_edges: Vec<Dependency> = Vec::new();
 
+    // 第一遍：添加所有节点，收集所有边
     for (file_path, adapter_idx) in &files {
         let rel = make_relative(file_path, &root);
         let source = std::fs::read_to_string(file_path).map_err(MigrateError::Io)?;
@@ -44,15 +46,16 @@ pub fn build_graph(root: &Path, adapters: &mut [Box<dyn LanguageAdapter>]) -> Re
         for node in &analysis.nodes {
             graph.add_node(node.clone());
         }
-        for edge in &analysis.edges {
-            graph.add_edge(edge.clone());
-        }
+        all_edges.extend(analysis.edges.iter().cloned());
 
         file_analyses.insert(rel, analysis);
     }
 
-    // 修正 extends 边的目标 ID（适配器产出时可能用了错误的前缀）
-    fixup_extends_targets(&mut graph);
+    // 修正 extends 边的目标 ID（跨文件查找），然后添加所有边
+    let fixed_edges = fixup_extends_in_edges(&graph, all_edges);
+    for edge in &fixed_edges {
+        graph.add_edge(edge.clone());
+    }
 
     // 构建跨文件边（Imports + Calls）
     let file_rels: Vec<String> = files.iter().map(|(p, _)| make_relative(p, &root)).collect();
@@ -108,41 +111,48 @@ fn make_relative(path: &Path, root: &Path) -> String {
         .replace('\\', "/")
 }
 
-/// 修正 extends 边：适配器可能用了 `interface:` 前缀，实际目标可能是 class/enum。
-fn fixup_extends_targets(graph: &mut SourceGraph) {
-    let extends_edges: Vec<Dependency> = graph
-        .edges()
-        .filter(|e| e.edge_type == EdgeType::Extends)
-        .cloned()
-        .collect();
-
-    for edge in extends_edges {
+/// 修正 extends 边：适配器用当前文件路径作为目标前缀，实际目标可能在其他文件。
+/// 在边添加到图之前调用（因为 add_edge 会丢弃目标不存在的边）。
+fn fixup_extends_in_edges(graph: &SourceGraph, mut edges: Vec<Dependency>) -> Vec<Dependency> {
+    for edge in &mut edges {
+        if edge.edge_type != EdgeType::Extends {
+            continue;
+        }
         if graph.node_index(&edge.target).is_some() {
             continue;
         }
-        let target_str = edge.target.as_str();
+        let target_str = edge.target.as_str().to_owned();
         let parts: Vec<&str> = target_str.splitn(3, ':').collect();
         if parts.len() < 3 {
             continue;
         }
-        let (rel, name) = (parts[1], parts[2]);
+        let rel = parts[1].to_owned();
+        let name = parts[2].to_owned();
 
-        let candidates = [format!("class:{rel}:{name}"), format!("enum:{rel}:{name}")];
-        for candidate in &candidates {
+        // 1. 同文件内查找备选类型前缀
+        let same_file = [format!("class:{rel}:{name}"), format!("enum:{rel}:{name}")];
+        let mut resolved = false;
+        for candidate in &same_file {
             if graph.node_index(&NodeId::new(candidate)).is_some() {
-                graph.add_edge(Dependency {
-                    source: edge.source.clone(),
-                    target: NodeId::new(candidate),
-                    edge_type: edge.edge_type,
-                    provenance: edge.provenance,
-                    weight: edge.weight,
-                    sub_kind: edge.sub_kind.clone(),
-                    mapping_notes: edge.mapping_notes.clone(),
-                });
+                edge.target = NodeId::new(candidate);
+                resolved = true;
                 break;
             }
         }
+        // 2. 跨文件按名称搜索
+        if !resolved {
+            if let Some(node) = graph.nodes().find(|n| {
+                n.name == name
+                    && matches!(
+                        n.node_type,
+                        NodeType::Interface | NodeType::Class | NodeType::Enum
+                    )
+            }) {
+                edge.target = node.id.clone();
+            }
+        }
     }
+    edges
 }
 
 /// 构建跨文件的 Imports 和 Calls 边。
@@ -170,12 +180,30 @@ fn add_cross_file_edges(
             }
         }
 
-        // Calls 边（跨文件：从当前文件指向其他文件的函数/类）
+        // 构建导入符号 → 源文件的映射
+        let mut import_map: HashMap<String, String> = HashMap::new();
+        for import in &analysis.imports {
+            if let Some(target_rel) = resolve_import(&import.module_path, rel, file_rels) {
+                for sym in &import.symbols {
+                    let local_name = sym.alias.as_deref().unwrap_or(&sym.name);
+                    import_map.insert(local_name.to_string(), target_rel.clone());
+                }
+            }
+        }
+
+        // Calls 边（跨文件：通过 imports 解析调用目标）
         for call in &analysis.calls {
             if call.is_constructor {
                 let target_id = format!("class:{rel}:{}", call.callee);
                 let resolved = if graph.node_index(&NodeId::new(&target_id)).is_some() {
                     Some(NodeId::new(&target_id))
+                } else if let Some(src_file) = import_map.get(&call.callee) {
+                    let cross_id = NodeId::new(format!("class:{src_file}:{}", call.callee));
+                    if graph.node_index(&cross_id).is_some() {
+                        Some(cross_id)
+                    } else {
+                        None
+                    }
                 } else {
                     graph
                         .nodes()
@@ -194,6 +222,8 @@ fn add_cross_file_edges(
                     });
                 }
             } else {
+                let callee_base = call.callee.split('.').next().unwrap_or(&call.callee);
+                // 1. 当前文件的函数
                 let target_id = format!("function:{rel}:{}", call.callee);
                 if graph.node_index(&NodeId::new(&target_id)).is_some() {
                     graph.add_edge(Dependency {
@@ -205,6 +235,20 @@ fn add_cross_file_edges(
                         sub_kind: None,
                         mapping_notes: None,
                     });
+                } else if let Some(src_file) = import_map.get(callee_base) {
+                    // 2. 通过 import 解析到其他文件的函数
+                    let cross_id = NodeId::new(format!("function:{src_file}:{}", call.callee));
+                    if graph.node_index(&cross_id).is_some() {
+                        graph.add_edge(Dependency {
+                            source: file_id.clone(),
+                            target: cross_id,
+                            edge_type: EdgeType::Calls,
+                            provenance: Provenance::TreeSitter,
+                            weight: 1.0,
+                            sub_kind: None,
+                            mapping_notes: None,
+                        });
+                    }
                 }
             }
         }

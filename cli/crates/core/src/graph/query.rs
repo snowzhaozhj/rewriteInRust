@@ -125,7 +125,7 @@ impl SourceGraph {
 mod tests {
     use super::*;
     use crate::graph::build::build_graph_ts;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     fn fixtures_dir() -> PathBuf {
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

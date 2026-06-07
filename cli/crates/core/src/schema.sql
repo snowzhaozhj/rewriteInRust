@@ -12,7 +12,7 @@ INSERT OR IGNORE INTO schema_versions (version) VALUES ('0.1');
 -- 源码图节点
 CREATE TABLE IF NOT EXISTS nodes (
     id                 TEXT PRIMARY KEY,
-    node_type          TEXT NOT NULL,  -- File|Module|Package|Function|Class|Interface|Enum|RustTarget|TestFixture|TypeAlias|Variable
+    node_type          TEXT NOT NULL,  -- File|Module|Package|Function|Class|Interface|Enum|RustTarget|TestFixture|TypeAlias|Variable|Community
     name               TEXT NOT NULL,
     file_path          TEXT NOT NULL,
     start_line         INTEGER,

@@ -96,7 +96,7 @@ fn ground_truth() -> Vec<SnippetTruth> {
         SnippetTruth {
             file: "08_reexport_named.ts",
             exports: &["foo", "baz", "defaultItem"],
-            imports: &[],
+            imports: &["foo<-./source", "bar<-./source", "default<-./other"],
             calls: &[],
         },
         SnippetTruth {
@@ -157,7 +157,11 @@ fn ground_truth() -> Vec<SnippetTruth> {
         SnippetTruth {
             file: "16_export_type_only.ts",
             exports: &["Config", "Handler", "User"],
-            imports: &[],
+            imports: &[
+                "type:Config<-./types",
+                "type:Handler<-./types",
+                "type:User<-./models",
+            ],
             calls: &[],
         },
         SnippetTruth {

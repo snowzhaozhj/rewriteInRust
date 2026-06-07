@@ -14,6 +14,7 @@ use crate::types::graph::{Dependency, EdgeType, NodeType, Provenance, SourceNode
 
 use super::{CallInfo, FileAnalysis, ImportInfo, ImportedSymbol, LanguageAdapter};
 
+/// TypeScript 语言适配器（基于 tree-sitter-typescript）。
 pub struct TypeScriptAdapter {
     parser: Parser,
 }
@@ -240,6 +241,47 @@ fn walk_ast(node: Node, ctx: &mut AnalysisContext) {
             if let Some(decl) = node.child_by_field_name("declaration") {
                 walk_ast(decl, ctx);
                 return;
+            }
+            // re-export: `export { x } from './module'` — 也生成 ImportInfo
+            if let Some(module_path) = get_source_string(node, ctx.source) {
+                let is_type_only = has_anon_child(node, "type");
+                let mut symbols = Vec::new();
+                let count = node.child_count();
+                for i in 0..count {
+                    if let Some(child) = node.child(i) {
+                        if child.kind() == "export_clause" {
+                            let cc = child.child_count();
+                            for j in 0..cc {
+                                if let Some(spec) = child.child(j) {
+                                    if spec.kind() == "export_specifier" {
+                                        let name = spec
+                                            .child_by_field_name("name")
+                                            .map(|n| text(n, ctx.source))
+                                            .unwrap_or_default();
+                                        let alias = spec
+                                            .child_by_field_name("alias")
+                                            .map(|n| text(n, ctx.source));
+                                        symbols.push(ImportedSymbol {
+                                            name,
+                                            alias,
+                                            is_default: false,
+                                            is_namespace: false,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if !symbols.is_empty() {
+                    ctx.imports.push(ImportInfo {
+                        module_path,
+                        symbols,
+                        is_type_only,
+                        is_side_effect: false,
+                        is_dynamic: false,
+                    });
+                }
             }
         }
         "import_statement" => {
@@ -810,6 +852,26 @@ obj.method();
         let dynamic: Vec<_> = result.imports.iter().filter(|i| i.is_dynamic).collect();
         assert_eq!(dynamic.len(), 1);
         assert_eq!(dynamic[0].module_path, "./module");
+    }
+
+    #[test]
+    fn generic_calls_are_known_limitation() {
+        let mut adapter = TypeScriptAdapter::new();
+        let source = r#"
+import { fetchData } from './utils';
+async function load() {
+    const data = await fetchData<number[]>("url");
+    return data;
+}
+"#;
+        let result = adapter.analyze_file(source, "test.ts").unwrap();
+        let callees: Vec<&str> = result.calls.iter().map(|c| c.callee.as_str()).collect();
+        // tree-sitter 将 fetchData<T>() 解析为比较表达式而非泛型调用
+        // 这是已知限制（Spike S3 精度报告已记录）
+        assert!(
+            !callees.contains(&"fetchData"),
+            "tree-sitter 的已知限制：泛型调用 f<T>() 不被识别为 call_expression"
+        );
     }
 
     #[test]
