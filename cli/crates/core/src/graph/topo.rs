@@ -84,7 +84,18 @@ pub fn detect_cycles(graph: &SourceGraph) -> Vec<Vec<NodeId>> {
 /// 即使存在环也会尽力生成排序（基于 SCC 凝缩图的拓扑序）。
 pub fn migration_sequence(graph: &SourceGraph) -> MigrationSequence {
     let (file_graph, index_to_id, id_to_index) = build_file_import_graph(graph);
-    let cycles = detect_cycles_internal(&file_graph, &index_to_id);
+
+    // 单次 Tarjan SCC 计算，同时提取环信息和有环时的排序
+    let sccs = algo::tarjan_scc(&file_graph);
+    let cycles: Vec<Vec<NodeId>> = sccs
+        .iter()
+        .filter(|scc| scc.len() > 1)
+        .map(|scc| {
+            scc.iter()
+                .filter_map(|idx| index_to_id.get(idx).cloned())
+                .collect()
+        })
+        .collect();
     let has_cycles = !cycles.is_empty();
 
     // 计算迁移顺序
@@ -99,9 +110,7 @@ pub fn migration_sequence(graph: &SourceGraph) -> MigrationSequence {
             Err(_) => Vec::new(),
         }
     } else {
-        // 有环：用 tarjan_scc 获取尽力排序。
-        // tarjan_scc 本身返回逆拓扑序的 SCC（叶节点在前），无需反转。
-        let sccs = algo::tarjan_scc(&file_graph);
+        // 有环：复用 tarjan_scc 结果（逆拓扑序 SCC，叶节点在前）
         sccs.into_iter()
             .flat_map(|scc| {
                 scc.into_iter()

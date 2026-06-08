@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS edges (
     source    TEXT NOT NULL REFERENCES nodes(id),
     target    TEXT NOT NULL REFERENCES nodes(id),
     edge_type TEXT NOT NULL,  -- contains|imports|calls|extends|uses_type|exports|maps_to|tested_by
-    provenance TEXT NOT NULL DEFAULT 'tree-sitter',
+    provenance TEXT NOT NULL DEFAULT 'tree_sitter',
     weight    REAL DEFAULT 1.0,
     sub_kind  TEXT,           -- 边的子类型（如 implements / constructor）
     mapping_notes TEXT,       -- 迁移映射备注

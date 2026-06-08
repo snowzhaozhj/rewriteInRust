@@ -19,19 +19,13 @@ pub struct TypeScriptAdapter {
     parser: Parser,
 }
 
-impl Default for TypeScriptAdapter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl TypeScriptAdapter {
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self> {
         let mut parser = Parser::new();
         parser
             .set_language(&tree_sitter_typescript::language_typescript())
-            .expect("tree-sitter TypeScript grammar");
-        Self { parser }
+            .map_err(|e| MigrateError::Config(format!("tree-sitter TypeScript 语法加载失败: {e}")))?;
+        Ok(Self { parser })
     }
 }
 
@@ -42,7 +36,7 @@ impl LanguageAdapter for TypeScriptAdapter {
 
     fn can_handle(&self, path: &Path) -> bool {
         let name = path.file_name().unwrap_or_default().to_string_lossy();
-        name.ends_with(".ts") && !name.ends_with(".d.ts")
+        (name.ends_with(".ts") || name.ends_with(".tsx")) && !name.ends_with(".d.ts")
     }
 
     fn resolve_extensions(&self) -> &[&str] {
@@ -752,7 +746,7 @@ mod tests {
 
     #[test]
     fn analyze_exports_and_imports() {
-        let mut adapter = TypeScriptAdapter::new();
+        let mut adapter = TypeScriptAdapter::new().unwrap();
         let source = r#"
 import { readFile } from 'fs';
 import type { User } from './types';
@@ -786,7 +780,7 @@ export class Calc {}
 
     #[test]
     fn analyze_class_methods_and_extends() {
-        let mut adapter = TypeScriptAdapter::new();
+        let mut adapter = TypeScriptAdapter::new().unwrap();
         let source = r#"
 export interface Serializable { serialize(): string; }
 export class AuthService implements Serializable {
@@ -828,7 +822,7 @@ export class AuthService implements Serializable {
 
     #[test]
     fn analyze_calls() {
-        let mut adapter = TypeScriptAdapter::new();
+        let mut adapter = TypeScriptAdapter::new().unwrap();
         let source = r#"
 foo();
 const x = new Bar();
@@ -850,7 +844,7 @@ obj.method();
 
     #[test]
     fn analyze_dynamic_import() {
-        let mut adapter = TypeScriptAdapter::new();
+        let mut adapter = TypeScriptAdapter::new().unwrap();
         let source = "const m = import('./module');";
         let result = adapter.analyze_file(source, "dyn.ts").unwrap();
         let dynamic: Vec<_> = result.imports.iter().filter(|i| i.is_dynamic).collect();
@@ -860,7 +854,7 @@ obj.method();
 
     #[test]
     fn generic_calls_are_known_limitation() {
-        let mut adapter = TypeScriptAdapter::new();
+        let mut adapter = TypeScriptAdapter::new().unwrap();
         let source = r#"
 import { fetchData } from './utils';
 async function load() {
@@ -880,7 +874,7 @@ async function load() {
 
     #[test]
     fn can_handle_ts_files() {
-        let adapter = TypeScriptAdapter::new();
+        let adapter = TypeScriptAdapter::new().unwrap();
         assert!(adapter.can_handle(Path::new("src/utils.ts")));
         assert!(!adapter.can_handle(Path::new("src/utils.d.ts")));
         assert!(!adapter.can_handle(Path::new("src/main.rs")));

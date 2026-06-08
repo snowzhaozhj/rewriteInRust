@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{MigrateError, Result};
 use crate::lang::{FileAnalysis, LanguageAdapter};
-use crate::types::common::NodeId;
+use crate::types::common::{NodeId, EXCLUDED_DIRS};
 use crate::types::graph::{Dependency, EdgeType, NodeType, Provenance};
 
 use super::SourceGraph;
@@ -60,13 +60,14 @@ pub fn build_graph(root: &Path, adapters: &mut [Box<dyn LanguageAdapter>]) -> Re
         graph.add_edge(edge.clone());
     }
 
-    // 收集所有 adapter 的解析扩展名（去重）
-    let resolve_exts: Vec<&str> = adapters
+    // 收集所有 adapter 的解析扩展名（去重 + 排序保证确定性）
+    let mut resolve_exts: Vec<&str> = adapters
         .iter()
         .flat_map(|a| a.resolve_extensions().iter().copied())
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
+    resolve_exts.sort();
 
     // 构建跨文件边（Imports + Calls）
     let file_set: HashSet<String> = files.iter().map(|(p, _)| make_relative(p, &root)).collect();
@@ -78,7 +79,7 @@ pub fn build_graph(root: &Path, adapters: &mut [Box<dyn LanguageAdapter>]) -> Re
 /// 便捷函数：用默认 TypeScript adapter 构建图。
 pub fn build_graph_ts(root: &Path) -> Result<SourceGraph> {
     let mut adapters: Vec<Box<dyn LanguageAdapter>> =
-        vec![Box::new(crate::lang::typescript::TypeScriptAdapter::new())];
+        vec![Box::new(crate::lang::typescript::TypeScriptAdapter::new()?)];
     build_graph(root, &mut adapters)
 }
 
@@ -104,7 +105,7 @@ fn collect_recursive(
         let path = entry.path();
         if path.is_dir() {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
-            if name == "node_modules" || name == ".git" || name == "dist" || name == "target" {
+            if EXCLUDED_DIRS.contains(&name.as_ref()) {
                 continue;
             }
             collect_recursive(&path, adapters, files)?;
@@ -276,7 +277,7 @@ fn resolve_import(
 
     let current_dir = Path::new(current_rel).parent().unwrap_or(Path::new(""));
     let resolved = current_dir.join(module_path);
-    let normalized = normalize_path(&resolved);
+    let normalized = normalize_path(&resolved)?;
 
     // 精确匹配（已带扩展名的路径）
     if file_set.contains(&normalized) {
@@ -298,13 +299,14 @@ fn resolve_import(
     None
 }
 
-fn normalize_path(path: &Path) -> String {
+/// 归一化相对路径。路径逃逸项目根时返回 None。
+fn normalize_path(path: &Path) -> Option<String> {
     let mut parts: Vec<&str> = Vec::new();
     for component in path.components() {
         match component {
             std::path::Component::CurDir => {}
             std::path::Component::ParentDir => {
-                parts.pop();
+                parts.pop()?;
             }
             std::path::Component::Normal(s) => {
                 parts.push(s.to_str().unwrap_or(""));
@@ -312,7 +314,7 @@ fn normalize_path(path: &Path) -> String {
             _ => {}
         }
     }
-    parts.join("/")
+    Some(parts.join("/"))
 }
 
 #[cfg(test)]

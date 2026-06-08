@@ -513,6 +513,10 @@ Phase A（忠实翻译）→ Tier 0 验证 → Phase B（惯用化）→ Tier 0+
 | M2-REFAC-06 | MigrationSequence 字段私有化：`order`/`parallel_groups`/`cycles` 改为 private + getter | 防止构造后意外修改 |
 | M2-REFAC-07 | MigrationStateMachine.load() 后置校验：加载后验证 state 与 history 末条一致 | 手工编辑的 state.json 不会导致静默不一致 |
 | M2-REFAC-08 | ModuleStatus 转换表：添加 `can_transition_to()` 方法 | Sprint 循环中模块状态转换有编译期保护 |
+| M2-REFAC-09 | Arrow function 提取：walk_ast 增加 lexical_declaration 处理 | `export const f = () => {}` 生成 Function 节点 |
+| M2-REFAC-10 | 跨文件方法调用解析：需 import→class→method 关联 | `service.doWork()` 正确解析到目标 Function 节点 |
+| M2-REFAC-11 | fixup_extends 名称索引：HashMap 替代 O(N) linear find | 同名歧义 emit warning，大型项目不退化 |
+| M2-REFAC-12 | walk_ast class 递归：extract_class 内处理 dynamic import 等嵌套模式 | 类方法内 `import('./lazy')` 被正确捕获 |
 
 ### Sprint 6：高级功能
 

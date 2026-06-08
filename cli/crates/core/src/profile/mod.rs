@@ -2,4 +2,4 @@
 
 pub mod detect;
 
-pub use detect::{detect_language, profile_project, ProjectProfile};
+pub use detect::{detect_language, profile_project, LangStats, ProjectProfile};

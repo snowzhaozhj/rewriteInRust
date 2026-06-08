@@ -231,7 +231,7 @@ fn tree_sitter_precision_benchmark() {
         .unwrap()
         .join("fixtures/ts-precision-bench/snippets");
 
-    let mut adapter = TypeScriptAdapter::new();
+    let mut adapter = TypeScriptAdapter::new().unwrap();
     let truths = ground_truth();
 
     let mut total_export_tp = 0usize;
@@ -358,7 +358,7 @@ fn tree_sitter_existing_fixtures() {
         .parent()
         .unwrap();
 
-    let mut adapter = TypeScriptAdapter::new();
+    let mut adapter = TypeScriptAdapter::new().unwrap();
 
     let p = root.join("fixtures/linear-deps/src/index.ts");
     let source = fs::read_to_string(&p).unwrap();

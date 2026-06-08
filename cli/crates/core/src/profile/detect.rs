@@ -8,7 +8,7 @@ use std::path::Path;
 use tokei::{Config, LanguageType, Languages};
 
 use crate::error::{MigrateError, Result};
-use crate::types::common::{Complexity, SourceLang};
+use crate::types::common::{Complexity, SourceLang, EXCLUDED_DIRS};
 
 /// 单语言统计。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -62,54 +62,15 @@ fn assess_complexity(lines: u64) -> Complexity {
     }
 }
 
-/// 检测项目主语言。
-///
-/// 扫描 `root` 目录下所有文件，按代码行数最多的支持语言判定。
-/// 如果没有检测到任何支持的语言，返回错误。
-pub fn detect_language(root: &Path) -> Result<SourceLang> {
+/// 扫描项目目录，返回按语言分组的统计、总文件数和总行数。
+fn scan_languages(root: &Path) -> Result<(HashMap<SourceLang, LangStats>, usize, u64)> {
     if !root.exists() {
         return Err(MigrateError::FileNotFound(root.to_path_buf()));
     }
 
     let mut languages = Languages::new();
     let config = Config::default();
-    let excluded: &[&str] = &["node_modules", "target", "dist", "build", ".git"];
-    languages.get_statistics(&[root.to_string_lossy().as_ref()], excluded, &config);
-
-    // 按代码行数聚合到 SourceLang
-    let mut lang_lines: Vec<(SourceLang, u64)> = Vec::new();
-    for (lang_type, lang) in &languages {
-        if lang.is_empty() {
-            continue;
-        }
-        if let Some(source_lang) = map_language(lang_type) {
-            // 查找是否已有该 SourceLang 的记录（如 TypeScript 和 Tsx 合并）
-            if let Some(entry) = lang_lines.iter_mut().find(|(sl, _)| *sl == source_lang) {
-                entry.1 += lang.code as u64;
-            } else {
-                lang_lines.push((source_lang, lang.code as u64));
-            }
-        }
-    }
-
-    lang_lines
-        .into_iter()
-        .max_by_key(|(_, lines)| *lines)
-        .map(|(lang, _)| lang)
-        .ok_or_else(|| MigrateError::Config("未检测到支持的源语言".to_string()))
-}
-
-/// 完整项目画像分析。
-///
-/// 返回 `ProjectProfile`，包含主语言、文件数、行数和复杂度。
-pub fn profile_project(root: &Path) -> Result<ProjectProfile> {
-    if !root.exists() {
-        return Err(MigrateError::FileNotFound(root.to_path_buf()));
-    }
-
-    let mut languages = Languages::new();
-    let config = Config::default();
-    let excluded: &[&str] = &["node_modules", "target", "dist", "build", ".git"];
+    let excluded: &[&str] = EXCLUDED_DIRS;
     languages.get_statistics(&[root.to_string_lossy().as_ref()], excluded, &config);
 
     let mut total_files: usize = 0;
@@ -134,6 +95,29 @@ pub fn profile_project(root: &Path) -> Result<ProjectProfile> {
             entry.lines += code_lines;
         }
     }
+
+    Ok((lang_map, total_files, total_lines))
+}
+
+/// 检测项目主语言。
+///
+/// 扫描 `root` 目录下所有文件，按代码行数最多的支持语言判定。
+/// 如果没有检测到任何支持的语言，返回错误。
+pub fn detect_language(root: &Path) -> Result<SourceLang> {
+    let (lang_map, _, _) = scan_languages(root)?;
+
+    lang_map
+        .iter()
+        .max_by_key(|(_, stats)| stats.lines)
+        .map(|(lang, _)| *lang)
+        .ok_or_else(|| MigrateError::Config("未检测到支持的源语言".to_string()))
+}
+
+/// 完整项目画像分析。
+///
+/// 返回 `ProjectProfile`，包含主语言、文件数、行数和复杂度。
+pub fn profile_project(root: &Path) -> Result<ProjectProfile> {
+    let (lang_map, total_files, total_lines) = scan_languages(root)?;
 
     let primary_language = lang_map
         .iter()

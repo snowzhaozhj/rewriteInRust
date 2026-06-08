@@ -124,6 +124,8 @@ pub struct Span {
 #[strum(serialize_all = "snake_case")]
 pub enum SourceLang {
     /// TypeScript 源语言。
+    #[serde(rename = "typescript")]
+    #[strum(serialize = "typescript")]
     TypeScript,
     /// Python 源语言。
     Python,
@@ -230,3 +232,6 @@ impl From<&str> for SchemaVersion {
         Self(s.to_owned())
     }
 }
+
+/// 文件遍历时排除的目录名。
+pub const EXCLUDED_DIRS: &[&str] = &["node_modules", ".git", "dist", "build", "target"];
