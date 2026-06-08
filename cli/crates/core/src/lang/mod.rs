@@ -72,8 +72,14 @@ pub trait LanguageAdapter: Send {
     /// 该适配器支持的源语言。
     fn language(&self) -> SourceLang;
 
-    /// 判断文件是否属于该语言。
+    /// 判断文件是否属于该语言（可包含启发式逻辑，如排除 .d.ts）。
     fn can_handle(&self, path: &Path) -> bool;
+
+    /// 模块解析时的候选扩展名（不带点，如 "ts", "tsx"）。
+    ///
+    /// 用于 `resolve_import` 生成候选路径，与 `can_handle` 职责分离：
+    /// `can_handle` 决定文件归属，此方法决定解析时尝试哪些后缀。
+    fn resolve_extensions(&self) -> &[&str];
 
     /// 分析单个文件，返回节点、边和依赖信息。
     ///

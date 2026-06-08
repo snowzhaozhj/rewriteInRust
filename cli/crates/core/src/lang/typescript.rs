@@ -45,6 +45,10 @@ impl LanguageAdapter for TypeScriptAdapter {
         name.ends_with(".ts") && !name.ends_with(".d.ts")
     }
 
+    fn resolve_extensions(&self) -> &[&str] {
+        &["ts", "tsx"]
+    }
+
     fn analyze_file(&mut self, source: &str, rel_path: &str) -> Result<FileAnalysis> {
         let tree = self
             .parser

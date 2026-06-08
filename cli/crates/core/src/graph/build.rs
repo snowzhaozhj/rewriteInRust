@@ -3,7 +3,7 @@
 //! 遍历项目目录，通过 `LanguageAdapter` trait 分析每个文件，
 //! 组装成完整的 `SourceGraph`。不依赖任何特定语言实现。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::error::{MigrateError, Result};
@@ -60,9 +60,17 @@ pub fn build_graph(root: &Path, adapters: &mut [Box<dyn LanguageAdapter>]) -> Re
         graph.add_edge(edge.clone());
     }
 
+    // 收集所有 adapter 的解析扩展名（去重）
+    let resolve_exts: Vec<&str> = adapters
+        .iter()
+        .flat_map(|a| a.resolve_extensions().iter().copied())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+
     // 构建跨文件边（Imports + Calls）
-    let file_rels: Vec<String> = files.iter().map(|(p, _)| make_relative(p, &root)).collect();
-    add_cross_file_edges(&mut graph, &file_analyses, &file_rels);
+    let file_set: HashSet<String> = files.iter().map(|(p, _)| make_relative(p, &root)).collect();
+    add_cross_file_edges(&mut graph, &file_analyses, &file_set, &resolve_exts);
 
     Ok(graph)
 }
@@ -164,14 +172,17 @@ fn fixup_extends_in_edges(graph: &SourceGraph, mut edges: Vec<Dependency>) -> Ve
 fn add_cross_file_edges(
     graph: &mut SourceGraph,
     analyses: &HashMap<String, FileAnalysis>,
-    file_rels: &[String],
+    file_set: &HashSet<String>,
+    resolve_exts: &[&str],
 ) {
     for (rel, analysis) in analyses {
         let file_id = NodeId::file(rel);
 
         // Imports 边
         for import in &analysis.imports {
-            if let Some(target_rel) = resolve_import(&import.module_path, rel, file_rels) {
+            if let Some(target_rel) =
+                resolve_import(&import.module_path, rel, file_set, resolve_exts)
+            {
                 let target_file_id = NodeId::file(&target_rel);
                 graph.add_edge(Dependency {
                     source: file_id.clone(),
@@ -188,7 +199,9 @@ fn add_cross_file_edges(
         // 构建导入符号 → 源文件的映射
         let mut import_map: HashMap<String, String> = HashMap::new();
         for import in &analysis.imports {
-            if let Some(target_rel) = resolve_import(&import.module_path, rel, file_rels) {
+            if let Some(target_rel) =
+                resolve_import(&import.module_path, rel, file_set, resolve_exts)
+            {
                 for sym in &import.symbols {
                     let local_name = sym.alias.as_deref().unwrap_or(&sym.name);
                     import_map.insert(local_name.to_string(), target_rel.clone());
@@ -260,7 +273,12 @@ fn add_cross_file_edges(
     }
 }
 
-fn resolve_import(module_path: &str, current_rel: &str, file_rels: &[String]) -> Option<String> {
+fn resolve_import(
+    module_path: &str,
+    current_rel: &str,
+    file_set: &HashSet<String>,
+    extensions: &[&str],
+) -> Option<String> {
     if !module_path.starts_with('.') {
         return None;
     }
@@ -269,20 +287,23 @@ fn resolve_import(module_path: &str, current_rel: &str, file_rels: &[String]) ->
     let resolved = current_dir.join(module_path);
     let normalized = normalize_path(&resolved);
 
-    let candidates = [
-        format!("{normalized}.ts"),
-        format!("{normalized}/index.ts"),
-        format!("{normalized}.py"),
-        format!("{normalized}.c"),
-        format!("{normalized}.go"),
-        normalized.clone(),
-    ];
+    // 精确匹配（已带扩展名的路径）
+    if file_set.contains(&normalized) {
+        return Some(normalized);
+    }
 
-    for candidate in &candidates {
-        if file_rels.contains(candidate) {
-            return Some(candidate.clone());
+    // 按 adapter 提供的扩展名生成候选：{path}.ext, {path}/index.ext
+    for ext in extensions {
+        let with_ext = format!("{normalized}.{ext}");
+        if file_set.contains(&with_ext) {
+            return Some(with_ext);
+        }
+        let barrel = format!("{normalized}/index.{ext}");
+        if file_set.contains(&barrel) {
+            return Some(barrel);
         }
     }
+
     None
 }
 
@@ -353,42 +374,69 @@ mod tests {
         assert_eq!(graph.node_count(), 0);
     }
 
+    const TS_EXTS: &[&str] = &["ts", "tsx"];
+
+    fn file_set(files: &[&str]) -> HashSet<String> {
+        files.iter().map(|s| s.to_string()).collect()
+    }
+
     #[test]
     fn resolve_import_parent_dir() {
-        let files = vec!["utils.ts".to_string(), "sub/service.ts".to_string()];
+        let files = file_set(&["utils.ts", "sub/service.ts"]);
         assert_eq!(
-            resolve_import("../utils", "sub/service.ts", &files),
+            resolve_import("../utils", "sub/service.ts", &files, TS_EXTS),
             Some("utils.ts".to_string())
         );
     }
 
     #[test]
     fn resolve_import_sibling() {
-        let files = vec!["a/foo.ts".to_string(), "a/bar.ts".to_string()];
+        let files = file_set(&["a/foo.ts", "a/bar.ts"]);
         assert_eq!(
-            resolve_import("./bar", "a/foo.ts", &files),
+            resolve_import("./bar", "a/foo.ts", &files, TS_EXTS),
             Some("a/bar.ts".to_string())
         );
     }
 
     #[test]
     fn resolve_import_index_barrel() {
-        let files = vec!["shared/index.ts".to_string()];
+        let files = file_set(&["shared/index.ts"]);
         assert_eq!(
-            resolve_import("./shared", "app.ts", &files),
+            resolve_import("./shared", "app.ts", &files, TS_EXTS),
             Some("shared/index.ts".to_string())
         );
     }
 
     #[test]
     fn resolve_import_non_relative_returns_none() {
-        let files = vec!["express.ts".to_string()];
-        assert_eq!(resolve_import("express", "app.ts", &files), None);
+        let files = file_set(&["express.ts"]);
+        assert_eq!(resolve_import("express", "app.ts", &files, TS_EXTS), None);
     }
 
     #[test]
     fn resolve_import_above_root_no_match() {
-        let files = vec!["utils.ts".to_string()];
-        assert_eq!(resolve_import("../../escape", "utils.ts", &files), None);
+        let files = file_set(&["utils.ts"]);
+        assert_eq!(
+            resolve_import("../../escape", "utils.ts", &files, TS_EXTS),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_import_exact_match_with_extension() {
+        let files = file_set(&["lib/helper.ts"]);
+        assert_eq!(
+            resolve_import("./helper.ts", "lib/app.ts", &files, TS_EXTS),
+            Some("lib/helper.ts".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_import_tsx_extension() {
+        let files = file_set(&["components/Button.tsx"]);
+        assert_eq!(
+            resolve_import("./Button", "components/App.tsx", &files, TS_EXTS),
+            Some("components/Button.tsx".to_string())
+        );
     }
 }
