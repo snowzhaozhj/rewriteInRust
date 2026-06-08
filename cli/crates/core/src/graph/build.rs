@@ -178,30 +178,21 @@ fn add_cross_file_edges(
     for (rel, analysis) in analyses {
         let file_id = NodeId::file(rel);
 
-        // Imports 边
+        // Imports 边 + 构建导入符号 → 源文件的映射
+        let mut import_map: HashMap<String, String> = HashMap::new();
         for import in &analysis.imports {
             if let Some(target_rel) =
                 resolve_import(&import.module_path, rel, file_set, resolve_exts)
             {
-                let target_file_id = NodeId::file(&target_rel);
                 graph.add_edge(Dependency {
                     source: file_id.clone(),
-                    target: target_file_id,
+                    target: NodeId::file(&target_rel),
                     edge_type: EdgeType::Imports,
                     provenance: Provenance::TreeSitter,
                     weight: 1.0,
                     sub_kind: None,
                     mapping_notes: None,
                 });
-            }
-        }
-
-        // 构建导入符号 → 源文件的映射
-        let mut import_map: HashMap<String, String> = HashMap::new();
-        for import in &analysis.imports {
-            if let Some(target_rel) =
-                resolve_import(&import.module_path, rel, file_set, resolve_exts)
-            {
                 for sym in &import.symbols {
                     let local_name = sym.alias.as_deref().unwrap_or(&sym.name);
                     import_map.insert(local_name.to_string(), target_rel.clone());
