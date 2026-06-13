@@ -1,12 +1,17 @@
 //! SQLite 持久化：读写 source-graph.db。
 //!
 //! 使用 `schema.sql` 建表，支持完整的 save/load round-trip。
-//! 节点的扩展属性（is_async / visibility / is_abstract / decorators）
-//! 存储在 `extra` JSON 列中。
+//!
+//! 字段落库划分（设计原则见 docs/design/04-toolchain.md § 5.7.1）：
+//! 通用且需查询的字段用独立列；类型特有的稀疏字段收进 `extra` JSON 列，
+//! 避免节点表列过宽。当前 `extra` 承载 Function/Class 专属的
+//! is_async / visibility / is_abstract / decorators，以及 RustTarget
+//! 专属的 rust_kind / rust_path / crate_name。
 
 use std::path::Path;
 
 use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
 
 use crate::error::{MigrateError, Result};
 use crate::types::common::{NodeId, Span};
@@ -135,8 +140,7 @@ pub fn load_from_db(db_path: &Path) -> Result<SourceGraph> {
             };
 
             let complexity = r.complexity.as_deref().and_then(|s| s.parse().ok());
-            let (is_async, visibility, is_abstract, decorators) =
-                parse_node_extra(r.extra.as_deref());
+            let extra = parse_node_extra(r.extra.as_deref(), &r.id, &mut graph.warnings);
 
             graph.add_node(SourceNode {
                 id: NodeId::new(r.id),
@@ -146,15 +150,15 @@ pub fn load_from_db(db_path: &Path) -> Result<SourceGraph> {
                 line_range,
                 is_exported: r.is_exported,
                 complexity,
-                is_async,
-                visibility,
-                is_abstract,
-                decorators,
+                is_async: extra.is_async,
+                visibility: extra.visibility,
+                is_abstract: extra.is_abstract,
+                decorators: extra.decorators,
                 migration_status: r.migration_status,
                 migration_priority: r.migration_priority,
-                rust_kind: None,
-                rust_path: None,
-                crate_name: None,
+                rust_kind: extra.rust_kind,
+                rust_path: extra.rust_path,
+                crate_name: extra.crate_name,
             });
         }
     }
@@ -235,53 +239,58 @@ struct EdgeRow {
 
 // === 节点扩展属性序列化 ===
 
-/// 序列化节点的扩展属性为 JSON（is_async / visibility / is_abstract / decorators）。
+/// 节点的类型特有扩展属性，持久化到 `nodes.extra` JSON 列。
+///
+/// 划分原则见 docs/design/04-toolchain.md § 5.7.1：通用且需查询的字段用独立列，
+/// 类型特有的稀疏字段收进 extra，避免节点表列过宽。
+/// `#[serde(default)]` 保证旧数据缺失的字段（如早期未写入 rust_*）按默认值读取。
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct NodeExtra {
+    /// Function/Class 专属。
+    is_async: bool,
+    visibility: Option<Visibility>,
+    is_abstract: bool,
+    decorators: Vec<String>,
+    /// RustTarget 专属。
+    rust_kind: Option<String>,
+    rust_path: Option<String>,
+    crate_name: Option<String>,
+}
+
+impl From<&SourceNode> for NodeExtra {
+    fn from(node: &SourceNode) -> Self {
+        Self {
+            is_async: node.is_async,
+            visibility: node.visibility,
+            is_abstract: node.is_abstract,
+            decorators: node.decorators.clone(),
+            rust_kind: node.rust_kind.clone(),
+            rust_path: node.rust_path.clone(),
+            crate_name: node.crate_name.clone(),
+        }
+    }
+}
+
+/// 序列化节点的扩展属性为 JSON。
 fn serialize_node_extra(node: &SourceNode) -> Result<String> {
-    let extra = serde_json::json!({
-        "is_async": node.is_async,
-        "is_abstract": node.is_abstract,
-        "visibility": node.visibility,
-        "decorators": node.decorators,
-    });
-    Ok(serde_json::to_string(&extra)?)
+    Ok(serde_json::to_string(&NodeExtra::from(node))?)
 }
 
 /// 解析节点的扩展属性 JSON。
-fn parse_node_extra(extra: Option<&str>) -> (bool, Option<Visibility>, bool, Vec<String>) {
-    let default = (false, None, false, Vec::new());
+///
+/// `extra` 列非空但 JSON 解析失败时，向 `warnings` 记录一条警告（区别于"本就无扩展属性"
+/// 的合法情况），避免静默把损坏行当作全默认值丢失数据。
+fn parse_node_extra(extra: Option<&str>, node_id: &str, warnings: &mut Vec<String>) -> NodeExtra {
     let Some(json_str) = extra else {
-        return default;
+        return NodeExtra::default();
     };
-
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(json_str) else {
-        return default;
-    };
-
-    let is_async = value
-        .get("is_async")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
-    let is_abstract = value
-        .get("is_abstract")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
-    let visibility: Option<Visibility> = value
-        .get("visibility")
-        .and_then(|v| serde_json::from_value(v.clone()).ok());
-
-    let decorators: Vec<String> = value
-        .get("decorators")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    (is_async, visibility, is_abstract, decorators)
+    serde_json::from_str(json_str).unwrap_or_else(|_| {
+        warnings.push(format!(
+            "节点 {node_id} 的 extra 列 JSON 解析失败，扩展属性已按默认值忽略"
+        ));
+        NodeExtra::default()
+    })
 }
 
 #[cfg(test)]
@@ -434,6 +443,53 @@ mod tests {
         assert_eq!(node.decorators, vec!["deprecated"]);
         assert_eq!(node.migration_status, Some("pending".to_string()));
         assert_eq!(node.migration_priority, Some(1));
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn persist_preserves_rust_target_attributes() {
+        // RustTarget 专属字段（rust_kind / rust_path / crate_name）经 extra JSON
+        // round-trip 后应完整保留，而非被静默丢弃。
+        let mut graph = SourceGraph::new();
+        graph.add_node(SourceNode {
+            id: NodeId::new("rust_target:my_crate::utils::capitalize"),
+            node_type: NodeType::RustTarget,
+            name: "capitalize".to_string(),
+            file_path: String::new(),
+            line_range: None,
+            is_exported: false,
+            complexity: None,
+            is_async: false,
+            visibility: None,
+            is_abstract: false,
+            decorators: Vec::new(),
+            migration_status: None,
+            migration_priority: None,
+            rust_kind: Some("Function".to_string()),
+            rust_path: Some("my_crate::utils::capitalize".to_string()),
+            crate_name: Some("my-crate".to_string()),
+        });
+
+        let db_path = temp_db_path("rust_target");
+        save_to_db(&graph, &db_path).unwrap();
+        let loaded = load_from_db(&db_path).unwrap();
+
+        let node = loaded
+            .node(
+                loaded
+                    .node_index(&NodeId::new("rust_target:my_crate::utils::capitalize"))
+                    .unwrap(),
+            )
+            .unwrap();
+
+        assert_eq!(node.node_type, NodeType::RustTarget);
+        assert_eq!(node.rust_kind, Some("Function".to_string()));
+        assert_eq!(
+            node.rust_path,
+            Some("my_crate::utils::capitalize".to_string())
+        );
+        assert_eq!(node.crate_name, Some("my-crate".to_string()));
 
         let _ = std::fs::remove_file(&db_path);
     }
