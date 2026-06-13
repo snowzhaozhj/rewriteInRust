@@ -5,16 +5,33 @@
 ## 当前位置
 
 - **Milestone**: M1 MVP
-- **Phase**: Phase 1 四路并行实现 ✅（含审查修复）
-- **下一步**: Phase 2（集成验证）
+- **Phase**: Phase 1 四路并行实现 ✅（含两轮审查修复）
+- **下一步**: P1 源码图差分校验 harness（M1 验收门）→ 然后 Phase 2（集成验证）
 
 ## 进行中的任务
 
-_无_
+_无_（`worktree-phase1-impl` 已 push commit `098f164`，code-review 修复 PR 待开）
 
 ## 下一步
 
-1. 执行 **Phase 2（集成验证）**
+> **优先级 1（下一个独立 PR，M1 验收门）**：源码图差分校验 harness。
+> 应在 analyzer / translator 等下游阶段往图上盖楼**之前**完成——图是它们信任的地基。
+
+### P1. 源码图差分校验 harness（独立 PR · M1 验收门）
+
+- **目的**：在真实 TS 仓库上，把自研「文件级 import 图 + 环检测」与外部成熟依赖图工具**差分对比**，确认建图正确性。
+- **关键决策（已定，勿改）**：
+  - 只校验**文件级 import 图 + 环**（驱动拓扑序的关键层）；符号级 Calls/Extends 不纳入（tree-sitter 启发式、设计上即近似）
+  - Oracle = **dependency-cruiser（主）+ dpdm（交叉验证）**；**不用 madge**（`04-toolchain.md:155` 已评估其停更并选用 dependency-cruiser 替代）
+  - 绕过 CLI（graph 命令仍 `todo!("Phase 2")`）：新建 `cli/crates/core/examples/dump_import_graph.rs` 直调 core API（`build_graph_ts` + `detect_cycles`，取 `EdgeType::Imports` 边）
+  - 两侧**归一化**到同一边形式（相对 src 根、posix、去扩展名、仅项目内边、type-only 两侧一致）
+  - **硬门**：对双 oracle 交集的边召回 ≥ 0.98 + 环集合一致
+  - 产物：`tools/graph-validation/`（run.sh + repos.txt 钉版本/sha + oracle/compare 脚本 + reports/）+ `just validate-graph`
+- **时机理由**：图刚经 code-review 加固＝干净基线；它是下游所有阶段的地基，错误会向下复利；设计已留槽位（`08-roadmap`「3 个公开中型 TS 项目验收」/ `03 §`「M1 验收 3 真实项目校准」）。设计标注「非 M1 阻断」，极端时间压力下可滑至 M2 前 2 周，但不建议推后。
+- **完整提示词**：已生成（见对应会话记录），新会话直接粘贴执行；产物按阶段交付流程单独提 PR。
+
+### P2. Phase 2（集成验证）— 不依赖 P1，可并行
+
    - M1-INTEG-01: `main.rs` 全命令路由（clap subcommands）
    - M1-INTEG-02: Thin E2E: init → graph build → graph topo 链路
    - M1-INTEG-03: 所有命令输出符合 JSON 格式
@@ -27,7 +44,19 @@ _无_
 
 ## Handoff Note
 
-**本次完成**：Phase 1 审查修复
+**本次完成**：Phase 1 第二轮 code-review 修复（commit `098f164`）
+
+### Phase 1 code-review 修复（2026-06-14）
+
+`/code-review` 一轮对抗审查后修复（persist.rs 由另一会话处理；4 项 Phase-2 接线后再修）：
+
+- **TS 提取**（`lang/typescript.rs`）：`export *`/`export * as` 产生 Imports 边；`export const` 箭头/函数表达式入图为 Function 节点；类数据字段不再误判为 Function；泛型/限定父类型 `extends Bar<T>`/`ns.Base` 归一化；`format!` 内联 NodeId 改 `NodeId::symbol`
+- **跨文件解析**（`build.rs`）：成员调用/命名空间构造剥离基名正确解析；构造/extends 全局兜底改唯一匹配（消除连错文件的虚假边）；import 别名冲突按歧义处理；跨文件边排序插入
+- **确定性**：`GraphStats` 改 BTreeMap；`parallel_groups` 排序；`primary_language` 确定性平局；`compute_level` 递归改迭代（消除深链栈溢出）；自导入识别为环
+- **profile**：复杂度只按源语言行数
+- **hooks**：`fmt.sh`/`on-rust-file-create.sh` 相对被编辑文件定位 Cargo；`verify.sh` 守护 git rev-parse
+
+**最终状态**: 121 测试全过 | clippy `-D warnings` 零警告 | fmt | shellcheck 全过
 
 ### Phase 1 审查修复（2026-06-07）
 
@@ -108,3 +137,4 @@ _无_
 | 2026-06-07 | 实施蓝图重构（PLAN.md v2 + fixtures + tooling） | c3acc34 |
 | 2026-06-07 | M0 Sprint 0 Spike S0+S3 完成 | 777da76 |
 | 2026-06-07 | Phase 0 冻结合约 | b3922c2 |
+| 2026-06-14 | code-review 修复（图提取/跨文件解析/确定性/hooks，121 测试） | 098f164 |
