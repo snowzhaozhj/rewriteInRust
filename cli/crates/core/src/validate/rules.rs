@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use strum::Display;
 
 use crate::error::Result;
 
@@ -15,7 +16,8 @@ type CheckFn = Box<dyn Fn(&Path) -> Result<(bool, Option<String>)> + Send + Sync
 /// - Tier0: 基本编译检查（cargo check, clippy）— 必须通过
 /// - Tier1: 覆盖率达标 — 应该通过
 /// - Tier2: 高级验证（proptest, fuzz）— 可选
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+// Display 默认输出 variant 名原样（Tier0/Tier1/Tier2），与 serde（无 rename）对齐。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Display)]
 pub enum ValidationTier {
     /// 基本编译检查。
     Tier0,
@@ -23,16 +25,6 @@ pub enum ValidationTier {
     Tier1,
     /// 高级验证（proptest/fuzz）。
     Tier2,
-}
-
-impl std::fmt::Display for ValidationTier {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Tier0 => write!(f, "Tier0"),
-            Self::Tier1 => write!(f, "Tier1"),
-            Self::Tier2 => write!(f, "Tier2"),
-        }
-    }
 }
 
 /// 单条验证规则的检查结果。
