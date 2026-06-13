@@ -16,7 +16,7 @@
     { "source": "file:src/index.ts", "target": "file:src/service.ts", "type": "imports" },
     { "source": "file:src/index.ts", "target": "file:src/utils.ts", "type": "imports" },
     { "source": "file:src/service.ts", "target": "function:src/utils.ts:clamp", "type": "calls" },
-    { "source": "file:src/service.ts", "target": "function:src/utils.ts:fetchData", "type": "calls" }
+    { "source": "file:src/service.ts", "target": "function:src/utils.ts:fetchData", "type": "calls", "note": "tree-sitter known limitation: generic calls f<T>() are parsed as comparisons" }
   ],
   "topo_order_constraints": [
     ["file:src/utils.ts", "file:src/service.ts"],

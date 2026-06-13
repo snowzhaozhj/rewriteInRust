@@ -3,12 +3,14 @@
 //! 参照 `docs/design/06-plugin-structure.md § 11.1`。
 
 use serde::{Deserialize, Serialize};
+use strum::Display;
 
 use super::common::SourceLang;
 
 /// 降级策略枚举。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum DegradeStrategy {
     /// 通过 FFI 桥接保留原实现。
     #[default]
@@ -19,19 +21,10 @@ pub enum DegradeStrategy {
     Skip,
 }
 
-impl std::fmt::Display for DegradeStrategy {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Ffi => write!(f, "ffi"),
-            Self::Manual => write!(f, "manual"),
-            Self::Skip => write!(f, "skip"),
-        }
-    }
-}
-
 /// 上下文预算检查模式。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum BudgetCheckMode {
     /// 严格模式：超预算则拒绝。
     Strict,
@@ -42,19 +35,10 @@ pub enum BudgetCheckMode {
     Ignore,
 }
 
-impl std::fmt::Display for BudgetCheckMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Strict => write!(f, "strict"),
-            Self::Warn => write!(f, "warn"),
-            Self::Ignore => write!(f, "ignore"),
-        }
-    }
-}
-
 /// 异步策略枚举。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, Display)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum AsyncStrategy {
     /// 边界异步（仅在模块边界使用 async）。
     #[default]
@@ -65,19 +49,10 @@ pub enum AsyncStrategy {
     SyncFirst,
 }
 
-impl std::fmt::Display for AsyncStrategy {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::BoundaryAsync => write!(f, "boundary_async"),
-            Self::FullAsync => write!(f, "full_async"),
-            Self::SyncFirst => write!(f, "sync_first"),
-        }
-    }
-}
-
 /// FFI 覆盖率模式。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, Display)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum FfiCoverageMode {
     /// 仅统计 Rust 侧覆盖率。
     #[default]
@@ -86,16 +61,6 @@ pub enum FfiCoverageMode {
     IncludeFfi,
     /// 全量覆盖（含原语言侧）。
     Full,
-}
-
-impl std::fmt::Display for FfiCoverageMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::RustOnly => write!(f, "rust_only"),
-            Self::IncludeFfi => write!(f, "include_ffi"),
-            Self::Full => write!(f, "full"),
-        }
-    }
 }
 
 /// 顶层配置结构（.rustmigrate.toml 反序列化目标）。

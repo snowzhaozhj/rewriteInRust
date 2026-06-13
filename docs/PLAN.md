@@ -386,6 +386,7 @@ shellcheck plugin/hooks/scripts/*.sh
 | M1-INTEG-02 | Thin E2E：`init → graph build → graph topo` 链路端到端通过 |
 | M1-INTEG-03 | 所有命令输出符合 JSON 格式规范 |
 | M1-INTEG-04 | `just ci` 全量通过 |
+| M1-INTEG-05 | 边类型方向对齐设计文档：Contains 补 File→Function/Class；Calls 改为 Function→Function（需调整 build.rs 调用归属逻辑）；Exports source 改为 Module 节点 |
 
 ### 四元组 Done
 
@@ -497,6 +498,25 @@ Phase A（忠实翻译）→ Tier 0 验证 → Phase B（惯用化）→ Tier 0+
 | M2-VER-01 | proptest 属性测试：图操作不变量 | 1000 次 fuzz 无 panic |
 | M2-VER-02 | cargo-fuzz：解析器健壮性 | 24h 无 crash |
 | M2-VER-03 | 行为录制框架：TS 运行时行为 → 测试用例 | 可自动生成 Rust 测试 |
+
+### Sprint 5.5：类型安全与代码质量重构（M1 审查遗留）
+
+> 来源：M1 Phase 1 PR 审查中类型设计和错误处理 agent 的建议，非阻塞但影响 M2 可维护性。
+
+| 任务 | 内容 | 验收 |
+|------|------|------|
+| M2-REFAC-01 | SourceNode 构造器：添加 `SourceNode::new()` + 将字段改为 `pub(crate)`，防止外部构造非法组合 | 所有构造点经过构造器；`rust_kind`/`rust_path`/`crate_name` 仅 RustTarget 节点可设置 |
+| M2-REFAC-02 | ImportInfo 枚举化：将 `is_type_only`/`is_side_effect`/`is_dynamic` 三布尔替换为 `ImportKind` enum；`ImportedSymbol` 的 `is_default`/`is_namespace` 替换为 `SymbolKind` enum | 消除 5 种非法布尔组合 |
+| M2-REFAC-03 | `sub_kind` 类型化：将 `Dependency.sub_kind: Option<String>` 替换为 `EdgeSubKind` enum（`Implements`/`Constructor`/`TypeOnly`） | 消除散布在 build.rs 中的字符串字面量 |
+| M2-REFAC-04 | `migration_status`/`rust_kind` 类型化：替换 `Option<String>` 为对应 enum | 编译期类型安全 |
+| M2-REFAC-05 | `parse_node_extra` 错误可见化：JSON 解析失败时记录 warning 而非静默默认值 | 数据库加载时畸形 extra 字段不再静默丢失 |
+| M2-REFAC-06 | MigrationSequence 字段私有化：`order`/`parallel_groups`/`cycles` 改为 private + getter | 防止构造后意外修改 |
+| M2-REFAC-07 | MigrationStateMachine.load() 后置校验：加载后验证 state 与 history 末条一致 | 手工编辑的 state.json 不会导致静默不一致 |
+| M2-REFAC-08 | ModuleStatus 转换表：添加 `can_transition_to()` 方法 | Sprint 循环中模块状态转换有编译期保护 |
+| M2-REFAC-09 | Arrow function 提取：walk_ast 增加 lexical_declaration 处理 | `export const f = () => {}` 生成 Function 节点 |
+| M2-REFAC-10 | 跨文件方法调用解析：需 import→class→method 关联 | `service.doWork()` 正确解析到目标 Function 节点 |
+| M2-REFAC-11 | fixup_extends 名称索引：HashMap 替代 O(N) linear find | 同名歧义 emit warning，大型项目不退化 |
+| M2-REFAC-12 | walk_ast class 递归：extract_class 内处理 dynamic import 等嵌套模式 | 类方法内 `import('./lazy')` 被正确捕获 |
 
 ### Sprint 6：高级功能
 

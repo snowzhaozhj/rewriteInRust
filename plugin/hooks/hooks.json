@@ -9,6 +9,15 @@
             "command": "hooks/scripts/fmt.sh"
           }
         ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "hooks/scripts/on-rust-file-create.sh"
+          }
+        ]
       }
     ],
     "PreToolUse": [

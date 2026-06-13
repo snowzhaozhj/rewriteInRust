@@ -5,12 +5,14 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use strum::{Display, EnumString};
 
 use super::common::{RiskLevel, SourceLang, Timestamp};
 
 /// 项目级状态机节点（编排器状态）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Display, EnumString)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum ProjectState {
     /// 初始化阶段。
     Init,
@@ -42,22 +44,10 @@ impl ProjectState {
     }
 }
 
-impl std::fmt::Display for ProjectState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Init => write!(f, "init"),
-            Self::Profile => write!(f, "profile"),
-            Self::Plan => write!(f, "plan"),
-            Self::Scaffold => write!(f, "scaffold"),
-            Self::SprintLoop => write!(f, "sprint_loop"),
-            Self::Graduate => write!(f, "graduate"),
-        }
-    }
-}
-
 /// 模块级状态（模块迁移生命周期）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Display, EnumString)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum ModuleStatus {
     Pending,
     Translating,
@@ -87,24 +77,6 @@ impl ModuleStatus {
             self,
             Self::DegradeFfi | Self::DegradeManual | Self::DegradeSkip
         )
-    }
-}
-
-impl std::fmt::Display for ModuleStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Pending => write!(f, "pending"),
-            Self::Translating => write!(f, "translating"),
-            Self::CompileFixing => write!(f, "compile_fixing"),
-            Self::Testing => write!(f, "testing"),
-            Self::Reviewing => write!(f, "reviewing"),
-            Self::Done => write!(f, "done"),
-            Self::DegradeFfi => write!(f, "degrade_ffi"),
-            Self::DegradeManual => write!(f, "degrade_manual"),
-            Self::DegradeSkip => write!(f, "degrade_skip"),
-            Self::Paused => write!(f, "paused"),
-            Self::Blocked => write!(f, "blocked"),
-        }
     }
 }
 

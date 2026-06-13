@@ -3,7 +3,7 @@
 
 -- 版本追踪（M2 schema 升级时使用）
 CREATE TABLE IF NOT EXISTS schema_versions (
-    version    TEXT NOT NULL,
+    version    TEXT PRIMARY KEY,
     applied_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -12,7 +12,7 @@ INSERT OR IGNORE INTO schema_versions (version) VALUES ('0.1');
 -- 源码图节点
 CREATE TABLE IF NOT EXISTS nodes (
     id                 TEXT PRIMARY KEY,
-    node_type          TEXT NOT NULL,  -- File|Module|Package|Function|Class|Interface|Enum|RustTarget|TestFixture|TypeAlias|Variable
+    node_type          TEXT NOT NULL,  -- File|Module|Package|Function|Class|Interface|Enum|RustTarget|TestFixture|TypeAlias|Variable|Community
     name               TEXT NOT NULL,
     file_path          TEXT NOT NULL,
     start_line         INTEGER,
@@ -32,8 +32,10 @@ CREATE TABLE IF NOT EXISTS edges (
     source    TEXT NOT NULL REFERENCES nodes(id),
     target    TEXT NOT NULL REFERENCES nodes(id),
     edge_type TEXT NOT NULL,  -- contains|imports|calls|extends|uses_type|exports|maps_to|tested_by
-    provenance TEXT NOT NULL DEFAULT 'tree-sitter',
+    provenance TEXT NOT NULL DEFAULT 'tree_sitter',
     weight    REAL DEFAULT 1.0,
+    sub_kind  TEXT,           -- 边的子类型（如 implements / constructor）
+    mapping_notes TEXT,       -- 迁移映射备注
     PRIMARY KEY (source, target, edge_type)
 );
 

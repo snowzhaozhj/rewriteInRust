@@ -8,7 +8,7 @@ use crate::error::MigrateError;
 
 /// 响应状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum Status {
     /// 成功。
     Ok,
