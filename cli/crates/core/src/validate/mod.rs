@@ -12,6 +12,7 @@ use crate::types::state::{MigrationStateFile, ProjectState};
 /// 检查项：
 /// - version 非空
 /// - state_history 非空且末条状态与当前状态一致
+/// - state_history 相邻状态满足合法转换（Init→Profile→…→Graduate）
 /// - 前置条件：各状态要求的数据字段是否存在
 pub fn validate_state(state_file: &MigrationStateFile) -> Result<Vec<String>> {
     let mut warnings: Vec<String> = Vec::new();
@@ -40,6 +41,17 @@ pub fn validate_state(state_file: &MigrationStateFile) -> Result<Vec<String>> {
         }
     }
 
+    // state_history 相邻状态必须满足合法转换。正常流程由 machine.rs 的 transition
+    // 保证，此处是对落盘文件的独立防御（检测外部篡改/损坏导致的跳级或回退历史）。
+    for pair in state_file.state_history.windows(2) {
+        if !pair[0].state.can_transition_to(pair[1].state) {
+            return Err(MigrateError::SchemaValidation(format!(
+                "state_history 含非法状态转换：{} → {}",
+                pair[0].state, pair[1].state
+            )));
+        }
+    }
+
     // 前置条件检查
     check_preconditions(state_file)?;
 
@@ -57,69 +69,61 @@ pub fn validate_state(state_file: &MigrationStateFile) -> Result<Vec<String>> {
 
 /// 前置条件检查：确保进入特定状态前所需数据已就位。
 ///
-/// - 进入 Plan 之前必须有 project 信息
-/// - 进入 Scaffold 之前必须有 graph（metadata.graph_build_completed）
-/// - 进入 SprintLoop 之前必须有 sprint 信息
+/// 硬性前置（不满足返回 `PreconditionFailed`）：
+/// - Profile / Plan / Scaffold / SprintLoop：需要 project 信息
+/// - Plan / Scaffold / SprintLoop：需要 graph 构建完成
+///   （graph build 在 Profile 阶段产出，见 `docs/design/06 § 10.2` analyzer 前置）
+///
+/// 软警告（见 `validate_state`，非硬前置）：SprintLoop 的 sprint / modules 缺失。
+/// Graduate 的模块终态校验待 graduate 命令落地（TODO(M2-ADV-03)）。
 fn check_preconditions(state_file: &MigrationStateFile) -> Result<()> {
     match state_file.state {
         ProjectState::Init => {
             // 初始阶段无前置条件
         }
         ProjectState::Profile => {
-            // Profile 阶段需要有 project 基本信息
-            if state_file.project.is_none() {
-                return Err(MigrateError::PreconditionFailed {
-                    condition: "进入 profile 阶段需要 project 信息".to_owned(),
-                });
-            }
+            require_project(state_file, "profile")?;
         }
         ProjectState::Plan => {
-            // Plan 阶段需要 project 信息
-            if state_file.project.is_none() {
-                return Err(MigrateError::PreconditionFailed {
-                    condition: "进入 plan 阶段需要 project 信息".to_owned(),
-                });
-            }
+            require_project(state_file, "plan")?;
+            require_graph(state_file, "plan")?;
         }
         ProjectState::Scaffold => {
-            // Scaffold 阶段需要 graph 构建完成
-            if state_file.project.is_none() {
-                return Err(MigrateError::PreconditionFailed {
-                    condition: "进入 scaffold 阶段需要 project 信息".to_owned(),
-                });
-            }
-            let graph_done = state_file
-                .metadata
-                .as_ref()
-                .map(|m| m.graph_build_completed)
-                .unwrap_or(false);
-            if !graph_done {
-                return Err(MigrateError::PreconditionFailed {
-                    condition: "进入 scaffold 阶段需要 graph 构建完成".to_owned(),
-                });
-            }
+            require_project(state_file, "scaffold")?;
+            require_graph(state_file, "scaffold")?;
         }
         ProjectState::SprintLoop => {
-            // SprintLoop 需要 project、graph、sprint
-            if state_file.project.is_none() {
-                return Err(MigrateError::PreconditionFailed {
-                    condition: "进入 sprint_loop 阶段需要 project 信息".to_owned(),
-                });
-            }
-            let graph_done = state_file
-                .metadata
-                .as_ref()
-                .map(|m| m.graph_build_completed)
-                .unwrap_or(false);
-            if !graph_done {
-                return Err(MigrateError::PreconditionFailed {
-                    condition: "进入 sprint_loop 阶段需要 graph 构建完成".to_owned(),
-                });
-            }
+            require_project(state_file, "sprint_loop")?;
+            require_graph(state_file, "sprint_loop")?;
         }
         ProjectState::Graduate => {
-            // Graduate 阶段所有模块应为终态（作为警告而非硬性条件）
+            // TODO(M2-ADV-03): graduate 命令落地时，校验所有模块为终态并对未完成模块告警
         }
+    }
+    Ok(())
+}
+
+/// 要求 project 信息存在，否则返回带阶段名的前置失败。
+fn require_project(state_file: &MigrationStateFile, phase: &str) -> Result<()> {
+    if state_file.project.is_none() {
+        return Err(MigrateError::PreconditionFailed {
+            condition: format!("进入 {phase} 阶段需要 project 信息"),
+        });
+    }
+    Ok(())
+}
+
+/// 要求 graph 构建已完成（metadata 缺失视为未完成），否则返回带阶段名的前置失败。
+fn require_graph(state_file: &MigrationStateFile, phase: &str) -> Result<()> {
+    let graph_done = state_file
+        .metadata
+        .as_ref()
+        .map(|m| m.graph_build_completed)
+        .unwrap_or(false);
+    if !graph_done {
+        return Err(MigrateError::PreconditionFailed {
+            condition: format!("进入 {phase} 阶段需要 graph 构建完成"),
+        });
     }
     Ok(())
 }
@@ -269,6 +273,58 @@ mod tests {
         match result.unwrap_err() {
             MigrateError::PreconditionFailed { condition } => {
                 assert!(condition.contains("graph"));
+            }
+            other => panic!("期望 PreconditionFailed，实际: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_validate_history_illegal_transition() {
+        // history 跳级（Init → Plan，跳过 Profile），末尾与当前状态一致但序列非法。
+        let now = Timestamp::new("2024-01-01T00:00:00Z");
+        let mut state = minimal_init_state();
+        state.state = ProjectState::Plan;
+        state.state_history = vec![
+            StateHistoryEntry {
+                state: ProjectState::Init,
+                entered_at: now.clone(),
+                exited_at: Some(now.clone()),
+            },
+            StateHistoryEntry {
+                state: ProjectState::Plan,
+                entered_at: now,
+                exited_at: None,
+            },
+        ];
+        let result = validate_state(&state);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            MigrateError::SchemaValidation(msg) => {
+                assert!(msg.contains("非法"));
+                assert!(msg.contains("转换"));
+            }
+            other => panic!("期望 SchemaValidation，实际: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_validate_plan_without_graph() {
+        // Plan 阶段 project 齐全但 graph 未构建 → 前置失败。
+        // minimal_init_state 的 metadata.graph_build_completed 默认 false。
+        let now = Timestamp::new("2024-01-01T00:00:00Z");
+        let mut state = minimal_init_state();
+        state.state = ProjectState::Plan;
+        state.state_history = vec![StateHistoryEntry {
+            state: ProjectState::Plan,
+            entered_at: now,
+            exited_at: None,
+        }];
+        let result = validate_state(&state);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            MigrateError::PreconditionFailed { condition } => {
+                assert!(condition.contains("graph"));
+                assert!(condition.contains("plan"));
             }
             other => panic!("期望 PreconditionFailed，实际: {:?}", other),
         }
