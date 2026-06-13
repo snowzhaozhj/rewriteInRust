@@ -602,15 +602,15 @@ fn extract_heritage(class_node: Node, class_id: &str, ctx: &mut AnalysisContext)
                 let Some(type_node) = clause.child(k) else {
                     continue;
                 };
-                // TODO(M1-GRAPH): extends_clause 的 `type_arguments` 子节点（如
-                // `extends Bar<T>` 的 `<T>`）也是命名节点、不是 extends/implements
-                // 关键字，会漏过此过滤被当成父类型，heritage_target_name 取其文本
-                // 生成一条 target 名为 "<T>" 的多余 Extends 边。该 target 匹配不到
-                // 真实节点、会被 build.rs 丢弃，故当前无实际危害，但属噪声边。
-                // 修法：在下面条件补 `|| type_node.kind() == "type_arguments"`。
+                // 跳过非父类型的子节点：extends/implements 关键字本身，以及
+                // extends_clause 的 `type_arguments`（如 `extends Bar<T>` 的 `<T>`）。
+                // type_arguments 是命名节点但不是父类型，若不跳过会被
+                // heritage_target_name 取文本、生成一条 target 名为 "<T>" 的噪声
+                // Extends 边（匹配不到真实节点）。
                 if !type_node.is_named()
                     || type_node.kind() == "extends"
                     || type_node.kind() == "implements"
+                    || type_node.kind() == "type_arguments"
                 {
                     continue;
                 }
@@ -976,6 +976,39 @@ export class AuthService implements Serializable {
             extends_edges[0].sub_kind.as_deref(),
             Some("implements"),
             "should be implements"
+        );
+    }
+
+    #[test]
+    fn extends_generic_base_no_type_arguments_noise_edge() {
+        // `extends Base<T>` 的泛型参数 `<T>`（type_arguments 节点）不应生成
+        // target 名含 "<" 的噪声 Extends 边；应只产生一条指向基础类型名 Base 的边。
+        let mut adapter = TypeScriptAdapter::new().unwrap();
+        let source = r#"
+class Base<T> {}
+class Derived extends Base<number> {}
+"#;
+        let result = adapter.analyze_file(source, "generic.ts").unwrap();
+
+        let extends_targets: Vec<&str> = result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Extends)
+            .map(|e| e.target.as_str())
+            .collect();
+
+        assert!(
+            !extends_targets.iter().any(|t| t.contains('<')),
+            "不应有 type_arguments 噪声边: {extends_targets:?}"
+        );
+        assert!(
+            extends_targets.iter().any(|t| t.ends_with(":Base")),
+            "应有指向 Base 的 Extends 边: {extends_targets:?}"
+        );
+        assert_eq!(
+            extends_targets.len(),
+            1,
+            "应恰好一条 Extends 边: {extends_targets:?}"
         );
     }
 
