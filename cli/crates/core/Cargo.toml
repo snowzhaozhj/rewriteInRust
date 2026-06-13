@@ -23,3 +23,6 @@ chrono.workspace = true
 [dev-dependencies]
 insta.workspace = true
 tempfile.workspace = true
+# ast_contract 测试直接建 parser 验证 typescript.rs 依赖的 AST 契约
+tree-sitter.workspace = true
+tree-sitter-typescript.workspace = true
