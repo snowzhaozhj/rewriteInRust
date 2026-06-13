@@ -24,7 +24,9 @@ impl TypeScriptAdapter {
         let mut parser = Parser::new();
         parser
             .set_language(&tree_sitter_typescript::language_typescript())
-            .map_err(|e| MigrateError::Config(format!("tree-sitter TypeScript 语法加载失败: {e}")))?;
+            .map_err(|e| {
+                MigrateError::Config(format!("tree-sitter TypeScript 语法加载失败: {e}"))
+            })?;
         Ok(Self { parser })
     }
 }
@@ -235,6 +237,11 @@ fn walk_ast(node: Node, ctx: &mut AnalysisContext) {
         "enum_declaration" => {
             extract_enum(node, ctx);
         }
+        // `const f = () => {}` / `const f = function() {}` 等函数表达式绑定
+        // （不 return，继续递归以提取箭头体内的 call/new）
+        "lexical_declaration" | "variable_declaration" => {
+            extract_var_functions(node, ctx);
+        }
         "export_statement" => {
             if let Some(decl) = node.child_by_field_name("declaration") {
                 walk_ast(decl, ctx);
@@ -271,15 +278,16 @@ fn walk_ast(node: Node, ctx: &mut AnalysisContext) {
                         }
                     }
                 }
-                if !symbols.is_empty() {
-                    ctx.imports.push(ImportInfo {
-                        module_path,
-                        symbols,
-                        is_type_only,
-                        is_side_effect: false,
-                        is_dynamic: false,
-                    });
-                }
+                // 即使 symbols 为空（`export * from`、`export * as ns from`）也要
+                // 产生 ImportInfo，否则 build.rs 不会建立 file→file 的 Imports 边，
+                // barrel 文件的依赖会对拓扑排序不可见
+                ctx.imports.push(ImportInfo {
+                    module_path,
+                    symbols,
+                    is_type_only,
+                    is_side_effect: false,
+                    is_dynamic: false,
+                });
             }
         }
         "import_statement" => {
@@ -327,6 +335,66 @@ fn extract_function(node: Node, ctx: &mut AnalysisContext) {
             name,
             file_path: ctx.rel_path.to_string(),
             line_range: Some(node_span(node)),
+            is_exported,
+            complexity: None,
+            is_async,
+            visibility: None,
+            is_abstract: false,
+            decorators: Vec::new(),
+            migration_status: None,
+            migration_priority: None,
+            rust_kind: None,
+            rust_path: None,
+            crate_name: None,
+        });
+    }
+}
+
+/// 判断一个值节点是否为函数表达式（箭头/函数/生成器）。
+fn is_function_value(kind: &str) -> bool {
+    matches!(
+        kind,
+        "arrow_function" | "function" | "function_expression" | "generator_function"
+    )
+}
+
+/// 从 `lexical_declaration`/`variable_declaration` 中提取函数表达式绑定为 Function 节点。
+/// 例如 `export const handler = () => {}` —— 仅 `export function` 会被 walk_ast 的
+/// function_declaration 分支处理，箭头/函数表达式常量此前完全不入图。
+fn extract_var_functions(node: Node, ctx: &mut AnalysisContext) {
+    let count = node.child_count();
+    for i in 0..count {
+        let Some(declarator) = node.child(i) else {
+            continue;
+        };
+        if declarator.kind() != "variable_declarator" {
+            continue;
+        }
+        let Some(value) = declarator.child_by_field_name("value") else {
+            continue;
+        };
+        if !is_function_value(value.kind()) {
+            continue;
+        }
+        let Some(name_node) = declarator.child_by_field_name("name") else {
+            continue;
+        };
+        // 仅处理简单标识符绑定（跳过解构 `const { a } = ...`）
+        if name_node.kind() != "identifier" {
+            continue;
+        }
+        let name = text(name_node, ctx.source);
+        if name.is_empty() {
+            continue;
+        }
+        let is_async = has_anon_child(value, "async");
+        let is_exported = ctx.exported_names.contains(&name);
+        ctx.nodes.push(SourceNode {
+            id: NodeId::symbol(NodeType::Function, ctx.rel_path, &name),
+            node_type: NodeType::Function,
+            name,
+            file_path: ctx.rel_path.to_string(),
+            line_range: Some(node_span(declarator)),
             is_exported,
             complexity: None,
             is_async,
@@ -395,18 +463,38 @@ fn extract_methods(body: Node, class_id: &str, class_name: &str, ctx: &mut Analy
         let Some(child) = body.child(i) else {
             continue;
         };
-        if child.kind() != "method_definition" && child.kind() != "public_field_definition" {
+        // method_definition 始终是方法；public_field_definition 仅当其值为函数
+        // 表达式（如 `handler = () => {}`）时才算方法——纯数据字段（`count = 0`）
+        // 不是函数，不应生成 Function 节点
+        let is_method = child.kind() == "method_definition";
+        let field_value = if child.kind() == "public_field_definition" {
+            child.child_by_field_name("value")
+        } else {
+            None
+        };
+        let field_is_fn = field_value
+            .map(|v| is_function_value(v.kind()))
+            .unwrap_or(false);
+        if !is_method && !field_is_fn {
             continue;
         }
         let Some(name_node) = child.child_by_field_name("name") else {
             continue;
         };
         let method_name = text(name_node, ctx.source);
-        let is_async = has_anon_child(child, "async");
-        let method_id = format!("function:{}:{class_name}.{method_name}", ctx.rel_path);
+        // 字段函数的 async 关键字位于值节点（箭头函数）内部，而非字段定义的直接子节点
+        let is_async = match field_value {
+            Some(v) => has_anon_child(v, "async"),
+            None => has_anon_child(child, "async"),
+        };
+        let method_id = NodeId::symbol(
+            NodeType::Function,
+            ctx.rel_path,
+            &format!("{class_name}.{method_name}"),
+        );
 
         ctx.nodes.push(SourceNode {
-            id: NodeId::new(&method_id),
+            id: method_id.clone(),
             node_type: NodeType::Function,
             name: format!("{class_name}.{method_name}"),
             file_path: ctx.rel_path.to_string(),
@@ -426,13 +514,30 @@ fn extract_methods(body: Node, class_id: &str, class_name: &str, ctx: &mut Analy
 
         ctx.edges.push(Dependency {
             source: NodeId::new(class_id),
-            target: NodeId::new(&method_id),
+            target: method_id,
             edge_type: EdgeType::Contains,
             provenance: Provenance::TreeSitter,
             weight: 1.0,
             sub_kind: None,
             mapping_notes: None,
         });
+    }
+}
+
+/// 取父类型节点的基础标识符名（剥离泛型参数与命名空间限定）。
+/// `Bar` → "Bar"；`Bar<T>` → "Bar"；`ns.Base` → "Base"；`ns.Base<T>` → "Base"。
+fn heritage_target_name(type_node: Node, source: &str) -> String {
+    match type_node.kind() {
+        // generic_type 与 nested_type_identifier 都有 `name` 字段
+        "generic_type" => type_node
+            .child_by_field_name("name")
+            .map(|n| heritage_target_name(n, source))
+            .unwrap_or_else(|| text(type_node, source)),
+        "nested_type_identifier" => type_node
+            .child_by_field_name("name")
+            .map(|n| text(n, source))
+            .unwrap_or_else(|| text(type_node, source)),
+        _ => text(type_node, source),
     }
 }
 
@@ -465,15 +570,18 @@ fn extract_heritage(class_node: Node, class_id: &str, ctx: &mut AnalysisContext)
                 {
                     continue;
                 }
-                let target_name = text(type_node, ctx.source);
+                // 归一化父类型名：剥离泛型参数与命名空间限定，取基础类型标识符，
+                // 否则 `extends Bar<T>` / `extends ns.Base` 的目标名为 "Bar<T>"/"ns.Base"，
+                // 永远匹配不到真实节点（名为 "Bar"/"Base"），Extends 边会被丢弃
+                let target_name = heritage_target_name(type_node, ctx.source);
                 if target_name.is_empty() {
                     continue;
                 }
                 // 目标 ID 暂用 interface 前缀，build.rs 在图完成后会修正
-                let target_id = format!("interface:{}:{target_name}", ctx.rel_path);
+                let target_id = NodeId::symbol(NodeType::Interface, ctx.rel_path, &target_name);
                 ctx.edges.push(Dependency {
                     source: NodeId::new(class_id),
-                    target: NodeId::new(&target_id),
+                    target: target_id,
                     edge_type: EdgeType::Extends,
                     provenance: Provenance::TreeSitter,
                     weight: 1.0,
@@ -869,6 +977,97 @@ async function load() {
         assert!(
             !callees.contains(&"fetchData"),
             "tree-sitter 的已知限制：泛型调用 f<T>() 不被识别为 call_expression"
+        );
+    }
+
+    #[test]
+    fn star_reexport_produces_import_edge() {
+        let mut adapter = TypeScriptAdapter::new().unwrap();
+        // `export *` / `export * as` 必须产生 ImportInfo，否则 build.rs 不建依赖边
+        let result = adapter
+            .analyze_file(
+                "export * from './utils';\nexport * as types from './models';",
+                "barrel.ts",
+            )
+            .unwrap();
+        assert!(
+            result.imports.iter().any(|i| i.module_path == "./utils"),
+            "export * 应产生对 ./utils 的 import: {:?}",
+            result.imports
+        );
+        assert!(
+            result.imports.iter().any(|i| i.module_path == "./models"),
+            "export * as 应产生对 ./models 的 import: {:?}",
+            result.imports
+        );
+    }
+
+    #[test]
+    fn exported_arrow_const_produces_function_node() {
+        let mut adapter = TypeScriptAdapter::new().unwrap();
+        let result = adapter
+            .analyze_file(
+                "export const handler = () => {};\nconst plain = 42;",
+                "h.ts",
+            )
+            .unwrap();
+        let handler = result
+            .nodes
+            .iter()
+            .find(|n| n.name == "handler" && n.node_type == NodeType::Function);
+        assert!(handler.is_some(), "箭头常量应产生 Function 节点");
+        assert!(handler.unwrap().is_exported, "handler 应标记为导出");
+        assert!(
+            !result.nodes.iter().any(|n| n.name == "plain"),
+            "非函数常量不应产生节点"
+        );
+    }
+
+    #[test]
+    fn class_data_field_is_not_a_function() {
+        let mut adapter = TypeScriptAdapter::new().unwrap();
+        let result = adapter
+            .analyze_file(
+                "class C {\n  count: number = 0;\n  run = () => {};\n  method() {}\n}",
+                "c.ts",
+            )
+            .unwrap();
+        let fn_names: Vec<&str> = result
+            .nodes
+            .iter()
+            .filter(|n| n.node_type == NodeType::Function)
+            .map(|n| n.name.as_str())
+            .collect();
+        assert!(
+            !fn_names.contains(&"C.count"),
+            "数据字段 count 不应是 Function: {fn_names:?}"
+        );
+        assert!(
+            fn_names.contains(&"C.run"),
+            "箭头字段 run 应是 Function: {fn_names:?}"
+        );
+        assert!(
+            fn_names.contains(&"C.method"),
+            "method 应是 Function: {fn_names:?}"
+        );
+    }
+
+    #[test]
+    fn generic_supertype_name_is_normalized() {
+        let mut adapter = TypeScriptAdapter::new().unwrap();
+        let result = adapter
+            .analyze_file("class A extends Base<string> {}", "a.ts")
+            .unwrap();
+        let extends_edge = result
+            .edges
+            .iter()
+            .find(|e| e.edge_type == EdgeType::Extends);
+        assert!(extends_edge.is_some(), "应有 Extends 边");
+        // 目标 ID 暂用 interface 前缀，但名字必须归一化为 "Base"（非 "Base<string>"）
+        assert!(
+            extends_edge.unwrap().target.as_str().ends_with(":Base"),
+            "父类型名应归一化为 Base，实际: {}",
+            extends_edge.unwrap().target.as_str()
         );
     }
 

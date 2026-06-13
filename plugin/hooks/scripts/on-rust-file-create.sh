@@ -11,9 +11,17 @@ if [[ "$FILE_PATH" != *.rs ]]; then
   exit 0
 fi
 
-# 定位 Cargo.toml 所在目录
-CARGO_DIR=$(cargo locate-project --message-format plain 2>/dev/null | xargs dirname 2>/dev/null || echo ".")
-cd "$CARGO_DIR"
+# 从被编辑文件所在目录向上定位 Cargo 工程
+# （hook cwd 通常是仓库根，而 Cargo 工程位于子目录或迁移目标工程，
+#  必须相对文件定位；否则 locate-project 落空导致 clippy 永不实际运行）
+FILE_DIR=$(dirname "$FILE_PATH")
+[[ -d "$FILE_DIR" ]] || exit 0
+cd "$FILE_DIR"
+
+CARGO_TOML=$(cargo locate-project --message-format plain 2>/dev/null || true)
+# 文件不在任何 Cargo 工程内则跳过
+[[ -n "$CARGO_TOML" ]] || exit 0
+cd "$(dirname "$CARGO_TOML")"
 
 # 运行 clippy，输出诊断结果
 # 使用 || true 避免 clippy 发现 warning 时脚本以非零退出

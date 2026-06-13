@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{MigrateError, Result};
 use crate::lang::{FileAnalysis, LanguageAdapter};
 use crate::types::common::{NodeId, EXCLUDED_DIRS};
-use crate::types::graph::{Dependency, EdgeType, NodeType, Provenance};
+use crate::types::graph::{Dependency, EdgeType, NodeType, Provenance, SourceNode};
 
 use super::SourceGraph;
 
@@ -153,20 +153,46 @@ fn fixup_extends_in_edges(graph: &SourceGraph, mut edges: Vec<Dependency>) -> Ve
                 break;
             }
         }
-        // 2. 跨文件按名称搜索
+        // 2. 跨文件按名称搜索：仅在全图唯一命中时绑定。
+        //    命中多个同名类型则放弃（保持目标为占位 ID，add_edge 会丢弃该边），
+        //    避免把 Extends 边连到同名但错误文件的类型。
         if !resolved {
-            if let Some(node) = graph.nodes().find(|n| {
+            if let Some(target) = find_unique_node(graph, |n| {
                 n.name == name
                     && matches!(
                         n.node_type,
                         NodeType::Interface | NodeType::Class | NodeType::Enum
                     )
             }) {
-                edge.target = node.id.clone();
+                edge.target = target;
             }
         }
     }
     edges
+}
+
+/// 按谓词在图中查找唯一节点；命中多个时返回 None（避免在歧义时猜测）。
+fn find_unique_node<F>(graph: &SourceGraph, pred: F) -> Option<NodeId>
+where
+    F: Fn(&SourceNode) -> bool,
+{
+    let mut it = graph.nodes().filter(|n| pred(n));
+    let first = it.next()?;
+    if it.next().is_some() {
+        None
+    } else {
+        Some(first.id.clone())
+    }
+}
+
+/// 剥离 callee 的导入基名前缀，得到目标模块内的符号名。
+/// `ns.clamp`（base=`ns`）→ `clamp`；`fn`（base=`fn`）→ `fn`。
+fn cross_symbol_name<'a>(callee: &'a str, base: &str) -> &'a str {
+    callee
+        .strip_prefix(base)
+        .and_then(|s| s.strip_prefix('.'))
+        .filter(|s| !s.is_empty())
+        .unwrap_or(callee)
 }
 
 /// 构建跨文件的 Imports 和 Calls 边。
@@ -176,11 +202,17 @@ fn add_cross_file_edges(
     file_set: &HashSet<String>,
     resolve_exts: &[&str],
 ) {
-    for (rel, analysis) in analyses {
+    // 按文件相对路径排序遍历，保证跨文件边的插入顺序确定（analyses 是 HashMap）
+    let mut rels: Vec<&String> = analyses.keys().collect();
+    rels.sort();
+    for rel in rels {
+        let analysis = &analyses[rel];
         let file_id = NodeId::file(rel);
 
         // Imports 边 + 构建导入符号 → 源文件的映射
         let mut import_map: HashMap<String, String> = HashMap::new();
+        // 同一本地别名被绑定到不同模块时视为歧义，移除并禁用，避免把调用连到错误模块
+        let mut ambiguous: HashSet<String> = HashSet::new();
         for import in &analysis.imports {
             if let Some(target_rel) =
                 resolve_import(&import.module_path, rel, file_set, resolve_exts)
@@ -196,29 +228,39 @@ fn add_cross_file_edges(
                 });
                 for sym in &import.symbols {
                     let local_name = sym.alias.as_deref().unwrap_or(&sym.name);
-                    import_map.insert(local_name.to_string(), target_rel.clone());
+                    if ambiguous.contains(local_name) {
+                        continue;
+                    }
+                    match import_map.get(local_name) {
+                        Some(existing) if existing != &target_rel => {
+                            import_map.remove(local_name);
+                            ambiguous.insert(local_name.to_string());
+                        }
+                        _ => {
+                            import_map.insert(local_name.to_string(), target_rel.clone());
+                        }
+                    }
                 }
             }
         }
 
         // Calls 边（跨文件：通过 imports 解析调用目标）
         for call in &analysis.calls {
+            let callee_base = call.callee.split('.').next().unwrap_or(&call.callee);
             if call.is_constructor {
                 let target_id = NodeId::symbol(NodeType::Class, rel, &call.callee);
                 let resolved = if graph.node_index(&target_id).is_some() {
                     Some(target_id)
-                } else if let Some(src_file) = import_map.get(&call.callee) {
-                    let cross_id = NodeId::symbol(NodeType::Class, src_file, &call.callee);
-                    if graph.node_index(&cross_id).is_some() {
-                        Some(cross_id)
-                    } else {
-                        None
-                    }
+                } else if let Some(src_file) = import_map.get(callee_base) {
+                    // 命名空间构造 `new ns.Foo()`：剥离基名后用 `Foo` 在目标模块查找
+                    let sym = cross_symbol_name(&call.callee, callee_base);
+                    let cross_id = NodeId::symbol(NodeType::Class, src_file, sym);
+                    graph.node_index(&cross_id).is_some().then_some(cross_id)
                 } else {
-                    graph
-                        .nodes()
-                        .find(|n| n.name == call.callee && n.node_type == NodeType::Class)
-                        .map(|n| n.id.clone())
+                    // 全局唯一同名兜底（命中多个则放弃，避免连到错误文件）
+                    find_unique_node(graph, |n| {
+                        n.name == call.callee && n.node_type == NodeType::Class
+                    })
                 };
                 if let Some(target) = resolved {
                     graph.add_edge(Dependency {
@@ -232,7 +274,6 @@ fn add_cross_file_edges(
                     });
                 }
             } else {
-                let callee_base = call.callee.split('.').next().unwrap_or(&call.callee);
                 // 1. 当前文件的函数
                 let target_id = NodeId::symbol(NodeType::Function, rel, &call.callee);
                 if graph.node_index(&target_id).is_some() {
@@ -246,8 +287,11 @@ fn add_cross_file_edges(
                         mapping_notes: None,
                     });
                 } else if let Some(src_file) = import_map.get(callee_base) {
-                    // 2. 通过 import 解析到其他文件的函数
-                    let cross_id = NodeId::symbol(NodeType::Function, src_file, &call.callee);
+                    // 2. 通过 import 解析到其他文件的函数。
+                    //    命名空间调用 `ns.fn()`：剥离基名后用 `fn` 查找目标模块的函数；
+                    //    普通导入 `fn()`：cross_symbol_name 返回完整 `fn`。
+                    let sym = cross_symbol_name(&call.callee, callee_base);
+                    let cross_id = NodeId::symbol(NodeType::Function, src_file, sym);
                     if graph.node_index(&cross_id).is_some() {
                         graph.add_edge(Dependency {
                             source: file_id.clone(),
@@ -371,6 +415,42 @@ mod tests {
 
     fn file_set(files: &[&str]) -> HashSet<String> {
         files.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn cross_symbol_name_strips_import_base() {
+        assert_eq!(cross_symbol_name("ns.clamp", "ns"), "clamp");
+        assert_eq!(cross_symbol_name("clamp", "clamp"), "clamp"); // 非点号：返回完整名
+        assert_eq!(cross_symbol_name("a.b.c", "a"), "b.c");
+    }
+
+    #[test]
+    fn namespace_call_resolves_cross_file() {
+        let dir = std::env::temp_dir().join("rustmigrate_ns_call_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("utils.ts"),
+            "export function clamp(x: number) { return x; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("app.ts"),
+            "import * as utils from './utils';\nutils.clamp(1);\n",
+        )
+        .unwrap();
+
+        let graph = build_graph_ts(&dir).unwrap();
+        let has_call = graph.edges().any(|e| {
+            e.edge_type == EdgeType::Calls
+                && e.source.as_str() == "file:app.ts"
+                && e.target.as_str() == "function:utils.ts:clamp"
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            has_call,
+            "命名空间调用 utils.clamp() 应解析为跨文件 Calls 边"
+        );
     }
 
     #[test]

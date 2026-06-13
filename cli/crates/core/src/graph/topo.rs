@@ -89,7 +89,7 @@ pub fn migration_sequence(graph: &SourceGraph) -> MigrationSequence {
     let sccs = algo::tarjan_scc(&file_graph);
     let cycles: Vec<Vec<NodeId>> = sccs
         .iter()
-        .filter(|scc| scc.len() > 1)
+        .filter(|scc| scc_is_cycle(scc, &file_graph))
         .map(|scc| {
             scc.iter()
                 .filter_map(|idx| index_to_id.get(idx).cloned())
@@ -174,6 +174,20 @@ fn build_file_import_graph(
     (file_graph, index_to_id, id_to_index)
 }
 
+/// 判断一个 SCC 是否构成环：多节点 SCC，或带自环的单节点（文件自导入）。
+///
+/// 注意：仅靠 `scc.len() > 1` 会漏掉自环——单节点 SCC 但存在指向自身的边时，
+/// petgraph `toposort` 仍会判定为环，导致环检测与拓扑排序结论不一致。
+fn scc_is_cycle(scc: &[NodeIndex], graph: &StableGraph<NodeId, ()>) -> bool {
+    if scc.len() > 1 {
+        return true;
+    }
+    scc.len() == 1
+        && graph
+            .edges_directed(scc[0], Direction::Outgoing)
+            .any(|e| e.target() == scc[0])
+}
+
 /// 用 Tarjan SCC 检测环（内部实现）。
 fn detect_cycles_internal(
     file_graph: &StableGraph<NodeId, ()>,
@@ -181,7 +195,7 @@ fn detect_cycles_internal(
 ) -> Vec<Vec<NodeId>> {
     algo::tarjan_scc(file_graph)
         .into_iter()
-        .filter(|scc| scc.len() > 1)
+        .filter(|scc| scc_is_cycle(scc, file_graph))
         .map(|scc| {
             scc.into_iter()
                 .filter_map(|idx| index_to_id.get(&idx).cloned())
@@ -206,11 +220,13 @@ fn compute_parallel_groups(
 
     // 计算每个节点的层级（到叶节点的最长路径距离）
     let mut levels: HashMap<NodeIndex, usize> = HashMap::new();
-    let indices: Vec<NodeIndex> = id_to_index.values().copied().collect();
+    // 排序根节点遍历顺序，保证有环图中各节点层级计算确定（id_to_index 是 HashMap）
+    let mut indices: Vec<NodeIndex> = id_to_index.values().copied().collect();
+    indices.sort();
 
     for &idx in &indices {
         if !levels.contains_key(&idx) {
-            compute_level(idx, file_graph, &mut levels, &mut HashSet::new());
+            compute_level(idx, file_graph, &mut levels);
         }
     }
 
@@ -224,41 +240,61 @@ fn compute_parallel_groups(
         }
     }
 
-    // 过滤空组
-    groups.into_iter().filter(|g| !g.is_empty()).collect()
+    // 过滤空组，并对每组内节点按 ID 排序，保证输出确定（levels 是 HashMap）
+    let mut result: Vec<Vec<NodeId>> = groups.into_iter().filter(|g| !g.is_empty()).collect();
+    for group in &mut result {
+        group.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    }
+    result
 }
 
-/// 递归计算节点层级（DFS + 记忆化）。
+/// 计算节点层级（显式栈的迭代式 DFS + 记忆化），结果写入 `levels`。
 ///
 /// 层级 0 = 叶节点（无出边），层级 n = 依赖链最长为 n 的节点。
-/// 遇到环时视为层级 0，避免无限递归。
+/// 环上的后边贡献 0（不参与 +1），避免无限递归。
+/// 使用显式栈而非递归，避免超深依赖链导致调用栈溢出。
 fn compute_level(
-    idx: NodeIndex,
+    start: NodeIndex,
     graph: &StableGraph<NodeId, ()>,
     levels: &mut HashMap<NodeIndex, usize>,
-    visiting: &mut HashSet<NodeIndex>,
-) -> usize {
-    if let Some(&level) = levels.get(&idx) {
-        return level;
+) {
+    enum Work {
+        Enter(NodeIndex),
+        Exit(NodeIndex),
     }
+    let mut stack = vec![Work::Enter(start)];
+    // 当前 DFS 路径上的节点（用于后边/环检测）
+    let mut on_path: HashSet<NodeIndex> = HashSet::new();
 
-    // 环检测：正在访问中的节点视为层级 0
-    if visiting.contains(&idx) {
-        return 0;
+    while let Some(work) = stack.pop() {
+        match work {
+            Work::Enter(idx) => {
+                if levels.contains_key(&idx) || on_path.contains(&idx) {
+                    continue;
+                }
+                on_path.insert(idx);
+                // 先压 Exit（后于所有后代出栈），再压未访问的后继
+                stack.push(Work::Exit(idx));
+                for edge in graph.edges_directed(idx, Direction::Outgoing) {
+                    let succ = edge.target();
+                    if !levels.contains_key(&succ) && !on_path.contains(&succ) {
+                        stack.push(Work::Enter(succ));
+                    }
+                }
+            }
+            Work::Exit(idx) => {
+                // 此刻所有非后边的后继都已记忆化；后边（仍在 on_path、未记忆化）贡献 0
+                let level = graph
+                    .edges_directed(idx, Direction::Outgoing)
+                    .map(|e| levels.get(&e.target()).copied().unwrap_or(0))
+                    .max()
+                    .map(|l| l + 1)
+                    .unwrap_or(0);
+                on_path.remove(&idx);
+                levels.insert(idx, level);
+            }
+        }
     }
-
-    visiting.insert(idx);
-
-    let max_successor_level = graph
-        .edges_directed(idx, Direction::Outgoing)
-        .map(|e| compute_level(e.target(), graph, levels, visiting))
-        .max()
-        .map(|l| l + 1)
-        .unwrap_or(0);
-
-    visiting.remove(&idx);
-    levels.insert(idx, max_successor_level);
-    max_successor_level
 }
 
 #[cfg(test)]
@@ -279,6 +315,54 @@ mod tests {
             let s = id.as_str();
             s == format!("file:{name}") || s == format!("file:src/{name}")
         })
+    }
+
+    #[test]
+    fn self_import_is_detected_as_cycle() {
+        let dir = std::env::temp_dir().join("rustmigrate_self_import_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("self.ts"),
+            "import { x } from './self';\nexport const x = 1;\n",
+        )
+        .unwrap();
+
+        let graph = build_graph_ts(&dir).unwrap();
+        let cycles = detect_cycles(&graph);
+        let topo = topological_sort(&graph);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // 自环应被识别为环（不能因单节点 SCC 被过滤而漏报）
+        assert!(
+            cycles
+                .iter()
+                .any(|c| c.iter().any(|id| id.as_str().contains("self.ts"))),
+            "自导入应被识别为环，实际: {cycles:?}"
+        );
+        // 且与拓扑排序结论一致：toposort 同样应判定为环而返回错误
+        assert!(topo.is_err(), "自环图的拓扑排序应返回错误");
+    }
+
+    #[test]
+    fn compute_level_handles_deep_chain_without_overflow() {
+        // 超深线性依赖链：递归实现会栈溢出，迭代实现应正常计算
+        let n: usize = 50_000;
+        let mut g: StableGraph<NodeId, ()> = StableGraph::new();
+        let first = g.add_node(NodeId::new("file:0.ts"));
+        let mut prev = first;
+        for i in 1..n {
+            let cur = g.add_node(NodeId::new(&format!("file:{i}.ts")));
+            g.add_edge(prev, cur, ()); // i-1 imports i（importer → imported）
+            prev = cur;
+        }
+
+        let mut levels: HashMap<NodeIndex, usize> = HashMap::new();
+        compute_level(first, &g, &mut levels);
+
+        // 链头（0.ts）依赖链最长，层级应为 n-1；链尾为叶子，层级 0
+        assert_eq!(levels.get(&first).copied(), Some(n - 1));
+        assert_eq!(levels.get(&prev).copied(), Some(0));
     }
 
     // === linear-deps 测试 ===

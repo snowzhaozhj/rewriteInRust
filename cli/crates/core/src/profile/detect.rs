@@ -62,6 +62,19 @@ fn assess_complexity(lines: u64) -> Complexity {
     }
 }
 
+/// 在语言统计中选出主语言：代码行数最多者；行数相同时按语言名升序取稳定的唯一胜者
+/// （避免 HashMap 迭代顺序导致平局时主语言不确定）。
+fn pick_primary_language(lang_map: &HashMap<SourceLang, LangStats>) -> Option<SourceLang> {
+    lang_map
+        .iter()
+        .max_by(|(la, sa), (lb, sb)| {
+            sa.lines
+                .cmp(&sb.lines)
+                .then_with(|| lb.to_string().cmp(&la.to_string()))
+        })
+        .map(|(lang, _)| *lang)
+}
+
 /// 扫描项目目录，返回按语言分组的统计、总文件数和总行数。
 fn scan_languages(root: &Path) -> Result<(HashMap<SourceLang, LangStats>, usize, u64)> {
     if !root.exists() {
@@ -84,10 +97,12 @@ fn scan_languages(root: &Path) -> Result<(HashMap<SourceLang, LangStats>, usize,
         let file_count = lang.reports.len();
         let code_lines = lang.code as u64;
 
-        total_files += file_count;
-        total_lines += code_lines;
-
+        // 仅统计受支持的源语言：total_files/total_lines 反映"待迁移的源代码"规模，
+        // 据此判定迁移复杂度。lockfile/JSON/Markdown 等非源文件不计入，否则会虚高复杂度。
         if let Some(source_lang) = map_language(lang_type) {
+            total_files += file_count;
+            total_lines += code_lines;
+
             let entry = lang_map
                 .entry(source_lang)
                 .or_insert(LangStats { files: 0, lines: 0 });
@@ -105,11 +120,7 @@ fn scan_languages(root: &Path) -> Result<(HashMap<SourceLang, LangStats>, usize,
 /// 如果没有检测到任何支持的语言，返回错误。
 pub fn detect_language(root: &Path) -> Result<SourceLang> {
     let (lang_map, _, _) = scan_languages(root)?;
-
-    lang_map
-        .iter()
-        .max_by_key(|(_, stats)| stats.lines)
-        .map(|(lang, _)| *lang)
+    pick_primary_language(&lang_map)
         .ok_or_else(|| MigrateError::Config("未检测到支持的源语言".to_string()))
 }
 
@@ -119,10 +130,7 @@ pub fn detect_language(root: &Path) -> Result<SourceLang> {
 pub fn profile_project(root: &Path) -> Result<ProjectProfile> {
     let (lang_map, total_files, total_lines) = scan_languages(root)?;
 
-    let primary_language = lang_map
-        .iter()
-        .max_by_key(|(_, stats)| stats.lines)
-        .map(|(lang, _)| *lang)
+    let primary_language = pick_primary_language(&lang_map)
         .ok_or_else(|| MigrateError::Config("未检测到支持的源语言".to_string()))?;
 
     let complexity = assess_complexity(total_lines);

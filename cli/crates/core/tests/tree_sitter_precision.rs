@@ -363,7 +363,7 @@ fn tree_sitter_existing_fixtures() {
     let p = root.join("fixtures/linear-deps/src/index.ts");
     let source = fs::read_to_string(&p).unwrap();
     let analysis = adapter.analyze_file(&source, "index.ts").unwrap();
-    let (exports, imports, calls) = to_string_sets(&analysis);
+    let (exports, imports, _calls) = to_string_sets(&analysis);
     assert!(
         imports.iter().any(|i| i.contains("./service")),
         "should import from service: {imports:?}"

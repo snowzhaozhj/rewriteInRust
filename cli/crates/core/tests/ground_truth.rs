@@ -11,6 +11,7 @@ fn fixtures_dir() -> PathBuf {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)] // 部分字段仅为完整反序列化 ground-truth.json，未在断言中读取
 struct GroundTruth {
     #[serde(default)]
     description: String,
@@ -40,6 +41,7 @@ struct NodeSpec {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)] // sub_kind 仅为完整反序列化，未在断言中读取
 struct EdgeSpec {
     source: String,
     target: String,
@@ -60,6 +62,7 @@ struct TopoSortSpec {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)] // 字段仅为完整反序列化 expectations 区块，未在断言中读取
 struct Expectations {
     #[serde(default)]
     empty_file: Option<String>,

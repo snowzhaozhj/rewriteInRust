@@ -1,6 +1,6 @@
 //! 图查询：neighbors / paths / subgraph / stats。
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use petgraph::stable_graph::NodeIndex;
 use petgraph::visit::EdgeRef;
@@ -16,8 +16,8 @@ use super::SourceGraph;
 pub struct GraphStats {
     pub total_nodes: usize,
     pub total_edges: usize,
-    pub nodes_by_type: HashMap<String, usize>,
-    pub edges_by_type: HashMap<String, usize>,
+    pub nodes_by_type: BTreeMap<String, usize>,
+    pub edges_by_type: BTreeMap<String, usize>,
 }
 
 impl SourceGraph {
@@ -72,8 +72,8 @@ impl SourceGraph {
 
     /// 计算图统计信息。
     pub fn stats(&self) -> GraphStats {
-        let mut nodes_by_type: HashMap<String, usize> = HashMap::new();
-        let mut edges_by_type: HashMap<String, usize> = HashMap::new();
+        let mut nodes_by_type: BTreeMap<String, usize> = BTreeMap::new();
+        let mut edges_by_type: BTreeMap<String, usize> = BTreeMap::new();
 
         for node in self.nodes() {
             *nodes_by_type.entry(node.node_type.to_string()).or_default() += 1;
