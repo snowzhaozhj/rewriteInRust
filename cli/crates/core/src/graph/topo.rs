@@ -352,7 +352,7 @@ mod tests {
         let first = g.add_node(NodeId::new("file:0.ts"));
         let mut prev = first;
         for i in 1..n {
-            let cur = g.add_node(NodeId::new(&format!("file:{i}.ts")));
+            let cur = g.add_node(NodeId::new(format!("file:{i}.ts")));
             g.add_edge(prev, cur, ()); // i-1 imports i（importer → imported）
             prev = cur;
         }

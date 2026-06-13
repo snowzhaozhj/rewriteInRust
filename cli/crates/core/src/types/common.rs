@@ -150,7 +150,7 @@ pub enum Complexity {
 
 /// 模块风险等级。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum RiskLevel {
     /// 低风险。
     Low,
