@@ -3,6 +3,13 @@
 //! 基于 tree-sitter-typescript 的单文件完整分析：
 //! 解析 AST → 提取节点（File/Function/Class/Interface/Enum）
 //! + 边（Contains/Extends/Exports）+ 导入/调用信息。
+//!
+//! 本文件按 `node.kind()`（节点类型名）和 `child_by_field_name(...)`（命名字段）
+//! 遍历 AST，这些字符串硬编码、无编译期检查。关键解析点配有「TS 片段 → AST 骨架」
+//! 注释帮助阅读；骨架中 `field:` 前缀表示命名字段、其余为匿名/位置子节点。
+//! 这些 kind/field 的存在性由 `tests/ast_contract.rs` 在 grammar 升级时兜底校验
+//! （示例基于 tree-sitter-typescript 0.21.x，AST 形状随 grammar 版本可能演进，
+//! 以 node-types.json 与该测试为准）。
 
 use std::path::Path;
 
@@ -127,6 +134,14 @@ struct AnalysisContext<'a> {
 
 // === Export 收集 ===
 
+/// 第一遍：收集所有 export 名称（供后续判定符号 is_exported）。
+///
+/// export 的多种形态对应不同 AST 结构：
+///   export function f(){}      → export_statement declaration:(function_declaration …)
+///   export default x           → export_statement + 匿名子节点 "default", value:(identifier)
+///   export { a as b }          → export_statement (export_clause (export_specifier name: alias:))
+///   export * from "m"          → export_statement + 匿名子节点 "*", source:(string)
+///   export * as ns from "m"    → export_statement (namespace_export (identifier)) source:(string)
 fn collect_exports(node: Node, source: &str, exports: &mut std::collections::HashSet<String>) {
     if node.kind() == "export_statement" {
         if let Some(decl) = node.child_by_field_name("declaration") {
@@ -457,6 +472,13 @@ fn extract_class(node: Node, ctx: &mut AnalysisContext) {
     }
 }
 
+/// 从 class body 提取方法为 Function 节点 + Contains 边。
+///
+/// `class C { method() {} handler = () => {}; data = 0 }` 的 class_body：
+///   method_definition       name:(property_identifier)            // 总是方法
+///   public_field_definition name: value:(arrow_function …)        // 字段值是函数 → 算方法
+///   public_field_definition name: value:(number)                  // 纯数据字段 → 跳过
+/// 故 public_field_definition 仅当其 value 为函数表达式时才生成 Function 节点。
 fn extract_methods(body: Node, class_id: &str, class_name: &str, ctx: &mut AnalysisContext) {
     let count = body.child_count();
     for i in 0..count {
@@ -541,6 +563,22 @@ fn heritage_target_name(type_node: Node, source: &str) -> String {
     }
 }
 
+/// 提取 class 的 extends/implements 关系为 Extends 边（implements 以 sub_kind 区分）。
+///
+/// `class Foo extends Bar<T> implements Baz, ns.Q {}` 的 AST：
+///   class_declaration
+///     name: (type_identifier)                  // Foo
+///     class_heritage
+///       extends_clause
+///         value: (identifier)                  // Bar（extends 处于表达式位置）
+///         type_arguments: (type_arguments …)   // <T>
+///       implements_clause                      // 无命名字段，类型节点为直接子节点
+///         (type_identifier)                    // Baz
+///         (nested_type_identifier              // ns.Q
+///            module:(identifier) name:(type_identifier))
+///     body: (class_body)
+/// 故需三层下钻：class_heritage → extends/implements_clause → 类型节点，
+/// 再由 heritage_target_name 归一化类型名。
 fn extract_heritage(class_node: Node, class_id: &str, ctx: &mut AnalysisContext) {
     let count = class_node.child_count();
     for i in 0..count {
@@ -564,6 +602,12 @@ fn extract_heritage(class_node: Node, class_id: &str, ctx: &mut AnalysisContext)
                 let Some(type_node) = clause.child(k) else {
                     continue;
                 };
+                // TODO(M1-GRAPH): extends_clause 的 `type_arguments` 子节点（如
+                // `extends Bar<T>` 的 `<T>`）也是命名节点、不是 extends/implements
+                // 关键字，会漏过此过滤被当成父类型，heritage_target_name 取其文本
+                // 生成一条 target 名为 "<T>" 的多余 Extends 边。该 target 匹配不到
+                // 真实节点、会被 build.rs 丢弃，故当前无实际危害，但属噪声边。
+                // 修法：在下面条件补 `|| type_node.kind() == "type_arguments"`。
                 if !type_node.is_named()
                     || type_node.kind() == "extends"
                     || type_node.kind() == "implements"
@@ -688,6 +732,13 @@ fn extract_import(node: Node, ctx: &mut AnalysisContext) {
     });
 }
 
+/// 解析 import_clause 的三种绑定形态为 ImportedSymbol。
+///
+/// `import D, { a as b } from "x"` / `import * as ns from "y"` 的 import_clause：
+///   (identifier)                          // D —— default import
+///   (named_imports                        // { a as b }
+///      (import_specifier name:(identifier) alias:(identifier)))
+///   (namespace_import (identifier))        // * as ns
 fn extract_import_clause(node: Node, source: &str, symbols: &mut Vec<ImportedSymbol>) {
     let count = node.child_count();
     for i in 0..count {
