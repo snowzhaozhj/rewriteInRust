@@ -178,15 +178,15 @@ impl MigrationStateMachine {
     ///
     /// 严格对齐 `docs/design/09-appendix-schemas.md` § 合法状态转换：
     ///
-    /// - `to == Some(target)` 且 `target != from`：校验
-    ///   [`ModuleStatus::can_transition_to`]，非法转换返回 `MigrateError::InvalidTransition`；
-    ///   合法则更新 `status`，并按转换边执行副作用：
-    ///   - 进入 `blocked`（`from != blocked`）：记录 `pre_blocked_status = from`。
-    ///   - 离开 `blocked`：清除 `blocked_by` 与 `pre_blocked_status`（设计行 207「恢复到
-    ///     进入 blocked 前的状态」，由调用方传 `--to <pre_blocked_status>`）。
+    /// - `to == Some(target)`：一律校验 [`ModuleStatus::can_transition_to`]（矩阵无自环，
+    ///   故同态/终态 `--to` 也会按矩阵返回 `MigrateError::InvalidTransition`）；合法则更新
+    ///   `status` 并按转换边执行副作用：
+    ///   - 进入 `blocked`：记录 `pre_blocked_status = from`。
+    ///   - 离开 `blocked`：须恢复到 `pre_blocked_status`（设计行 207/218）。已记录时强校验
+    ///     `target == pre_blocked_status`，否则报 `InvalidTransition`；随后清除
+    ///     `blocked_by` 与 `pre_blocked_status`。
     ///   - `degrade_* → translating`（设计行 381 `--force` 恢复）：清除 `substatus`、
     ///     清空 `attempts`（重置重试计数，重新进入翻译循环）。
-    /// - `to == Some(from)`（同态）：跳过转换校验，仅落盘 substatus/reason（幂等）。
     /// - `to == None`：仅更新 substatus（status 不变），对应设计 Step 4/5 的 Phase 进度记录
     ///   （行 461/485 `state transition --module <M> --substatus <s>`）。
     /// - `substatus == Some(s)`：显式覆盖 `substatus`（设置在转换副作用之后，故可在
@@ -210,29 +210,41 @@ impl MigrationStateMachine {
         let from = module.status;
 
         if let Some(target) = to {
-            if target != from {
-                if !from.can_transition_to(target) {
-                    return Err(MigrateError::InvalidTransition {
-                        from: from.to_string(),
-                        to: target.to_string(),
-                    });
-                }
-                // 进入 blocked：记录恢复锚点。
-                if target == ModuleStatus::Blocked {
-                    module.pre_blocked_status = Some(from);
-                }
-                // 离开 blocked：清除阻塞元数据。
-                if from == ModuleStatus::Blocked {
-                    module.blocked_by = None;
-                    module.pre_blocked_status = None;
-                }
-                // degrade_* → translating（--force 恢复）：清除 substatus + 重置 attempts。
-                if from.is_degraded() && target == ModuleStatus::Translating {
-                    module.substatus = None;
-                    module.attempts.clear();
-                }
-                module.status = target;
+            // 显式 --to 一律校验合法转换矩阵（无自环：target==from 也按矩阵判，
+            // 故对终态/同态 --to 会正确报 InvalidTransition；幂等的「仅更新 substatus」
+            // 走 to==None 路径，不经此处。设计 Step 501 的「已是 testing 则跳过」由
+            // 上游 SKILL 不发起该调用保证，CLI 不需支持同态 --to）。
+            if !from.can_transition_to(target) {
+                return Err(MigrateError::InvalidTransition {
+                    from: from.to_string(),
+                    to: target.to_string(),
+                });
             }
+            // 进入 blocked：记录恢复锚点。
+            if target == ModuleStatus::Blocked {
+                module.pre_blocked_status = Some(from);
+            }
+            // 离开 blocked：须恢复到进入前状态（设计行 207/218）。已记录 pre_blocked_status
+            // 时强校验 target == pre_blocked_status，避免恢复到错误状态丢失断点续传锚点；
+            // 未记录时（如直接 update_module 造的 blocked）退化为只校验 blockable。
+            if from == ModuleStatus::Blocked {
+                if let Some(pre) = module.pre_blocked_status {
+                    if target != pre {
+                        return Err(MigrateError::InvalidTransition {
+                            from: from.to_string(),
+                            to: format!("{target}（blocked 须恢复到 pre_blocked_status={pre}）"),
+                        });
+                    }
+                }
+                module.blocked_by = None;
+                module.pre_blocked_status = None;
+            }
+            // degrade_* → translating（--force 恢复）：清除 substatus + 重置 attempts。
+            if from.is_degraded() && target == ModuleStatus::Translating {
+                module.substatus = None;
+                module.attempts.clear();
+            }
+            module.status = target;
         }
 
         // 显式 substatus 覆盖（在转换副作用之后，允许恢复转换同时指定新 substatus）。
@@ -592,6 +604,44 @@ mod tests {
         assert_eq!(module.status, ModuleStatus::Translating);
         assert!(module.substatus.is_none());
         assert!(module.attempts.is_empty());
+    }
+
+    #[test]
+    fn test_transition_module_leave_blocked_wrong_target_rejected() {
+        // 离开 blocked 必须恢复到 pre_blocked_status，恢复到其他 blockable 态应报错。
+        let mut m = new_machine();
+        let mut module = module_with_status(ModuleStatus::Blocked);
+        module.pre_blocked_status = Some(ModuleStatus::Testing);
+        m.update_module("a", module);
+        // 恢复到 translating（≠ pre_blocked_status=testing）应被拒。
+        let err = m
+            .transition_module("a", Some(ModuleStatus::Translating), None, None)
+            .unwrap_err();
+        assert!(matches!(err, MigrateError::InvalidTransition { .. }));
+        // 状态保持 blocked、锚点未被清除。
+        assert_eq!(m.state_file().modules["a"].status, ModuleStatus::Blocked);
+        assert_eq!(
+            m.state_file().modules["a"].pre_blocked_status,
+            Some(ModuleStatus::Testing)
+        );
+        // 恢复到正确的 pre_blocked_status 成功。
+        assert!(m
+            .transition_module("a", Some(ModuleStatus::Testing), None, None)
+            .is_ok());
+        assert_eq!(m.state_file().modules["a"].status, ModuleStatus::Testing);
+    }
+
+    #[test]
+    fn test_transition_module_homomorphic_to_rejected() {
+        // 显式 --to == 当前态：矩阵无自环，应报 InvalidTransition（保护终态/避免伪审计）。
+        let mut m = new_machine();
+        m.update_module("a", module_with_status(ModuleStatus::Done));
+        let err = m
+            .transition_module("a", Some(ModuleStatus::Done), None, Some("noop"))
+            .unwrap_err();
+        assert!(matches!(err, MigrateError::InvalidTransition { .. }));
+        // done 模块未被追加伪审计记录。
+        assert!(m.state_file().modules["a"].attempts.is_empty());
     }
 
     #[test]

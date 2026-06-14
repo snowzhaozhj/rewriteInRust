@@ -173,17 +173,20 @@ fn parse_version_str(s: &str) -> Option<String> {
     None
 }
 
-/// 解析 `major.minor.patch`（缺失部分补 0）为 `(u32, u32, u32)`。
-fn parse_triple(v: &str) -> Option<(u32, u32, u32)> {
+/// 解析 `major.minor.patch`（缺失部分补 0）为 `(u64, u64, u64)`。
+///
+/// 用 u64 避免 CalVer/超长版本段（如 `20240131`）或异常输出溢出 u32 导致解析失败、
+/// 进而被 [`version_satisfies`] 保守误判为「版本不足」。
+fn parse_triple(v: &str) -> Option<(u64, u64, u64)> {
     let mut parts = v.split('.');
-    let major = parts.next()?.parse::<u32>().ok()?;
+    let major = parts.next()?.parse::<u64>().ok()?;
     let minor = parts
         .next()
-        .and_then(|p| p.parse::<u32>().ok())
+        .and_then(|p| p.parse::<u64>().ok())
         .unwrap_or(0);
     let patch = parts
         .next()
-        .and_then(|p| p.parse::<u32>().ok())
+        .and_then(|p| p.parse::<u64>().ok())
         .unwrap_or(0);
     Some((major, minor, patch))
 }
