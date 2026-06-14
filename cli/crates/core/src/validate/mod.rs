@@ -41,6 +41,36 @@ pub fn validate_state(state_file: &MigrationStateFile) -> Result<Vec<String>> {
         }
     }
 
+    // 历史首条必须是状态机起点 Init。windows(2) 对单元素历史不做任何检查，
+    // 若缺此项，伪造的 [Plan] 单元素历史可在前置条件满足时蒙混过关。
+    if let Some(first) = state_file.state_history.first() {
+        if first.state != ProjectState::Init {
+            return Err(MigrateError::SchemaValidation(format!(
+                "state_history 首条状态应为 init，实际为 {}（历史链起点被篡改或损坏）",
+                first.state
+            )));
+        }
+    }
+
+    // exited_at 链完整性：除最后一条外都应有 exited_at（已退出），最后一条不应有
+    // （当前所处状态）。防止伪造同时"进行中"的多条历史或断裂的时间链。
+    let last_idx = state_file.state_history.len() - 1;
+    for (i, entry) in state_file.state_history.iter().enumerate() {
+        if i == last_idx {
+            if entry.exited_at.is_some() {
+                return Err(MigrateError::SchemaValidation(format!(
+                    "state_history 末条（当前状态 {}）不应有 exited_at",
+                    entry.state
+                )));
+            }
+        } else if entry.exited_at.is_none() {
+            return Err(MigrateError::SchemaValidation(format!(
+                "state_history 非末条（状态 {}）缺少 exited_at",
+                entry.state
+            )));
+        }
+    }
+
     // state_history 相邻状态必须满足合法转换。正常流程由 machine.rs 的 transition
     // 保证，此处是对落盘文件的独立防御（检测外部篡改/损坏导致的跳级或回退历史）。
     for pair in state_file.state_history.windows(2) {
@@ -135,6 +165,36 @@ mod tests {
     use crate::types::state::{MigrationMetadata, ProjectInfo, StateHistoryEntry};
     use std::collections::HashMap;
 
+    /// 辅助：构建从 Init 到目标状态的合法历史链（除末条外均带 exited_at）。
+    fn history_chain(target: ProjectState) -> Vec<StateHistoryEntry> {
+        let now = Timestamp::new("2024-01-01T00:00:00Z");
+        let order = [
+            ProjectState::Init,
+            ProjectState::Profile,
+            ProjectState::Plan,
+            ProjectState::Scaffold,
+            ProjectState::SprintLoop,
+            ProjectState::Graduate,
+        ];
+        let target_idx = order
+            .iter()
+            .position(|s| *s == target)
+            .expect("target 必在 order 内");
+        order[..=target_idx]
+            .iter()
+            .enumerate()
+            .map(|(i, s)| StateHistoryEntry {
+                state: *s,
+                entered_at: now.clone(),
+                exited_at: if i == target_idx {
+                    None
+                } else {
+                    Some(now.clone())
+                },
+            })
+            .collect()
+    }
+
     /// 辅助：构建最小合法状态文件（Init 阶段）。
     fn minimal_init_state() -> MigrationStateFile {
         let now = Timestamp::new("2024-01-01T00:00:00Z");
@@ -213,15 +273,10 @@ mod tests {
 
     #[test]
     fn test_validate_plan_without_project() {
-        let now = Timestamp::new("2024-01-01T00:00:00Z");
         let state = MigrationStateFile {
             version: "1.0.0".to_owned(),
             state: ProjectState::Plan,
-            state_history: vec![StateHistoryEntry {
-                state: ProjectState::Plan,
-                entered_at: now,
-                exited_at: None,
-            }],
+            state_history: history_chain(ProjectState::Plan),
             project: None,
             sprint: None,
             modules: HashMap::new(),
@@ -245,11 +300,7 @@ mod tests {
         let state = MigrationStateFile {
             version: "1.0.0".to_owned(),
             state: ProjectState::Scaffold,
-            state_history: vec![StateHistoryEntry {
-                state: ProjectState::Scaffold,
-                entered_at: now.clone(),
-                exited_at: None,
-            }],
+            state_history: history_chain(ProjectState::Scaffold),
             project: Some(ProjectInfo {
                 name: "test".to_owned(),
                 source_language: SourceLang::TypeScript,
@@ -311,14 +362,9 @@ mod tests {
     fn test_validate_plan_without_graph() {
         // Plan 阶段 project 齐全但 graph 未构建 → 前置失败。
         // minimal_init_state 的 metadata.graph_build_completed 默认 false。
-        let now = Timestamp::new("2024-01-01T00:00:00Z");
         let mut state = minimal_init_state();
         state.state = ProjectState::Plan;
-        state.state_history = vec![StateHistoryEntry {
-            state: ProjectState::Plan,
-            entered_at: now,
-            exited_at: None,
-        }];
+        state.state_history = history_chain(ProjectState::Plan);
         let result = validate_state(&state);
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -336,11 +382,7 @@ mod tests {
         let state = MigrationStateFile {
             version: "1.0.0".to_owned(),
             state: ProjectState::SprintLoop,
-            state_history: vec![StateHistoryEntry {
-                state: ProjectState::SprintLoop,
-                entered_at: now.clone(),
-                exited_at: None,
-            }],
+            state_history: history_chain(ProjectState::SprintLoop),
             project: Some(ProjectInfo {
                 name: "test".to_owned(),
                 source_language: SourceLang::TypeScript,
@@ -369,15 +411,10 @@ mod tests {
 
     #[test]
     fn test_validate_profile_without_project() {
-        let now = Timestamp::new("2024-01-01T00:00:00Z");
         let state = MigrationStateFile {
             version: "1.0.0".to_owned(),
             state: ProjectState::Profile,
-            state_history: vec![StateHistoryEntry {
-                state: ProjectState::Profile,
-                entered_at: now,
-                exited_at: None,
-            }],
+            state_history: history_chain(ProjectState::Profile),
             project: None,
             sprint: None,
             modules: HashMap::new(),
@@ -392,6 +429,57 @@ mod tests {
                 assert!(condition.contains("project"));
             }
             other => panic!("期望 PreconditionFailed，实际: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_validate_rejects_non_init_start() {
+        // 伪造从中途状态开始的单元素历史：末尾与当前一致、前置满足，
+        // 但首条非 Init，应被拦截（修复前 windows(2) 对单元素不检查会放过）。
+        let now = Timestamp::new("2024-01-01T00:00:00Z");
+        let mut state = minimal_init_state();
+        state.state = ProjectState::Plan;
+        state.state_history = vec![StateHistoryEntry {
+            state: ProjectState::Plan,
+            entered_at: now,
+            exited_at: None,
+        }];
+        // 让前置条件全部满足，确保拦截来自历史起点校验而非 precondition。
+        state.metadata = Some(MigrationMetadata {
+            graph_build_completed: true,
+            graph_build_completed_at: None,
+            last_error: None,
+            lock_token: None,
+        });
+        let result = validate_state(&state);
+        match result.unwrap_err() {
+            MigrateError::SchemaValidation(msg) => assert!(msg.contains("init")),
+            other => panic!("期望 SchemaValidation(init)，实际: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_validate_rejects_broken_exited_chain() {
+        // 两条历史但首条缺 exited_at（伪造同时"进行中"），应被拦截。
+        let now = Timestamp::new("2024-01-01T00:00:00Z");
+        let mut state = minimal_init_state();
+        state.state = ProjectState::Profile;
+        state.state_history = vec![
+            StateHistoryEntry {
+                state: ProjectState::Init,
+                entered_at: now.clone(),
+                exited_at: None, // 非末条却无 exited_at
+            },
+            StateHistoryEntry {
+                state: ProjectState::Profile,
+                entered_at: now,
+                exited_at: None,
+            },
+        ];
+        let result = validate_state(&state);
+        match result.unwrap_err() {
+            MigrateError::SchemaValidation(msg) => assert!(msg.contains("exited_at")),
+            other => panic!("期望 SchemaValidation(exited_at)，实际: {:?}", other),
         }
     }
 }

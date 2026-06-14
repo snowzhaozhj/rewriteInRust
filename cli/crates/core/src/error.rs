@@ -60,6 +60,10 @@ pub enum MigrateError {
     /// 并发锁冲突。
     #[error("迁移锁冲突: {0}")]
     LockConflict(String),
+
+    /// 命令尚未实现（占位，待后续阶段接线）。
+    #[error("命令尚未实现: {0}")]
+    NotImplemented(String),
 }
 
 /// 便捷 Result 别名。

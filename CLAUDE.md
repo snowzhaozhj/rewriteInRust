@@ -70,7 +70,7 @@ scope: M0-S0 / M1-CLI-03 / M1-PLG-01 等（引用 PLAN.md 任务 ID）
 
 ## 编码约束
 
-- CLI 输出统一 JSON 格式：`{"status":"ok|error|warning", "data":{...}, "warnings":[...]}`
+- CLI 输出统一 JSON：`{status, data, warnings}`；warnings 仅非空时输出并将 status 降级 warning（空则省略）
 - Rust 代码遵循 clippy -D warnings
 - CLI 与 Plugin 通过文件系统 + JSON 通信,不直接耦合
 - 设计细节以 `docs/design/` 为唯一权威（实现时对照,不二次文档化）
