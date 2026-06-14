@@ -90,9 +90,10 @@ function main() {
   selfScc.cycles.forEach((comp, i) => comp.forEach((n) => selfSccOf.set(n, i)));
   const sccSplit = [];
   for (const comp of oracleScc.cycles) {
-    const selfIds = new Set(comp.map((n) => selfSccOf.get(n)));
-    // size>1 = 被拆到多个自研 SCC；全 undefined（整环漏报）由 cycNodeMissing 另计，不重复惩罚。
-    if (selfIds.size > 1) sccSplit.push([...comp].sort());
+    // 只看落在自研环里的节点是否分属多个自研 SCC（真拆分）。漏报节点（selfSccOf 无映射 →
+    // undefined）由 cycNodeMissing 另计，必须先滤除，否则「部分节点漏报」会被二次惩罚成「拆分」。
+    const ids = comp.map((n) => selfSccOf.get(n)).filter((id) => id !== undefined);
+    if (new Set(ids).size > 1) sccSplit.push([...comp].sort());
   }
   // 环一致 = 环节点集合 ⊇ oracle 交集、无双 oracle 都不认的多余环节点、且无 oracle SCC 被自研拆分。
   const cyclesConsistent =

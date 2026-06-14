@@ -45,7 +45,11 @@ while read -r name url sha src_root || [[ -n "${name:-}" ]]; do
     || { git -C "$repo" fetch --quiet --depth 1 origin "$sha" && git -C "$repo" checkout --quiet "$sha"; }
 
   echo "==== [$name] 符号级对比 ====" >&2
-  "$EX" "$repo/$src_root" > "$work/self-sym.json"
+  # dump 失败时跳过本仓库而非中止全部（set -e 下须显式 guard，与下方 ts-morph 失败处理一致）。
+  if ! "$EX" "$repo/$src_root" > "$work/self-sym.json"; then
+    echo "[$name] ✗ dump_symbol_graph 失败（跳过）" >&2
+    continue
+  fi
   if ! node "$SCRIPT_DIR/oracle/symbol-graph-tsmorph.js" "$repo" "$src_root" \
         > "$work/oracle-sym.json" 2>"$work/tsmorph-err.txt"; then
     echo "[$name] ✗ ts-morph 提取失败（跳过）:" >&2
