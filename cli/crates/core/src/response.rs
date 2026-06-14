@@ -25,7 +25,9 @@ pub struct Response<T: Serialize> {
     pub status: Status,
     /// 响应数据。
     pub data: T,
-    /// 警告信息列表（始终输出，空则序列化为 `[]`，保证统一 `{status,data,warnings}` 契约）。
+    /// 警告信息列表。空时省略序列化——warnings 仅在确有内容时出现，
+    /// 避免每条响应都挂个空 `[]` 噪声/误导。消费方按"可能缺失"处理（如 `jq '.warnings[]'`）。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 }
 
@@ -112,6 +114,7 @@ impl From<MigrateError> for Response<ErrorData> {
             MigrateError::FileNotFound(_) => "file_not_found",
             MigrateError::SchemaValidation(_) => "schema_validation",
             MigrateError::LockConflict(_) => "lock_conflict",
+            MigrateError::NotImplemented(_) => "not_implemented",
         };
         Self {
             status: Status::Error,
@@ -122,5 +125,36 @@ impl From<MigrateError> for Response<ErrorData> {
             },
             warnings: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_empty_warnings_omitted() {
+        // 空 warnings 不序列化——仅在确有内容时出现。
+        let json = serde_json::to_value(Response::ok(serde_json::json!({"k": 1}))).unwrap();
+        assert_eq!(json["status"], "ok");
+        assert!(json.get("warnings").is_none(), "空 warnings 应省略");
+    }
+
+    #[test]
+    fn test_error_empty_warnings_omitted() {
+        let resp: Response<ErrorData> = MigrateError::NotImplemented("x".into()).into();
+        let json = serde_json::to_value(resp).unwrap();
+        assert_eq!(json["status"], "error");
+        assert_eq!(json["data"]["kind"], "not_implemented");
+        assert!(json.get("warnings").is_none(), "空 warnings 应省略");
+    }
+
+    #[test]
+    fn test_nonempty_warnings_present_and_downgrades_status() {
+        // warnings 有内容时才出现，且 status 降级为 warning。
+        let resp = Response::ok_with_warnings(serde_json::json!({}), vec!["w".into()]);
+        let json = serde_json::to_value(resp).unwrap();
+        assert_eq!(json["status"], "warning");
+        assert_eq!(json["warnings"], serde_json::json!(["w"]));
     }
 }
