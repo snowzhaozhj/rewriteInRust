@@ -35,6 +35,8 @@ const WORK_DIR: &str = ".rust-migration";
 const DB_FILE: &str = "source-graph.db";
 /// 迁移状态文件名。
 const STATE_FILE: &str = "migration-state.json";
+/// 项目根配置文件名（见 `06-plugin-structure.md` § CLI 命令概览）。
+const CONFIG_FILE: &str = ".rustmigrate.toml";
 
 /// CLI 顶层入口。
 #[derive(Parser)]
@@ -130,6 +132,12 @@ pub enum StateCommands {
         module: String,
         #[arg(long)]
         to: String,
+        /// 子状态（如 phase_a_complete_awaiting_review），见 09-appendix-schemas.md。
+        #[arg(long)]
+        substatus: Option<String>,
+        /// 转换原因说明（写入历史/审计）。
+        #[arg(long)]
+        reason: Option<String>,
     },
 }
 
@@ -201,9 +209,15 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
         },
         Commands::State { action } => match action {
             StateCommands::Get { module } => emit(writer, cmd_state_get(module)),
-            StateCommands::Transition { module, to } => {
-                emit(writer, cmd_state_transition(module, to))
-            }
+            StateCommands::Transition {
+                module,
+                to,
+                substatus,
+                reason,
+            } => emit(
+                writer,
+                cmd_state_transition(module, to, substatus.as_deref(), reason.as_deref()),
+            ),
         },
         Commands::Stats { action } => match action {
             StatsCommands::Loc => emit(writer, cmd_stats_loc()),
@@ -270,23 +284,40 @@ fn state_path() -> PathBuf {
     work_dir().join(STATE_FILE)
 }
 
+/// 项目根 `.rustmigrate.toml` 配置文件路径。
+fn config_path() -> PathBuf {
+    PathBuf::from(CONFIG_FILE)
+}
+
 // === 命令实现 ===
 
-/// `init`：创建 `.rust-migration/` 目录与初始 `migration-state.json`。
+/// `init`：创建 `.rust-migration/` 目录、初始 `migration-state.json`
+/// 与项目根 `.rustmigrate.toml` 配置文件（见 `06-plugin-structure.md` § CLI 命令概览）。
 ///
-/// 已存在状态文件时不覆盖（幂等），仅返回已初始化标记。
+/// 已存在状态文件 / 配置文件时不覆盖（幂等），仅返回已初始化标记。
 fn cmd_init() -> CmdResult {
     let dir = work_dir();
     std::fs::create_dir_all(&dir)?;
 
     let state = state_path();
     let already = state.exists();
+    // 主语言在 init 阶段未知，先用 profile 探测；探测失败回退 TypeScript。
+    let lang = rustmigrate_core::profile::detect_language(Path::new("."))
+        .unwrap_or(rustmigrate_core::types::common::SourceLang::TypeScript);
     if !already {
-        // 主语言在 init 阶段未知，先用 profile 探测；探测失败回退 TypeScript。
-        let lang = rustmigrate_core::profile::detect_language(Path::new("."))
-            .unwrap_or(rustmigrate_core::types::common::SourceLang::TypeScript);
         let machine = MigrationStateMachine::init_new(&project_name(), lang);
         machine.save(&state)?;
+    }
+
+    // 项目根 `.rustmigrate.toml`：不存在时按默认配置写入（幂等，存在不覆盖）。
+    let config = config_path();
+    let config_already = config.exists();
+    if !config_already {
+        let mut cfg = rustmigrate_core::types::config::MigrateConfig::default();
+        cfg.project.name = project_name();
+        cfg.project.source_language = lang;
+        let toml_str = toml::to_string(&cfg)?;
+        std::fs::write(&config, toml_str)?;
     }
 
     Ok((
@@ -294,7 +325,8 @@ fn cmd_init() -> CmdResult {
             "message": "initialized",
             "work_dir": dir.to_string_lossy(),
             "state_file": state.to_string_lossy(),
-            "already_initialized": already,
+            "config_file": config.to_string_lossy(),
+            "already_initialized": already && config_already,
         }),
         Vec::new(),
     ))
@@ -398,12 +430,15 @@ fn cmd_graph_topo_sort<W: Write>(writer: &mut W) -> i32 {
                 .iter()
                 .map(|c| c.iter().map(|id| id.to_string()).collect())
                 .collect();
+            // data 形状对齐统一 ErrorData 的 `kind`/`message` 命名（原手搓 `error`/`suggestion`）。
+            // 结构化的 `cycles` 是本错误特有上下文，ErrorData 无对应字段，故仍用 json! 自构造。
+            // TODO(M2): ErrorData 增加 structured context（如 details: Value），让环路径走统一类型。
             let resp = Response {
                 status: Status::Error,
                 data: json!({
-                    "error": "cyclic_dependency",
+                    "kind": "cyclic_dependency",
+                    "message": "存在循环依赖，无法生成拓扑序；请打破环后重试",
                     "cycles": cycle_paths,
-                    "suggestion": "存在循环依赖，无法生成拓扑序；请打破环后重试",
                 }),
                 warnings: Vec::new(),
             };
@@ -541,9 +576,17 @@ fn cmd_state_get(module: &str) -> CmdResult {
 /// `--to` 取 ModuleStatus（translating/compile_fixing/testing/reviewing/done…），
 /// 校验合法转换路径，并支持 `--substatus`/`--reason` 与 tmp-fsync-rename 原子写。
 /// 这是一块独立的模块级状态机功能（设计有专门附录），不属于本 PR 的命令路由接线范围。
-fn cmd_state_transition(module: &str, to: &str) -> CmdResult {
+///
+/// 命令签名已一次对齐到位（含 substatus/reason），本体仍为诚实占位（implemented:false），
+/// 仅把收到的参数回显进响应，避免后续接线再改命令签名。
+fn cmd_state_transition(
+    module: &str,
+    to: &str,
+    substatus: Option<&str>,
+    reason: Option<&str>,
+) -> CmdResult {
     // TODO(M1-STATE): 完整模块级状态转换 —— ModuleStatus 解析 + 合法性前置校验
-    // + substatus/reason 参数 + 原子写（复用 core `update_module`）。
+    // + substatus/reason 落盘 + 原子写（复用 core `update_module`）。
     // 当前诚实返回未实现，避免用项目级 ProjectState 语义冒充模块级转换。
     Ok((
         json!({
@@ -551,19 +594,40 @@ fn cmd_state_transition(module: &str, to: &str) -> CmdResult {
             "implemented": false,
             "module": module,
             "requested_to": to,
+            "substatus": substatus,
+            "reason": reason,
         }),
         vec![
-            "state transition 需模块级状态机完整实现（合法性校验/substatus/reason/原子写），本 PR 未实现"
+            "state transition 需模块级状态机完整实现（合法性校验/substatus/reason 落盘/原子写），本 PR 未实现"
                 .to_owned(),
         ],
     ))
 }
 
-/// `stats loc`：迁移进度统计（按模块状态分类）。
+/// `stats loc`：当前返回迁移进度统计（按模块状态分类）。
+///
+/// 设计（`06-plugin-structure.md:99`）要求 `stats loc` = tokei 源码/Rust 代码行数统计，
+/// 当前实现接的是迁移进度统计 [`compute_stats`]，语义偏离。M1 临时占位，诚实标注。
+// TODO(M1-STATS): stats loc 改为 tokei 源码/Rust LOC 统计（复用 profile/detect 的 tokei）
 fn cmd_stats_loc() -> CmdResult {
     let machine = MigrationStateMachine::load(&state_path())?;
     let stats = compute_stats(machine.state_file());
-    Ok((serde_json::to_value(&stats)?, Vec::new()))
+    let mut data = serde_json::to_value(&stats)?;
+    if let Some(obj) = data.as_object_mut() {
+        obj.insert(
+            "note".to_owned(),
+            json!(
+                "当前返回迁移进度统计而非设计要求的 tokei 源码/Rust LOC（偏离 06:99），M1 临时占位"
+            ),
+        );
+    }
+    Ok((
+        data,
+        vec![
+            "当前返回迁移进度统计而非设计要求的 tokei 源码/Rust LOC（偏离 06:99），M1 临时占位"
+                .to_owned(),
+        ],
+    ))
 }
 
 /// `stats compare`：源码与 Rust 结构复杂度对比（推迟 M2）。

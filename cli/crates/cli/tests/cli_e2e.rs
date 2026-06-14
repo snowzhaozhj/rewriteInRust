@@ -135,7 +135,7 @@ fn e2e_topo_sort_circular_returns_nonzero_and_cycles() {
         let (code, json) = run(&["graph", "topo-sort"]);
         assert_eq!(code, 2, "有环应非零退出: {json}");
         assert_eq!(json["status"], "error");
-        assert_eq!(json["data"]["error"], "cyclic_dependency");
+        assert_eq!(json["data"]["kind"], "cyclic_dependency");
         let cycles = json["data"]["cycles"].as_array().expect("应含 cycles");
         assert!(!cycles.is_empty(), "应列出至少一个环");
     });
@@ -151,6 +151,12 @@ fn smoke_init() {
         assert_eq!(code, 0);
         assert_eq!(json["status"], "ok");
         assert_eq!(json["data"]["message"], "initialized");
+        // init 同时生成项目根 .rustmigrate.toml（设计 06:89）。
+        assert!(json["data"]["config_file"].is_string());
+        assert!(
+            Path::new(".rustmigrate.toml").exists(),
+            "init 应生成 .rustmigrate.toml"
+        );
     });
 }
 
@@ -273,7 +279,14 @@ fn smoke_state_transition_placeholder() {
     let tmp = tempfile::tempdir().unwrap();
     with_cwd(tmp.path(), || {
         let _ = run(&["init"]);
-        let (code, json) = run(&["state", "transition", "--module", "all", "--to", "translating"]);
+        let (code, json) = run(&[
+            "state",
+            "transition",
+            "--module",
+            "all",
+            "--to",
+            "translating",
+        ]);
         assert_eq!(code, 0, "占位响应应成功返回: {json}");
         // 占位携带「未实现」警告，Response 据此将 status 置为 warning（ok|warning|error 三态）。
         assert_eq!(json["status"], "warning");
@@ -303,8 +316,13 @@ fn smoke_stats_loc() {
         let _ = run(&["init"]);
         let (code, json) = run(&["stats", "loc"]);
         assert_eq!(code, 0, "stats loc 应成功: {json}");
-        assert_eq!(json["status"], "ok");
+        // 带 tokei 语义偏差告警，Response 据此将 status 置为 warning（见 cmd_stats_loc）。
+        assert_eq!(json["status"], "warning");
         assert_eq!(json["data"]["total_modules"], 0);
+        assert!(
+            json["data"]["note"].is_string(),
+            "应含 note 偏差说明: {json}"
+        );
     });
 }
 
