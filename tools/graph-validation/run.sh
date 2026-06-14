@@ -29,6 +29,7 @@ echo "[setup] 编译 dump_import_graph example..." >&2
 DUMP_BIN="$REPO_ROOT/cli/target/debug/examples/dump_import_graph"
 
 declare -a SUMMARIES=()
+gate_failed=0
 
 # repos.txt 格式：<name> <git_url> <commit_sha> <src_root>，# 开头为注释。
 while read -r name url sha src_root || [[ -n "${name:-}" ]]; do
@@ -73,8 +74,10 @@ while read -r name url sha src_root || [[ -n "${name:-}" ]]; do
   # 避免静默失败沿用陈旧/空数据 → compare 假绿（compare.js 另有 oracle 有效性兜底）。
   echo "[$name] dpdm..." >&2
   rm -f "$work/dpdm-raw.json"
+  # glob 覆盖 .ts/.tsx/.mts/.cts（depcruise 扫目录本就覆盖，dpdm 交叉验证侧需显式列全，
+  # 否则含 TSX 仓库的边从 dpdm 侧消失、交集变小 → 掩盖自研对 TSX import 的漏边）。
   ( cd "$repo" && "$ORACLE_BIN/dpdm" --no-warning --no-progress \
-      --output "$work/dpdm-raw.json" "$src_root/**/*.ts" >/dev/null ) || true
+      --output "$work/dpdm-raw.json" "$src_root/**/*.{ts,tsx,mts,cts}" >/dev/null ) || true
   if [[ ! -s "$work/dpdm-raw.json" ]]; then
     echo "[$name] ✗ dpdm 未产出有效输出（oracle 失败，compare 将判不达标）" >&2
   fi
@@ -82,13 +85,15 @@ while read -r name url sha src_root || [[ -n "${name:-}" ]]; do
       < "$work/dpdm-raw.json" > "$work/dpdm-norm.json"
 
   # 5. 差分对比 → 报告 + stdout summary（JSON 一行）
+  # compare.js 硬门未过时以非零退出；用 if 捕获退出码累计到 gate_failed（if 条件位置
+  # 豁免 set -e），跑完所有仓库后再统一非零退出，避免中途中止漏掉后续仓库。
   echo "[$name] compare..." >&2
-  summary="$( node "$SCRIPT_DIR/compare/compare.js" \
+  if summary="$( node "$SCRIPT_DIR/compare/compare.js" \
       --self "$work/self-norm.json" \
       --depcruise "$work/dc-norm.json" \
       --dpdm "$work/dpdm-norm.json" \
       --name "$name" --sha "$sha" --src "$src_root" \
-      --out "$REPORT_DIR/$name.md" )"
+      --out "$REPORT_DIR/$name.md" )"; then :; else gate_failed=1; fi
   echo "$summary"
   SUMMARIES+=("$summary")
 done < "$SCRIPT_DIR/repos.txt"
@@ -97,3 +102,8 @@ done < "$SCRIPT_DIR/repos.txt"
 echo "" >&2
 echo "==== 汇总（详见 reports/）====" >&2
 printf '%s\n' "${SUMMARIES[@]}"
+if [[ "$gate_failed" -ne 0 ]]; then
+  echo "✗ 硬门未通过：存在 gate_pass=false 的仓库（见上方报告）" >&2
+  exit 1
+fi
+echo "✓ 全部仓库硬门通过" >&2

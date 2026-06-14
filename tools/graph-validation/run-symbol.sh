@@ -9,7 +9,7 @@
 # 用法：
 #   ./run-symbol.sh            跑 repos.txt 全部仓库
 #   ./run-symbol.sh rxjs       只跑指定仓库
-set -uo pipefail
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"

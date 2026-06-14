@@ -38,20 +38,12 @@ function parseArgs() {
   return a;
 }
 
-// ---- 自研侧：路径已含扩展名，需归一化到与 oracle 同口径（去扩展名 / 去 index）----
-const TS_EXTS = ['.d.ts', '.tsx', '.mts', '.cts', '.ts', '.jsx', '.mjs', '.cjs', '.js'];
+// ---- 自研侧：路径已含扩展名，归一化到与 oracle 同口径 ----
+// 复用文件级 normalize.js 的 canonFile（同一套去扩展名 / 去 index 规则，避免两份实现
+// 口径漂移导致符号级对比假漏/假命中），仅补 null 守卫（符号 dump 的 callee.file 可能缺失）。
+const { canonFile: canonFileRaw } = require('./normalize.js');
 function canonFile(p) {
-  if (p == null) return null;
-  let s = String(p).split('\\').join('/');
-  for (const ext of TS_EXTS.slice().sort((a, b) => b.length - a.length)) {
-    if (s.endsWith(ext)) {
-      s = s.slice(0, -ext.length);
-      break;
-    }
-  }
-  if (s.endsWith('/index')) s = s.slice(0, -'/index'.length);
-  while (s.startsWith('./')) s = s.slice(2);
-  return s;
+  return p == null ? null : canonFileRaw(p);
 }
 
 // 文件级边集（忽略自环：自研 Calls 不产同文件边，oracle 也已剔同文件，双保险）。
@@ -153,22 +145,32 @@ function main() {
     results[k] = { metrics: m, diff: d, label: blocks[k].label };
   }
 
+  // oracle 整体有效性：三类边全空 = ts-morph 很可能静默失败（无真值基准），
+  // 此时各类 prf 因双空集返回 F1=1，必须标 invalid，否则软门报告假绿。
+  const oracleEdges =
+    results.calls.metrics.oracle_count +
+    results.extends.metrics.oracle_count +
+    results.implements.metrics.oracle_count;
+  const oracleValid = oracleEdges > 0;
+
   // stretch：callee 符号集合弱对比（仅 Calls；按 (callee_file) 分组比符号名集合）。
   const calleeSymbolNote = stretchSymbolNote(self, oracle);
 
+  // 各类软门警示：oracle 整体有效 + 该类有真值（oracle_count>0）+ F1 偏低。
+  const warnOf = (m) => oracleValid && m.oracle_count > 0 && m.f1 < WARN_F1;
   const summary = {
     name: args.name,
     sha: args.sha,
     src: args.src,
     level: 'file-aggregated',
+    oracle_valid: oracleValid,
     calls: results.calls.metrics,
     extends: results.extends.metrics,
     implements: results.implements.metrics,
     warn_f1: WARN_F1,
-    calls_warn: results.calls.metrics.f1 < WARN_F1,
-    extends_warn: results.extends.metrics.oracle_count > 0 && results.extends.metrics.f1 < WARN_F1,
-    implements_warn:
-      results.implements.metrics.oracle_count > 0 && results.implements.metrics.f1 < WARN_F1,
+    calls_warn: warnOf(results.calls.metrics),
+    extends_warn: warnOf(results.extends.metrics),
+    implements_warn: warnOf(results.implements.metrics),
     soft_gate: true,
   };
 
@@ -202,7 +204,11 @@ function stretchSymbolNote(self, oracle) {
 }
 
 function fmtRow(label, m) {
-  const warn = m.f1 < WARN_F1 && m.oracle_count > 0 ? ' ⚠️' : '';
+  // oracle 该类无边（oracle_count=0）：无真值基准，标 n.a. 而非误导性的 1.0/0。
+  if (m.oracle_count === 0) {
+    return `| ${label} | ${m.self_count} | 0 | ${m.tp} | n.a. | n.a. | **n.a.** |`;
+  }
+  const warn = m.f1 < WARN_F1 ? ' ⚠️' : '';
   return `| ${label} | ${m.self_count} | ${m.oracle_count} | ${m.tp} | ${m.precision} | ${m.recall} | **${m.f1}**${warn} |`;
 }
 
@@ -263,10 +269,12 @@ function writeReport(out, s, results, symNote) {
   L.push('> 符号级精确对比的口径对齐难点见 `tools/graph-validation/SYMBOL-PRECISION.md`。');
   L.push('');
 
-  const anyWarn = s.calls_warn || s.extends_warn || s.implements_warn;
   L.push('## 软门结论');
   L.push('');
-  if (anyWarn) {
+  if (!s.oracle_valid) {
+    L.push('⚠️ **oracle 无效**：ts-morph 三类关系边全空（很可能 tsconfig 加载失败 / 未安装 / 源码未被收集），');
+    L.push('无真值基准，本次软门跳过，请检查 oracle 运行日志（勿据此判定启发式效果）。');
+  } else if (s.calls_warn || s.extends_warn || s.implements_warn) {
     L.push('⚠️ 存在 F1 < 阈值的关系类别（属预期：启发式精度必然低于类型系统）。');
     L.push('请按下列方向区分「自研可改进 / 口径差异 / 启发式固有局限」：');
     L.push('- Calls 漏报：跨文件方法调用 `obj.method()`（自研只解析顶层函数/构造）、');
@@ -274,7 +282,7 @@ function writeReport(out, s, results, symNote) {
     L.push('- Calls 误报：同名不同模块的兜底匹配命中错误文件；');
     L.push('- Extends/Implements 漏报：跨多层 barrel 的基类型、泛型基类、外部基类型（已剔）。');
   } else {
-    L.push('✅ 各关系类别 F1 均达警示阈值以上。');
+    L.push('✅ 各有真值的关系类别 F1 均达警示阈值以上（oracle_count=0 的类别无真值，标 n.a.）。');
   }
   L.push('');
   fs.writeFileSync(out, L.join('\n') + '\n');

@@ -81,8 +81,22 @@ function main() {
   const cycNodeExtra = [...selfScc.cyclicNodes]
     .filter((n) => !dcScc.cyclicNodes.has(n) && !dpdmScc.cyclicNodes.has(n))
     .sort();
-  // 环集合一致 = 自研图的环上节点集合 ⊇ oracle 交集，且无双 oracle 都不认的多余环节点。
-  const cyclesConsistent = cycNodeMissing.length === 0 && cycNodeExtra.length === 0;
+
+  // SCC 分组结构一致性：仅比「环节点集合」会漏掉「大 SCC 被拆成多个小 SCC」——节点仍各在
+  // 某环里、集合相同，但拓扑分组已错（污染迁移序）。故对 oracle 交集边集重算 SCC，要求其
+  // 每个 SCC 的节点在自研图中落在同一个自研 SCC（未被拆开）。
+  const oracleScc = tarjanScc([...oracleIntersect].map((e) => e.split('\t')));
+  const selfSccOf = new Map();
+  selfScc.cycles.forEach((comp, i) => comp.forEach((n) => selfSccOf.set(n, i)));
+  const sccSplit = [];
+  for (const comp of oracleScc.cycles) {
+    const selfIds = new Set(comp.map((n) => selfSccOf.get(n)));
+    // size>1 = 被拆到多个自研 SCC；全 undefined（整环漏报）由 cycNodeMissing 另计，不重复惩罚。
+    if (selfIds.size > 1) sccSplit.push([...comp].sort());
+  }
+  // 环一致 = 环节点集合 ⊇ oracle 交集、无双 oracle 都不认的多余环节点、且无 oracle SCC 被自研拆分。
+  const cyclesConsistent =
+    cycNodeMissing.length === 0 && cycNodeExtra.length === 0 && sccSplit.length === 0;
 
   const recallPass = oracleValid && recall >= RECALL_GATE;
   const gatePass = oracleValid && recallPass && cyclesConsistent;
@@ -105,6 +119,7 @@ function main() {
     oracle_cycle_nodes: oracleCyclicNodes.size,
     cycle_nodes_missing: cycNodeMissing.length,
     cycle_nodes_extra: cycNodeExtra.length,
+    scc_split_count: sccSplit.length,
     cycles_consistent: cyclesConsistent,
     gate_pass: gatePass,
   };
@@ -120,6 +135,9 @@ function main() {
   });
 
   process.stdout.write(JSON.stringify(summary) + '\n');
+  // 硬门未过（含 oracle 无效）时以非零退出码退出，供 run.sh 感知并整体判失败，
+  // 否则验收门假绿（recall<0.98 / 环不一致 / oracle 静默失败时退出码仍为 0）。
+  if (!gatePass) process.exitCode = 1;
 }
 
 function sample(arr, n) {
@@ -190,6 +208,7 @@ function writeReport(out, s, detail) {
   L.push(`- oracle 交集环上节点数：${s.oracle_cycle_nodes}`);
   L.push(`- 自研缺失的环节点：${s.cycle_nodes_missing}`);
   L.push(`- 自研多出（双 oracle 都不认）的环节点：${s.cycle_nodes_extra}`);
+  L.push(`- oracle SCC 被自研拆分数（应为 0）：${s.scc_split_count}`);
   if (detail.cycNodeMissing.length) {
     L.push('');
     L.push('缺失环节点样本：`' + sample(detail.cycNodeMissing, 30).join('`, `') + '`');

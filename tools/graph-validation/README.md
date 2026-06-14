@@ -71,14 +71,17 @@ tree-sitter 启发式（非确定性），用 **ts-morph（TS 编译器类型检
 
 ### 结果（2026-06-14，含本 PR 的 interface extends 修复）
 
-| 仓库 | Calls (P/R/F1) | Extends (P/R/F1) | Implements |
-|------|----------------|------------------|------------|
-| rxjs | 1.0 / 0.65 / 0.79 | 1.0 / 1.0 / **1.0** | 1.0 / 1.0 / **1.0** |
-| fp-ts | 1.0 / 0.45 / 0.62 ⚠️ | 1.0 / 1.0 / **1.0** | — |
-| zod | 1.0 / 0.39 / 0.56 ⚠️ | — | — |
+oracle 该类无边时标 `n.a.`（无真值基准，非满分）。
 
-- **precision 恒 = 1.0**：自研启发式建的符号边**零误报**——精确但不全。对迁移用途（图可信、不误导）是最优属性。
-- **Extends/Implements F1 = 1.0**：继承图完整准确（含本 PR 修复的 interface extends）。
+| 仓库 | Calls (P/R/F1) | Extends (P/R/F1) | Implements (P/R/F1) |
+|------|----------------|------------------|---------------------|
+| rxjs | 1.0 / 0.65 / 0.79 | 1.0 / 1.0 / **1.0** | 1.0 / 1.0 / **1.0** |
+| fp-ts | 1.0 / 0.45 / 0.62 ⚠️ | 1.0 / 1.0 / **1.0** | n.a.（oracle 无边） |
+| zod | 1.0 / 0.39 / 0.56 ⚠️ | n.a.（oracle 无边） | 0 / 0 / **0** ⚠️ |
+
+- **precision：有真值的类别均为 1.0**（自研符号边零误报，精确但不全）——唯一例外 zod Implements：自研 0 边 / oracle 1 边，漏报 `types → helpers/parseUtil`（跨 barrel 的接口实现），precision 取 0。
+- **Extends F1 = 1.0**（rxjs/fp-ts，含本 PR 修复的 interface extends）；zod 无 interface extends（oracle 0 边，标 n.a.）。
+- **Implements**：rxjs 1.0；fp-ts oracle 无边（n.a.）；**zod 漏报 1 条**（`types` 实现 `helpers/parseUtil` 的接口，跨 barrel）——已知启发式局限，记 `TODO`。
 - **Calls F1 0.56~0.79（⚠️ 软门警示）**：recall 偏低，根因 tree-sitter 启发式**不解析方法调用 `obj.method()`**（只认顶层函数 + `new`）。这是启发式根本边界，需类型系统才能解 —— 记 `TODO`，迁移主靠 import 拓扑（已达硬门），Calls 是辅助信号。
 
 ### harness 发现并修复的第二个建图 bug：interface extends 全漏

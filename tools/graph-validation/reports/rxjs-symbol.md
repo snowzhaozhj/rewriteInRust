@@ -1,6 +1,6 @@
 # 符号级精度差分报告（文件级聚合）— rxjs
 
-- 仓库 SHA：`x`　src 根：`src/internal`
+- 仓库 SHA：`72bc92191ab959e27a969dc4476e14d95416573f`　src 根：`src/internal`
 - oracle：ts-morph 类型检查器（真值）　预测：自研 tree-sitter 启发式
 - 对比口径：**文件级聚合**（caller_file→callee_file，忽略符号名）
 - 软门：F1 < 0.7 标注「⚠️ 启发式效果偏低」，**不阻断**（退出码恒 0）
@@ -67,5 +67,5 @@ ajax/ajax -> ajax/types
 
 ## 软门结论
 
-✅ 各关系类别 F1 均达警示阈值以上。
+✅ 各有真值的关系类别 F1 均达警示阈值以上（oracle_count=0 的类别无真值，标 n.a.）。
 
