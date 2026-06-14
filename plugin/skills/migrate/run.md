@@ -25,4 +25,6 @@
 - `.rust-migration/porting/` 存在且含规则文件
 - 目标模块已在 Sprint 计划中
 
+> **状态衔接缺口**：`/migrate analyze`（Phase 3）当前将项目 state 推进到 `profile`；到 `sprint_loop` 的推进（经 PLAN/SCAFFOLD）依赖项目级 `state transition` 落盘（M1-STATE-04，当前 TODO）。Phase 4 实现本命令时一并接入该推进，使 analyze→run 衔接闭合。
+
 > Phase 4 实现时，把上述骨架展开为完整分步指令，并对齐 `state transition` CLI（M1-STATE-04）的 substatus 落盘。

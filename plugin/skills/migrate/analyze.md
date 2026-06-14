@@ -55,17 +55,19 @@ COMPLETED = .metadata.graph_build_completed
 
 > 为何无需轮询：该字段由 CLI 在 COMMIT 后原子写入，MVP 串行下 Step 2 的 Bash 调用返回后必然已落盘，单次读取判定即可。`graph build` 是覆盖式重建，重跑安全。这属于**前置条件验证**，不走 `max_retries_per_step` 重试。
 
-门禁通过后，用 Agent tool 调用 **analyzer** SubAgent 做语义增强（补 calls/uses_type 边、复杂度标注）。
-**检查点**：analyzer 返回后，确认 `source-graph.db` 含 calls/uses_type 边（L3 语义校验，M1 可人工 sampling）。
+门禁通过后，用 Agent tool 调用 **analyzer** SubAgent 做语义分析与标注。
+
+> **MVP 范围（重要）**：基础 calls 边由 `graph build`（tree-sitter，含跨文件解析）产出，analyzer 验证其存在并做复杂度 / 惯用法标注。**跨文件方法调用补边与 uses_type 边因 CLI 暂无"补边写入"命令、且"写图统一走 CLI"，MVP 不由 analyzer 直写** `source-graph.db`，推迟 M2（见 PLAN §10 M2-REFAC-10）。analyzer 在 MVP 的产出是画像摘要 + 标注，不写库。
+
+**检查点**：analyzer 返回后，执行 `rustmigrate graph stats` 确认 `data` 中 calls 边分类计数 > 0（uses_type 为 M2，不作 M1 门禁）。
 
 ### Step 2.8: 拓扑排序探测（循环依赖前置门禁）
-生成初始状态前执行 `rustmigrate graph topo-sort`，按退出码分支：
-- 退出码 0 → 排序成功，继续 Step 3。
-- 非零退出 → 解析诊断 JSON：
-  - `error == "graph_truncated"`（增量构建触发断路器，图不完整）→ 提示用户执行 `rustmigrate graph build --full` 后重跑 `/migrate analyze`，不进入 Step 3。
-  - 输出含 `cycle_path`（检测到环）→ 输出环路径并**暂停**，提示用户二选一打破循环：(a) 在源项目临时注释环上某条 import 后重跑 `/migrate analyze`；(b) 将环内模块标记 `requires_manual_review` 降级，人工拆环后再迁移。
+生成初始状态前执行 `rustmigrate graph topo-sort`，按退出码 + `data` 分支（字段对齐真实 CLI 输出）：
+- 退出码 0 → 排序成功（`data.order` 为迁移顺序），继续 Step 3。
+- 退出码非 0（环检测为 2）→ 解析 `data`：
+  - `data.kind == "cyclic_dependency"` → `data.cycle_path` 为环路径数组，输出并**暂停**，提示用户二选一打破循环：(a) 在源项目临时注释环上某条 import 后重跑 `/migrate analyze`；(b) 将环内模块标记 `requires_manual_review` 降级（Phase 4 接 `state transition` 时映射到状态机枚举 `degrade_manual`），人工拆环后再迁移。
 
-> 完整 SCC 检测见 M2 `graph cycles`；此处只做 MVP 轻量门禁，防止有环图进入后续翻译。
+> **图截断分支不在 MVP**：设计的「增量构建断路器 → 提示 `graph build --full`」依赖 M2 增量构建；当前 `graph build` 等价全量重建，不会触发截断，CLI 暂不输出该信号，故 MVP 不处理。完整 SCC 检测见 M2 `graph cycles`；此处只做轻量门禁，防止有环图进入后续翻译。
 
 ### Step 3: 更新迁移状态
 基于 analyzer 产出，更新 `migration-state.json`：state 从 init 转为 profile，填充 project/modules/sprint 字段；保留 Step 2 已写入的 `metadata.graph_build_completed`。
@@ -91,7 +93,9 @@ COMPLETED = .metadata.graph_build_completed
 **检查点（L1）**：`test-fixtures/golden/` 存在且非空。
 
 ### Step 7: 输出摘要
-向用户展示项目画像摘要：源语言、代码行数、模块数、依赖数、建议迁移策略。释放全局锁（Step 0），提示用户下一步执行 `/migrate run`。
+向用户展示项目画像摘要：源语言、代码行数、模块数、依赖数、建议迁移策略。释放全局锁（Step 0）。
+
+> **状态衔接**：附录 B 的 analyze 骨架 Step 3 将项目 state 推进到 `profile`。`/migrate run` 前置要求的 `sprint_loop`（经 PLAN/SCAFFOLD 状态）依赖项目级 `state transition` 落盘（M1-STATE-04，当前 TODO），Phase 4 接入。故当前 analyze 完成后 state 停在 `profile`；待 Phase 4 落地后再提示执行 `/migrate run`。
 
 ## 失败处理
 任一 SubAgent 调用（Step 2.5/4/6）校验失败时，按 [SKILL.md](./SKILL.md) 的失败恢复三步处理（记录→诊断重试→降级/回滚）。回滚清理范围见 `09-appendix-schemas.md` 附录 B「关键检查点的失败恢复规则」表；`intermediate/attempts/*` 始终保留。

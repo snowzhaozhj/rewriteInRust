@@ -29,7 +29,7 @@ argument-hint: "[analyze|run|review] [module]"
 - 命令清单（M1 共 13 个）：`init`、`profile --root`、`graph build --root [--full]`、`graph topo-sort`、`graph deps <m>`、`graph interfaces <m> [--deps-of <t>]`、`graph stats`、`validate state`、`state get <m>`、`state transition --module --to [--substatus] [--reason]`、`stats loc`、`stats compare`、`scaffold workspace [--target] [--name]`。
 
 ### SubAgent 编排（权威：06-plugin-structure.md §10.2 / §10.5）
-- 用 **Agent tool** 调用 SubAgent，`agentType` 取 agent 名（`analyzer` / `translator` / `scaffolder` / `verifier`）。若 Plugin 命名空间要求前缀，则用 `rust-migrate:analyzer` 形式——此为运行时行为，待 M1-PLG-05 交互式 Live 验证确认。MVP 阶段 SubAgent **串行执行**，通过 `.rust-migration/` 下的文件通信，不直接对话。
+- 用 **Agent tool** 调用 SubAgent，参数 `subagent_type` 取 agent 名（`analyzer` / `translator` / `scaffolder` / `verifier`）。若 Plugin 命名空间要求前缀，则用 `rust-migrate:analyzer` 形式。参数名与命名空间均属运行时行为，待 M1-PLG-05 交互式 Live 验证确认（设计 §10.2.1 记为 `agentType`，以真实工具参数 `subagent_type` 为准）。MVP 阶段 SubAgent **串行执行**，通过 `.rust-migration/` 下的文件通信，不直接对话。
 - **不解析 SubAgent 的返回文本判断成功**。每次调用后只做产出物的确定性校验：
   - **L1 存在性**：文件存在、非空、含关键标题（Markdown / 代码 / 配置产出物）。
   - **L2 结构校验**：JSON 产出物（`migration-state.json`、测试结果）格式合法、关键字段非空；`source-graph.db` 必要表存在。
