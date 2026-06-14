@@ -38,6 +38,10 @@ argument-hint: "[analyze|run|review] [module]"
 
 ### SubAgent 编排
 - 用 **Agent tool** 调用 SubAgent，参数 `subagent_type` 取带插件命名空间前缀的 agent 名：`rust-migrate:analyzer` / `rust-migrate:translator` / `rust-migrate:scaffolder` / `rust-migrate:verifier`。MVP 阶段 SubAgent **串行执行**，通过 `.rust-migration/` 下的文件通信，不直接对话。
+- **调用前后记台账**（每次 Agent 调用都做，含重试；否则 `subagent_calls` 恒空、卡死/重试无法诊断）：
+  - 调用**前**：`rustmigrate state record-subagent-call --step-index <子命令步骤号> --subagent-name <analyzer|translator|verifier|scaffolder> --status started`。
+  - 调用**后**：按结果再记一条 `--status ok`（产出物校验通过）或 `--status error --error-message "<原因>"`（校验失败 / 超时）。`--step-index` 与 `--subagent-name` 同上一条对齐。
+  - 子命令各调用点已标注本步的 `step_index`；统一用该步整数号，便于按步聚合统计。
 - **不解析 SubAgent 的返回文本判断成功**。每次调用后只做产出物的确定性校验：
   - **L1 存在性**：文件存在、非空、含关键标题（Markdown / 代码 / 配置产出物）。
   - **L2 结构校验**：JSON 产出物（`migration-state.json`、测试结果）格式合法、关键字段非空；`source-graph.db` 必要表存在。

@@ -282,6 +282,13 @@ impl MigrationStateMachine {
                 module.attempts.clear();
             }
             module.status = target;
+            // graduate 到 Done：清空 testing/review 阶段残留的 substatus（如
+            // phase_b_optimization_in_progress / incomplete_*），避免污染 review 仪表板。
+            // 仅清 Done；degrade_*（DegradeFfi/Manual/Skip）的 substatus 含降级原因须保留。
+            // 清空在前、显式 substatus 覆盖在后，故 done 时显式传 substatus 仍能设上。
+            if target == ModuleStatus::Done {
+                module.substatus = None;
+            }
         }
 
         // 显式 substatus 覆盖（在转换副作用之后，允许恢复转换同时指定新 substatus）。
@@ -688,6 +695,40 @@ mod tests {
         assert_eq!(module.status, ModuleStatus::Translating);
         assert!(module.substatus.is_none());
         assert!(module.attempts.is_empty());
+    }
+
+    #[test]
+    fn test_transition_module_to_done_clears_substatus() {
+        // graduate 到 Done 时清空 testing/review 阶段残留的 substatus。
+        let mut m = new_machine();
+        let mut module = module_with_status(ModuleStatus::Reviewing);
+        module.substatus = Some("phase_b_optimization_in_progress".to_owned());
+        m.update_module("a", module);
+        m.transition_module("a", Some(ModuleStatus::Done), None, None, false)
+            .unwrap();
+        let module = &m.state_file().modules["a"];
+        assert_eq!(module.status, ModuleStatus::Done);
+        assert!(module.substatus.is_none());
+    }
+
+    #[test]
+    fn test_transition_module_to_done_explicit_substatus_wins() {
+        // done 时显式传 substatus：清空在前、显式覆盖在后，最终应保留显式值。
+        let mut m = new_machine();
+        let mut module = module_with_status(ModuleStatus::Reviewing);
+        module.substatus = Some("incomplete_stub".to_owned());
+        m.update_module("a", module);
+        m.transition_module(
+            "a",
+            Some(ModuleStatus::Done),
+            Some("graduated_with_note"),
+            None,
+            false,
+        )
+        .unwrap();
+        let module = &m.state_file().modules["a"];
+        assert_eq!(module.status, ModuleStatus::Done);
+        assert_eq!(module.substatus.as_deref(), Some("graduated_with_note"));
     }
 
     #[test]

@@ -119,7 +119,7 @@ Plugin 中的确定性计算由独立的 Rust CLI 工具 `rustmigrate` 承担，
 | `rustmigrate state populate-modules` | 用源码图迁移序列填充 `migration-state.json` 的 `modules`/`sprint`（PLAN 操作）：读 `source-graph.db` → `migration_sequence()` 拓扑序 → 每个文件模块写 `{status:pending, sprint:1, risk:low}`（module key 用 NodeId 原值，与 `graph deps` 输出一致）+ `sprint.current=1`；有环拒绝填充。是 `/migrate analyze`→`/migrate run` 衔接的 PLAN 落盘环节（见 PLAN.md §9.5） |
 | `rustmigrate stats loc` | 统计源码和 Rust 代码行数（嵌入 tokei） |
 | `rustmigrate stats compare` | 源码与 Rust 结构复杂度对比（函数数量比、代码行数比、控制流嵌套层级）——复用 tokei + tree-sitter 函数计数，作为 Phase A 结构校验门禁（见 03 § 4.3 Step 4.5） |
-| `rustmigrate scaffold workspace` | 生成 Cargo workspace 骨架（注入 dev-dependencies） |
+| `rustmigrate scaffold workspace` | 生成 Cargo workspace 基础骨架（委托 `cargo init`）；dev-dependencies 与 `deny.toml` 由 scaffolder SubAgent 按项目测试需求注入 |
 
 **M2 扩展 — 5 个命令**：
 

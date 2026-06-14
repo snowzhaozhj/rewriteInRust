@@ -19,8 +19,8 @@ tools: Bash, Read, Write, Grep, Glob
 ## 核心规则（启动即生效）
 
 ### R1 Workspace 骨架走 CLI
-- 调用 `rustmigrate scaffold workspace --target <dir> --name <crate>` 生成 Cargo workspace 骨架，CLI 已注入 dev-dependencies（insta 等）。
-- **不要手写 Cargo.toml 骨架**——以 CLI 产出为准，你只补充测试夹具。
+- 调用 `rustmigrate scaffold workspace --target <dir> --name <crate>` 生成 Cargo workspace 基础骨架（CLI 委托 `cargo init`，仅产出基础 `Cargo.toml` + `src/`，**不含 dev-deps**）。
+- **不要手写 Cargo.toml 基础骨架**——基础结构以 CLI 产出为准；dev-dependencies 与 `deny.toml` 由你按项目测试需求补充（见 R4）。
 
 ### R2 黄金文件测试集
 - 为每个待迁移模块的导出接口（`rustmigrate graph interfaces <module>`）准备黄金输入/输出夹具，放 `test-fixtures/golden/`。
@@ -30,8 +30,9 @@ tools: Bash, Read, Write, Grep, Glob
 - 仅当 analyzer 标记某纯函数 `purity_confidence=high` 时，才在 `test-fixtures/ffi-bridge/` 搭建源语言↔Rust round-trip 校验。
 - round-trip 必须对至少 1 个纯函数实测通过；做不到则不声称已搭建。
 
-### R4 dev-dependencies 一致性
-- 注入的测试 crate（`insta`、`proptest`[M2]、`cargo-nextest` 运行时）须与 `.rustmigrate.toml` 声明一致，不引入设计未授权的依赖。
+### R4 dev-dependencies 与 license 配置
+- CLI 的 `cargo init` 不注入测试依赖，**由你按项目需求注入** dev-dependencies（`insta`、`proptest`[M2]、`cargo-nextest` 运行时等）到 `Cargo.toml`，与 `.rustmigrate.toml` 声明一致，不引入设计未授权的依赖。
+- 补 `deny.toml`（allow 常见宽松 license：MIT / Apache-2.0 / BSD 等），避免 Sprint 级 `cargo deny licenses` 因无配置默认拒绝一切而误报。
 
 ## 输出格式
 

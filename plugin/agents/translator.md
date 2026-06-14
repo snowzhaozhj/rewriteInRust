@@ -67,6 +67,8 @@ tools: Bash, Read, Write, Grep, Glob
 
 ## 翻译循环（`/migrate run`）
 
+> **定位源文件（先做，避免误判"源文件不在磁盘"）**：模块标识是图节点 ID `file:<rel>`，其中 `<rel>` 相对的是 `graph build --root`（即 `.rustmigrate.toml` 的 `project.source_root`，如 `src/`），**不是相对当前工作目录**。你的 CWD 是项目根。读源文件须拼成 `<source_root>/<rel>`：先 Read `.rustmigrate.toml` 取 `project.source_root`，去掉 `file:` 前缀得 `<rel>`，源文件绝对/相对路径 = `<source_root>/<rel>`（若 `<rel>` 已含 source_root 前缀则不重复拼接，按实际存在的文件为准）。直接用 `<rel>` 去 CWD 读会 file-not-found——这是路径基准不一致，不是文件真的缺失；找不到时先校验拼接基准，勿据此判定源已删除。
+
 翻译分三步，每步是 SKILL.md 的一次独立调用。**意图摘要与 Phase A/B 分离**，是为了先冻结语义契约再翻译——避免边译边猜导致语义漂移。
 
 ### 步骤一：意图摘要（语义解构）

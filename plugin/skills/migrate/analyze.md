@@ -20,9 +20,11 @@
 **检查点**：`rustmigrate graph stats` 的节点/边非空；`migration-state.json` 的 `metadata.graph_build_completed == true`（CLI 在事务提交后才原子写入该字段）。任一不满足按 build 失败停止——后续步骤全部依赖这张图。
 
 ### 4. 语义分析（analyzer）
-用 Agent tool 调 `rust-migrate:analyzer`：验证 `graph build` 产出的 calls 边、做复杂度与惯用法标注，产出画像摘要。MVP 不直写图（跨文件补边推迟 M2）。
+调 `rust-migrate:analyzer`（**前/后记 subagent_call**，见 SKILL.md「SubAgent 编排」，本步 step_index=4）：验证 `graph build` 产出的 calls 边、做复杂度与惯用法标注，产出画像摘要。MVP 不直写图（跨文件补边推迟 M2）。
 
-**检查点**：`rustmigrate graph stats` 的 calls 边计数 > 0。
+**检查点**（按是否含函数节点分流）：读 `rustmigrate graph stats` 的 `nodes_by_type`。
+- `nodes_by_type.function > 0`（项目含函数）→ 要求 `edges_by_type.calls > 0`，否则视为 calls 漏报、按失败处理。
+- `nodes_by_type` 无 `function` 或 `function == 0`（纯类型定义 / 空文件，如 edge-cases fixture）→ `calls == 0` 是正确值而非漏报，**跳过本检查**，直接进下一步。
 
 ### 5. 拓扑排序 + 填充迁移序列
 `rustmigrate graph topo-sort`：
@@ -37,7 +39,7 @@
 **检查点**：state == `plan`、`data.module_count > 0`。
 
 ### 6. 生成迁移规则（translator）
-用 Agent tool 调 `rust-migrate:translator`，输入 `source-graph.db` + `adapters/<language>/porting-template.md`（Read 后注入上下文），产出 `.rust-migration/porting/`（dependency-mapping.md、core-rules.md 等）。
+调 `rust-migrate:translator`（**前/后记 subagent_call**，step_index=6），输入 `source-graph.db` + `adapters/<language>/porting-template.md`（Read 后注入上下文），产出 `.rust-migration/porting/`（dependency-mapping.md、core-rules.md 等）。
 
 **检查点**：`porting/` 非空，至少一个 `.md` 大小 > 0 且含关键标题（如 `## 类型映射`）。
 
@@ -47,7 +49,7 @@
 - `.rust-migration/AGENTS.md`——AI 行为约束，从模板生成并注入项目特有约束。
 
 ### 8. 搭建测试基础设施（scaffolder）
-用 Agent tool 调 `rust-migrate:scaffolder`，输入 `source-graph.db` + 模块接口（`rustmigrate graph interfaces <module>`），产出 `test-fixtures/golden/` 下的测试数据 + Cargo dev-dependencies。
+调 `rust-migrate:scaffolder`（**前/后记 subagent_call**，step_index=8），输入 `source-graph.db` + 模块接口（`rustmigrate graph interfaces <module>`），产出 `test-fixtures/golden/` 下的测试数据 + Cargo dev-dependencies。
 
 **检查点**：`test-fixtures/golden/` 非空。
 
