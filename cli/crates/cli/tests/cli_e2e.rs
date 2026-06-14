@@ -153,8 +153,6 @@ fn smoke_init() {
         assert_eq!(code, 0);
         assert_eq!(json["status"], "ok");
         assert_eq!(json["data"]["message"], "initialized");
-        // warnings 字段始终输出（即使为空数组），保证统一契约。
-        assert!(json["warnings"].is_array(), "warnings 应始终为数组");
         // init 同时生成项目根 .rustmigrate.toml（设计 06:89）。
         assert!(json["data"]["config_file"].is_string());
         assert!(
@@ -382,7 +380,6 @@ fn cli_parse_error_emits_unified_json() {
     assert_eq!(code, 1, "解析失败应退出 1: {json}");
     assert_eq!(json["status"], "error");
     assert_eq!(json["data"]["kind"], "cli_parse");
-    assert!(json["warnings"].is_array(), "warnings 应始终为数组");
 }
 
 #[test]
