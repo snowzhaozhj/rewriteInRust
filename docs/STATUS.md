@@ -5,37 +5,26 @@
 ## 当前位置
 
 - **Milestone**: M1 MVP
-- **Phase**: Phase 1 四路并行实现 ✅（含两轮审查修复）
-- **下一步**: P1 源码图差分校验 harness（M1 验收门）→ 然后 Phase 2（集成验证）
+- **Phase**: Phase 1 ✅ → 源码图校验 harness ✅（M1 验收门）→ Phase 2 集成验证 ✅
+- **下一步**: M1 收尾补做 3 项（见下）→ M1 graduate
 
 ## 进行中的任务
 
-_无_（`worktree-phase1-impl` 已 push commit `098f164`，code-review 修复 PR 待开）
+- **PR #5**（`feat/m1-graph-validation-harness`）源码图校验 harness（文件级硬门 + 符号级软门 + 建图修复）：已合并 master ✅
+- **PR #3**（`feat/m1-integ-phase2`）Phase 2 集成验证（13 命令路由 + E2E + 契约修复 + 双审查 + merge master）：待验收
 
 ## 下一步
 
-> **优先级 1（下一个独立 PR，M1 验收门）**：源码图差分校验 harness。
-> 应在 analyzer / translator 等下游阶段往图上盖楼**之前**完成——图是它们信任的地基。
+> **M1 收尾补做（3 项独立小任务）**：集成接线（PR#3）暴露的设计要求子功能 —— 对应 Worker 模块已实现主体，但漏了这几个子项。CLI 当前诚实占位（不糊弄），需在 M1 graduate 前补做。详见 PLAN.md 对应 Worker 任务。
 
-### P1. 源码图差分校验 harness（独立 PR · M1 验收门）
+| 任务 | 内容 | 设计出处 | 当前 CLI 状态 |
+|------|------|----------|--------------|
+| **M1-STATE-04** | 模块级 `ModuleStatus` 转换（substatus/reason 落盘 + 合法性校验 + 原子写） | 09-appendix | `state transition` 占位 `implemented:false` |
+| **M1-PROFILE-04** | profile 工具可用性检测（ADAPTER/RUST_TOOL_MISSING，按 `analysis-tools.json`） | 06:90 | profile 占位 + warning |
+| **M1-PROFILE-05** | `stats loc` 改 tokei 源码/Rust LOC | 06:99 | 借用 coverage 迁移进度，语义偏离 |
 
-- **目的**：在真实 TS 仓库上，把自研「文件级 import 图 + 环检测」与外部成熟依赖图工具**差分对比**，确认建图正确性。
-- **关键决策（已定，勿改）**：
-  - 只校验**文件级 import 图 + 环**（驱动拓扑序的关键层）；符号级 Calls/Extends 不纳入（tree-sitter 启发式、设计上即近似）
-  - Oracle = **dependency-cruiser（主）+ dpdm（交叉验证）**；**不用 madge**（`04-toolchain.md:155` 已评估其停更并选用 dependency-cruiser 替代）
-  - 绕过 CLI（graph 命令仍 `todo!("Phase 2")`）：新建 `cli/crates/core/examples/dump_import_graph.rs` 直调 core API（`build_graph_ts` + `detect_cycles`，取 `EdgeType::Imports` 边）
-  - 两侧**归一化**到同一边形式（相对 src 根、posix、去扩展名、仅项目内边、type-only 两侧一致）
-  - **硬门**：对双 oracle 交集的边召回 ≥ 0.98 + 环集合一致
-  - 产物：`tools/graph-validation/`（run.sh + repos.txt 钉版本/sha + oracle/compare 脚本 + reports/）+ `just validate-graph`
-- **时机理由**：图刚经 code-review 加固＝干净基线；它是下游所有阶段的地基，错误会向下复利；设计已留槽位（`08-roadmap`「3 个公开中型 TS 项目验收」/ `03 §`「M1 验收 3 真实项目校准」）。设计标注「非 M1 阻断」，极端时间压力下可滑至 M2 前 2 周，但不建议推后。
-- **完整提示词**：已生成（见对应会话记录），新会话直接粘贴执行；产物按阶段交付流程单独提 PR。
-
-### P2. Phase 2（集成验证）— 不依赖 P1，可并行
-
-   - M1-INTEG-01: `main.rs` 全命令路由（clap subcommands）
-   - M1-INTEG-02: Thin E2E: init → graph build → graph topo 链路
-   - M1-INTEG-03: 所有命令输出符合 JSON 格式
-   - M1-INTEG-04: `just ci` 全量通过
+> **M2 推迟项**（已在代码 TODO 标注，不在 M1 范围）：增量构建、`graph build --profile` 性能画像、`graph interfaces --deps-of` 批量、`stats compare` 结构对比、ErrorData structured context。
+> **M2 符号级精度提升**：跨文件方法调用 `obj.method()` 解析（PLAN §10 **M2-REFAC-10**，已补 2026-06-14 调研的分档方案/recall ~70% 天花板/stack-graphs 避坑；档1 零歧义增强低成本可先做）。
 
 ## 阻塞项
 
@@ -138,3 +127,5 @@ _无_（`worktree-phase1-impl` 已 push commit `098f164`，code-review 修复 PR
 | 2026-06-07 | M0 Sprint 0 Spike S0+S3 完成 | 777da76 |
 | 2026-06-07 | Phase 0 冻结合约 | b3922c2 |
 | 2026-06-14 | code-review 修复（图提取/跨文件解析/确定性/hooks，121 测试） | 098f164 |
+| 2026-06-14 | 源码图校验 harness（文件级硬门 + 符号级软门 + barrel/interface 修复 + 双审查）PR#5 | 已合并 |
+| 2026-06-14 | Phase 2 集成验证（13 命令路由 + E2E + 契约修复 + codex/code-review 双审查 + merge master）PR#3 | 待验收 |

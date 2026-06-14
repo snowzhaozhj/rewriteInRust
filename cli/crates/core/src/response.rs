@@ -110,6 +110,7 @@ impl From<MigrateError> for Response<ErrorData> {
             MigrateError::Json(_) => "json",
             MigrateError::Io(_) => "io",
             MigrateError::Toml(_) => "toml",
+            MigrateError::TomlSer(_) => "toml",
             MigrateError::FileNotFound(_) => "file_not_found",
             MigrateError::SchemaValidation(_) => "schema_validation",
             MigrateError::LockConflict(_) => "lock_conflict",

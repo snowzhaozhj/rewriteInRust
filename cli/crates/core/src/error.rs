@@ -49,6 +49,10 @@ pub enum MigrateError {
     #[error("TOML 解析错误: {0}")]
     Toml(#[from] toml::de::Error),
 
+    /// TOML 序列化失败。
+    #[error("TOML 序列化错误: {0}")]
+    TomlSer(#[from] toml::ser::Error),
+
     /// 文件不存在。
     #[error("文件不存在: {0}")]
     FileNotFound(PathBuf),

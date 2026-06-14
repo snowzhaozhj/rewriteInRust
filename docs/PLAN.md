@@ -313,6 +313,7 @@ cargo nextest run -p rustmigrate-core --filter-expr 'test(graph::)'
 | M1-STATE-01 | `machine.rs`：状态机（INIT→PROFILE→PLAN→SCAFFOLD→SPRINT_LOOP→GRADUATE） |
 | M1-STATE-02 | `validate.rs`：状态转换前置条件检查 |
 | M1-STATE-03 | `validate/rules.rs`：Tier 0/1/2 验证规则定义 |
+| M1-STATE-04 | 模块级 `ModuleStatus` 转换（CLI `state transition`：解析 ModuleStatus + substatus/reason 落盘 + 合法性前置校验 + 原子写）；区别于 01 的项目级状态机。当前 CLI 诚实占位（`implemented:false`），**M1 收尾补做**（09-appendix） |
 
 **四元组 Done**：
 
@@ -336,6 +337,8 @@ cargo nextest run -p rustmigrate-core --filter-expr 'test(state::) | test(valida
 | M1-PROFILE-01 | `profile/detect.rs`：语言检测 + 文件统计 + 复杂度评估 |
 | M1-PROFILE-02 | `scaffold/template.rs`：生成 Cargo.toml + src/ 骨架 |
 | M1-PROFILE-03 | `stats/coverage.rs`：模块迁移进度 + 覆盖率计算 |
+| M1-PROFILE-04 | profile 工具可用性检测：按 `analysis-tools.json` 验证适配器工具+版本 → `ADAPTER_TOOL_MISSING`；检测 `cargo-nextest` → `RUST_TOOL_MISSING`。当前 CLI 占位 + warning，**M1 收尾补做**（06:90） |
+| M1-PROFILE-05 | `stats loc`：tokei 源码/Rust LOC 统计，替换当前借用 coverage 迁移进度的占位语义。**M1 收尾补做**（06:99） |
 
 **四元组 Done**：
 
@@ -517,6 +520,13 @@ Phase A（忠实翻译）→ Tier 0 验证 → Phase B（惯用化）→ Tier 0+
 | M2-REFAC-10 | 跨文件方法调用解析：需 import→class→method 关联 | `service.doWork()` 正确解析到目标 Function 节点 |
 | M2-REFAC-11 | fixup_extends 名称索引：HashMap 替代 O(N) linear find | 同名歧义 emit warning，大型项目不退化 |
 | M2-REFAC-12 | walk_ast class 递归：extract_class 内处理 dynamic import 等嵌套模式 | 类方法内 `import('./lazy')` 被正确捕获 |
+
+> **M2-REFAC-10 实现指引**（2026-06-14 调研补充，符号级 Calls 精度提升）：保 **precision=1.0 优先**，分档做：
+> - **现实天花板**：方法调用 recall ~70% 封顶（PyCG, ICSE 2021, arxiv 2103.00587：P 99.2% / R 69.9%）——纯 tree-sitter 做不到 import 拓扑的 ~1.0，符号级 Calls 永远是**辅助信号**，别期望硬门级精度。
+> - **档 1（低成本先做）**：`obj.method()` 仅当全库该方法名**唯一**时连边 + `new Foo(); x.bar()` 局部 receiver 绑定。白赚 recall，**不破 precision**（不做模糊匹配）。
+> - **档 2（中期，每语言一个 extractor）**：GitNexus 式轻量 receiver 类型环境——per-file 收集「变量→类型」（Tier0 显式注解 + Tier1 构造器推断 + this/self），call site 按 receiver 类型过滤候选。蓝图见 `~/workspace/explore/GitNexus/type-resolution-system.md`；不依赖 tsconfig、天然多语言、与软门「宁漏不错」哲学一致。
+> - **评测**：ts-morph 固定为 CI oracle（已有 `tools/graph-validation`），量化每次改动的 recall 提升、守 precision 不回退；**不进运行时**（避免绑 tsconfig + 锁死 TS）。
+> - ⚠️ **避坑**：GitHub `stack-graphs` 已于 2025-09 归档，且只解 name binding 不解类型化方法分派，勿引入。
 
 ### Sprint 6：高级功能
 
