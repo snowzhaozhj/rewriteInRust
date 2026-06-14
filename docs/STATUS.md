@@ -34,7 +34,24 @@
 
 ## Handoff Note
 
-**本次完成**：Phase 1 第二轮 code-review 修复（commit `098f164`）
+**本次完成**：M1 收尾 3 项（PR #7，分支 `feat/m1-finalize`）实现 + 三方审查 + 两轮修复。
+
+### M1 收尾 3 项审查闭环（2026-06-14）
+
+- 实现 commit `af0cd68`；审查修复 `0fa9210`（/code-review）+ `ca3b37f`（codex + pr-review-toolkit 5 agent + /code-review 三方汇总）。
+- 质量门全过：fmt + clippy -D warnings + 139 core + 25 e2e；design-checker 无 MISMATCH。
+- **待 PR #7 合并 → M1 graduate**。
+
+**M1-INTEG 接线时需处理的 deferred TODO**（见 PR #7 评论）：
+1. profile 自动定位 analysis-tools.json（需 `CLAUDE_PLUGIN_ROOT` env 约定 + SKILL 接线；当前靠 `--adapter-tools` 显式传参）
+2. 完整子进程超时（当前仅 stdin(null)）
+3. ToolStatus 枚举化 / LocReport 派生 totals（type-design，M2 质量项）
+
+**设计文档歧义（需团队定夺，当前实现遵循转换矩阵）**：
+- `done + --force` 重做：设计行 379（暗示可重做）vs 行 209 矩阵（done 硬终态）矛盾。
+- blocked 进入：设计行 206「可从任何状态进入」vs 矩阵（仅 blockable 活跃态可进）。
+
+### Phase 1 第二轮 code-review 修复（commit `098f164`）
 
 ### Phase 1 code-review 修复（2026-06-14）
 
