@@ -177,8 +177,30 @@ where
     let cli = match Cli::try_parse_from(args) {
         Ok(cli) => cli,
         Err(e) => {
-            let _ = write!(writer, "{e}");
-            return if e.use_stderr() { 1 } else { 0 };
+            use clap::error::ErrorKind;
+            // --help / --version 是正常输出，原样写出并退出 0。
+            if matches!(
+                e.kind(),
+                ErrorKind::DisplayHelp
+                    | ErrorKind::DisplayVersion
+                    | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+            ) {
+                let _ = write!(writer, "{e}");
+                return 0;
+            }
+            // 真正的解析错误：包成统一 JSON 错误响应，不输出 clap 裸文本
+            // （契约：所有输出统一 {status,data,warnings}）。
+            let resp = Response::<ErrorData> {
+                status: Status::Error,
+                data: ErrorData {
+                    kind: "cli_parse".to_owned(),
+                    message: e.to_string(),
+                    context: None,
+                },
+                warnings: Vec::new(),
+            };
+            write_json(writer, &resp);
+            return 1;
         }
     };
 
@@ -342,16 +364,27 @@ fn project_name() -> String {
 }
 
 /// `profile --root <path>`：项目画像分析。
+///
+/// 设计（06-plugin-structure.md § CLI）要求 profile 额外做外部工具可用性检测
+/// （按 `analysis-tools.json` 验证适配器工具与版本 → `ADAPTER_TOOL_MISSING`；检测
+/// `cargo-nextest` → `RUST_TOOL_MISSING`）。该检测属 profile 功能模块、尚未实现，
+/// 此处明确 warning 告知画像不含工具检测，避免「不完整却静默报 ok」。
 fn cmd_profile(root: &Path) -> CmdResult {
     let profile = profile_project(root)?;
-    Ok((serde_json::to_value(&profile)?, Vec::new()))
+    // TODO(M1-PROFILE): 工具可用性检测（analysis-tools.json 逐项验证 + cargo-nextest），
+    // 缺失时产出 ADAPTER_TOOL_MISSING / RUST_TOOL_MISSING 警告（设计 06-plugin § CLI）。
+    let warnings = vec![
+        "工具可用性检测尚未实现：本画像不含 ADAPTER_TOOL_MISSING / RUST_TOOL_MISSING 检查（推迟 M1-PROFILE）"
+            .to_owned(),
+    ];
+    Ok((serde_json::to_value(&profile)?, warnings))
 }
 
 /// `graph build --root <path> [--full] [--profile]`：构建图并写入 db。
 ///
 /// 当前以 TypeScript adapter 全量构建。`--full` 在 M1 等价默认（增量推 M2），
 /// `--profile` 性能画像推 M2。
-fn cmd_graph_build(root: &Path, full: bool, profile: bool) -> CmdResult {
+fn cmd_graph_build(root: &Path, _full: bool, profile: bool) -> CmdResult {
     let mut warnings: Vec<String> = Vec::new();
 
     // TODO(M2): 增量构建（file_fingerprints 跳过未变更文件）；当前 --full 无差异。
@@ -359,6 +392,8 @@ fn cmd_graph_build(root: &Path, full: bool, profile: bool) -> CmdResult {
     if profile {
         warnings.push("--profile 性能画像尚未实现（推迟 M2），本次按普通构建处理".to_owned());
     }
+    // M1 暂无增量构建：无论 --full 与否都是全量。下方 `full` 字段恒 true 反映真实构建模式
+    // （原 `full: full` 默认 false 会让上层误判为增量结果）。增量推 M2。
 
     let graph = build_graph_ts(root)?;
     warnings.extend(graph.warnings().iter().cloned());
@@ -376,7 +411,7 @@ fn cmd_graph_build(root: &Path, full: bool, profile: bool) -> CmdResult {
             "db_path": db.to_string_lossy(),
             "node_count": graph.node_count(),
             "edge_count": graph.edge_count(),
-            "full": full,
+            "full": true,
         }),
         warnings,
     ))
@@ -431,14 +466,15 @@ fn cmd_graph_topo_sort<W: Write>(writer: &mut W) -> i32 {
                 .map(|c| c.iter().map(|id| id.to_string()).collect())
                 .collect();
             // data 形状对齐统一 ErrorData 的 `kind`/`message` 命名（原手搓 `error`/`suggestion`）。
-            // 结构化的 `cycles` 是本错误特有上下文，ErrorData 无对应字段，故仍用 json! 自构造。
+            // 环路径字段名用 `cycle_path` 对齐设计 09-appendix § Step 2.8（SKILL 据此解析）；
+            // 值为环路径数组（可能多个环），ErrorData 无对应字段故仍用 json! 自构造。
             // TODO(M2): ErrorData 增加 structured context（如 details: Value），让环路径走统一类型。
             let resp = Response {
                 status: Status::Error,
                 data: json!({
                     "kind": "cyclic_dependency",
                     "message": "存在循环依赖，无法生成拓扑序；请打破环后重试",
-                    "cycles": cycle_paths,
+                    "cycle_path": cycle_paths,
                 }),
                 warnings: Vec::new(),
             };

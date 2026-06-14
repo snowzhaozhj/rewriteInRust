@@ -25,8 +25,7 @@ pub struct Response<T: Serialize> {
     pub status: Status,
     /// 响应数据。
     pub data: T,
-    /// 警告信息列表。
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    /// 警告信息列表（始终输出，空则序列化为 `[]`，保证统一 `{status,data,warnings}` 契约）。
     pub warnings: Vec<String>,
 }
 

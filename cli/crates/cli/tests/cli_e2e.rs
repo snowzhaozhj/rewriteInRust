@@ -136,7 +136,9 @@ fn e2e_topo_sort_circular_returns_nonzero_and_cycles() {
         assert_eq!(code, 2, "有环应非零退出: {json}");
         assert_eq!(json["status"], "error");
         assert_eq!(json["data"]["kind"], "cyclic_dependency");
-        let cycles = json["data"]["cycles"].as_array().expect("应含 cycles");
+        let cycles = json["data"]["cycle_path"]
+            .as_array()
+            .expect("应含 cycle_path");
         assert!(!cycles.is_empty(), "应列出至少一个环");
     });
 }
@@ -151,6 +153,8 @@ fn smoke_init() {
         assert_eq!(code, 0);
         assert_eq!(json["status"], "ok");
         assert_eq!(json["data"]["message"], "initialized");
+        // warnings 字段始终输出（即使为空数组），保证统一契约。
+        assert!(json["warnings"].is_array(), "warnings 应始终为数组");
         // init 同时生成项目根 .rustmigrate.toml（设计 06:89）。
         assert!(json["data"]["config_file"].is_string());
         assert!(
@@ -177,7 +181,16 @@ fn smoke_profile() {
     let root = project.path().join("src");
     let (code, json) = run(&["profile", "--root", root.to_str().unwrap()]);
     assert_eq!(code, 0, "profile 应成功: {json}");
-    assert_eq!(json["status"], "ok");
+    // 工具可用性检测未实现 → status 为 warning（设计 06:90 要求该检测，缺失须显式告知下游）。
+    assert_eq!(json["status"], "warning");
+    assert!(
+        json["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w.as_str().unwrap_or("").contains("工具可用性检测")),
+        "profile 应含工具检测未实现的 warning: {json}"
+    );
     assert_eq!(json["data"]["primary_language"], "typescript");
 }
 
@@ -190,6 +203,8 @@ fn smoke_graph_build() {
         assert_eq!(code, 0);
         assert_eq!(json["status"], "ok");
         assert!(json["data"]["edge_count"].as_u64().is_some());
+        // M1 不传 --full 也是全量构建，full 字段恒 true（不再误报 false）。
+        assert_eq!(json["data"]["full"], true);
     });
 }
 
@@ -358,6 +373,29 @@ fn smoke_scaffold_workspace() {
         assert_eq!(json["status"], "ok");
         assert!(target.join("Cargo.toml").exists(), "应生成 Cargo.toml");
     });
+}
+
+#[test]
+fn cli_parse_error_emits_unified_json() {
+    // clap 解析失败（非法参数）应走统一 JSON 错误，不输出 clap 裸文本，退出码 1。
+    let (code, json) = run(&["graph", "build", "--bogus-flag"]);
+    assert_eq!(code, 1, "解析失败应退出 1: {json}");
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["data"]["kind"], "cli_parse");
+    assert!(json["warnings"].is_array(), "warnings 应始终为数组");
+}
+
+#[test]
+fn cli_help_is_plain_text_exit_zero() {
+    // --help 是正常输出：原样文本 + 退出码 0（不包成 JSON 错误）。
+    let mut buf: Vec<u8> = Vec::new();
+    let code = run_with_args(["rustmigrate", "--help"], &mut buf);
+    assert_eq!(code, 0, "--help 应退出 0");
+    let text = String::from_utf8(buf).unwrap();
+    assert!(
+        serde_json::from_str::<Value>(text.trim()).is_err(),
+        "--help 应为纯文本而非 JSON: {text}"
+    );
 }
 
 // === 错误路径：未构建图时读命令应报错（非 panic） ===
