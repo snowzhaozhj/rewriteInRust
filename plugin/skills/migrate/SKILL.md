@@ -25,6 +25,7 @@ argument-hint: "[analyze|run|review] [module]"
 
 ### CLI 调用与输出解析
 - 通过 Bash 调用 `rustmigrate <子命令>`，工作目录为源项目根。所有 CLI 输出是统一 JSON：`{status, data, warnings}`。
+- **定位 CLI**：裸调 `rustmigrate` 假设其在 `$PATH`。若不确定是否安装，先运行 `BIN=$(hooks/scripts/ensure-cli.sh)` 取二进制绝对路径（解析优先级 PATH > `$RUSTMIGRATE_BIN` > 本地构建产物），后续用 `"$BIN" <子命令>` 调用；脚本未找到二进制时退出非 0 并打印安装指引，应如实转达用户。
 - **只解析 `data` 字段**取结构化结果；`status` 为 `error` 时按 `data` 中的错误码处理，不要从自然语言里猜成败。`warnings` 非空时如实转达用户，不要静默吞掉。
 - 命令清单（M1 共 14 个）：`init`、`profile --root`、`graph build --root [--full]`、`graph topo-sort`、`graph deps <m>`、`graph interfaces <m> [--deps-of <t>]`、`graph stats`、`validate state`、`state get <m>`、`state transition [--module] --to [--substatus] [--reason] [--force]`、`state populate-modules`、`stats loc`、`stats compare`、`scaffold workspace [--target] [--name]`。
 
