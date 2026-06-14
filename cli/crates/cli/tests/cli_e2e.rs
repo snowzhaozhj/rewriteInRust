@@ -451,6 +451,7 @@ fn smoke_state_transition_project_level() {
             ("profile", "plan"),
             ("plan", "scaffold"),
             ("scaffold", "sprint_loop"),
+            ("sprint_loop", "graduate"),
         ] {
             let (code, json) = run(&["state", "transition", "--to", to]);
             assert_eq!(code, 0, "项目级 {from}→{to} 应成功: {json}");
@@ -485,6 +486,10 @@ fn smoke_state_transition_project_rejects_module_args() {
         // 项目级不支持 --force。
         let (code, json) = run(&["state", "transition", "--to", "profile", "--force"]);
         assert_eq!(code, 1, "项目级带 --force 应报错: {json}");
+        assert_eq!(json["status"], "error");
+        // 项目级不支持 --reason（与 substatus/force 一致，不静默吞参）。
+        let (code, json) = run(&["state", "transition", "--to", "profile", "--reason", "x"]);
+        assert_eq!(code, 1, "项目级带 --reason 应报错: {json}");
         assert_eq!(json["status"], "error");
         // 缺 --to 报错。
         let (code, json) = run(&["state", "transition"]);

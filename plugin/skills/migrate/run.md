@@ -12,7 +12,7 @@
 > **状态衔接**：`/migrate analyze` 把项目 state 推进到 `profile`；到本命令要求的 `sprint_loop`，经 `plan → scaffold → sprint_loop` 推进，均由项目级 `rustmigrate state transition --to <ProjectState>`（无 `--module`）驱动（合法性由 `ProjectState::can_transition_to` 校验）。
 
 ## 调用形式
-`/migrate run <module>`（可选 `--retry` 从断点重入、`--force` 重做 degrade_*、`--degrade=ffi` 确认降级）。
+`/migrate run <module>`（可选 `--retry` 从断点重入、`--force` 重做 degrade_*、`--degrade=ffi|manual|skip` 确认降级方式）。
 
 ## 分步序列
 
@@ -25,6 +25,7 @@
 | status / substatus | 动作 |
 |---|---|
 | `done` | 报错退出：终态不可重做（如确需重迁，人工重置状态后再跑） |
+| `paused` | 报错退出：模块暂停中，请先 `--degrade=ffi\|manual\|skip` 确认降级方式再续 |
 | `degrade_*` 且无 `--force` | 报错：降级是人类决策，须 `--force` |
 | `degrade_*` + `--force` | 重置为 `translating`（清 substatus/attempts）→ 续 Step 0.5 |
 | `translating` + `phase_a_complete_awaiting_review` | 跳 Step 3 |
@@ -58,7 +59,7 @@
 ### Step 4：Phase B 惯用化 + 编译修正（translator）
 `state transition --module <M> --substatus phase_b_optimization_in_progress`。先 `cargo fix --allow-dirty`，剩余错误交 translator（仅三类重写：并发/取消安全/局部性能）。编译失败则 `state transition --to compile_fixing --substatus "<当轮错误摘要>"`，最多 **3 轮**（`max_retry_rounds`）；失败持久化 `attempts/{module}-phase-b-partial.rs`、置 `phase_b_failed_at_round_N`（供 `--retry`）。
 
-> **双计数器（独立）**：SubAgent 超时/产出物校验失败计入 `max_retries_per_step`(2)；编译失败计入 `max_retry_rounds`(3)。任一耗尽 → pause→degrade：生成降级分析报告，置 `paused`，等待用户 `--degrade=ffi` 确认。不要强行输出能编译但语义可疑的代码。
+> **双计数器（独立）**：SubAgent 超时/产出物校验失败计入 `max_retries_per_step`(2)；编译失败计入 `max_retry_rounds`(3)。任一耗尽 → pause→degrade：生成降级分析报告，置 `paused`，等待用户 `--degrade=ffi|manual|skip` 确认。不要强行输出能编译但语义可疑的代码。
 
 ### Step 5：测试验证（verifier）
 `state transition --module <M> --to testing`。调 verifier 生成测试并跑 `hooks/scripts/verify.sh`（nextest + clippy + 条件 loom/shuttle），产出测试结果 JSON（**L2**：通过率 ∈[0,1]）。**done 前置硬条件**：通过率 ≥ 预期、clippy 无 warning、`TODO(port)` 计数=0、无未确认的 `bug_replica`。任一不满足标 incomplete、停在 testing。失败 ≤2 次重试，回滚保留 Phase B 产物。通过 → `state transition --module <M> --to reviewing`。

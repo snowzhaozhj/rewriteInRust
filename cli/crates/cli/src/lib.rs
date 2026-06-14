@@ -759,7 +759,7 @@ fn cmd_state_transition(
 ) -> CmdResult {
     // 无 --module：项目级 ProjectState 转换（profile→…→sprint_loop→graduate）。
     let Some(module) = module else {
-        return cmd_state_transition_project(to, substatus, force);
+        return cmd_state_transition_project(to, substatus, reason, force);
     };
     if to.is_none() && substatus.is_none() {
         return Err(MigrateError::Config(
@@ -802,25 +802,29 @@ fn cmd_state_transition(
 ///
 /// 驱动 `init→profile→plan→scaffold→sprint_loop→graduate`（合法性由
 /// [`ProjectState::can_transition_to`] 校验），是 `/migrate analyze`（推进到 `profile`）
-/// 与 `/migrate run`（前置要求 `sprint_loop`）之间的衔接接入点。`--substatus`/`--force`
-/// 为模块级概念，项目级不适用——显式拒绝以免静默吞参。
+/// 与 `/migrate run`（前置要求 `sprint_loop`）之间的衔接接入点。`--substatus`/`--reason`/`--force`
+/// 为模块级概念（substatus 是 Phase 进度、reason 落 attempts 审计、force 是 degrade 恢复），
+/// 项目级 `transition` 不落这些字段——显式拒绝以免静默吞参。
 fn cmd_state_transition_project(
     to: Option<&str>,
     substatus: Option<&str>,
+    reason: Option<&str>,
     force: bool,
 ) -> CmdResult {
-    if substatus.is_some() || force {
+    if substatus.is_some() || reason.is_some() || force {
         return Err(MigrateError::Config(
-            "项目级 state transition（无 --module）不支持 --substatus / --force（仅模块级适用）"
+            "项目级 state transition（无 --module）不支持 --substatus / --reason / --force（仅模块级适用）"
                 .to_owned(),
         ));
     }
     let to = to.ok_or_else(|| {
         MigrateError::Config("项目级 state transition 必须指定 --to <ProjectState>".to_owned())
     })?;
+    // 提示仅列「可作为转换目标」的状态：init 是初始态，无任何 can_transition_to 规则以其为 target，
+    // 故不列入（照其转换必失败，徒增误导）。
     let target = to.parse::<ProjectState>().map_err(|_| {
         MigrateError::Config(format!(
-            "非法 ProjectState: {to}（合法值: init/profile/plan/scaffold/sprint_loop/graduate）"
+            "非法 ProjectState: {to}（合法值: profile/plan/scaffold/sprint_loop/graduate）"
         ))
     })?;
 

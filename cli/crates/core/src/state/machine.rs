@@ -86,6 +86,10 @@ impl MigrationStateMachine {
     /// 自动创建父目录；采用 tmp → fsync → 原子 rename，并同步父目录，
     /// 保证进程崩溃或并发写入中断时不会留下半截 JSON。覆盖前先备份 `.backup`，
     /// 供 [`load`](Self::load) 在主文件损坏时回退。
+    ///
+    /// **恢复后保存的特例**：若本实例来自 backup 回退（[`recovered_from_backup`](Self::recovered_from_backup)
+    /// 为真），磁盘上的主文件仍是损坏内容——此时**跳过备份步骤**，避免用损坏的主文件覆盖唯一可用的
+    /// `.backup`（否则 rename 前若再崩溃，主备双损、彻底不可恢复）。保留 backup 为回退前的最后有效快照。
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() && !parent.exists() {
@@ -93,7 +97,7 @@ impl MigrationStateMachine {
             }
         }
         let content = serde_json::to_string_pretty(&self.state_file)?;
-        atomic_write(path, content.as_bytes())
+        atomic_write(path, content.as_bytes(), !self.recovered_from_backup)
     }
 
     /// 执行状态转换。
@@ -315,11 +319,13 @@ impl MigrationStateMachine {
     }
 }
 
-/// 原子写入：覆盖前备份 `.backup`，写入 `.tmp` 并 fsync，再 rename 到目标，最后同步父目录。
+/// 原子写入：（按 `backup_existing`）覆盖前备份 `.backup`，写入 `.tmp` 并 fsync，再 rename 到目标，最后同步父目录。
 ///
 /// 保证崩溃/并发中断时目标文件要么是旧内容要么是完整新内容，绝不出现半截 JSON。
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
-    if path.exists() {
+/// `backup_existing=false` 时跳过备份——仅用于"已知现有主文件损坏"的恢复保存场景（见 [`save`]），
+/// 防止用损坏内容覆盖最后的有效 `.backup`。
+fn atomic_write(path: &Path, bytes: &[u8], backup_existing: bool) -> Result<()> {
+    if backup_existing && path.exists() {
         let backup = sibling_with_suffix(path, ".backup");
         std::fs::copy(path, &backup)?;
     }
@@ -763,6 +769,42 @@ mod tests {
             loaded.recovered_from_backup(),
             "回退 backup 应置 recovered 标志"
         );
+    }
+
+    #[test]
+    fn test_recovered_save_preserves_good_backup() {
+        // 主文件损坏 → 从 backup 恢复 → 保存，不得用损坏 primary 覆盖有效 backup。
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
+        let path = dir.path().join("migration-state.json");
+        let backup = sibling_with_suffix(&path, ".backup");
+
+        let m = new_machine(); // Init
+        m.save(&path).expect("首次保存");
+        let mut m2 = m.clone();
+        m2.transition(ProjectState::Profile).unwrap();
+        m2.save(&path).expect("二次保存"); // backup 现为 Init 状态
+
+        std::fs::write(&path, b"{ broken json").unwrap(); // 损坏主文件
+        let mut recovered = MigrationStateMachine::load(&path).expect("从 backup 恢复");
+        assert!(recovered.recovered_from_backup());
+        assert_eq!(recovered.current_state(), ProjectState::Init); // backup 为 Init
+
+        // 恢复后推进并保存（Init→Profile 合法）。
+        recovered.transition(ProjectState::Profile).unwrap();
+        recovered.save(&path).expect("恢复后保存");
+
+        // 主文件现为有效新状态。
+        let reloaded = MigrationStateMachine::load(&path).expect("重载主文件");
+        assert_eq!(reloaded.current_state(), ProjectState::Profile);
+        assert!(
+            !reloaded.recovered_from_backup(),
+            "重载主文件不应再标记 recovered"
+        );
+
+        // backup 必须仍是回退前的有效快照（可解析），而非被损坏 primary 覆盖。
+        let backup_content = std::fs::read_to_string(&backup).expect("backup 应存在");
+        serde_json::from_str::<MigrationStateFile>(&backup_content)
+            .expect("backup 应仍是有效 JSON，未被损坏主文件覆盖");
     }
 
     #[test]

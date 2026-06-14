@@ -345,7 +345,7 @@ MVP 中 SubAgent 的实现基于 Claude Code 的标准 agent 定义机制：
 
 **调用方式**：
 - Skill 的 SKILL.md 中通过 Claude Code 的 `Agent` tool 调用 SubAgent
-- 调用时指定 `agentType` 为对应的 agent 名称（如 `analyzer`），Claude Code 自动加载对应的 `agents/analyzer.md` 作为系统提示
+- 调用时指定 agent 名称（实际工具参数为 `subagent_type`；本文档用 `agentType` 指代该概念）。**Plugin 内 SubAgent 须带插件命名空间前缀 `<plugin-name>:<agent>`**——本插件 name=`rust-migrate`，故为 `rust-migrate:analyzer` / `rust-migrate:translator` / `rust-migrate:scaffolder` / `rust-migrate:verifier`（M1-PLG-05 Live 验证实测确认）。Claude Code 据此加载对应 `agents/<agent>.md` 作为系统提示
 - 示例：SKILL.md 中写"使用 Agent tool 调用 analyzer SubAgent，传入项目根目录路径"
 
 **上下文隔离**：
