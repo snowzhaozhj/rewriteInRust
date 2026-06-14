@@ -58,3 +58,8 @@ ci: fmt-check lint test deny shellcheck
 #       just validate-graph rxjs   只跑指定仓库
 validate-graph *repo:
     tools/graph-validation/run.sh {{repo}}
+
+# 符号级精度对比（自研 tree-sitter 启发式 vs ts-morph 类型检查器，软门不阻断）。
+# 需 npm install ts-morph（钉于 oracle/package.symbol.json），首次自动安装。
+validate-graph-symbol *repo:
+    tools/graph-validation/run-symbol.sh {{repo}}

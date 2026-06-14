@@ -1,0 +1,9 @@
+{
+  "name": "rustmigrate-graph-validation-symbol-oracle",
+  "private": true,
+  "description": "符号级 Calls/Extends oracle 依赖（ts-morph，钉死版本保证可复现）。独立于 import 图 oracle 的 package.json，避免污染其 lockfile。安装时用：npm install --prefix <此目录> --package-lock-only=false（或把本文件内容并入 package.json 后 npm install）。",
+  "//pin": "ts-morph 23.x 封装 TypeScript 5.x 编译器 API；与 import oracle 的 typescript@5.6.3 同主线。锁死避免类型检查器行为漂移导致 oracle 真值不可复现。",
+  "dependencies": {
+    "ts-morph": "23.0.0"
+  }
+}
