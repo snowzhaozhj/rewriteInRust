@@ -15,8 +15,8 @@ argument-hint: "[analyze|run|review] [module]"
 | 参数 | 子命令文件 | 作用 |
 |------|-----------|------|
 | `analyze`（默认） | [analyze.md](./analyze.md) | 分析源码、生成迁移规则、搭建测试基础设施（init+plan+test 合并） |
-| `run` | [run.md](./run.md) | 翻译指定模块（Phase A 忠实翻译 / Phase B 惯用化，M1 Phase 4 启用） |
-| `review` | [review.md](./review.md) | 完整验证管线 + 迁移进度仪表板（M1 Phase 4 启用） |
+| `run` | [run.md](./run.md) | 翻译指定模块（Phase A 忠实翻译 / Phase B 惯用化） |
+| `review` | [review.md](./review.md) | 完整验证管线 + 迁移进度仪表板 |
 | `graduate` | — | 毕业评估 + unsafe 审计（M2，非 MVP） |
 
 无参数时默认 `analyze`（迁移的起点）。参数为未知词时，提示用户可用子命令而非猜测。
@@ -29,7 +29,7 @@ argument-hint: "[analyze|run|review] [module]"
 - 命令清单（M1 共 13 个）：`init`、`profile --root`、`graph build --root [--full]`、`graph topo-sort`、`graph deps <m>`、`graph interfaces <m> [--deps-of <t>]`、`graph stats`、`validate state`、`state get <m>`、`state transition --module --to [--substatus] [--reason]`、`stats loc`、`stats compare`、`scaffold workspace [--target] [--name]`。
 
 ### SubAgent 编排（权威：06-plugin-structure.md §10.2 / §10.5）
-- 用 **Agent tool** 调用 SubAgent，参数 `subagent_type` 取 agent 名（`analyzer` / `translator` / `scaffolder` / `verifier`）。若 Plugin 命名空间要求前缀，则用 `rust-migrate:analyzer` 形式。参数名与命名空间均属运行时行为，待 M1-PLG-05 交互式 Live 验证确认（设计 §10.2.1 记为 `agentType`，以真实工具参数 `subagent_type` 为准）。MVP 阶段 SubAgent **串行执行**，通过 `.rust-migration/` 下的文件通信，不直接对话。
+- 用 **Agent tool** 调用 SubAgent，参数 `subagent_type` 取**带插件命名空间前缀**的 agent 名：`rust-migrate:analyzer` / `rust-migrate:translator` / `rust-migrate:scaffolder` / `rust-migrate:verifier`（Plugin 内 SubAgent 强制 `<plugin-name>:<agent>` 前缀，本插件 name=`rust-migrate`；设计 §10.2.1 概念名记为 `agentType`，实际工具参数为 `subagent_type`）。MVP 阶段 SubAgent **串行执行**，通过 `.rust-migration/` 下的文件通信，不直接对话。
 - **不解析 SubAgent 的返回文本判断成功**。每次调用后只做产出物的确定性校验：
   - **L1 存在性**：文件存在、非空、含关键标题（Markdown / 代码 / 配置产出物）。
   - **L2 结构校验**：JSON 产出物（`migration-state.json`、测试结果）格式合法、关键字段非空；`source-graph.db` 必要表存在。
@@ -38,4 +38,4 @@ argument-hint: "[analyze|run|review] [module]"
 ### 产出物根目录
 所有产出物在源项目下的 `.rust-migration/` 目录（`init` 创建）。关键文件：`migration-state.json`、`source-graph.db`、`porting/`（迁移规则）、`PARITY.md`、`AGENTS.md`、`test-fixtures/golden/`。写 `migration-state.json` 统一走 CLI（原子写：tmp→fsync→rename）。
 
-> **诚实占位说明**：本 Plugin 的 `analyze` 流程（M1 Phase 3）已完整可执行；`run` / `review`（Phase 4）当前为骨架，未到可对真实项目跑通的程度，子命令文件中已显式标注，不糊弄。
+> **诚实状态说明**：`analyze` / `run` / `review` 三个子命令的分步指令均已完整实现；端到端 **Live 验证**（对真实 fixture 跑通、确认 SubAgent 实际触发，M1-PLG-05）仍待交互式会话补全，未经实跑前不宣称"已验证可用"。
