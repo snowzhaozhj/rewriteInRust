@@ -81,39 +81,45 @@ impl ModuleStatus {
 
     /// 检查模块状态是否允许从当前状态转换到目标状态。
     ///
-    /// 依据 `docs/design/09-appendix-schemas.md` 的模块状态转换图：
+    /// 严格对齐 `docs/design/09-appendix-schemas.md` 的模块状态转换图：
     /// ```text
     /// pending → translating → compile_fixing → testing → reviewing → done
-    ///               ↓（cargo check 首次通过）→ testing
-    ///         compile_fixing/testing（多轮失败）→ paused → degrade_ffi/manual/skip
+    ///               └（cargo check 首次通过）→ testing
+    ///         compile_fixing（3 轮失败）/ testing（不可修复）→ paused
+    ///         paused → translating | degrade_ffi | degrade_manual | degrade_skip
+    ///         degrade_* →（/migrate run --force 恢复）→ translating
     /// ```
     /// 补充语义：
-    /// - 任意活跃态（非终态）可因依赖未完成进入 `blocked`；`blocked` 恢复回任意活跃态
-    ///   （实际恢复目标由 `pre_blocked_status` 决定）。
-    /// - `paused` 经人类确认后可降级，或重试回 `translating`。
-    /// - 终态（`done` / `degrade_*`）不可再转出——保护断点续传不被非法回退覆盖。
+    /// - 任意可阻塞活跃态（pending/translating/compile_fixing/testing/reviewing/paused）
+    ///   可因依赖未完成进入 `blocked`；`blocked` 恢复回这些活跃态之一
+    ///   （实际恢复目标由 `pre_blocked_status` 决定，此处只校验"是可阻塞活跃态"）。
+    /// - **`done` 是唯一真终态**；`degrade_*` 非终态，可经 `--force` 恢复到 `translating`
+    ///   （设计 §0.3 Step / 状态图恢复边）。
     pub fn can_transition_to(self, target: Self) -> bool {
         use ModuleStatus::*;
-        // 活跃态：可互相进入 blocked，也是 blocked 的合法恢复目标。
-        let is_active = |s: ModuleStatus| {
+        // 可被阻塞的活跃态：可进入 blocked，也是 blocked 恢复的合法目标。
+        let blockable = |s: ModuleStatus| {
             matches!(
                 s,
-                Pending | Translating | CompileFixing | Testing | Reviewing
+                Pending | Translating | CompileFixing | Testing | Reviewing | Paused
             )
         };
         match self {
             Pending => matches!(target, Translating | Blocked),
-            Translating => matches!(target, CompileFixing | Testing | Paused | Blocked),
+            Translating => matches!(target, CompileFixing | Testing | Blocked),
             CompileFixing => matches!(target, Testing | Paused | Blocked),
-            Testing => matches!(target, Reviewing | CompileFixing | Paused | Blocked),
-            Reviewing => matches!(target, Done | Paused | Blocked),
+            Testing => matches!(target, Reviewing | Paused | Blocked),
+            Reviewing => matches!(target, Done | Blocked),
             Paused => matches!(
                 target,
-                Translating | DegradeFfi | DegradeManual | DegradeSkip
+                Translating | DegradeFfi | DegradeManual | DegradeSkip | Blocked
             ),
-            Blocked => is_active(target),
-            // 终态不可再转出。
-            Done | DegradeFfi | DegradeManual | DegradeSkip => false,
+            // degrade_* 非真终态：可经 --force 恢复到 translating。
+            DegradeFfi | DegradeManual | DegradeSkip => matches!(target, Translating),
+            // done 是唯一真终态，不可再转出（保护断点续传不被非法回退覆盖）。
+            Done => false,
+            // blocked 恢复到原活跃态（目标由 pre_blocked_status 决定）。
+            Blocked => blockable(target),
         }
     }
 }
@@ -260,4 +266,110 @@ pub struct MigrationStateFile {
     pub subagent_calls: Vec<SubAgentCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<MigrationMetadata>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ModuleStatus::*;
+    use super::*;
+
+    /// 全量校验 `ModuleStatus::can_transition_to` 的转换矩阵：
+    /// 白名单严格对齐 `docs/design/09-appendix-schemas.md` 状态转换图，
+    /// 对 11×11 笛卡尔积取反验证"白名单外皆非法"。
+    #[test]
+    fn test_module_transition_matrix() {
+        let all = [
+            Pending,
+            Translating,
+            CompileFixing,
+            Testing,
+            Reviewing,
+            Done,
+            DegradeFfi,
+            DegradeManual,
+            DegradeSkip,
+            Paused,
+            Blocked,
+        ];
+        // (from, to) 合法白名单（依据设计状态转换图）。
+        let legal: &[(ModuleStatus, ModuleStatus)] = &[
+            // 主链
+            (Pending, Translating),
+            (Translating, CompileFixing),
+            (Translating, Testing),
+            (CompileFixing, Testing),
+            (Testing, Reviewing),
+            (Reviewing, Done),
+            // 失败 → paused
+            (CompileFixing, Paused),
+            (Testing, Paused),
+            // paused 出边
+            (Paused, Translating),
+            (Paused, DegradeFfi),
+            (Paused, DegradeManual),
+            (Paused, DegradeSkip),
+            // degrade_* --force 恢复
+            (DegradeFfi, Translating),
+            (DegradeManual, Translating),
+            (DegradeSkip, Translating),
+            // 任意可阻塞活跃态 → blocked
+            (Pending, Blocked),
+            (Translating, Blocked),
+            (CompileFixing, Blocked),
+            (Testing, Blocked),
+            (Reviewing, Blocked),
+            (Paused, Blocked),
+            // blocked 恢复到原活跃态
+            (Blocked, Pending),
+            (Blocked, Translating),
+            (Blocked, CompileFixing),
+            (Blocked, Testing),
+            (Blocked, Reviewing),
+            (Blocked, Paused),
+        ];
+        for &from in &all {
+            for &to in &all {
+                let want = legal.contains(&(from, to));
+                assert_eq!(
+                    from.can_transition_to(to),
+                    want,
+                    "{from} -> {to} 期望 {want}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_degrade_force_recovery_to_translating() {
+        // 设计：degrade_* 可经 --force 恢复到 translating（非真终态）。
+        for st in [DegradeFfi, DegradeManual, DegradeSkip] {
+            assert!(
+                st.can_transition_to(Translating),
+                "{st} 应允许 --force 恢复到 translating"
+            );
+            // 但不能直达其他状态。
+            assert!(!st.can_transition_to(Done));
+            assert!(!st.can_transition_to(Testing));
+        }
+    }
+
+    #[test]
+    fn test_done_is_only_true_terminal() {
+        // done 不可转出任何状态。
+        for to in [Translating, Testing, Reviewing, Pending, Blocked, Paused] {
+            assert!(!Done.can_transition_to(to), "done 不应可转出到 {to}");
+        }
+    }
+
+    #[test]
+    fn test_no_bypass_review_to_done() {
+        // 只有 reviewing 能到 done，其余活跃态直达 done 均非法（防越权标完成）。
+        for from in [Pending, Translating, CompileFixing, Testing] {
+            assert!(
+                !from.can_transition_to(Done),
+                "{from} 不应越过 reviewing 直达 done"
+            );
+        }
+        assert!(Reviewing.can_transition_to(Done));
+    }
 }

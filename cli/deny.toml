@@ -6,9 +6,18 @@
 [advisories]
 version = 2
 # yanked 仍可配置严重度；unmaintained 在 v2 取 all/workspace/transitive/none（选检查范围）。
+# 用 all 覆盖工作区 + 全部传递依赖，保持旧 "warn" 的全量未维护信号，不缩窄安全覆盖。
 yanked = "warn"
-unmaintained = "workspace"
-ignore = []
+unmaintained = "all"
+# 以下均为 tokei（源码 LOC 统计）旧 clap v2 依赖链引入的传递未维护 crate，
+# 无法在本项目修复、不影响工作区代码；显式记录而非缩小扫描范围，
+# 新出现的未维护依赖仍会被 all 拦截。
+ignore = [
+    "RUSTSEC-2021-0139", # ansi_term 未维护（tokei → clap v2）
+    "RUSTSEC-2024-0375", # atty 未维护（tokei → clap v2）
+    "RUSTSEC-2024-0384", # instant 未维护（传递依赖）
+    "RUSTSEC-2020-0163", # term_size 未维护（tokei → clap v2）
+]
 
 [licenses]
 version = 2

@@ -26,22 +26,30 @@ impl MigrationStateMachine {
     /// 从文件加载状态。
     ///
     /// 如果文件不存在返回 `MigrateError::FileNotFound`。
-    /// 主文件读取或 JSON 解析失败时，自动回退到 `.backup`（若存在）——
-    /// 应对崩溃/并发写入残留的半截文件。两者皆失败则返回主文件的错误。
+    ///
+    /// **仅当主文件 JSON 解析失败（数据损坏）时**才回退到 `.backup`——这是应对
+    /// 崩溃/并发写入残留半截文件的兜底。I/O / 权限等非损坏错误**直接上抛**，
+    /// 不被回退掩盖（否则临时 I/O 故障会让调用方静默读到过期状态）。
+    /// 主备双双损坏时，返回**主文件**的错误（primary），保留真正的故障现场。
+    ///
+    /// 注意：回退到 backup 意味着拿到的是**上一次成功保存前**的旧状态，最近一次
+    /// 保存的进度可能丢失。load 本身不自愈主文件（损坏文件残留，依赖下次 save 覆盖）。
+    /// TODO(M1-INTEG)：CLI 接线时，应把"已从 backup 恢复、最新进度可能丢失"作为
+    /// warning 经统一响应（`Response::ok_with_warnings`）上报给用户。
     pub fn load(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Err(MigrateError::FileNotFound(path.to_path_buf()));
         }
         match Self::load_file(path) {
             Ok(machine) => Ok(machine),
-            Err(primary) => {
+            // 仅数据损坏（JSON 解析失败）才回退 backup；其余错误直接上抛。
+            Err(primary @ MigrateError::Json(_)) => {
                 let backup = sibling_with_suffix(path, ".backup");
-                if backup.exists() {
-                    Self::load_file(&backup)
-                } else {
-                    Err(primary)
-                }
+                // backup 不存在时 load_file 返回 Io 错误，与"backup 也损坏"一并落入
+                // 兜底：返回 primary 错误，不掩盖主文件故障现场。
+                Self::load_file(&backup).map_err(|_| primary)
             }
+            Err(other) => Err(other),
         }
     }
 
@@ -230,12 +238,20 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// 在同目录下生成「原文件名 + 后缀」的兄弟路径（如 `state.json` → `state.json.backup`）。
+/// 在同目录下生成**隐藏**兄弟路径 `.<原文件名><后缀>`，与设计
+/// `docs/design/06-plugin-structure.md` crash-safe 约定的隐藏 tmp/backup 命名一致
+/// （如 `migration-state.json` → `.migration-state.json.backup`）。
+/// 隐藏文件避免污染目录列表/被工具误扫；已带前导点的输入不再叠加。
 fn sibling_with_suffix(path: &Path, suffix: &str) -> PathBuf {
-    let mut name = path
+    let original = path
         .file_name()
         .map(|n| n.to_os_string())
         .unwrap_or_default();
+    let mut name = std::ffi::OsString::new();
+    if !original.to_string_lossy().starts_with('.') {
+        name.push(".");
+    }
+    name.push(&original);
     name.push(suffix);
     path.with_file_name(name)
 }
@@ -464,5 +480,54 @@ mod tests {
             !sibling_with_suffix(&path, ".tmp").exists(),
             "不应残留 .tmp"
         );
+    }
+
+    #[test]
+    fn test_load_both_corrupt_returns_primary_error() {
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
+        let path = dir.path().join("migration-state.json");
+        let m = new_machine();
+        m.save(&path).unwrap();
+        m.save(&path).unwrap(); // 二次保存生成 .backup
+                                // 主备双双损坏：应返回主文件（primary）的 Json 错误，不掩盖
+        std::fs::write(&path, b"{ broken main").unwrap();
+        std::fs::write(sibling_with_suffix(&path, ".backup"), b"{ broken backup").unwrap();
+        match MigrationStateMachine::load(&path).unwrap_err() {
+            MigrateError::Json(_) => {}
+            other => panic!("期望主文件 Json 错误，实际: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_backup_and_tmp_are_hidden_files() {
+        // 对齐设计：tmp/backup 为前导点隐藏文件 `.migration-state.json.{tmp,backup}`。
+        let path = std::path::Path::new("/tmp/migration-state.json");
+        let backup = sibling_with_suffix(path, ".backup");
+        let tmp = sibling_with_suffix(path, ".tmp");
+        assert_eq!(
+            backup.file_name().unwrap().to_string_lossy(),
+            ".migration-state.json.backup"
+        );
+        assert_eq!(
+            tmp.file_name().unwrap().to_string_lossy(),
+            ".migration-state.json.tmp"
+        );
+    }
+
+    #[test]
+    fn test_transition_module_force_recovery_from_degrade() {
+        // degrade_* 经 --force 恢复到 translating（设计恢复边）。
+        for st in [
+            ModuleStatus::DegradeFfi,
+            ModuleStatus::DegradeManual,
+            ModuleStatus::DegradeSkip,
+        ] {
+            let mut m = new_machine();
+            m.update_module("a", module_with_status(st));
+            assert!(
+                m.transition_module("a", ModuleStatus::Translating).is_ok(),
+                "{st} 应允许恢复到 translating"
+            );
+        }
     }
 }
