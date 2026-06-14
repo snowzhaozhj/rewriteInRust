@@ -69,9 +69,15 @@ while read -r name url sha src_root || [[ -n "${name:-}" ]]; do
       < "$work/dc-raw.json" > "$work/dc-norm.json"
 
   # 4. dpdm（交叉验证 oracle）→ 解析归一化
+  # dpdm 检测到循环依赖时以非零退出，故容忍退出码；但先删旧产物，跑完校验新产物非空，
+  # 避免静默失败沿用陈旧/空数据 → compare 假绿（compare.js 另有 oracle 有效性兜底）。
   echo "[$name] dpdm..." >&2
+  rm -f "$work/dpdm-raw.json"
   ( cd "$repo" && "$ORACLE_BIN/dpdm" --no-warning --no-progress \
       --output "$work/dpdm-raw.json" "$src_root/**/*.ts" >/dev/null ) || true
+  if [[ ! -s "$work/dpdm-raw.json" ]]; then
+    echo "[$name] ✗ dpdm 未产出有效输出（oracle 失败，compare 将判不达标）" >&2
+  fi
   node "$SCRIPT_DIR/oracle/parse-dpdm.js" "$repo" "$src_root" \
       < "$work/dpdm-raw.json" > "$work/dpdm-norm.json"
 

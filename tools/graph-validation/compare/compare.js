@@ -51,7 +51,10 @@ function main() {
     else missing.push(e);
   }
   const total = oracleIntersect.size;
-  const recall = total === 0 ? 1 : hit / total;
+  // oracle 有效性：任一 oracle 边集为空（dpdm/depcruise 静默失败）或交集为空时，
+  // 校验基准不可信，不得判过——否则 M1 验收门会假绿（见 code-review 发现）。
+  const oracleValid = dc.set.size > 0 && dpdm.set.size > 0 && total > 0;
+  const recall = oracleValid ? hit / total : 0;
 
   // 自研图多出的边（相对交集），按是否被任一 oracle 认可分类。
   const extraVsIntersect = [];
@@ -81,8 +84,8 @@ function main() {
   // 环集合一致 = 自研图的环上节点集合 ⊇ oracle 交集，且无双 oracle 都不认的多余环节点。
   const cyclesConsistent = cycNodeMissing.length === 0 && cycNodeExtra.length === 0;
 
-  const recallPass = recall >= RECALL_GATE;
-  const gatePass = recallPass && cyclesConsistent;
+  const recallPass = oracleValid && recall >= RECALL_GATE;
+  const gatePass = oracleValid && recallPass && cyclesConsistent;
 
   const summary = {
     name: args.name,
@@ -93,6 +96,7 @@ function main() {
     dc_edges: dc.set.size,
     dpdm_edges: dpdm.set.size,
     oracle_intersect_edges: total,
+    oracle_valid: oracleValid,
     recall: Number(recall.toFixed(4)),
     recall_pass: recallPass,
     missing_count: missing.length,
@@ -145,6 +149,13 @@ function writeReport(out, s, detail) {
   L.push('');
   L.push(`**综合硬门：${s.gate_pass ? '✅ 达标' : '❌ 不达标（见下方根因分析）'}**`);
   L.push('');
+  if (!s.oracle_valid) {
+    L.push(
+      '> ⚠️ **oracle 无效**：dependency-cruiser 或 dpdm 边集/交集为空（很可能 oracle 工具静默失败），',
+    );
+    L.push('> 校验基准不可信，已强制判不达标，请检查 oracle 运行日志。');
+    L.push('');
+  }
 
   L.push('## 边召回明细');
   L.push('');
