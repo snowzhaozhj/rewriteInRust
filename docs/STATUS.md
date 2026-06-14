@@ -5,24 +5,29 @@
 ## 当前位置
 
 - **Milestone**: M1 MVP
-- **Phase**: Phase 1 ✅ → 源码图校验 harness ✅（M1 验收门）→ Phase 2 集成验证 ✅ → Phase 3 Plugin analyze 实现 ✅（已合并 master，Live 验证待交互会话）→ M1 收尾 3 项 ✅（PR #7 待合并）
-- **下一步**: Phase 4 翻译循环（另一会话进行中）+ PR #7 合并 → M1 graduate
+- **Phase**: Phase 1/2/3 ✅ → 收尾 3 项 ✅（PR #7）→ **Phase 4 翻译循环提示词主体 ✅（PR #9，待合并）** → **M1 收尾：analyze→run 衔接缺口（§9.5，新会话接续）** → M1 graduate
+- **下一步**（**新会话从这里开始**）: **PR #9 合并后，实现 PLAN 填充缺口（PLAN.md §9.5 M1-PLAN-01/02）让 analyze→run 真正跑通 → TRANS-06 MVP 验收 → M1 graduate**
 
 ## 进行中的任务
 
-- **PR #5**（`feat/m1-graph-validation-harness`）源码图校验 harness：已合并 master ✅
-- **PR #3**（`feat/m1-integ-phase2`）Phase 2 集成验证：已合并 master ✅（commit bfacff1）
-- **PR（待提）**（`feat/m1-finalize`）M1 收尾 3 项：实现完成，4 层门禁全过，待提 PR
+- **PR #5/#3/#7/#8 均已合并 master** ✅
+- **PR #9**（`feat/m1-trans-phase4`）：Phase 4 提示词主体 + 配套修复 + 插件可安装。已过四方审查（code-review/design-checker/code-reviewer/codex）并修复，Live 验证核心通过。**待用户合并。**
 
-## 下一步
+## 下一步（PR #9 合并后，新会话接续）
 
-> **M1 收尾 3 项已实现完成**（分支 `feat/m1-finalize`），4 层质量门全过、design-checker 无 MISMATCH。提 1 个收尾 PR → 审查 → 合并 → **M1 graduate**。
+> **M1 graduate 的硬前置**：PR #9 交付了 Phase 4 提示词主体，但 Live 验证（M1-PLG-05）实跑暴露 **analyze→run 状态衔接缺口**——analyze 后 `modules=[]`/`sprint` 缺失/state 停在 `profile`，`/migrate run` 无法执行。**详见 PLAN.md §9.5**（任务 M1-PLAN-01/02 + 2 个设计决策 + 最小可行范围）。
 
-| 任务 | 内容 | 设计出处 | 状态 |
-|------|------|----------|------|
-| **M1-STATE-04** | 模块级 `transition_module`（Option<to>/substatus/reason 落盘 + blocked 恢复/degrade 重置副作用 + 合法性校验 + 原子写） | 09-appendix | ✅ 实现 + 6 单测 + 2 e2e |
-| **M1-PROFILE-04** | profile 工具可用性检测（`--adapter-tools` → ADAPTER_TOOL_MISSING；cargo-nextest → RUST_TOOL_MISSING；结果入 `data.tool_checks`） | 06:90/676/677/865 | ✅ `profile/tools.rs` + 6 单测 + 2 e2e + ts adapter analysis-tools.json |
-| **M1-PROFILE-05** | `stats loc` 改 tokei 源码/Rust LOC（`source`/`rust` 双侧 + by_language；路径取 CLI 参数>配置>默认） | 06:99 | ✅ `stats/loc.rs` + 2 单测 + 2 e2e |
+| 任务 | 内容 | 状态 |
+|------|------|------|
+| **M1-PLAN-01** | 新增 CLI `state populate-modules`（topo→modules/sprint 落盘） | 🔲 **TRANS-06 硬前置**，~1d |
+| **M1-PLAN-02** | analyze/SKILL 接线 populate + 推进 state 到 sprint_loop | 🔲 **硬前置**，~0.5d |
+| **M1-DIAG-01** | CLI `state record-subagent-call`（subagent_calls 落地） | 🔲 独立小 PR，非阻塞 |
+| **M1-BOOT-01** | ensure-cli.sh / CLI PATH 引导 | 🔲 小，非阻塞 |
+| **M1-TRANS-06** | 3 项目 MVP 验收（依赖 PLAN-01/02 完成） | 🔲 交互会话 |
+
+> **Phase 4 提示词主体（PR #9）**：M1-TRANS-01..05 ✅（translator/verifier/run.md/review.md）。
+> **M1-PLG-05 Live 验证结论**：插件加载 ✅、SubAgent 命名空间 = `rust-migrate:analyzer/...` ✅、analyze 端到端触发 SubAgent ✅；缺口见 §9.5。
+> **PR #9 附带交付**：项目级 `state transition` CLI + `load` backup 回退告警（machine.rs M1-INTEG TODO，含 recovered 后不覆盖好 backup 的安全修复）+ 仓库根 `marketplace.json`（插件可安装，`claude plugin validate` ✔）+ `docs/learnings/agent-skill-prompt-guide.md`（提示词规范沉淀）。
 
 > **M2 推迟项**（已在代码 TODO 标注，不在 M1 范围）：增量构建、`graph build --profile` 性能画像、`graph interfaces --deps-of` 批量、`stats compare` 结构对比、ErrorData structured context。
 > **M2 符号级精度提升**：跨文件方法调用 `obj.method()` 解析（PLAN §10 **M2-REFAC-10**，已补 2026-06-14 调研的分档方案/recall ~70% 天花板/stack-graphs 避坑；档1 零歧义增强低成本可先做）。

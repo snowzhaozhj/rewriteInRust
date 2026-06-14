@@ -20,6 +20,9 @@ const STATE_SCHEMA_VERSION: &str = "1.0.0";
 pub struct MigrationStateMachine {
     /// 内部状态文件数据。
     state_file: MigrationStateFile,
+    /// 运行时标志（不序列化）：本次 [`load`](Self::load) 是否因主文件损坏而回退到 `.backup`。
+    /// 为真表示拿到的是上一次成功保存前的旧状态，最近进度可能丢失，调用方应向用户告警。
+    recovered_from_backup: bool,
 }
 
 impl MigrationStateMachine {
@@ -34,8 +37,8 @@ impl MigrationStateMachine {
     ///
     /// 注意：回退到 backup 意味着拿到的是**上一次成功保存前**的旧状态，最近一次
     /// 保存的进度可能丢失。load 本身不自愈主文件（损坏文件残留，依赖下次 save 覆盖）。
-    /// TODO(M1-INTEG)：CLI 接线时，应把"已从 backup 恢复、最新进度可能丢失"作为
-    /// warning 经统一响应（`Response::ok_with_warnings`）上报给用户。
+    /// 回退发生时 [`recovered_from_backup`](Self::recovered_from_backup) 置真，CLI 接线据此
+    /// 经统一响应向用户告警「已从 backup 恢复、最近进度可能丢失」。
     pub fn load(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Err(MigrateError::FileNotFound(path.to_path_buf()));
@@ -47,17 +50,35 @@ impl MigrationStateMachine {
                 let backup = sibling_with_suffix(path, ".backup");
                 // backup 不存在时 load_file 返回 Io 错误，与"backup 也损坏"一并落入
                 // 兜底：返回 primary 错误，不掩盖主文件故障现场。
-                Self::load_file(&backup).map_err(|_| primary)
+                Self::load_file(&backup)
+                    .map(Self::mark_recovered)
+                    .map_err(|_| primary)
             }
             Err(other) => Err(other),
         }
+    }
+
+    /// 标记本次加载来自 backup 回退（供 [`load`](Self::load) 内部使用）。
+    fn mark_recovered(mut self) -> Self {
+        self.recovered_from_backup = true;
+        self
+    }
+
+    /// 本次 [`load`](Self::load) 是否因主文件损坏回退到 `.backup`。
+    ///
+    /// CLI 接线据此向用户告警「已从 backup 恢复、最近进度可能丢失」（经统一响应降级 warning）。
+    pub fn recovered_from_backup(&self) -> bool {
+        self.recovered_from_backup
     }
 
     /// 从指定路径读取并反序列化状态文件。
     fn load_file(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let state_file: MigrationStateFile = serde_json::from_str(&content)?;
-        Ok(Self { state_file })
+        Ok(Self {
+            state_file,
+            recovered_from_backup: false,
+        })
     }
 
     /// 保存状态到文件（crash-safe）。
@@ -65,6 +86,10 @@ impl MigrationStateMachine {
     /// 自动创建父目录；采用 tmp → fsync → 原子 rename，并同步父目录，
     /// 保证进程崩溃或并发写入中断时不会留下半截 JSON。覆盖前先备份 `.backup`，
     /// 供 [`load`](Self::load) 在主文件损坏时回退。
+    ///
+    /// **恢复后保存的特例**：若本实例来自 backup 回退（[`recovered_from_backup`](Self::recovered_from_backup)
+    /// 为真），磁盘上的主文件仍是损坏内容——此时**跳过备份步骤**，避免用损坏的主文件覆盖唯一可用的
+    /// `.backup`（否则 rename 前若再崩溃，主备双损、彻底不可恢复）。保留 backup 为回退前的最后有效快照。
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() && !parent.exists() {
@@ -72,7 +97,7 @@ impl MigrationStateMachine {
             }
         }
         let content = serde_json::to_string_pretty(&self.state_file)?;
-        atomic_write(path, content.as_bytes())
+        atomic_write(path, content.as_bytes(), !self.recovered_from_backup)
     }
 
     /// 执行状态转换。
@@ -139,7 +164,10 @@ impl MigrationStateMachine {
             }),
         };
 
-        Self { state_file }
+        Self {
+            state_file,
+            recovered_from_backup: false,
+        }
     }
 
     /// 返回当前项目状态。
@@ -291,11 +319,13 @@ impl MigrationStateMachine {
     }
 }
 
-/// 原子写入：覆盖前备份 `.backup`，写入 `.tmp` 并 fsync，再 rename 到目标，最后同步父目录。
+/// 原子写入：（按 `backup_existing`）覆盖前备份 `.backup`，写入 `.tmp` 并 fsync，再 rename 到目标，最后同步父目录。
 ///
 /// 保证崩溃/并发中断时目标文件要么是旧内容要么是完整新内容，绝不出现半截 JSON。
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
-    if path.exists() {
+/// `backup_existing=false` 时跳过备份——仅用于"已知现有主文件损坏"的恢复保存场景（见 [`save`]），
+/// 防止用损坏内容覆盖最后的有效 `.backup`。
+fn atomic_write(path: &Path, bytes: &[u8], backup_existing: bool) -> Result<()> {
+    if backup_existing && path.exists() {
         let backup = sibling_with_suffix(path, ".backup");
         std::fs::copy(path, &backup)?;
     }
@@ -734,6 +764,59 @@ mod tests {
         let loaded = MigrationStateMachine::load(&path).expect("应从 backup 恢复");
         // backup 是首次保存的 Init 状态
         assert_eq!(loaded.current_state(), ProjectState::Init);
+        // 回退发生时标志置真，供 CLI 向用户告警进度可能丢失。
+        assert!(
+            loaded.recovered_from_backup(),
+            "回退 backup 应置 recovered 标志"
+        );
+    }
+
+    #[test]
+    fn test_recovered_save_preserves_good_backup() {
+        // 主文件损坏 → 从 backup 恢复 → 保存，不得用损坏 primary 覆盖有效 backup。
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
+        let path = dir.path().join("migration-state.json");
+        let backup = sibling_with_suffix(&path, ".backup");
+
+        let m = new_machine(); // Init
+        m.save(&path).expect("首次保存");
+        let mut m2 = m.clone();
+        m2.transition(ProjectState::Profile).unwrap();
+        m2.save(&path).expect("二次保存"); // backup 现为 Init 状态
+
+        std::fs::write(&path, b"{ broken json").unwrap(); // 损坏主文件
+        let mut recovered = MigrationStateMachine::load(&path).expect("从 backup 恢复");
+        assert!(recovered.recovered_from_backup());
+        assert_eq!(recovered.current_state(), ProjectState::Init); // backup 为 Init
+
+        // 恢复后推进并保存（Init→Profile 合法）。
+        recovered.transition(ProjectState::Profile).unwrap();
+        recovered.save(&path).expect("恢复后保存");
+
+        // 主文件现为有效新状态。
+        let reloaded = MigrationStateMachine::load(&path).expect("重载主文件");
+        assert_eq!(reloaded.current_state(), ProjectState::Profile);
+        assert!(
+            !reloaded.recovered_from_backup(),
+            "重载主文件不应再标记 recovered"
+        );
+
+        // backup 必须仍是回退前的有效快照（可解析），而非被损坏 primary 覆盖。
+        let backup_content = std::fs::read_to_string(&backup).expect("backup 应存在");
+        serde_json::from_str::<MigrationStateFile>(&backup_content)
+            .expect("backup 应仍是有效 JSON，未被损坏主文件覆盖");
+    }
+
+    #[test]
+    fn test_normal_load_not_marked_recovered() {
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
+        let path = dir.path().join("migration-state.json");
+        new_machine().save(&path).expect("保存失败");
+        let loaded = MigrationStateMachine::load(&path).expect("加载失败");
+        assert!(
+            !loaded.recovered_from_backup(),
+            "正常加载不应标记 recovered"
+        );
     }
 
     #[test]

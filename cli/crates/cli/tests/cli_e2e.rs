@@ -440,6 +440,69 @@ fn smoke_state_transition_degrade_force() {
 }
 
 #[test]
+fn smoke_state_transition_project_level() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]); // 项目 state=init
+
+        // 无 --module：项目级 init → profile → plan → scaffold → sprint_loop 全链路合法。
+        for (from, to) in [
+            ("init", "profile"),
+            ("profile", "plan"),
+            ("plan", "scaffold"),
+            ("scaffold", "sprint_loop"),
+            ("sprint_loop", "graduate"),
+        ] {
+            let (code, json) = run(&["state", "transition", "--to", to]);
+            assert_eq!(code, 0, "项目级 {from}→{to} 应成功: {json}");
+            assert_eq!(json["status"], "ok");
+            assert_eq!(json["data"]["from"], from);
+            assert_eq!(json["data"]["state"], to);
+        }
+    });
+}
+
+#[test]
+fn smoke_state_transition_project_illegal_jump() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]); // state=init
+                                // 跳过中间态 init → sprint_loop 非法。
+        let (code, json) = run(&["state", "transition", "--to", "sprint_loop"]);
+        assert_eq!(code, 1, "非法项目级跳转应报错: {json}");
+        assert_eq!(json["status"], "error");
+    });
+}
+
+#[test]
+fn smoke_state_transition_project_rejects_module_args() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        // 项目级不支持 --substatus。
+        let (code, json) = run(&["state", "transition", "--to", "profile", "--substatus", "x"]);
+        assert_eq!(code, 1, "项目级带 --substatus 应报错: {json}");
+        assert_eq!(json["status"], "error");
+        // 项目级不支持 --force。
+        let (code, json) = run(&["state", "transition", "--to", "profile", "--force"]);
+        assert_eq!(code, 1, "项目级带 --force 应报错: {json}");
+        assert_eq!(json["status"], "error");
+        // 项目级不支持 --reason（与 substatus/force 一致，不静默吞参）。
+        let (code, json) = run(&["state", "transition", "--to", "profile", "--reason", "x"]);
+        assert_eq!(code, 1, "项目级带 --reason 应报错: {json}");
+        assert_eq!(json["status"], "error");
+        // 缺 --to 报错。
+        let (code, json) = run(&["state", "transition"]);
+        assert_eq!(code, 1, "项目级缺 --to 应报错: {json}");
+        assert_eq!(json["status"], "error");
+        // 非法 ProjectState 报错。
+        let (code, json) = run(&["state", "transition", "--to", "bogus"]);
+        assert_eq!(code, 1, "非法 ProjectState 应报错: {json}");
+        assert_eq!(json["status"], "error");
+    });
+}
+
+#[test]
 fn smoke_state_get_missing_errors() {
     let tmp = tempfile::tempdir().unwrap();
     with_cwd(tmp.path(), || {

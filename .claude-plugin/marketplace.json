@@ -1,0 +1,14 @@
+{
+  "name": "rust-migrate-catalog",
+  "description": "Rust 迁移验证工作台插件市场（rust-migrate plugin）",
+  "owner": {
+    "name": "snowzhaozhj"
+  },
+  "plugins": [
+    {
+      "name": "rust-migrate",
+      "source": "./plugin",
+      "description": "Rust 迁移验证工作台 — AI 辅助的代码迁移 + 验证管线"
+    }
+  ]
+}
