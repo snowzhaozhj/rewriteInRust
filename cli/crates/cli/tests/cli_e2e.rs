@@ -654,3 +654,120 @@ fn topo_sort_without_db_errors() {
         assert_eq!(json["status"], "error");
     });
 }
+
+// === state populate-modules（PLAN.md §9.5 M1-PLAN-01：analyze→run 衔接）===
+
+#[test]
+fn e2e_populate_modules_linear_unblocks_run() {
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        let _ = run(&["init"]);
+        let (code, _) = run(&["graph", "build", "--root", "src"]);
+        assert_eq!(code, 0);
+
+        // populate：拓扑序落成 modules + sprint。
+        let (code, json) = run(&["state", "populate-modules"]);
+        assert_eq!(code, 0, "populate 应成功: {json}");
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["data"]["sprint"], 1);
+        let count = json["data"]["module_count"].as_u64().unwrap();
+        assert_eq!(count, 3, "linear-deps 应有 3 个文件模块: {json}");
+
+        // module key = NodeId 原值（file:src/...），与 graph deps 输出一致。
+        let modules = json["data"]["modules"].as_array().unwrap();
+        let utils = modules
+            .iter()
+            .find(|m| m.as_str().unwrap().contains("utils"))
+            .expect("应含 utils 模块")
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(
+            utils.starts_with("file:"),
+            "module key 应为 NodeId 原值: {utils}"
+        );
+
+        // 落盘校验：state 合法 + 模块 status=pending、sprint=1。
+        let (code, json) = run(&["validate", "state"]);
+        assert_eq!(code, 0, "填充后 state 应合法: {json}");
+        let (code, json) = run(&["state", "get", &utils]);
+        assert_eq!(code, 0, "应能读取填充的模块: {json}");
+        assert_eq!(json["data"]["status"], "pending");
+        assert_eq!(json["data"]["state"]["sprint"], 1);
+
+        // 衔接验证：run 阶段依赖门禁用 graph deps 的 key 查 modules，必须一致。
+        let (code, json) = run(&["graph", "deps", &utils]);
+        assert_eq!(code, 0, "graph deps 应成功: {json}");
+        for dep in json["data"]["dependencies"].as_array().unwrap() {
+            assert!(
+                modules.contains(dep),
+                "graph deps 输出的依赖 key {dep} 应在 modules 中（否则 run 依赖门禁失配）"
+            );
+        }
+    });
+}
+
+#[test]
+fn smoke_populate_rejects_cycles() {
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("circular-deps"), tmp.path());
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        let (code, _) = run(&["graph", "build", "--root", "src"]);
+        assert_eq!(code, 0);
+        // 有环：拒绝填充（对齐 topo-sort 门禁）。
+        let (code, json) = run(&["state", "populate-modules"]);
+        assert_eq!(code, 1, "有环应拒绝填充: {json}");
+        assert_eq!(json["status"], "error");
+        assert!(
+            json["data"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("循环依赖"),
+            "错误信息应提示循环依赖: {json}"
+        );
+    });
+}
+
+#[test]
+fn smoke_populate_rejects_active_progress() {
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        let _ = run(&["init"]);
+        let (code, _) = run(&["graph", "build", "--root", "src"]);
+        assert_eq!(code, 0);
+        let (code, _) = run(&["state", "populate-modules"]);
+        assert_eq!(code, 0);
+
+        // 把某模块推进到 translating（模拟迁移进行中）。
+        let utils = {
+            let (_, json) = run(&["graph", "topo-sort"]);
+            json["data"]["order"][0].as_str().unwrap().to_owned()
+        };
+        let (code, _) = run(&[
+            "state",
+            "transition",
+            "--module",
+            &utils,
+            "--to",
+            "translating",
+        ]);
+        assert_eq!(code, 0);
+
+        // 再次 populate：拒绝重填以免重置进度（断点续传安全）。
+        let (code, json) = run(&["state", "populate-modules"]);
+        assert_eq!(code, 1, "存在活跃模块应拒绝重填: {json}");
+        assert_eq!(json["status"], "error");
+    });
+}
+
+#[test]
+fn smoke_populate_without_db_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        let (code, json) = run(&["state", "populate-modules"]);
+        assert_eq!(code, 1, "无 db 时应报错");
+        assert_eq!(json["status"], "error");
+    });
+}

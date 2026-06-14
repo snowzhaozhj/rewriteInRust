@@ -102,7 +102,7 @@ Plugin 中的确定性计算由独立的 Rust CLI 工具 `rustmigrate` 承担，
 
 > 各命令 `data` 字段的完整 Schema 随 M1 CLI 实现落地，纳入 insta 快照回归测试（见 [08 § CLI 测试](./08-roadmap-and-reference.md)）。
 
-**MVP（M1）— 13 个命令**：
+**MVP（M1）— 14 个命令**：
 
 | 子命令 | 说明 |
 |--------|------|
@@ -115,7 +115,8 @@ Plugin 中的确定性计算由独立的 Rust CLI 工具 `rustmigrate` 承担，
 | `rustmigrate graph stats` | 图统计信息（节点/边计数、度分布） |
 | `rustmigrate validate state` | 校验 `migration-state.json` 的合法性（JSON Schema + 状态机约束） |
 | `rustmigrate state get` | 查询指定模块的当前迁移状态 |
-| `rustmigrate state transition` | 执行状态转换（带状态机合法性前置条件检查：校验当前状态→目标状态为合法转换路径） |
+| `rustmigrate state transition` | 执行状态转换（带状态机合法性前置条件检查：校验当前状态→目标状态为合法转换路径）。`--module` 为模块级 ModuleStatus 转换；省略则为项目级 ProjectState 转换（`/migrate analyze` 把 state 从 `init` 推进到 `sprint_loop` 的接入点） |
+| `rustmigrate state populate-modules` | 用源码图迁移序列填充 `migration-state.json` 的 `modules`/`sprint`（PLAN 操作）：读 `source-graph.db` → `migration_sequence()` 拓扑序 → 每个文件模块写 `{status:pending, sprint:1, risk:low}`（module key 用 NodeId 原值，与 `graph deps` 输出一致）+ `sprint.current=1`；有环拒绝填充。是 `/migrate analyze`→`/migrate run` 衔接的 PLAN 落盘环节（见 PLAN.md §9.5） |
 | `rustmigrate stats loc` | 统计源码和 Rust 代码行数（嵌入 tokei） |
 | `rustmigrate stats compare` | 源码与 Rust 结构复杂度对比（函数数量比、代码行数比、控制流嵌套层级）——复用 tokei + tree-sitter 函数计数，作为 Phase A 结构校验门禁（见 03 § 4.3 Step 4.5） |
 | `rustmigrate scaffold workspace` | 生成 Cargo workspace 骨架（注入 dev-dependencies） |

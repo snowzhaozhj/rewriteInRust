@@ -18,7 +18,7 @@ use serde_json::json;
 use rustmigrate_core::error::MigrateError;
 use rustmigrate_core::graph::build::build_graph_ts;
 use rustmigrate_core::graph::persist::{load_from_db, save_to_db};
-use rustmigrate_core::graph::topo::{detect_cycles, topological_sort};
+use rustmigrate_core::graph::topo::{detect_cycles, migration_sequence, topological_sort};
 use rustmigrate_core::graph::SourceGraph;
 use rustmigrate_core::profile::{
     check_adapter_tools, check_cargo_nextest, load_analysis_tools, profile_project, ToolStatus,
@@ -27,9 +27,9 @@ use rustmigrate_core::response::{ErrorData, Response, Status};
 use rustmigrate_core::scaffold::scaffold_project;
 use rustmigrate_core::state::MigrationStateMachine;
 use rustmigrate_core::stats::count_loc;
-use rustmigrate_core::types::common::NodeId;
+use rustmigrate_core::types::common::{NodeId, RiskLevel};
 use rustmigrate_core::types::graph::{EdgeType, NodeType};
-use rustmigrate_core::types::state::{ModuleStatus, ProjectState};
+use rustmigrate_core::types::state::{ModuleState, ModuleStatus, ProjectState, SprintState};
 use rustmigrate_core::validate::validate_state;
 
 /// `.rust-migration/` 工作目录名（见 `docs/design/04-toolchain.md § 5.7.3`）。
@@ -165,6 +165,14 @@ pub enum StateCommands {
         #[arg(long)]
         force: bool,
     },
+    /// 用源码图的迁移序列填充 `migration-state.json` 的 `modules`/`sprint`（PLAN 操作）。
+    ///
+    /// 读取 `source-graph.db` → `migration_sequence()` 拓扑序 → 为每个文件模块写入
+    /// `ModuleState{status:pending, sprint:1, risk:low}` 并设 `sprint{current:1}`，原子落盘。
+    /// module key 用 NodeId 原值（与 `graph deps` 输出一致，保证 run 阶段依赖门禁匹配）。
+    /// 环图（`migration_sequence().has_cycles()`）拒绝填充，须先打破环（对齐 topo-sort 门禁）。
+    /// 是 `/migrate analyze`→`/migrate run` 衔接的缺失 PLAN 步骤（见 PLAN.md §9.5 M1-PLAN-01）。
+    PopulateModules,
 }
 
 /// Stats 子命令。
@@ -283,6 +291,7 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
                     *force,
                 ),
             ),
+            StateCommands::PopulateModules => emit(writer, cmd_state_populate_modules()),
         },
         Commands::Stats { action } => match action {
             StatsCommands::Loc { source, rust } => {
@@ -838,6 +847,95 @@ fn cmd_state_transition_project(
         json!({
             "from": from.to_string(),
             "state": target.to_string(),
+        }),
+        warnings,
+    ))
+}
+
+/// `state populate-modules`：用源码图迁移序列填充 `modules`/`sprint`（PLAN 操作）。
+///
+/// 这是 `/migrate analyze`→`/migrate run` 衔接的缺失环节（见 PLAN.md §9.5 M1-PLAN-01）：
+/// analyze 构建源码图后，需把拓扑序"落"成可执行的模块清单，run 阶段才有 `modules[target]`
+/// 可读、依赖门禁（`graph deps` + `modules[dep].status`）才成立。
+///
+/// 流程：`load_graph` → `migration_sequence()` →（有环则拒绝，对齐 topo-sort 门禁）→
+/// 为每个文件模块写 `ModuleState{status:pending, sprint:1, risk:low}`（module key = NodeId 原值，
+/// 与 `graph deps` 输出一致）→ `set_sprint(current:1)` → 原子落盘。
+///
+/// **幂等保护**：已有模块处于非 `pending` 活跃态（迁移进行中）时拒绝覆盖，避免把进度重置回
+/// `pending`（断点续传安全）；仅当全部模块仍为 pending（或全新）时才整体重填。
+fn cmd_state_populate_modules() -> CmdResult {
+    let graph = load_graph()?;
+    let sequence = migration_sequence(&graph);
+
+    // 环图拒绝：与 topo-sort 门禁一致——有环无法生成可靠迁移序，须先打破环。
+    if sequence.has_cycles() {
+        let cycle_paths: Vec<Vec<String>> = sequence
+            .cycles
+            .iter()
+            .map(|c| c.iter().map(|id| id.to_string()).collect())
+            .collect();
+        return Err(MigrateError::Graph {
+            message: format!(
+                "源码图存在循环依赖，无法填充迁移序列；请先打破环后重试。环路径: {cycle_paths:?}"
+            ),
+            file: String::new(),
+        });
+    }
+
+    let path = state_path();
+    let (mut machine, mut warnings) = load_state_with_warnings(&path)?;
+
+    // 断点续传保护：任一模块已离开 pending（迁移进行中/已完成）则拒绝重填，避免重置进度。
+    if let Some(active) = machine
+        .state_file()
+        .modules
+        .iter()
+        .find(|(_, m)| m.status != ModuleStatus::Pending)
+    {
+        return Err(MigrateError::Config(format!(
+            "模块 `{}` 已处于 `{}`（非 pending），拒绝重填以免重置迁移进度；\
+             如需重建请先清空 modules",
+            active.0, active.1.status
+        )));
+    }
+
+    if sequence.order.is_empty() {
+        warnings.push("源码图无文件模块，填充结果为空（请确认已运行 graph build）".to_owned());
+    }
+
+    for node_id in &sequence.order {
+        machine.update_module(
+            node_id.as_str(),
+            ModuleState {
+                status: ModuleStatus::Pending,
+                substatus: None,
+                sprint: Some(1),
+                attempts: Vec::new(),
+                test_pass_rate: None,
+                coverage: None,
+                known_differences: 0,
+                risk: RiskLevel::Low,
+                phase_a_version: None,
+                phase_a_audit_passed: None,
+                blocked_by: None,
+                pre_blocked_status: None,
+            },
+        );
+    }
+
+    machine.set_sprint(SprintState {
+        current: 1,
+        history: Vec::new(),
+    });
+    machine.save(&path)?;
+
+    let modules: Vec<String> = sequence.order.iter().map(|id| id.to_string()).collect();
+    Ok((
+        json!({
+            "module_count": modules.len(),
+            "modules": modules,
+            "sprint": 1,
         }),
         warnings,
     ))
