@@ -27,7 +27,7 @@ use rustmigrate_core::response::{ErrorData, Response, Status};
 use rustmigrate_core::scaffold::scaffold_project;
 use rustmigrate_core::state::MigrationStateMachine;
 use rustmigrate_core::stats::count_loc;
-use rustmigrate_core::types::common::{NodeId, RiskLevel};
+use rustmigrate_core::types::common::{NodeId, RiskLevel, Timestamp};
 use rustmigrate_core::types::graph::{EdgeType, NodeType};
 use rustmigrate_core::types::state::{ModuleState, ModuleStatus, ProjectState, SprintState};
 use rustmigrate_core::validate::validate_state;
@@ -173,6 +173,32 @@ pub enum StateCommands {
     /// 环图（`migration_sequence().has_cycles()`）拒绝填充，须先打破环（对齐 topo-sort 门禁）。
     /// 是 `/migrate analyze`→`/migrate run` 衔接的缺失 PLAN 步骤（见 PLAN.md §9.5 M1-PLAN-01）。
     PopulateModules,
+    /// 追加一条 SubAgent 调用记录到顶层 `subagent_calls`（诊断卡死 / 统计重试，append-only）。
+    ///
+    /// 对齐 `09-appendix-schemas.md § subagent_calls 字段说明`：每次 SubAgent 调用（含重试）
+    /// 追加一条 `{step_index, subagent_name, started_at, ended_at, status, error_message}`。
+    /// `--started-at` / `--ended-at` 取 ISO8601 字符串；`--started-at` 省略时由 CLI 取当前 UTC 时间
+    /// （schema 中 started_at 必填，给出合理缺省以便编排器在调用开始时即可记录）。
+    RecordSubagentCall {
+        /// 编排步骤序号（见 06 § 10.5 编排调度路径）。
+        #[arg(long)]
+        step_index: u32,
+        /// SubAgent 名称（如 translator / verifier / analyzer / scaffolder）。
+        #[arg(long)]
+        subagent_name: String,
+        /// 调用结果状态（如 success / timeout / failed）。
+        #[arg(long)]
+        status: String,
+        /// 调用开始时间（ISO8601）。省略则取当前 UTC 时间。
+        #[arg(long)]
+        started_at: Option<String>,
+        /// 调用结束时间（ISO8601）。进行中 / 卡死场景可省略。
+        #[arg(long)]
+        ended_at: Option<String>,
+        /// 失败 / 超时原因（成功时省略）。
+        #[arg(long)]
+        error_message: Option<String>,
+    },
 }
 
 /// Stats 子命令。
@@ -292,6 +318,24 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
                 ),
             ),
             StateCommands::PopulateModules => emit(writer, cmd_state_populate_modules()),
+            StateCommands::RecordSubagentCall {
+                step_index,
+                subagent_name,
+                status,
+                started_at,
+                ended_at,
+                error_message,
+            } => emit(
+                writer,
+                cmd_state_record_subagent_call(
+                    *step_index,
+                    subagent_name,
+                    status,
+                    started_at.as_deref(),
+                    ended_at.as_deref(),
+                    error_message.as_deref(),
+                ),
+            ),
         },
         Commands::Stats { action } => match action {
             StatsCommands::Loc { source, rust } => {
@@ -936,6 +980,42 @@ fn cmd_state_populate_modules() -> CmdResult {
             "module_count": modules.len(),
             "modules": modules,
             "sprint": 1,
+        }),
+        warnings,
+    ))
+}
+
+/// `state record-subagent-call`：追加一条 SubAgent 调用记录到 `subagent_calls`（诊断 / 重试统计）。
+///
+/// 设计（`09-appendix-schemas.md § subagent_calls 字段说明` + `06 § 10.5`）：顶层 append-only
+/// 数组，每次 SubAgent 调用（含重试）追加一条，用于诊断卡死与统计重试次数。本命令构造
+/// [`SubAgentCall`] 后经 core [`MigrationStateMachine::push_subagent_call`] 入库，落盘走 tmp-fsync-rename
+/// 原子写。`started_at` schema 必填——省略时取当前 UTC 时间（编排器在调用开始即可记录、结束再补登一条）。
+fn cmd_state_record_subagent_call(
+    step_index: u32,
+    subagent_name: &str,
+    status: &str,
+    started_at: Option<&str>,
+    ended_at: Option<&str>,
+    error_message: Option<&str>,
+) -> CmdResult {
+    let path = state_path();
+    let (mut machine, warnings) = load_state_with_warnings(&path)?;
+    // started_at 缺省由 core 取当前 UTC 时间（schema 必填）。
+    let count = machine.push_subagent_call(
+        step_index,
+        subagent_name.to_owned(),
+        status.to_owned(),
+        started_at.map(Timestamp::from),
+        ended_at.map(Timestamp::from),
+        error_message.map(str::to_owned),
+    );
+    machine.save(&path)?;
+
+    Ok((
+        json!({
+            "recorded": true,
+            "subagent_calls_count": count,
         }),
         warnings,
     ))

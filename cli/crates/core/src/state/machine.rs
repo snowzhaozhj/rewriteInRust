@@ -302,6 +302,39 @@ impl MigrationStateMachine {
         Ok(())
     }
 
+    /// 追加一条 SubAgent 调用记录到顶层 `subagent_calls` 数组（append-only，不去重）。
+    ///
+    /// 对齐 `docs/design/09-appendix-schemas.md § subagent_calls 字段说明`：每次 SubAgent
+    /// 调用（含重试）追加一条 `{step_index, subagent_name, started_at, ended_at, status,
+    /// error_message}`，用于诊断卡死与统计重试次数。本方法只负责入库，时间戳/状态由调用方
+    /// 构造好的 [`SubAgentCall`] 决定（不做任何校验或合并）。
+    ///
+    /// `started_at` 为 `None` 时取当前 UTC 时间（schema 中该字段必填，给出合理缺省以便
+    /// 编排器在调用开始时即可记录），返回追加后数组的长度。
+    pub fn push_subagent_call(
+        &mut self,
+        step_index: u32,
+        subagent_name: String,
+        status: String,
+        started_at: Option<Timestamp>,
+        ended_at: Option<Timestamp>,
+        error_message: Option<String>,
+    ) -> usize {
+        let started_at =
+            started_at.unwrap_or_else(|| Timestamp::new(chrono::Utc::now().to_rfc3339()));
+        self.state_file
+            .subagent_calls
+            .push(crate::types::state::SubAgentCall {
+                step_index,
+                subagent_name,
+                started_at,
+                ended_at,
+                status,
+                error_message,
+            });
+        self.state_file.subagent_calls.len()
+    }
+
     /// 设置 sprint 信息。
     pub fn set_sprint(&mut self, sprint: crate::types::state::SprintState) {
         self.state_file.sprint = Some(sprint);

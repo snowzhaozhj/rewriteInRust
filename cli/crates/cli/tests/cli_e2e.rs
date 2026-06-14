@@ -383,6 +383,75 @@ fn smoke_state_transition() {
 }
 
 #[test]
+fn smoke_state_record_subagent_call() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+
+        // 第一条：完整字段（含 started_at/ended_at/error_message）。
+        let (code, json) = run(&[
+            "state",
+            "record-subagent-call",
+            "--step-index",
+            "1",
+            "--subagent-name",
+            "translator",
+            "--status",
+            "success",
+            "--started-at",
+            "2026-06-14T09:05:00Z",
+            "--ended-at",
+            "2026-06-14T09:08:30Z",
+        ]);
+        assert_eq!(code, 0, "记录 subagent 调用应成功: {json}");
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["data"]["recorded"], true);
+        assert_eq!(json["data"]["subagent_calls_count"], 1);
+
+        // 落盘字段正确（直接读文件断言 append-only 数组内容）。
+        let path = std::path::Path::new(".rust-migration").join("migration-state.json");
+        let state: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let calls = state["subagent_calls"].as_array().expect("应为数组");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["step_index"], 1);
+        assert_eq!(calls[0]["subagent_name"], "translator");
+        assert_eq!(calls[0]["status"], "success");
+        assert_eq!(calls[0]["started_at"], "2026-06-14T09:05:00Z");
+        assert_eq!(calls[0]["ended_at"], "2026-06-14T09:08:30Z");
+
+        // 第二条：仅必填字段，started_at 省略由 CLI 取当前时间，error_message 记录失败原因。
+        let (code, json) = run(&[
+            "state",
+            "record-subagent-call",
+            "--step-index",
+            "2",
+            "--subagent-name",
+            "verifier",
+            "--status",
+            "timeout",
+            "--error-message",
+            "exceeded 600s",
+        ]);
+        assert_eq!(code, 0, "第二次记录应成功: {json}");
+        // append 到长度 2。
+        assert_eq!(json["data"]["subagent_calls_count"], 2);
+
+        let state: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let calls = state["subagent_calls"].as_array().expect("应为数组");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1]["subagent_name"], "verifier");
+        assert_eq!(calls[1]["status"], "timeout");
+        assert_eq!(calls[1]["error_message"], "exceeded 600s");
+        // started_at 缺省也应落非空时间戳（schema 必填）。
+        assert!(calls[1]["started_at"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()));
+        // ended_at 省略时不序列化（skip_serializing_if）。
+        assert!(calls[1].get("ended_at").is_none());
+    });
+}
+
+#[test]
 fn smoke_state_transition_invalid_status() {
     let tmp = tempfile::tempdir().unwrap();
     with_cwd(tmp.path(), || {
