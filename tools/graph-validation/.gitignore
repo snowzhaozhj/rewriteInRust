@@ -1,0 +1,5 @@
+# 运行时工作目录（克隆的真实仓库 + 各阶段中间产物 self-dump/dc-raw/dpdm-raw…）
+.work/
+
+# oracle npm 依赖（由 `npm install` 按 package.json + package-lock.json 重建）
+oracle/node_modules/

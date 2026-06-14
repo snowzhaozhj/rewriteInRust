@@ -642,27 +642,83 @@ fn extract_heritage(class_node: Node, class_id: &str, ctx: &mut AnalysisContext)
 }
 
 fn extract_interface(node: Node, ctx: &mut AnalysisContext) {
-    if let Some(name_node) = node.child_by_field_name("name") {
-        let name = text(name_node, ctx.source);
-        let is_exported = ctx.exported_names.contains(&name);
-        ctx.nodes.push(SourceNode {
-            id: NodeId::symbol(NodeType::Interface, ctx.rel_path, &name),
-            node_type: NodeType::Interface,
-            name,
-            file_path: ctx.rel_path.to_string(),
-            line_range: Some(node_span(node)),
-            is_exported,
-            complexity: None,
-            is_async: false,
-            visibility: None,
-            is_abstract: false,
-            decorators: Vec::new(),
-            migration_status: None,
-            migration_priority: None,
-            rust_kind: None,
-            rust_path: None,
-            crate_name: None,
-        });
+    let Some(name_node) = node.child_by_field_name("name") else {
+        return;
+    };
+    let name = text(name_node, ctx.source);
+    let is_exported = ctx.exported_names.contains(&name);
+    let interface_id = NodeId::symbol(NodeType::Interface, ctx.rel_path, &name);
+    ctx.nodes.push(SourceNode {
+        id: interface_id.clone(),
+        node_type: NodeType::Interface,
+        name,
+        file_path: ctx.rel_path.to_string(),
+        line_range: Some(node_span(node)),
+        is_exported,
+        complexity: None,
+        is_async: false,
+        visibility: None,
+        is_abstract: false,
+        decorators: Vec::new(),
+        migration_status: None,
+        migration_priority: None,
+        rust_kind: None,
+        rust_path: None,
+        crate_name: None,
+    });
+
+    // `interface Foo extends Bar` → Extends 边。interface 的继承节点是
+    // `extends_type_clause`（区别于 class 的 `class_heritage > extends_clause`），
+    // 故单独提取，否则 interface extends interface 全部漏报（函数式/类型密集库重灾区）。
+    extract_interface_heritage(node, interface_id.as_str(), ctx);
+}
+
+/// 提取 interface 的 extends 关系为 Extends 边。
+///
+/// `interface Foo extends Bar, Baz<T> {}` 的 AST：
+///   interface_declaration
+///     name: (type_identifier)                       // Foo
+///     extends_type_clause                           // 'extends' commaSep1(type)
+///       (type_identifier)                           // Bar
+///       (generic_type name:(type_identifier) …)     // Baz<T>
+///     body: (interface_body)
+/// 目标父接口先以占位 Interface ID 记录，跨文件由 fixup_extends_in_edges 按名称唯一匹配修正。
+fn extract_interface_heritage(node: Node, interface_id: &str, ctx: &mut AnalysisContext) {
+    let count = node.child_count();
+    for i in 0..count {
+        let Some(clause) = node.child(i) else {
+            continue;
+        };
+        if clause.kind() != "extends_type_clause" {
+            continue;
+        }
+        let tc = clause.child_count();
+        for k in 0..tc {
+            let Some(type_node) = clause.child(k) else {
+                continue;
+            };
+            // 跳过 `extends` 关键字、逗号等非父类型节点；type_arguments 在
+            // generic_type 内部，由 heritage_target_name 归一化剥离。
+            if !type_node.is_named()
+                || type_node.kind() == "extends"
+                || type_node.kind() == "type_arguments"
+            {
+                continue;
+            }
+            let target_name = heritage_target_name(type_node, ctx.source);
+            if target_name.is_empty() {
+                continue;
+            }
+            ctx.edges.push(Dependency {
+                source: NodeId::new(interface_id),
+                target: NodeId::symbol(NodeType::Interface, ctx.rel_path, &target_name),
+                edge_type: EdgeType::Extends,
+                provenance: Provenance::TreeSitter,
+                weight: 1.0,
+                sub_kind: None,
+                mapping_notes: None,
+            });
+        }
     }
 }
 
@@ -1152,6 +1208,38 @@ async function load() {
             extends_edge.unwrap().target.as_str().ends_with(":Base"),
             "父类型名应归一化为 Base，实际: {}",
             extends_edge.unwrap().target.as_str()
+        );
+    }
+
+    #[test]
+    fn interface_extends_generates_edge() {
+        let mut adapter = TypeScriptAdapter::new().unwrap();
+        // interface extends interface(s)：继承节点为 extends_type_clause（非 class_heritage）。
+        let result = adapter
+            .analyze_file("interface Foo extends Bar, Baz<T> {}", "f.ts")
+            .unwrap();
+        let extends_targets: Vec<String> = result
+            .edges
+            .iter()
+            .filter(|e| e.edge_type == EdgeType::Extends)
+            .map(|e| e.target.as_str().to_string())
+            .collect();
+        assert_eq!(
+            extends_targets.len(),
+            2,
+            "interface 多继承应有 2 条 Extends 边: {extends_targets:?}"
+        );
+        assert!(
+            extends_targets.iter().any(|t| t.ends_with(":Bar")),
+            "应有指向 Bar 的 Extends 边: {extends_targets:?}"
+        );
+        assert!(
+            extends_targets.iter().any(|t| t.ends_with(":Baz")),
+            "泛型父接口应归一化为 Baz（非 Baz<T>）: {extends_targets:?}"
+        );
+        assert!(
+            !extends_targets.iter().any(|t| t.contains('<')),
+            "不应有 type_arguments 噪声边: {extends_targets:?}"
         );
     }
 

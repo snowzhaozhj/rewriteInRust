@@ -1,0 +1,26 @@
+# 源码图差分校验 —— 钉死的真实 TS 仓库清单
+#
+# 格式（每行一个仓库，# 开头为注释，空行忽略）：
+#   <name> <git_url> <commit_sha> <src_root>
+#
+# - name      ：本地工作目录名 + 报告文件名
+# - git_url   ：clone 地址
+# - commit_sha：精确提交 SHA（来自 git ls-remote 对应 tag，保证可复现）
+# - src_root  ：相对仓库根的源码根目录（建图 / oracle 扫描的起点）
+#
+# 选取标准：公开、纯 TS、结构干净（无 monorepo、几乎无 .d.ts 噪声）、
+# 文件量级覆盖小/中（十几 ~ 两百多文件），依赖结构有代表性（含菱形、循环）。
+#
+# Oracle 工具版本（钉死，见 oracle/package.json）：
+#   dependency-cruiser@16.10.4   （主；16.10.0 与 node v24 的 node:fs R_OK 不兼容，故用 .4）
+#   dpdm@3.14.0                  （交叉验证）
+#   typescript@5.6.3             （oracle 解析依赖）
+
+# rxjs：响应式编程库，src/internal 245 个纯 TS 文件、零 .d.ts、含多个真实循环依赖，最大样本
+rxjs    https://github.com/ReactiveX/rxjs.git       72bc92191ab959e27a969dc4476e14d95416573f    src/internal
+
+# fp-ts：函数式编程库，src 123 个纯 TS 文件，模块间高度互递归（环极多），考验环检测
+fp-ts   https://github.com/gcanti/fp-ts.git         669cd3ed7cb5726024331a7a1cf35125669feb30    src
+
+# zod：schema 校验库，src 含 lib + 内联测试/benchmark，结构相对扁平，无 .d.ts
+zod     https://github.com/colinhacks/zod.git       ca42965df46b2f7e2747db29c40a26bcb32a51d5    src

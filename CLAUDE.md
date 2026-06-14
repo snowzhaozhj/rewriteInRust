@@ -132,7 +132,7 @@ cargo run -- graph build --root fixtures/linear-deps  # 手动验证
 2. 更新 `docs/STATUS.md`
 3. commit 引用任务 ID（如 `feat(M1-GRAPH): 图构建模块`）
 4. 独立分支提 PR
-5. PR 审查：调用 `/pr-review-toolkit:review-pr`，额外运行 `design-checker` agent 检查设计文档一致性
+5. PR 审查：调用 `/pr-review-toolkit:review-pr`，额外运行 `design-checker` agent 检查设计文档一致性；再跑 `codex:codex-rescue`（对抗审查）和 `/code-review` skill
 6. 修复 critical/important issues 后通知用户审阅
 
 禁止合并多阶段为一个 PR。

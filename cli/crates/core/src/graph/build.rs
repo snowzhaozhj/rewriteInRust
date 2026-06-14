@@ -330,11 +330,21 @@ fn resolve_import(
 
     // 按 adapter 提供的扩展名生成候选：{path}.ext, {path}/index.ext
     for ext in extensions {
-        let with_ext = format!("{normalized}.{ext}");
-        if file_set.contains(&with_ext) {
-            return Some(with_ext);
+        // normalized 为空 = import 解析到 src 根目录（如 `__tests__/x.ts` 的 `from ".."`）。
+        // 根目录本身不是文件，跳过 `{path}.ext`；barrel 候选不能带前导斜杠，否则
+        // `/index.ext` 永不匹配根下的 `index.ext`，导致 `from ".."` 这类 barrel 导入漏边
+        // （进而 SCC 断裂、漏报循环依赖）。
+        if !normalized.is_empty() {
+            let with_ext = format!("{normalized}.{ext}");
+            if file_set.contains(&with_ext) {
+                return Some(with_ext);
+            }
         }
-        let barrel = format!("{normalized}/index.{ext}");
+        let barrel = if normalized.is_empty() {
+            format!("index.{ext}")
+        } else {
+            format!("{normalized}/index.{ext}")
+        };
         if file_set.contains(&barrel) {
             return Some(barrel);
         }
@@ -477,6 +487,17 @@ mod tests {
         assert_eq!(
             resolve_import("./shared", "app.ts", &files, TS_EXTS),
             Some("shared/index.ts".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_import_parent_to_root_barrel() {
+        // 深度 1 目录的文件 `from ".."` 应解析到 src 根的 barrel index.ts
+        // （zod 测试文件 `import { z } from ".."` 模式，曾因 `/index.ts` 前导斜杠漏边）。
+        let files = file_set(&["index.ts", "__tests__/catch.test.ts"]);
+        assert_eq!(
+            resolve_import("..", "__tests__/catch.test.ts", &files, TS_EXTS),
+            Some("index.ts".to_string())
         );
     }
 

@@ -49,3 +49,17 @@ shellcheck:
 
 ci: fmt-check lint test deny shellcheck
     @echo "✓ All CI checks passed"
+
+# === 图差分校验（M1 验收门）===
+
+# 源码图差分校验：自研文件级 import 图 vs dependency-cruiser ∩ dpdm 双 oracle 交集。
+# 硬门：边召回 ≥0.98 且环集合一致。非 ci 项（需联网拉真实仓库），独立运行。
+# 用法：just validate-graph        跑全部仓库
+#       just validate-graph rxjs   只跑指定仓库
+validate-graph *repo:
+    tools/graph-validation/run.sh {{repo}}
+
+# 符号级精度对比（自研 tree-sitter 启发式 vs ts-morph 类型检查器，软门不阻断）。
+# 需 npm install ts-morph（钉于 oracle/package.symbol.json），首次自动安装。
+validate-graph-symbol *repo:
+    tools/graph-validation/run-symbol.sh {{repo}}

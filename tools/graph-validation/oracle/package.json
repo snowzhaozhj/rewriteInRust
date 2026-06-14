@@ -1,0 +1,11 @@
+{
+  "name": "rustmigrate-graph-validation-oracle",
+  "private": true,
+  "description": "差分校验所用的外部依赖图 oracle 工具（钉死版本，保证可复现）",
+  "dependencies": {
+    "dependency-cruiser": "16.10.4",
+    "dpdm": "3.14.0",
+    "ts-morph": "^23.0.0",
+    "typescript": "5.6.3"
+  }
+}
