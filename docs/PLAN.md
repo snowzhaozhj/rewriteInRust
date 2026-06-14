@@ -492,6 +492,36 @@ Phase A（忠实翻译）→ Tier 0 验证 → Phase B（惯用化）→ Tier 0+
 
 ---
 
+## §9.5 M1 收尾：analyze→run 衔接缺口（PLAN 填充）
+
+> **来源**：2026-06-14 PR #9 的 Live 验证（M1-PLG-05）实跑暴露。M1-PLG-05 核心已通过（插件加载、`rust-migrate:` 命名空间确认、`/migrate analyze` 端到端触发 SubAgent、产出物真实）。但发现 **analyze→run 状态衔接结构性缺口**，是 TRANS-06 MVP 验收的硬前置。**新会话从这里接续。**
+
+### 缺口本质
+`analyze.md` Step 3 写着"填充 `migration-state.json` 的 modules/sprint 字段、推进 state"，但 **CLI 无任何命令填充 modules/sprint**（只有 init / state transition / graph build）。设计规定"写 migration-state.json 统一走 CLI"，故该步无法执行：实测 analyze 后 `modules=[]`、`sprint` 缺失、state 停在 `profile`。结果 `/migrate run`（前置要求 `sprint_loop`、Step 0.3 读 `modules[target].status`）**根本无法执行**。这是缺失的 **PLAN 操作**（topo-sort → modules + sprint 计划 + 推进到 sprint_loop）。
+
+### 任务清单
+
+| 任务 ID | 内容 | 阻塞 TRANS-06? | 估时 |
+|---------|------|:---:|:---:|
+| **M1-PLAN-01** | 新增 CLI `rustmigrate state populate-modules`：`load_graph` → `migration_sequence()` → 每模块写 `ModuleState{status:pending, sprint:1, risk:low, known_differences:0, attempts:[]}` → `set_sprint({current:1, history:[]})` → 原子落盘。复用 `topo.rs::migration_sequence`、`machine.rs::update_module/set_sprint`（均已就绪）。环图沿用 Step 2.8 `has_cycles` 门禁 | **是** | 1d |
+| **M1-PLAN-02** | `analyze.md` Step 3 / `SKILL.md` 接线：调 `state populate-modules` 填充 + 用项目级 `state transition --to plan → scaffold → sprint_loop` 推进（populate 后/scaffolder 后）。检查点：state=sprint_loop、modules 非空 | **是** | 0.5d |
+| **M1-DIAG-01** | 新增 CLI `rustmigrate state record-subagent-call`（core 加 `push_subagent_call`）+ SKILL 接线，兑现 `subagent_calls` append-only（设计 06:370 / 09:136）。当前恒 `[]`，诊断/卡死统计未落地 | 否（独立小 PR） | 0.5-1d |
+| **M1-BOOT-01** | CLI 引导：实现设计提及的 `hooks/scripts/ensure-cli.sh`（检测/选择二进制）**或**文档化"先装 CLI 到 PATH"。当前 skill 裸调 `rustmigrate`，用户未装即失败 | 否 | 0.5d |
+
+### 两个需定夺的设计决策（实现 M1-PLAN-01/02 前定）
+1. **module key 命名**：用 NodeId 原值（`file:src/utils.ts`）**[推荐]** vs 去前缀（`utils`）。NodeId 原值与 run 阶段 `graph deps <module>` 的 `resolve_file_node` 解析一致，否则依赖门禁失配（**最大的坑**）。
+2. **谁推进状态机**：SKILL 在 populate/scaffold 后显式 `state transition --to ...` 推进 **[推荐]** vs analyze 末尾一次性推进。现 `run.md` 把推进甩给 run 衔接序列但 run 又硬要求 sprint_loop，自相矛盾，必须有人推。
+
+### MVP 最小可行范围（让 TRANS-06 跑通）
+M1-PLAN-01 + M1-PLAN-02 + linear/diamond fixture e2e（init→build→populate→transition→run 前置满足）。**单 sprint**、靠 topo `order` + run Step 0.6 依赖门禁决定执行序即可。
+
+### 推迟 M2
+多 sprint 层级划分（`parallel_groups`→多 sprint）、跨模块并行、risk 评估、`sprint.history.target_modules` 预填、module key 人类友好归一化、`[persistence].backup_on_write`/`retention_days` config（machine.rs atomic_write 当前无条件备份、`.backup` 不过期；单文件覆盖式，低影响）。
+
+> **关键文件**：`cli/crates/core/src/graph/topo.rs`（migration_sequence/parallel_groups）、`cli/crates/core/src/state/machine.rs`（update_module:201/set_sprint:306，可能加 push_subagent_call）、`cli/crates/cli/src/lib.rs`（StateCommands:140 加子命令）、`cli/crates/core/src/types/state.rs`（ModuleState/SprintState schema）、`plugin/skills/migrate/analyze.md`（Step 3 接线）。
+
+---
+
 ## §10 M2 模块级规划（质量提升，Sprint 5-8）
 
 ### Sprint 5：验证管线增强

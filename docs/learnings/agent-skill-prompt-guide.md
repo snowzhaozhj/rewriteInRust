@@ -57,7 +57,18 @@
 - **安装/开发**：用户 `/plugin marketplace add snowzhaozhj/rewriteInRust` → `/plugin install rust-migrate@rust-migrate-catalog`；本地开发 `claude --plugin-dir ./plugin`。
 - **提交前校验**（已验证通过）：`claude plugin validate .`（marketplace）+ `claude plugin validate ./plugin`（插件本体，含 skill/agent/hook frontmatter 解析）。
 
-## 6. 官方出处
+## 6. Plugin Live 验证经验（实跑验证，复用降本）
+
+静态校验（`claude plugin validate`）只查 frontmatter/schema；**真正的端到端行为必须 Live 跑**——2026-06-14 的 Live 验证正是靠实跑才发现 analyze→run 的状态填充缺口（静态审查全没发现）。方法论：
+
+- **不安装、不污染本会话**：用独立 headless 进程驱动 `claude --plugin-dir <绝对路径>/plugin -p "<prompt>"`。本会话默认**不加载**开发中的插件（可用 agent/skill 列表里看不到 `rust-migrate:*`），所以不能在本会话内调 `/migrate`，必须 `--plugin-dir`。
+- **命名空间确认**：headless 跑 `-p "列出可用 skills 和 agents 名称"` 即可实测插件注册形态——本插件实测 `/migrate`→`rust-migrate:migrate`、SubAgent=`rust-migrate:{analyzer,translator,scaffolder,verifier}`，确认 `<plugin-name>:` 前缀。这是最便宜、最高价值的第一步，先做。
+- **`-p` headless 限制**：① 人类确认门禁（如 run 的 Step 1.5 `auto_confirm_intent=false`）无法交互，会卡住——验证 run 类需临时设 `auto_confirm_intent=true` 或只验 analyze；② stdout 末尾常为空，**结论靠核查产出物文件**（`.rust-migration/` 下的 state/db/规则），不靠 stdout；③ 写操作需 `--dangerously-skip-permissions`。
+- **隔离**：把 fixture 复制到 `/tmp` 再跑，绝不动仓库；CLI 先 `cargo build` 并 `export PATH=.../target/debug:$PATH`（skill 裸调 `rustmigrate` 假设在 PATH，见 M1-BOOT-01）。
+- **分阶段、带超时**：analyze 串行 spawn 3 个 SubAgent，实测 ~9 分钟。每条命令 `timeout`，先廉价验证（加载+命名空间）再跑重的端到端，避免一个大命令静默卡死（呼应 [[feedback_watchdog_stall]]）。
+- **核查清单**（analyze）：`migration-state.json` 的 `state` 值、`source-graph.db` 节点/边/calls 计数、`porting/` 规则含关键标题、`PARITY.md`/golden fixtures 真实非占位、SubAgent 是否实际产出（专属产出物存在＝触发证据）。注意 schema 权威字段（modules/sprint/subagent_calls）是否真被填——**SKILL 指令说"填"≠ 真能填**（需对应 CLI 写命令存在）。
+
+## 7. 官方出处
 
 - SubAgent：https://code.claude.com/docs/en/sub-agents.md
 - Skill：https://code.claude.com/docs/en/skills.md
