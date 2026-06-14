@@ -5,8 +5,8 @@
 ## 当前位置
 
 - **Milestone**: M1 MVP
-- **Phase**: Phase 1 ✅ → 源码图校验 harness ✅（M1 验收门）→ Phase 2 集成验证 ✅ → M1 收尾 3 项 ✅
-- **下一步**: M1 graduate
+- **Phase**: Phase 1 ✅ → 源码图校验 harness ✅（M1 验收门）→ Phase 2 集成验证 ✅ → Phase 3 Plugin analyze 实现 ✅（已合并 master，Live 验证待交互会话）→ M1 收尾 3 项 ✅（PR #7 待合并）
+- **下一步**: Phase 4 翻译循环（另一会话进行中）+ PR #7 合并 → M1 graduate
 
 ## 进行中的任务
 
@@ -31,6 +31,7 @@
 
 - Plugin Live 验证（skill/agent/hook 实际触发）需在交互式会话中补全
   - 影响范围：仅 Phase 3（Plugin 实现），不阻塞 Phase 1-2
+  - Phase 3 代码已实现（analyzer/translator/scaffolder SubAgent + SKILL.md analyze 8 步骨架 + TS porting-template）；**待 Live 验证**：① `/migrate analyze` 端到端真实执行（M1-PLG-05）② plugin 内 SubAgent `agentType` 是否需 `rust-migrate:` 命名空间前缀
 
 ## Handoff Note
 
