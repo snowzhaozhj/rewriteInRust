@@ -516,7 +516,7 @@ Phase A（忠实翻译）→ Tier 0 验证 → Phase B（惯用化）→ Tier 0+
 M1-PLAN-01 + M1-PLAN-02 + linear/diamond fixture e2e（init→build→populate→transition→run 前置满足）。**单 sprint**、靠 topo `order` + run Step 0.6 依赖门禁决定执行序即可。
 
 ### 推迟 M2
-多 sprint 层级划分（`parallel_groups`→多 sprint）、跨模块并行、risk 评估、`sprint.history.target_modules` 预填、module key 人类友好归一化、`[persistence].backup_on_write`/`retention_days` config（machine.rs atomic_write 当前无条件备份、`.backup` 不过期；单文件覆盖式，低影响）。
+多 sprint 层级划分（`parallel_groups`→多 sprint）、跨模块并行、risk 评估、`sprint.history.target_modules` 预填、module key 人类友好归一化、`[persistence].backup_on_write`/`retention_days` config（machine.rs atomic_write 当前无条件备份、`.backup` 不过期；单文件覆盖式，低影响）。**populate 重填的替换语义**（重 analyze 后清理已不在迁移序列的 orphan 模块 key + 保留 sprint.history；当前为合并式写入，配合增量构建做，code-review 2026-06-15 发现，低）。**record-subagent-call 时间戳 ISO8601 格式校验**（当前 `Timestamp` 为透明 String 不校验，编排器传错序/非法时间戳会静默落盘，低）。
 
 > **关键文件**：`cli/crates/core/src/graph/topo.rs`（migration_sequence/parallel_groups）、`cli/crates/core/src/state/machine.rs`（update_module:201/set_sprint:306，可能加 push_subagent_call）、`cli/crates/cli/src/lib.rs`（StateCommands:140 加子命令）、`cli/crates/core/src/types/state.rs`（ModuleState/SprintState schema）、`plugin/skills/migrate/analyze.md`（Step 3 接线）。
 
