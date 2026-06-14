@@ -99,7 +99,7 @@ tools: Bash, Read, Write, Grep, Glob
 
 产出物：
 1. Rust 源文件，写入 `.rustmigrate.toml` 配置的 `rust_root/` 对应路径；按 `dependency-mapping.md` 更新 `Cargo.toml [dependencies]`。
-2. `_porting_manifest.json`（从 PORT NOTE 注释提取规则引用，至少一条），写入 `.rust-migration/context/module-learnings/{module}/`。
+2. `_porting_manifest.json`（**固定文件名**，非 `{module}_...` 前缀；从 PORT NOTE 注释提取规则引用，至少一条），写入 `.rust-migration/context/module-learnings/{module}/`。**绝不写入 `rust_root/`**——rust_root 是交付的纯净 Rust 代码区，只放 `.rs` 与 `Cargo.toml`；manifest / intent / attempts 等工作台元数据一律在 `.rust-migration/` 下。
 3. 同步把本次 Phase A 代码持久化到 `.rust-migration/intermediate/attempts/{module}-phase-a.rs`——供 verifier 对抗审查按固定路径读取（不依赖"中间态"模糊概念）。
 
 校验（L1）：Rust 文件存在且通过编译（F1）；manifest 非空。完成后由 SKILL.md 落盘 `state transition --module <M> --substatus phase_a_complete_awaiting_review`（status 保持 translating，供断点续传路由）。
