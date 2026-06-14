@@ -42,6 +42,10 @@ tools: Bash, Read, Write, Grep, Glob
 ## 三、测试验证（Phase B 后）
 
 - 按对抗审查选出的维度生成 Rust 测试：**纯函数**用 FFI 等价断言（同输入对比源运行时输出）；**非纯函数**用自正确性断言。黄金数据取自源项目真实样本，缺样本标 `TODO(port): need golden sample`，不编造期望值。
+- **测试粒度匹配模块复杂度，不为凑数刷测试**（测试对准模块真实暴露的语义风险：边界 / 数值 / 错误路径 / 并发）：
+  - **占位 / stub 模块**（依赖未实现，逻辑只有"返回默认值"）只验「占位契约」一次——整条占位链返回 `None` 验一处即可，**不对每个占位函数重复同一 `*_always_none` 断言**。
+  - **纯 re-export / 常量 / 类型定义模块**只验**编译通过 + 导出可见**，不强造业务断言。
+  - 有真实逻辑才写语义测试——**宁缺毋滥**，重复的 trivial 测试无验证价值、只增噪声。
 - 执行 `hooks/scripts/verify.sh`（cargo nextest + clippy + 条件 loom/shuttle），产出测试结果 JSON。
 - **done 前置硬条件**（任一不满足即标 incomplete，阻塞进入 done）：
   - 测试通过率 ≥ 预期、clippy 无 warning；
