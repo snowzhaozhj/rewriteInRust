@@ -25,10 +25,9 @@ pub struct Response<T: Serialize> {
     pub status: Status,
     /// 响应数据。
     pub data: T,
-    /// 警告信息列表。
-    ///
-    /// **始终序列化**（空时输出 `[]`），保证 `{status,data,warnings}` 三字段恒在，
-    /// 满足「所有命令输出全字段可解析」契约（见 CLAUDE.md 编码约束）。
+    /// 警告信息列表。空时省略序列化——warnings 仅在确有内容时出现，
+    /// 避免每条响应都挂个空 `[]` 噪声/误导。消费方按"可能缺失"处理（如 `jq '.warnings[]'`）。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 }
 
@@ -133,25 +132,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_ok_always_outputs_warnings_field() {
+    fn test_empty_warnings_omitted() {
+        // 空 warnings 不序列化——仅在确有内容时出现。
         let json = serde_json::to_value(Response::ok(serde_json::json!({"k": 1}))).unwrap();
-        // {status,data,warnings} 三字段恒在，空 warnings 输出 []。
         assert_eq!(json["status"], "ok");
-        assert!(json.get("warnings").is_some(), "warnings 字段必须存在");
-        assert_eq!(json["warnings"], serde_json::json!([]));
+        assert!(json.get("warnings").is_none(), "空 warnings 应省略");
     }
 
     #[test]
-    fn test_error_outputs_warnings_field() {
+    fn test_error_empty_warnings_omitted() {
         let resp: Response<ErrorData> = MigrateError::NotImplemented("x".into()).into();
         let json = serde_json::to_value(resp).unwrap();
         assert_eq!(json["status"], "error");
         assert_eq!(json["data"]["kind"], "not_implemented");
-        assert_eq!(json["warnings"], serde_json::json!([]));
+        assert!(json.get("warnings").is_none(), "空 warnings 应省略");
     }
 
     #[test]
-    fn test_nonempty_warnings_downgrades_to_warning_status() {
+    fn test_nonempty_warnings_present_and_downgrades_status() {
+        // warnings 有内容时才出现，且 status 降级为 warning。
         let resp = Response::ok_with_warnings(serde_json::json!({}), vec!["w".into()]);
         let json = serde_json::to_value(resp).unwrap();
         assert_eq!(json["status"], "warning");
