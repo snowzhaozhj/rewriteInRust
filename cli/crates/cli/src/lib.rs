@@ -20,13 +20,16 @@ use rustmigrate_core::graph::build::build_graph_ts;
 use rustmigrate_core::graph::persist::{load_from_db, save_to_db};
 use rustmigrate_core::graph::topo::{detect_cycles, topological_sort};
 use rustmigrate_core::graph::SourceGraph;
-use rustmigrate_core::profile::profile_project;
+use rustmigrate_core::profile::{
+    check_adapter_tools, check_cargo_nextest, load_analysis_tools, profile_project, ToolStatus,
+};
 use rustmigrate_core::response::{ErrorData, Response, Status};
 use rustmigrate_core::scaffold::scaffold_project;
 use rustmigrate_core::state::MigrationStateMachine;
-use rustmigrate_core::stats::compute_stats;
+use rustmigrate_core::stats::count_loc;
 use rustmigrate_core::types::common::NodeId;
 use rustmigrate_core::types::graph::{EdgeType, NodeType};
+use rustmigrate_core::types::state::ModuleStatus;
 use rustmigrate_core::validate::validate_state;
 
 /// `.rust-migration/` 工作目录名（见 `docs/design/04-toolchain.md § 5.7.3`）。
@@ -57,11 +60,16 @@ pub struct Cli {
 pub enum Commands {
     /// 初始化 `.rust-migration/` 目录与迁移状态文件。
     Init,
-    /// 项目画像分析（语言检测 + 复杂度）。
+    /// 项目画像分析（语言检测 + 复杂度 + 外部工具可用性检测）。
     Profile {
         /// 项目根目录（默认当前目录）。
         #[arg(long, default_value = ".")]
         root: PathBuf,
+        /// 适配器 `analysis-tools.json` 路径（用于 ADAPTER_TOOL_MISSING 检测）。
+        /// 由 Plugin SKILL 传入 `${CLAUDE_PLUGIN_ROOT}/skills/migrate/adapters/<lang>/analysis-tools.json`；
+        /// 省略则跳过适配器工具检测（仍检测 cargo-nextest）。
+        #[arg(long)]
+        adapter_tools: Option<PathBuf>,
     },
     /// 源码图相关命令。
     Graph {
@@ -132,26 +140,39 @@ pub enum ValidateCommands {
 pub enum StateCommands {
     /// 查询指定模块的当前迁移状态。
     Get { module: String },
-    /// 执行项目状态机转换（带合法性前置检查）。
+    /// 执行模块级状态机转换（带合法性前置检查）。
     Transition {
         #[arg(long)]
         module: String,
+        /// 目标 ModuleStatus（translating/compile_fixing/testing/reviewing/done/degrade_*/
+        /// paused/blocked）。省略则仅更新 substatus（status 不变，见 09-appendix § Step 2/4）。
         #[arg(long)]
-        to: String,
+        to: Option<String>,
         /// 子状态（如 phase_a_complete_awaiting_review），见 09-appendix-schemas.md。
         #[arg(long)]
         substatus: Option<String>,
-        /// 转换原因说明（写入历史/审计）。
+        /// 转换原因说明（追加到模块 attempts 审计序列）。
         #[arg(long)]
         reason: Option<String>,
+        /// 强制恢复：degrade_* → translating 须显式 --force（降级恢复是人类决策，
+        /// 见设计 § Step 0.3）。其余转换忽略。
+        #[arg(long)]
+        force: bool,
     },
 }
 
 /// Stats 子命令。
 #[derive(clap::Subcommand)]
 pub enum StatsCommands {
-    /// 迁移进度统计（按模块状态分类）。
-    Loc,
+    /// 源码与 Rust 代码行数统计（嵌入 tokei）。
+    Loc {
+        /// 源码根目录（省略则取 `.rustmigrate.toml` 的 `project.source_root`）。
+        #[arg(long)]
+        source: Option<PathBuf>,
+        /// Rust 代码根目录（省略则取 `.rustmigrate.toml` 的 `project.rust_root`）。
+        #[arg(long)]
+        rust: Option<PathBuf>,
+    },
     /// 源码与 Rust 结构复杂度对比（M2 落地）。
     Compare,
 }
@@ -217,7 +238,10 @@ where
 fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
     match command {
         Commands::Init => emit(writer, cmd_init()),
-        Commands::Profile { root } => emit(writer, cmd_profile(root)),
+        Commands::Profile {
+            root,
+            adapter_tools,
+        } => emit(writer, cmd_profile(root, adapter_tools.as_deref())),
         Commands::Graph { action } => match action {
             GraphCommands::Build {
                 root,
@@ -242,13 +266,22 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
                 to,
                 substatus,
                 reason,
+                force,
             } => emit(
                 writer,
-                cmd_state_transition(module, to, substatus.as_deref(), reason.as_deref()),
+                cmd_state_transition(
+                    module,
+                    to.as_deref(),
+                    substatus.as_deref(),
+                    reason.as_deref(),
+                    *force,
+                ),
             ),
         },
         Commands::Stats { action } => match action {
-            StatsCommands::Loc => emit(writer, cmd_stats_loc()),
+            StatsCommands::Loc { source, rust } => {
+                emit(writer, cmd_stats_loc(source.as_deref(), rust.as_deref()))
+            }
             StatsCommands::Compare => emit(writer, cmd_stats_compare()),
         },
         Commands::Scaffold { action } => match action {
@@ -369,21 +402,91 @@ fn project_name() -> String {
         .unwrap_or_else(|| "project".to_owned())
 }
 
-/// `profile --root <path>`：项目画像分析。
+/// `profile --root <path> [--adapter-tools <json>]`：项目画像分析 + 外部工具可用性检测。
 ///
-/// 设计（06-plugin-structure.md § CLI）要求 profile 额外做外部工具可用性检测
-/// （按 `analysis-tools.json` 验证适配器工具与版本 → `ADAPTER_TOOL_MISSING`；检测
-/// `cargo-nextest` → `RUST_TOOL_MISSING`）。该检测属 profile 功能模块、尚未实现，
-/// 此处明确 warning 告知画像不含工具检测，避免「不完整却静默报 ok」。
-fn cmd_profile(root: &Path) -> CmdResult {
+/// 设计（06-plugin-structure.md § CLI / 错误码表）：
+/// - `--adapter-tools` 指向适配器 `analysis-tools.json`，逐项验证安装与最低版本，
+///   必需工具缺失/版本不足产出 `ADAPTER_TOOL_MISSING` 警告（含 install_hint）；
+/// - 始终检测 Tier 0 Rust 二进制 `cargo-nextest`，缺失产出 `RUST_TOOL_MISSING` 警告。
+///
+/// 检测结果（含已满足项）写入 `data.tool_checks`，缺失项同时降级为 warning。
+fn cmd_profile(root: &Path, adapter_tools: Option<&Path>) -> CmdResult {
     let profile = profile_project(root)?;
-    // TODO(M1-PROFILE): 工具可用性检测（analysis-tools.json 逐项验证 + cargo-nextest），
-    // 缺失时产出 ADAPTER_TOOL_MISSING / RUST_TOOL_MISSING 警告（设计 06-plugin § CLI）。
-    let warnings = vec![
-        "工具可用性检测尚未实现：本画像不含 ADAPTER_TOOL_MISSING / RUST_TOOL_MISSING 检查（推迟 M1-PROFILE）"
-            .to_owned(),
-    ];
-    Ok((serde_json::to_value(&profile)?, warnings))
+    let mut warnings: Vec<String> = Vec::new();
+    let mut checks: Vec<ToolStatus> = Vec::new();
+
+    // 适配器工具检测（按 analysis-tools.json）。
+    match adapter_tools {
+        Some(path) => match load_analysis_tools(path) {
+            Ok(tools) => {
+                for status in check_adapter_tools(&tools) {
+                    if status.is_missing() {
+                        warnings.push(format_tool_missing("ADAPTER_TOOL_MISSING", &status));
+                    }
+                    checks.push(status);
+                }
+            }
+            // 清单文件本身读不了/损坏 ≠ 工具缺失，用独立的 MANIFEST 码，
+            // 并区分「路径错」与「内容损坏」，避免污染 ADAPTER_TOOL_MISSING 计数。
+            Err(MigrateError::FileNotFound(_)) => warnings.push(format!(
+                "ADAPTER_TOOLS_MANIFEST_UNREADABLE: analysis-tools.json 不存在（检查 --adapter-tools 路径）：{}",
+                path.display()
+            )),
+            Err(e) => warnings.push(format!(
+                "ADAPTER_TOOLS_MANIFEST_UNREADABLE: analysis-tools.json 解析失败（文件可能损坏）（{}）：{e}",
+                path.display()
+            )),
+        },
+        None => warnings
+            .push("未提供 --adapter-tools，跳过适配器工具检测（ADAPTER_TOOL_MISSING）".to_owned()),
+    }
+
+    // Tier 0 Rust 工具检测（cargo-nextest）。
+    let nextest = check_cargo_nextest();
+    if nextest.is_missing() {
+        warnings.push(format_tool_missing("RUST_TOOL_MISSING", &nextest));
+    }
+    checks.push(nextest);
+
+    let mut data = serde_json::to_value(&profile)?;
+    if let Some(obj) = data.as_object_mut() {
+        obj.insert("tool_checks".to_owned(), serde_json::to_value(&checks)?);
+    }
+    Ok((data, warnings))
+}
+
+/// 构造工具缺失警告文案，按根因给出**精确**结论，避免误导用户：
+/// - 探测失败（命令存在但执行异常）→「探测失败（<原因>），无法确认是否安装」；
+/// - 命令不存在 →「未安装」；
+/// - 已安装但有 min_version 却解析不出版本 →「版本无法解析…无法确认是否满足 ≥<min>」；
+/// - 已安装但版本不足 →「版本不足（需 ≥<min>，探测到 <det>）」。
+///
+/// 末尾附 `install_hint`（如有）。
+fn format_tool_missing(code: &str, status: &ToolStatus) -> String {
+    let mut msg = format!("{code}: {} ", status.display_name);
+    if let Some(err) = &status.probe_error {
+        msg.push_str(&format!("探测失败（{err}），无法确认是否安装"));
+    } else if !status.available {
+        msg.push_str("未安装");
+    } else if status.min_version.is_some() && status.detected_version.is_none() {
+        // 命令成功但版本号无法解析：不应断言「版本不足」。
+        if let Some(min) = &status.min_version {
+            msg.push_str(&format!("版本无法解析，无法确认是否满足 ≥{min}"));
+        }
+    } else {
+        msg.push_str("版本不足");
+        if let Some(min) = &status.min_version {
+            msg.push_str(&format!("（需 ≥{min}"));
+            if let Some(det) = &status.detected_version {
+                msg.push_str(&format!("，探测到 {det}"));
+            }
+            msg.push('）');
+        }
+    }
+    if let Some(hint) = &status.install_hint {
+        msg.push_str(&format!("；安装: {hint}"));
+    }
+    msg
 }
 
 /// `graph build --root <path> [--full] [--profile]`：构建图并写入 db。
@@ -612,64 +715,174 @@ fn cmd_state_get(module: &str) -> CmdResult {
     }
 }
 
-/// `state transition --module <m> --to <status>`：模块级迁移状态转换。
+/// `state transition --module <m> [--to <status>] [--substatus <s>] [--reason <r>]`：
+/// 模块级迁移状态转换。
 ///
-/// 设计（`09-appendix-schemas.md` § 状态机）要求本命令为【模块级】转换：
-/// `--to` 取 ModuleStatus（translating/compile_fixing/testing/reviewing/done…），
-/// 校验合法转换路径，并支持 `--substatus`/`--reason` 与 tmp-fsync-rename 原子写。
-/// 这是一块独立的模块级状态机功能（设计有专门附录），不属于本 PR 的命令路由接线范围。
-///
-/// 命令签名已一次对齐到位（含 substatus/reason），本体仍为诚实占位（implemented:false），
-/// 仅把收到的参数回显进响应，避免后续接线再改命令签名。
+/// 设计（`09-appendix-schemas.md` § 合法状态转换）：`--to` 取 ModuleStatus
+/// （translating/compile_fixing/testing/reviewing/done/degrade_*/paused/blocked），
+/// 经 [`ModuleStatus::can_transition_to`] 校验合法转换路径；省略 `--to` 时仅更新
+/// `--substatus`（status 不变，对应 Step 2/4 的 Phase 进度记录）。`degrade_* → translating`
+/// 恢复须 `--force`。转换的 blocked 恢复、degrade 重置等副作用由 core
+/// [`MigrationStateMachine::transition_module`] 处理，落盘走 tmp-fsync-rename 原子写。
 fn cmd_state_transition(
     module: &str,
-    to: &str,
+    to: Option<&str>,
     substatus: Option<&str>,
     reason: Option<&str>,
+    force: bool,
 ) -> CmdResult {
-    // TODO(M1-STATE): 完整模块级状态转换 —— ModuleStatus 解析 + 合法性前置校验
-    // + substatus/reason 落盘 + 原子写（复用 core `update_module`）。
-    // 当前诚实返回未实现，避免用项目级 ProjectState 语义冒充模块级转换。
+    if to.is_none() && substatus.is_none() {
+        return Err(MigrateError::Config(
+            "state transition 至少需指定 --to 或 --substatus 之一".to_owned(),
+        ));
+    }
+    // 解析目标状态（ModuleStatus 派生 EnumString，snake_case）。
+    let target = match to {
+        Some(s) => Some(s.parse::<ModuleStatus>().map_err(|_| {
+            MigrateError::Config(format!(
+                "非法 ModuleStatus: {s}（合法值: pending/translating/compile_fixing/testing/\
+                 reviewing/done/degrade_ffi/degrade_manual/degrade_skip/paused/blocked）"
+            ))
+        })?),
+        None => None,
+    };
+
+    let path = state_path();
+    let mut machine = MigrationStateMachine::load(&path)?;
+    machine.transition_module(module, target, substatus, reason, force)?;
+    machine.save(&path)?;
+
+    let updated = machine
+        .state_file()
+        .modules
+        .get(module)
+        .expect("转换成功后模块必存在");
     Ok((
         json!({
-            "message": "state transition 模块级状态转换尚未实现",
-            "implemented": false,
             "module": module,
-            "requested_to": to,
-            "substatus": substatus,
-            "reason": reason,
+            "status": updated.status.to_string(),
+            "substatus": updated.substatus,
+            "state": serde_json::to_value(updated)?,
         }),
-        vec![
-            "state transition 需模块级状态机完整实现（合法性校验/substatus/reason 落盘/原子写），本 PR 未实现"
-                .to_owned(),
-        ],
+        Vec::new(),
     ))
 }
 
-/// `stats loc`：当前返回迁移进度统计（按模块状态分类）。
+/// `stats loc [--source <p>] [--rust <p>]`：源码 / Rust 代码行数统计（嵌入 tokei）。
 ///
-/// 设计（`06-plugin-structure.md:99`）要求 `stats loc` = tokei 源码/Rust 代码行数统计，
-/// 当前实现接的是迁移进度统计 [`compute_stats`]，语义偏离。M1 临时占位，诚实标注。
-// TODO(M1-STATS): stats loc 改为 tokei 源码/Rust LOC 统计（复用 profile/detect 的 tokei）
-fn cmd_stats_loc() -> CmdResult {
-    let machine = MigrationStateMachine::load(&state_path())?;
-    let stats = compute_stats(machine.state_file());
-    let mut data = serde_json::to_value(&stats)?;
-    if let Some(obj) = data.as_object_mut() {
-        obj.insert(
-            "note".to_owned(),
-            json!(
-                "当前返回迁移进度统计而非设计要求的 tokei 源码/Rust LOC（偏离 06:99），M1 临时占位"
-            ),
-        );
+/// 设计（`06-plugin-structure.md:99`）：统计源码和 Rust 代码行数。路径优先取命令行参数，
+/// 否则读 `.rustmigrate.toml` 的 `project.source_root` / `project.rust_root`，再退默认值
+/// （`src` / `rust-src`）。某一侧目录不存在时该侧报 null 并降级 warning（Rust 端在迁移
+/// 早期通常尚未生成，属正常情形，不应整命令失败）。
+fn cmd_stats_loc(source: Option<&Path>, rust: Option<&Path>) -> CmdResult {
+    let mut warnings: Vec<String> = Vec::new();
+    // 解析路径：CLI 参数 > 配置文件 > 默认值（配置读取/解析失败会进 warnings）。
+    let cfg = load_config_or_default(&mut warnings);
+    let source_root = source
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(&cfg.project.source_root));
+    let rust_root = rust
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(&cfg.project.rust_root));
+
+    // 包含关系检测：一侧是另一侧的子目录时，被包含侧的文件会被外侧 tokei 递归计入，
+    // 造成跨 source/rust 重复计数 + 源码侧混入 Rust（EXCLUDED_DIRS 不含 rust_root）。
+    // M1 仅显式告警（不静默），完整去重（扫外侧时排除内侧）留待 M2。
+    if let Some(outer) = roots_overlap(&source_root, &rust_root) {
+        warnings.push(format!(
+            "source 与 rust 目录存在包含关系（{outer} 包含另一侧），LOC 可能重复计数且源码侧会混入 Rust；\
+             建议将 source_root / rust_root 配置为互不包含的目录"
+        ));
     }
+
+    let source_loc = count_loc_side(&source_root, "source", &mut warnings);
+    let rust_loc = count_loc_side(&rust_root, "rust", &mut warnings);
+
     Ok((
-        data,
-        vec![
-            "当前返回迁移进度统计而非设计要求的 tokei 源码/Rust LOC（偏离 06:99），M1 临时占位"
-                .to_owned(),
-        ],
+        json!({
+            "source": source_loc,
+            "rust": rust_loc,
+        }),
+        warnings,
     ))
+}
+
+/// 检测两个 root 是否存在包含关系（含相等）。返回**外层**目录的展示路径（供告警）。
+///
+/// 优先按 [`std::fs::canonicalize`] 比较真实路径（解析符号链接/`.`/`..`），任一侧无法
+/// 规范化（如目录不存在）时回退到原始路径的 [`Path::starts_with`] 词法比较。无包含返回 `None`。
+fn roots_overlap(source: &Path, rust: &Path) -> Option<String> {
+    let cs = std::fs::canonicalize(source).unwrap_or_else(|_| source.to_path_buf());
+    let cr = std::fs::canonicalize(rust).unwrap_or_else(|_| rust.to_path_buf());
+    if cs == cr || cs.starts_with(&cr) {
+        Some(rust.display().to_string())
+    } else if cr.starts_with(&cs) {
+        Some(source.display().to_string())
+    } else {
+        None
+    }
+}
+
+/// 统计单侧 LOC。三种结果均产生**可区分**的输出/告警，不静默：
+/// - 成功：返回序列化后的 `LocReport`；若 `files == 0`（目录存在但未统计到受支持文件）
+///   追加可疑提示。
+/// - 目录不存在：返回 `Null` + warning（迁移早期 Rust 端常未生成，属正常）。
+/// - 序列化失败 / 其余错误：返回 `Null` + warning（**不与"目录不存在"混淆**）。
+fn count_loc_side(root: &Path, label: &str, warnings: &mut Vec<String>) -> serde_json::Value {
+    match count_loc(root) {
+        Ok(report) => {
+            if report.files == 0 {
+                warnings.push(format!(
+                    "{label} 目录存在但未统计到任何受支持语言文件（可能为空/权限不足/全被排除）: {}",
+                    root.display()
+                ));
+            }
+            match serde_json::to_value(&report) {
+                Ok(v) => v,
+                Err(e) => {
+                    warnings.push(format!("{label} LOC 结果序列化失败: {e}"));
+                    serde_json::Value::Null
+                }
+            }
+        }
+        Err(MigrateError::FileNotFound(_)) => {
+            warnings.push(format!(
+                "{label} 目录不存在，跳过 LOC 统计: {}",
+                root.display()
+            ));
+            serde_json::Value::Null
+        }
+        Err(e) => {
+            warnings.push(format!("{label} LOC 统计失败: {e}"));
+            serde_json::Value::Null
+        }
+    }
+}
+
+/// 读取项目根 `.rustmigrate.toml` 回退默认配置。**区分三种情形**，避免静默吞错：
+/// - 文件不存在：静默回退默认（正常，配置可选）。
+/// - 读取失败（权限等非 NotFound IO 错误）/ TOML 解析失败：回退默认并**追加 warning**，
+///   避免用户精心配置的 `source_root` 因 typo 被无声丢弃。
+fn load_config_or_default(
+    warnings: &mut Vec<String>,
+) -> rustmigrate_core::types::config::MigrateConfig {
+    use rustmigrate_core::types::config::MigrateConfig;
+    match std::fs::read_to_string(config_path()) {
+        Ok(s) => match toml::from_str::<MigrateConfig>(&s) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                warnings.push(format!(
+                    "{CONFIG_FILE} 解析失败，回退默认配置（路径将用默认值）: {e}"
+                ));
+                MigrateConfig::default()
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => MigrateConfig::default(),
+        Err(e) => {
+            warnings.push(format!("{CONFIG_FILE} 读取失败，回退默认配置: {e}"));
+            MigrateConfig::default()
+        }
+    }
 }
 
 /// `stats compare`：源码与 Rust 结构复杂度对比（推迟 M2）。

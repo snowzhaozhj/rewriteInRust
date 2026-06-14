@@ -5,23 +5,24 @@
 ## 当前位置
 
 - **Milestone**: M1 MVP
-- **Phase**: Phase 1 ✅ → 源码图校验 harness ✅（M1 验收门）→ Phase 2 集成验证 ✅ → Phase 3 Plugin analyze 实现 ✅（PR 待审，Live 验证待交互会话）
-- **下一步**: M1 收尾补做 3 项（见下）+ Phase 4 翻译循环 → M1 graduate
+- **Phase**: Phase 1 ✅ → 源码图校验 harness ✅（M1 验收门）→ Phase 2 集成验证 ✅ → Phase 3 Plugin analyze 实现 ✅（已合并 master，Live 验证待交互会话）→ M1 收尾 3 项 ✅（PR #7 待合并）
+- **下一步**: Phase 4 翻译循环（另一会话进行中）+ PR #7 合并 → M1 graduate
 
 ## 进行中的任务
 
-- **PR #5**（`feat/m1-graph-validation-harness`）源码图校验 harness（文件级硬门 + 符号级软门 + 建图修复）：已合并 master ✅
-- **PR #3**（`feat/m1-integ-phase2`）Phase 2 集成验证（13 命令路由 + E2E + 契约修复 + 双审查 + merge master）：待验收
+- **PR #5**（`feat/m1-graph-validation-harness`）源码图校验 harness：已合并 master ✅
+- **PR #3**（`feat/m1-integ-phase2`）Phase 2 集成验证：已合并 master ✅（commit bfacff1）
+- **PR（待提）**（`feat/m1-finalize`）M1 收尾 3 项：实现完成，4 层门禁全过，待提 PR
 
 ## 下一步
 
-> **M1 收尾补做（3 项独立小任务）**：集成接线（PR#3）暴露的设计要求子功能 —— 对应 Worker 模块已实现主体，但漏了这几个子项。CLI 当前诚实占位（不糊弄），需在 M1 graduate 前补做。详见 PLAN.md 对应 Worker 任务。
+> **M1 收尾 3 项已实现完成**（分支 `feat/m1-finalize`），4 层质量门全过、design-checker 无 MISMATCH。提 1 个收尾 PR → 审查 → 合并 → **M1 graduate**。
 
-| 任务 | 内容 | 设计出处 | 当前 CLI 状态 |
-|------|------|----------|--------------|
-| **M1-STATE-04** | 模块级 `ModuleStatus` 转换（substatus/reason 落盘 + 合法性校验 + 原子写） | 09-appendix | `state transition` 占位 `implemented:false` |
-| **M1-PROFILE-04** | profile 工具可用性检测（ADAPTER/RUST_TOOL_MISSING，按 `analysis-tools.json`） | 06:90 | profile 占位 + warning |
-| **M1-PROFILE-05** | `stats loc` 改 tokei 源码/Rust LOC | 06:99 | 借用 coverage 迁移进度，语义偏离 |
+| 任务 | 内容 | 设计出处 | 状态 |
+|------|------|----------|------|
+| **M1-STATE-04** | 模块级 `transition_module`（Option<to>/substatus/reason 落盘 + blocked 恢复/degrade 重置副作用 + 合法性校验 + 原子写） | 09-appendix | ✅ 实现 + 6 单测 + 2 e2e |
+| **M1-PROFILE-04** | profile 工具可用性检测（`--adapter-tools` → ADAPTER_TOOL_MISSING；cargo-nextest → RUST_TOOL_MISSING；结果入 `data.tool_checks`） | 06:90/676/677/865 | ✅ `profile/tools.rs` + 6 单测 + 2 e2e + ts adapter analysis-tools.json |
+| **M1-PROFILE-05** | `stats loc` 改 tokei 源码/Rust LOC（`source`/`rust` 双侧 + by_language；路径取 CLI 参数>配置>默认） | 06:99 | ✅ `stats/loc.rs` + 2 单测 + 2 e2e |
 
 > **M2 推迟项**（已在代码 TODO 标注，不在 M1 范围）：增量构建、`graph build --profile` 性能画像、`graph interfaces --deps-of` 批量、`stats compare` 结构对比、ErrorData structured context。
 > **M2 符号级精度提升**：跨文件方法调用 `obj.method()` 解析（PLAN §10 **M2-REFAC-10**，已补 2026-06-14 调研的分档方案/recall ~70% 天花板/stack-graphs 避坑；档1 零歧义增强低成本可先做）。
@@ -34,7 +35,24 @@
 
 ## Handoff Note
 
-**本次完成**：Phase 1 第二轮 code-review 修复（commit `098f164`）
+**本次完成**：M1 收尾 3 项（PR #7，分支 `feat/m1-finalize`）实现 + 三方审查 + 两轮修复。
+
+### M1 收尾 3 项审查闭环（2026-06-14）
+
+- 实现 commit `af0cd68`；审查修复 `0fa9210`（/code-review）+ `ca3b37f`（codex + pr-review-toolkit 5 agent + /code-review 三方汇总）。
+- 质量门全过：fmt + clippy -D warnings + 139 core + 25 e2e；design-checker 无 MISMATCH。
+- **待 PR #7 合并 → M1 graduate**。
+
+**M1-INTEG 接线时需处理的 deferred TODO**（见 PR #7 评论）：
+1. profile 自动定位 analysis-tools.json（需 `CLAUDE_PLUGIN_ROOT` env 约定 + SKILL 接线；当前靠 `--adapter-tools` 显式传参）
+2. 完整子进程超时（当前仅 stdin(null)）
+3. ToolStatus 枚举化 / LocReport 派生 totals（type-design，M2 质量项）
+
+**设计文档歧义（需团队定夺，当前实现遵循转换矩阵）**：
+- `done + --force` 重做：设计行 379（暗示可重做）vs 行 209 矩阵（done 硬终态）矛盾。
+- blocked 进入：设计行 206「可从任何状态进入」vs 矩阵（仅 blockable 活跃态可进）。
+
+### Phase 1 第二轮 code-review 修复（commit `098f164`）
 
 ### Phase 1 code-review 修复（2026-06-14）
 

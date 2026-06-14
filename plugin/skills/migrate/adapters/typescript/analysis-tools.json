@@ -1,0 +1,9 @@
+[
+  {
+    "tool_id": "depcruise",
+    "display_name": "dependency-cruiser",
+    "min_version": "11.0.0",
+    "install_hint": "npm install --global dependency-cruiser",
+    "required": true
+  }
+]
