@@ -11,21 +11,22 @@
 ## 进行中的任务
 
 - **PR #5/#3/#7/#8 均已合并 master** ✅（M1 Phase 1-3 + 收尾 3 项 + 健壮性加固全部落地）
-- **Phase 4 翻译循环**（`feat/m1-trans-phase4`）：原会话已挂，本会话接手。分支当前为空，从骨架展开实现。
+- **Phase 4 翻译循环**（`feat/m1-trans-phase4`）：本会话接手。提示词主体 TRANS-01..05 已实现，待 MVP 验收 + Live 验证。
 
 ## 下一步
 
-> **M1 仅剩 Phase 4 翻译循环 + Plugin Live 验证**，完成即 M1 graduate。
+> **M1 仅剩 Phase 4 MVP 验收 + Plugin Live 验证**，完成即 M1 graduate。
 
 | 任务 | 内容 | 设计出处 | 状态 |
 |------|------|----------|------|
-| **M1-TRANS-01** | translator SubAgent Phase A：忠实翻译（逐行对应） | 06 §10.5 | 🔲 translator.md 待充实 |
-| **M1-TRANS-02** | translator SubAgent Phase B：惯用化优化 | 06 §10.5 | 🔲 |
-| **M1-TRANS-03** | verifier SubAgent：对抗审查（等价性检查） | 06 §10.5 | 🔲 verifier.md 待充实 |
-| **M1-TRANS-04** | SKILL.md `run` 完整实现（展开骨架） | 09-appendix 附录 B | 🔲 run.md 骨架 |
-| **M1-TRANS-05** | SKILL.md `review` 完整实现（仪表板） | — | 🔲 review.md 骨架 |
-| **M1-TRANS-06** | 3 项目 MVP 验收（cargo check+clippy+≥1 测试+结构可识别） | PLAN §9 | 🔲 |
-| **M1-PLG-05** | Plugin Live 验证（`/migrate analyze` 端到端 + SubAgent agentType 命名空间） | — | 🔲 需交互会话 |
+| **M1-TRANS-01/02** | translator 意图摘要 + Phase A 忠实翻译 + Phase B 惯用化 | 03§4.3/09附录E | ✅ translator.md |
+| **M1-TRANS-03** | verifier 对抗审查 9 维度 + 结构门禁 + 测试验证 | 03§7.7 | ✅ verifier.md |
+| **M1-TRANS-04** | `/migrate run` 完整分步（Step 0/0.3/0.5/0.6/1-6） | 09 附录 B | ✅ run.md |
+| **M1-TRANS-05** | `/migrate review` 进度仪表板 | 06§10.5 | ✅ review.md |
+| **M1-TRANS-06** | 3 项目 MVP 验收（cargo check+clippy+≥1 测试+结构可识别） | PLAN §9 | 🔲 需交互会话 |
+| **M1-PLG-05** | Plugin Live 验证（`/migrate analyze` 端到端真实执行） | — | 🔲 需交互会话；agentType 命名空间已定论 `rust-migrate:` |
+
+> **本会话附带交付**：项目级 `state transition` CLI 接线（闭合 analyze→run 衔接）+ `load` backup 回退告警（machine.rs M1-INTEG TODO）+ 仓库根 `marketplace.json`（插件可安装，`claude plugin validate` ✔）+ `docs/learnings/agent-skill-prompt-guide.md`（提示词规范沉淀）。
 
 > **M2 推迟项**（已在代码 TODO 标注，不在 M1 范围）：增量构建、`graph build --profile` 性能画像、`graph interfaces --deps-of` 批量、`stats compare` 结构对比、ErrorData structured context。
 > **M2 符号级精度提升**：跨文件方法调用 `obj.method()` 解析（PLAN §10 **M2-REFAC-10**，已补 2026-06-14 调研的分档方案/recall ~70% 天花板/stack-graphs 避坑；档1 零歧义增强低成本可先做）。
