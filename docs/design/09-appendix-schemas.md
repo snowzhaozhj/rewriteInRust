@@ -203,8 +203,9 @@ pending → translating → compile_fixing → testing → reviewing → done
                               testing（不可修复）→ paused → degrade_*（人类确认）
                                                   paused → translating（人类选择重试）
 
-blocked 可从任何状态进入（依赖模块降级或阻塞时触发）
-blocked → {原状态}（阻塞解除后恢复到进入 blocked 前的状态）
+blocked 可从任何【活跃状态】进入（pending/translating/compile_fixing/testing/reviewing/paused；
+        依赖模块尚未完成、下游无法开始时触发）
+blocked → {原状态}（阻塞解除后恢复到进入 blocked 前的状态 pre_blocked_status）
 
 degrade_* → translating（通过 /migrate run --module=X --force 恢复）
 ```
@@ -376,7 +377,7 @@ CLI 构建基础图（contains/imports 边），存储到 `.rust-migration/sourc
 读取 `modules[target].status` 与 `substatus`，确定性路由至对应入口步：
 
 ```
-- done (无 --force)              → 报错退出「模块已完成，若需重做请加 --force」
+- done                          → 报错退出「模块已完成（终态，不可经 --force 重做）；如确需重迁，请人工重置该模块状态（编辑 migration-state.json 或重新 init）后重跑」
 - degrade_* (无 --force)         → 报错退出「模块已降级，若需重做请加 --force」
 - degrade_* + --force            → 执行 `rustmigrate state transition --module <M> --to translating`，清除 substatus/degradation 字段，重置 attempts 计数 → 跳至 Step 0.5（重新进入翻译循环）
 - paused                         → 报错退出「模块暂停中，请先 --degrade=... 确认降级方式」
