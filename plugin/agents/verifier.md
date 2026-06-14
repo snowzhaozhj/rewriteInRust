@@ -10,12 +10,12 @@ tools: Bash, Read, Write, Grep, Glob
 
 > 仅由 `/migrate run` 调用；不参与 `/migrate analyze`（其序列只用 analyzer/translator/scaffolder）。
 
-## 输入 / 输出契约（权威：06-plugin-structure.md §10.2 接口表）
+## 输入 / 输出契约
 
 - **对抗审查**（Phase A 后）：输入 `.rust-migration/intermediate/attempts/{module}-phase-a.rs` + 原始源码（`source-ref/`）+ 迁移规则；输出 `{module}-review.md`（含**差异列表**标题 + 修正建议）。L1：存在、非空、含差异列表。
 - **测试验证**（Phase B 后）：输入 Phase B Rust 产出 + 黄金文件；输出测试结果 JSON（stdout）+ 追加 `KNOWN_DIFFERENCES.md` 条目。L2：JSON 格式合法、通过率字段在 [0,1]。
 
-## 一、对抗审查：9 维度不等价探测（权威：03-execution-model.md §7.7）
+## 一、对抗审查：9 维度不等价探测
 
 逐维度比对 Phase A 译码与源码语义，找出**行为差异**。按模块实际涉及的数据类型/操作选适用维度（1-2 参数函数 ≥3 维，3+ 参数 ≥5 维）；**维度 9 对所有模块强制**。每个适用维度至少给一个具体探测点（能写成 proptest case 的优先写）。
 
@@ -35,7 +35,7 @@ tools: Bash, Read, Write, Grep, Glob
 
 `{module}-review.md` 须含「## 差异列表」标题，逐条写：维度、源码行为、Rust 行为、严重度、修正建议。无差异也要显式写明"已核对维度 X，未发现差异"，不要留空。
 
-## 二、Phase A 结构门禁（配合 SKILL.md Step 3.5）
+## 二、Phase A 结构门禁
 
 调 `rustmigrate stats compare` 校验 Phase A 是否保持 1:1 结构（防止 translator 偷偷优化）：函数数量比、代码行数比、控制流嵌套大致对应。越界说明 Phase A 已非忠实翻译，应在 review 中标记要求重做。
 

@@ -26,10 +26,17 @@ argument-hint: "[analyze|run|review] [module]"
 ### CLI 调用与输出解析
 - 通过 Bash 调用 `rustmigrate <子命令>`，工作目录为源项目根。所有 CLI 输出是统一 JSON：`{status, data, warnings}`。
 - **只解析 `data` 字段**取结构化结果；`status` 为 `error` 时按 `data` 中的错误码处理，不要从自然语言里猜成败。`warnings` 非空时如实转达用户，不要静默吞掉。
-- 命令清单（M1 共 13 个）：`init`、`profile --root`、`graph build --root [--full]`、`graph topo-sort`、`graph deps <m>`、`graph interfaces <m> [--deps-of <t>]`、`graph stats`、`validate state`、`state get <m>`、`state transition --module --to [--substatus] [--reason]`、`stats loc`、`stats compare`、`scaffold workspace [--target] [--name]`。
+- 命令清单（M1 共 14 个）：`init`、`profile --root`、`graph build --root [--full]`、`graph topo-sort`、`graph deps <m>`、`graph interfaces <m> [--deps-of <t>]`、`graph stats`、`validate state`、`state get <m>`、`state transition [--module] --to [--substatus] [--reason] [--force]`、`state populate-modules`、`stats loc`、`stats compare`、`scaffold workspace [--target] [--name]`。
 
-### SubAgent 编排（权威：06-plugin-structure.md §10.2 / §10.5）
-- 用 **Agent tool** 调用 SubAgent，参数 `subagent_type` 取**带插件命名空间前缀**的 agent 名：`rust-migrate:analyzer` / `rust-migrate:translator` / `rust-migrate:scaffolder` / `rust-migrate:verifier`（Plugin 内 SubAgent 强制 `<plugin-name>:<agent>` 前缀，本插件 name=`rust-migrate`；设计 §10.2.1 概念名记为 `agentType`，实际工具参数为 `subagent_type`）。MVP 阶段 SubAgent **串行执行**，通过 `.rust-migration/` 下的文件通信，不直接对话。
+### 全局锁（所有子命令开始时取，结束或异常退出时释放）
+同一项目同一时刻只允许一个 `/migrate` 命令运行。锁文件 `.rust-migration/.migration-lock`，内容为单行 JSON `{session_pid, started_at, hostname}`，`session_pid` 取 `$PPID`（Claude Code 宿主进程，生命周期覆盖整个会话）。
+- **取锁**：写临时文件后 `link` 到锁文件（原子，等效 `O_EXCL` 且保证有内容），link 成功即获锁。
+- **link 失败 → 判陈旧**：同机且 `session_pid` 进程已死、或 `session_pid == 当前 $PPID`（同会话串行残留）→ 删锁后重试一次；不同会话的活进程 → 真实并发，报错退出；跨机或 PID 不可判定且 `now - started_at > lock_timeout_secs`（默认 300）→ 视为陈旧。
+- **释放**：命令结束或异常退出时删除锁文件。
+- **逃生口**：卡死时用户可手动删除 `.rust-migration/.migration-lock`；报错信息须包含这一提示。
+
+### SubAgent 编排
+- 用 **Agent tool** 调用 SubAgent，参数 `subagent_type` 取带插件命名空间前缀的 agent 名：`rust-migrate:analyzer` / `rust-migrate:translator` / `rust-migrate:scaffolder` / `rust-migrate:verifier`。MVP 阶段 SubAgent **串行执行**，通过 `.rust-migration/` 下的文件通信，不直接对话。
 - **不解析 SubAgent 的返回文本判断成功**。每次调用后只做产出物的确定性校验：
   - **L1 存在性**：文件存在、非空、含关键标题（Markdown / 代码 / 配置产出物）。
   - **L2 结构校验**：JSON 产出物（`migration-state.json`、测试结果）格式合法、关键字段非空；`source-graph.db` 必要表存在。
@@ -37,5 +44,3 @@ argument-hint: "[analyze|run|review] [module]"
 
 ### 产出物根目录
 所有产出物在源项目下的 `.rust-migration/` 目录（`init` 创建）。关键文件：`migration-state.json`、`source-graph.db`、`porting/`（迁移规则）、`PARITY.md`、`AGENTS.md`、`test-fixtures/golden/`。写 `migration-state.json` 统一走 CLI（原子写：tmp→fsync→rename）。
-
-> **诚实状态说明**：`analyze` / `run` / `review` 三个子命令的分步指令均已完整实现；端到端 **Live 验证**（对真实 fixture 跑通、确认 SubAgent 实际触发，M1-PLG-05）仍待交互式会话补全，未经实跑前不宣称"已验证可用"。

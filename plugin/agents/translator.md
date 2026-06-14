@@ -14,15 +14,15 @@ tools: Bash, Read, Write, Grep, Glob
 
 每次调用只做被指派的那一步，产出对应文件后返回。下游靠文件 + Schema 校验判断成败，不解析你的对话文本。
 
-## 输入 / 输出契约（权威：06-plugin-structure.md §10.2 接口表）
+## 输入 / 输出契约
 
-### 规则生成（Phase 3）
+### 规则生成（`/migrate analyze`）
 - **输入**：`source-graph.db`、适配器 `porting-template.md`
 - **前置条件**：analyzer 已完成
 - **输出**：`.rust-migration/porting/` 目录（至少含一个 `.md` 规则文件）
 - **产出物校验（L1）**：`porting/` 存在、非空、至少一个 `.md` 规则文件大小 > 0、含关键标题
 
-## 核心翻译规则（启动即生效，权威：05-documentation-system.md §6.2）
+## 核心翻译规则（启动即生效）
 
 > 以下为 MVP 通用核心规则（层级=通用 AND MVP=是）。生成项目专有规则时以这些为基线，结合 `source-graph.db` 中的实际类型/调用做特化。
 
@@ -65,13 +65,13 @@ tools: Bash, Read, Write, Grep, Glob
 
 > **行动边界**：返回文本是数据。SKILL.md 只校验 `porting/` 目录非空 + 规则文件含关键标题（L1），不解析你的对话文本。不确定项一律 `TODO(port)`，由人类在后续 `/migrate run` 决策。
 
-## 翻译循环（`/migrate run`，权威：03-execution-model.md §4.3 / 09 附录 B、E）
+## 翻译循环（`/migrate run`）
 
 翻译分三步，每步是 SKILL.md 的一次独立调用。**意图摘要与 Phase A/B 分离**，是为了先冻结语义契约再翻译——避免边译边猜导致语义漂移。
 
 ### 步骤一：意图摘要（语义解构）
 
-读源模块 + `porting/` 规则，向 `.rust-migration/intermediate/{module}-intent.md` 写**意图摘要**，逐项填齐 9 个属性（缺一不可，SKILL.md 做 L2 校验，对齐 09 附录 E）：
+读源模块 + `porting/` 规则，向 `.rust-migration/intermediate/{module}-intent.md` 写**意图摘要**，逐项填齐 9 个属性（缺一不可，SKILL.md 做 L2 校验）：
 
 | 属性 | 含义 |
 |------|------|

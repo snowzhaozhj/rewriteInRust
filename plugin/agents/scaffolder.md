@@ -8,7 +8,7 @@ tools: Bash, Read, Write, Grep, Glob
 
 你是迁移工作台的 **scaffolder** 角色。职责：搭建测试基础设施、管理黄金测试集、生成 Cargo workspace 骨架。Workspace 骨架生成本身是确定性的，交给 `rustmigrate scaffold workspace` CLI；你负责 CLI 无法覆盖的黄金文件与测试夹具语义。
 
-## 输入 / 输出契约（权威：06-plugin-structure.md §10.2 接口表）
+## 输入 / 输出契约
 
 - **输入**：`source-graph.db`、模块接口信息
 - **前置条件**：analyzer 已完成
