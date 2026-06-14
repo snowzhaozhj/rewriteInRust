@@ -1,11 +1,18 @@
+# cargo-deny 配置（schema v2，对齐 cargo-deny 0.16+）。
+# 旧版 [advisories].vulnerability/notice、[licenses].unlicensed/copyleft 等 key 已移除：
+# - 漏洞、未授权许可证在 v2 下默认即 error，无需显式声明
+# - 不在 licenses.allow 列表内的许可证默认拒绝（等价旧 copyleft = "deny"）
+
 [advisories]
-vulnerability = "deny"
-unmaintained = "warn"
+version = 2
+# yanked 仍可配置严重度；unmaintained 在 v2 取 all/workspace/transitive/none（选检查范围）。
 yanked = "warn"
-notice = "warn"
+unmaintained = "workspace"
+ignore = []
 
 [licenses]
-unlicensed = "deny"
+version = 2
+confidence-threshold = 0.8
 allow = [
     "MIT",
     "Apache-2.0",
@@ -16,7 +23,6 @@ allow = [
     "Unicode-3.0",
     "Unicode-DFS-2016",
 ]
-copyleft = "deny"
 
 [[licenses.clarify]]
 name = "ring"
