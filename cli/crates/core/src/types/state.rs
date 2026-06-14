@@ -78,6 +78,44 @@ impl ModuleStatus {
             Self::DegradeFfi | Self::DegradeManual | Self::DegradeSkip
         )
     }
+
+    /// 检查模块状态是否允许从当前状态转换到目标状态。
+    ///
+    /// 依据 `docs/design/09-appendix-schemas.md` 的模块状态转换图：
+    /// ```text
+    /// pending → translating → compile_fixing → testing → reviewing → done
+    ///               ↓（cargo check 首次通过）→ testing
+    ///         compile_fixing/testing（多轮失败）→ paused → degrade_ffi/manual/skip
+    /// ```
+    /// 补充语义：
+    /// - 任意活跃态（非终态）可因依赖未完成进入 `blocked`；`blocked` 恢复回任意活跃态
+    ///   （实际恢复目标由 `pre_blocked_status` 决定）。
+    /// - `paused` 经人类确认后可降级，或重试回 `translating`。
+    /// - 终态（`done` / `degrade_*`）不可再转出——保护断点续传不被非法回退覆盖。
+    pub fn can_transition_to(self, target: Self) -> bool {
+        use ModuleStatus::*;
+        // 活跃态：可互相进入 blocked，也是 blocked 的合法恢复目标。
+        let is_active = |s: ModuleStatus| {
+            matches!(
+                s,
+                Pending | Translating | CompileFixing | Testing | Reviewing
+            )
+        };
+        match self {
+            Pending => matches!(target, Translating | Blocked),
+            Translating => matches!(target, CompileFixing | Testing | Paused | Blocked),
+            CompileFixing => matches!(target, Testing | Paused | Blocked),
+            Testing => matches!(target, Reviewing | CompileFixing | Paused | Blocked),
+            Reviewing => matches!(target, Done | Paused | Blocked),
+            Paused => matches!(
+                target,
+                Translating | DegradeFfi | DegradeManual | DegradeSkip
+            ),
+            Blocked => is_active(target),
+            // 终态不可再转出。
+            Done | DegradeFfi | DegradeManual | DegradeSkip => false,
+        }
+    }
 }
 
 /// 翻译阶段（Phase A 忠实翻译 / Phase B 惯用化优化）。

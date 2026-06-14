@@ -2,12 +2,14 @@
 //!
 //! 管理 `migration-state.json` 的生命周期：创建、加载、保存、状态转换。
 
-use std::path::Path;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 
 use crate::error::{MigrateError, Result};
 use crate::types::common::{SourceLang, Timestamp};
 use crate::types::state::{
-    MigrationMetadata, MigrationStateFile, ProjectInfo, ProjectState, StateHistoryEntry,
+    MigrationMetadata, MigrationStateFile, ModuleState, ModuleStatus, ProjectInfo, ProjectState,
+    StateHistoryEntry,
 };
 
 /// 状态文件 schema 版本号。
@@ -23,29 +25,46 @@ pub struct MigrationStateMachine {
 impl MigrationStateMachine {
     /// 从文件加载状态。
     ///
-    /// 如果文件不存在返回 `MigrateError::FileNotFound`，
-    /// JSON 格式错误返回 `MigrateError::Json`。
+    /// 如果文件不存在返回 `MigrateError::FileNotFound`。
+    /// 主文件读取或 JSON 解析失败时，自动回退到 `.backup`（若存在）——
+    /// 应对崩溃/并发写入残留的半截文件。两者皆失败则返回主文件的错误。
     pub fn load(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Err(MigrateError::FileNotFound(path.to_path_buf()));
         }
+        match Self::load_file(path) {
+            Ok(machine) => Ok(machine),
+            Err(primary) => {
+                let backup = sibling_with_suffix(path, ".backup");
+                if backup.exists() {
+                    Self::load_file(&backup)
+                } else {
+                    Err(primary)
+                }
+            }
+        }
+    }
+
+    /// 从指定路径读取并反序列化状态文件。
+    fn load_file(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let state_file: MigrationStateFile = serde_json::from_str(&content)?;
         Ok(Self { state_file })
     }
 
-    /// 保存状态到文件。
+    /// 保存状态到文件（crash-safe）。
     ///
-    /// 自动创建父目录（如果不存在）。
+    /// 自动创建父目录；采用 tmp → fsync → 原子 rename，并同步父目录，
+    /// 保证进程崩溃或并发写入中断时不会留下半截 JSON。覆盖前先备份 `.backup`，
+    /// 供 [`load`](Self::load) 在主文件损坏时回退。
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
-            if !parent.exists() {
+            if !parent.as_os_str().is_empty() && !parent.exists() {
                 std::fs::create_dir_all(parent)?;
             }
         }
         let content = serde_json::to_string_pretty(&self.state_file)?;
-        std::fs::write(path, content)?;
-        Ok(())
+        atomic_write(path, content.as_bytes())
     }
 
     /// 执行状态转换。
@@ -138,9 +157,34 @@ impl MigrationStateMachine {
         metadata.graph_build_completed_at = Some(now);
     }
 
-    /// 更新模块状态。
-    pub fn update_module(&mut self, name: &str, module: crate::types::state::ModuleState) {
+    /// 登记/覆盖模块的完整状态记录（**不校验**状态转换合法性）。
+    ///
+    /// 仅用于首次登记模块或整体重建场景。运行时的状态流转应走
+    /// [`transition_module`](Self::transition_module)，以免把 `done` 等终态非法改回 `pending`、
+    /// 破坏断点续传语义。
+    pub fn update_module(&mut self, name: &str, module: ModuleState) {
         self.state_file.modules.insert(name.to_owned(), module);
+    }
+
+    /// 执行模块级状态转换（带合法性校验）。
+    ///
+    /// 校验 [`ModuleStatus::can_transition_to`]（依据 `docs/design/09-appendix-schemas.md`
+    /// 模块状态转换图），非法转换返回 `MigrateError::InvalidTransition`；
+    /// 模块不存在返回 `MigrateError::Config`。仅更新 `status`，保留其余字段。
+    pub fn transition_module(&mut self, name: &str, to: ModuleStatus) -> Result<()> {
+        let module = self
+            .state_file
+            .modules
+            .get_mut(name)
+            .ok_or_else(|| MigrateError::Config(format!("模块不存在: {name}")))?;
+        if !module.status.can_transition_to(to) {
+            return Err(MigrateError::InvalidTransition {
+                from: module.status.to_string(),
+                to: to.to_string(),
+            });
+        }
+        module.status = to;
+        Ok(())
     }
 
     /// 设置 sprint 信息。
@@ -160,11 +204,65 @@ impl MigrationStateMachine {
     }
 }
 
+/// 原子写入：覆盖前备份 `.backup`，写入 `.tmp` 并 fsync，再 rename 到目标，最后同步父目录。
+///
+/// 保证崩溃/并发中断时目标文件要么是旧内容要么是完整新内容，绝不出现半截 JSON。
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    if path.exists() {
+        let backup = sibling_with_suffix(path, ".backup");
+        std::fs::copy(path, &backup)?;
+    }
+    let tmp = sibling_with_suffix(path, ".tmp");
+    {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)?;
+    // 同步父目录，确保 rename 元数据落盘（best-effort，失败不影响数据完整性）。
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 在同目录下生成「原文件名 + 后缀」的兄弟路径（如 `state.json` → `state.json.backup`）。
+fn sibling_with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(suffix);
+    path.with_file_name(name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write as _;
+    use crate::types::common::RiskLevel;
     use tempfile::NamedTempFile;
+
+    /// 辅助：构造指定状态的最小模块记录。
+    fn module_with_status(status: ModuleStatus) -> ModuleState {
+        ModuleState {
+            status,
+            substatus: None,
+            sprint: None,
+            attempts: Vec::new(),
+            test_pass_rate: None,
+            coverage: None,
+            known_differences: 0,
+            risk: RiskLevel::Low,
+            phase_a_version: None,
+            phase_a_audit_passed: None,
+            blocked_by: None,
+            pre_blocked_status: None,
+        }
+    }
 
     /// 辅助：创建一个初始状态机。
     fn new_machine() -> MigrationStateMachine {
@@ -306,5 +404,65 @@ mod tests {
         let m = new_machine();
         assert!(m.save(&nested).is_ok());
         assert!(nested.exists());
+    }
+
+    #[test]
+    fn test_transition_module_valid() {
+        let mut m = new_machine();
+        m.update_module("a", module_with_status(ModuleStatus::Pending));
+        assert!(m.transition_module("a", ModuleStatus::Translating).is_ok());
+        assert_eq!(
+            m.state_file().modules["a"].status,
+            ModuleStatus::Translating
+        );
+    }
+
+    #[test]
+    fn test_transition_module_rejects_terminal_regression() {
+        let mut m = new_machine();
+        m.update_module("a", module_with_status(ModuleStatus::Done));
+        // done 是终态，不可改回 pending（断点续传保护）。
+        let err = m.transition_module("a", ModuleStatus::Pending).unwrap_err();
+        assert!(matches!(err, MigrateError::InvalidTransition { .. }));
+        assert_eq!(m.state_file().modules["a"].status, ModuleStatus::Done);
+    }
+
+    #[test]
+    fn test_transition_module_missing() {
+        let mut m = new_machine();
+        let err = m
+            .transition_module("ghost", ModuleStatus::Translating)
+            .unwrap_err();
+        assert!(matches!(err, MigrateError::Config(_)));
+    }
+
+    #[test]
+    fn test_load_falls_back_to_backup_on_corruption() {
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
+        let path = dir.path().join("migration-state.json");
+        let m = new_machine();
+        m.save(&path).expect("首次保存失败");
+        // 二次保存会把首版内容备份到 .backup
+        let mut m2 = m.clone();
+        m2.transition(ProjectState::Profile).unwrap();
+        m2.save(&path).expect("二次保存失败");
+
+        // 模拟主文件被半截写入损坏
+        std::fs::write(&path, b"{ broken json").unwrap();
+        let loaded = MigrationStateMachine::load(&path).expect("应从 backup 恢复");
+        // backup 是首次保存的 Init 状态
+        assert_eq!(loaded.current_state(), ProjectState::Init);
+    }
+
+    #[test]
+    fn test_atomic_write_leaves_no_tmp() {
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
+        let path = dir.path().join("state.json");
+        let m = new_machine();
+        m.save(&path).unwrap();
+        assert!(
+            !sibling_with_suffix(&path, ".tmp").exists(),
+            "不应残留 .tmp"
+        );
     }
 }

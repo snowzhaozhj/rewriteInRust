@@ -112,6 +112,7 @@ impl From<MigrateError> for Response<ErrorData> {
             MigrateError::FileNotFound(_) => "file_not_found",
             MigrateError::SchemaValidation(_) => "schema_validation",
             MigrateError::LockConflict(_) => "lock_conflict",
+            MigrateError::NotImplemented(_) => "not_implemented",
         };
         Self {
             status: Status::Error,

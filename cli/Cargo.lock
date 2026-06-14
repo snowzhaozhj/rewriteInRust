@@ -1756,7 +1756,6 @@ dependencies = [
 name = "rustmigrate"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "clap 4.6.1",
  "rustmigrate-core",
  "serde_json",

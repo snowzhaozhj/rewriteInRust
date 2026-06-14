@@ -1,4 +1,6 @@
 use clap::Parser;
+use rustmigrate_core::error::MigrateError;
+use rustmigrate_core::response::{ErrorData, Response};
 use std::io::Write;
 
 /// CLI 顶层入口。
@@ -90,54 +92,67 @@ where
     let cli = match Cli::try_parse_from(args) {
         Ok(cli) => cli,
         Err(e) => {
+            // --help / --version 等正常退出场景（use_stderr=false）保留 clap 原样人类可读输出；
+            // 真正的解析错误统一包成 JSON，保证「所有命令输出可被工具链解析」的契约。
+            if e.use_stderr() {
+                emit_error(writer, MigrateError::Config(e.to_string()));
+                return 1;
+            }
             let _ = write!(writer, "{e}");
-            return if e.use_stderr() { 1 } else { 0 };
+            return 0;
         }
     };
 
     match execute(&cli.command, writer) {
         Ok(()) => 0,
         Err(e) => {
-            let _ = writeln!(
-                writer,
-                r#"{{"status":"error","data":{{"message":"{}"}}}}"#,
-                e.to_string().replace('"', "\\\"")
-            );
+            emit_error(writer, e);
             1
         }
     }
 }
 
-fn execute<W: Write>(command: &Commands, writer: &mut W) -> anyhow::Result<()> {
+/// 将错误序列化为统一 JSON 响应写入 writer，避免手工转义产生非法 JSON。
+fn emit_error<W: Write>(writer: &mut W, err: MigrateError) {
+    let response: Response<ErrorData> = Response::from(err);
+    let _ = serde_json::to_writer(&mut *writer, &response);
+    let _ = writeln!(writer);
+}
+
+fn execute<W: Write>(command: &Commands, writer: &mut W) -> Result<(), MigrateError> {
     match command {
         Commands::Init => {
-            writeln!(
-                writer,
-                r#"{{"status":"ok","data":{{"message":"initialized"}}}}"#
-            )?;
+            let response = Response::ok(serde_json::json!({ "message": "initialized" }));
+            serde_json::to_writer(&mut *writer, &response)?;
+            writeln!(writer)?;
             Ok(())
         }
-        Commands::Profile => todo!("Phase 2: profile 命令集成"),
+        Commands::Profile => Err(not_impl("profile")),
         Commands::Graph { action } => match action {
-            GraphCommands::Build => todo!("Phase 2: graph build 命令集成"),
-            GraphCommands::TopoSort => todo!("Phase 2: graph topo-sort 命令集成"),
-            GraphCommands::Deps { .. } => todo!("Phase 2: graph deps 命令集成"),
-            GraphCommands::Interfaces { .. } => todo!("Phase 2: graph interfaces 命令集成"),
-            GraphCommands::Stats => todo!("Phase 2: graph stats 命令集成"),
+            GraphCommands::Build => Err(not_impl("graph build")),
+            GraphCommands::TopoSort => Err(not_impl("graph topo-sort")),
+            GraphCommands::Deps { .. } => Err(not_impl("graph deps")),
+            GraphCommands::Interfaces { .. } => Err(not_impl("graph interfaces")),
+            GraphCommands::Stats => Err(not_impl("graph stats")),
         },
         Commands::Validate { action } => match action {
-            ValidateCommands::State => todo!("Phase 2: validate state 命令集成"),
+            ValidateCommands::State => Err(not_impl("validate state")),
         },
         Commands::State { action } => match action {
-            StateCommands::Get { .. } => todo!("Phase 2: state get 命令集成"),
-            StateCommands::Transition { .. } => todo!("Phase 2: state transition 命令集成"),
+            StateCommands::Get { .. } => Err(not_impl("state get")),
+            StateCommands::Transition { .. } => Err(not_impl("state transition")),
         },
         Commands::Stats { action } => match action {
-            StatsCommands::Loc => todo!("Phase 2: stats loc 命令集成"),
-            StatsCommands::Compare => todo!("Phase 2: stats compare 命令集成"),
+            StatsCommands::Loc => Err(not_impl("stats loc")),
+            StatsCommands::Compare => Err(not_impl("stats compare")),
         },
         Commands::Scaffold { action } => match action {
-            ScaffoldCommands::Workspace => todo!("Phase 2: scaffold workspace 命令集成"),
+            ScaffoldCommands::Workspace => Err(not_impl("scaffold workspace")),
         },
     }
+}
+
+/// 构造「命令尚未实现（Phase 2 接线）」错误。
+fn not_impl(command: &str) -> MigrateError {
+    MigrateError::NotImplemented(format!("{command}（Phase 2 接线）"))
 }
