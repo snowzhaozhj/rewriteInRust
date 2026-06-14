@@ -5,24 +5,27 @@
 ## 当前位置
 
 - **Milestone**: M1 MVP
-- **Phase**: Phase 1 ✅ → 源码图校验 harness ✅（M1 验收门）→ Phase 2 集成验证 ✅ → Phase 3 Plugin analyze 实现 ✅（已合并 master，Live 验证待交互会话）→ M1 收尾 3 项 ✅（PR #7 待合并）
-- **下一步**: Phase 4 翻译循环（另一会话进行中）+ PR #7 合并 → M1 graduate
+- **Phase**: Phase 1 ✅ → 源码图校验 harness ✅（M1 验收门）→ Phase 2 集成验证 ✅ → Phase 3 Plugin analyze 实现 ✅（已合并）→ M1 收尾 3 项 ✅（PR #7 已合并 `bfb0a20`）
+- **下一步**: **Phase 4 翻译循环（M1-TRANS-01..06）** → Plugin Live 验证（M1-PLG-05）→ M1 graduate
 
 ## 进行中的任务
 
-- **PR #5**（`feat/m1-graph-validation-harness`）源码图校验 harness：已合并 master ✅
-- **PR #3**（`feat/m1-integ-phase2`）Phase 2 集成验证：已合并 master ✅（commit bfacff1）
-- **PR（待提）**（`feat/m1-finalize`）M1 收尾 3 项：实现完成，4 层门禁全过，待提 PR
+- **PR #5/#3/#7/#8 均已合并 master** ✅（M1 Phase 1-3 + 收尾 3 项 + 健壮性加固全部落地）
+- **Phase 4 翻译循环**（`feat/m1-trans-phase4`）：原会话已挂，本会话接手。分支当前为空，从骨架展开实现。
 
 ## 下一步
 
-> **M1 收尾 3 项已实现完成**（分支 `feat/m1-finalize`），4 层质量门全过、design-checker 无 MISMATCH。提 1 个收尾 PR → 审查 → 合并 → **M1 graduate**。
+> **M1 仅剩 Phase 4 翻译循环 + Plugin Live 验证**，完成即 M1 graduate。
 
 | 任务 | 内容 | 设计出处 | 状态 |
 |------|------|----------|------|
-| **M1-STATE-04** | 模块级 `transition_module`（Option<to>/substatus/reason 落盘 + blocked 恢复/degrade 重置副作用 + 合法性校验 + 原子写） | 09-appendix | ✅ 实现 + 6 单测 + 2 e2e |
-| **M1-PROFILE-04** | profile 工具可用性检测（`--adapter-tools` → ADAPTER_TOOL_MISSING；cargo-nextest → RUST_TOOL_MISSING；结果入 `data.tool_checks`） | 06:90/676/677/865 | ✅ `profile/tools.rs` + 6 单测 + 2 e2e + ts adapter analysis-tools.json |
-| **M1-PROFILE-05** | `stats loc` 改 tokei 源码/Rust LOC（`source`/`rust` 双侧 + by_language；路径取 CLI 参数>配置>默认） | 06:99 | ✅ `stats/loc.rs` + 2 单测 + 2 e2e |
+| **M1-TRANS-01** | translator SubAgent Phase A：忠实翻译（逐行对应） | 06 §10.5 | 🔲 translator.md 待充实 |
+| **M1-TRANS-02** | translator SubAgent Phase B：惯用化优化 | 06 §10.5 | 🔲 |
+| **M1-TRANS-03** | verifier SubAgent：对抗审查（等价性检查） | 06 §10.5 | 🔲 verifier.md 待充实 |
+| **M1-TRANS-04** | SKILL.md `run` 完整实现（展开骨架） | 09-appendix 附录 B | 🔲 run.md 骨架 |
+| **M1-TRANS-05** | SKILL.md `review` 完整实现（仪表板） | — | 🔲 review.md 骨架 |
+| **M1-TRANS-06** | 3 项目 MVP 验收（cargo check+clippy+≥1 测试+结构可识别） | PLAN §9 | 🔲 |
+| **M1-PLG-05** | Plugin Live 验证（`/migrate analyze` 端到端 + SubAgent agentType 命名空间） | — | 🔲 需交互会话 |
 
 > **M2 推迟项**（已在代码 TODO 标注，不在 M1 范围）：增量构建、`graph build --profile` 性能画像、`graph interfaces --deps-of` 批量、`stats compare` 结构对比、ErrorData structured context。
 > **M2 符号级精度提升**：跨文件方法调用 `obj.method()` 解析（PLAN §10 **M2-REFAC-10**，已补 2026-06-14 调研的分档方案/recall ~70% 天花板/stack-graphs 避坑；档1 零歧义增强低成本可先做）。

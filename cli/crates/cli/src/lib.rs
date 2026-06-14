@@ -29,7 +29,7 @@ use rustmigrate_core::state::MigrationStateMachine;
 use rustmigrate_core::stats::count_loc;
 use rustmigrate_core::types::common::NodeId;
 use rustmigrate_core::types::graph::{EdgeType, NodeType};
-use rustmigrate_core::types::state::ModuleStatus;
+use rustmigrate_core::types::state::{ModuleStatus, ProjectState};
 use rustmigrate_core::validate::validate_state;
 
 /// `.rust-migration/` 工作目录名（见 `docs/design/04-toolchain.md § 5.7.3`）。
@@ -140,12 +140,18 @@ pub enum ValidateCommands {
 pub enum StateCommands {
     /// 查询指定模块的当前迁移状态。
     Get { module: String },
-    /// 执行模块级状态机转换（带合法性前置检查）。
+    /// 执行状态机转换（带合法性前置检查）。
+    ///
+    /// 提供 `--module` 为**模块级**转换（ModuleStatus）；省略 `--module` 为**项目级**转换
+    /// （ProjectState：init/profile/plan/scaffold/sprint_loop/graduate，见 02-architecture § 3.4）。
+    /// 项目级转换是 `/migrate analyze`→`/migrate run` 衔接（profile→…→sprint_loop）的接入点。
     Transition {
+        /// 模块名。省略则执行项目级 ProjectState 转换（此时 `--to` 必填、`--substatus`/`--force` 不适用）。
         #[arg(long)]
-        module: String,
-        /// 目标 ModuleStatus（translating/compile_fixing/testing/reviewing/done/degrade_*/
-        /// paused/blocked）。省略则仅更新 substatus（status 不变，见 09-appendix § Step 2/4）。
+        module: Option<String>,
+        /// 目标状态。有 `--module` 时为 ModuleStatus（translating/compile_fixing/testing/reviewing/
+        /// done/degrade_*/paused/blocked）；无 `--module` 时为 ProjectState（profile/plan/scaffold/
+        /// sprint_loop/graduate）。模块级省略则仅更新 substatus（status 不变，见 09-appendix § Step 2/4）。
         #[arg(long)]
         to: Option<String>,
         /// 子状态（如 phase_a_complete_awaiting_review），见 09-appendix-schemas.md。
@@ -270,7 +276,7 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
             } => emit(
                 writer,
                 cmd_state_transition(
-                    module,
+                    module.as_deref(),
                     to.as_deref(),
                     substatus.as_deref(),
                     reason.as_deref(),
@@ -343,6 +349,25 @@ fn db_path() -> PathBuf {
 /// `migration-state.json` 路径。
 fn state_path() -> PathBuf {
     work_dir().join(STATE_FILE)
+}
+
+/// 加载状态机，并在因主文件损坏回退 `.backup` 时返回告警。
+///
+/// 见 [`MigrationStateMachine::recovered_from_backup`]：回退意味着拿到的是上一次保存前的
+/// 旧状态，最近进度可能丢失，必须经统一响应（warning 降级 status）显式告知用户。
+fn load_state_with_warnings(
+    path: &Path,
+) -> Result<(MigrationStateMachine, Vec<String>), MigrateError> {
+    let machine = MigrationStateMachine::load(path)?;
+    let mut warnings = Vec::new();
+    if machine.recovered_from_backup() {
+        warnings.push(
+            "migration-state.json 主文件损坏，已从 .backup 恢复——最近一次保存的进度可能丢失，\
+             请核对状态后再继续"
+                .to_owned(),
+        );
+    }
+    Ok((machine, warnings))
 }
 
 /// 项目根 `.rustmigrate.toml` 配置文件路径。
@@ -538,8 +563,9 @@ fn mark_graph_built(warnings: &mut Vec<String>) {
         );
         return;
     }
-    match MigrationStateMachine::load(&state) {
-        Ok(mut machine) => {
+    match load_state_with_warnings(&state) {
+        Ok((mut machine, backup_warnings)) => {
+            warnings.extend(backup_warnings);
             machine.set_graph_build_completed();
             if let Err(e) = machine.save(&state) {
                 warnings.push(format!("标记 graph_build_completed 失败: {e}"));
@@ -693,14 +719,14 @@ fn cmd_graph_stats() -> CmdResult {
 
 /// `validate state`：校验 `migration-state.json`。
 fn cmd_validate_state() -> CmdResult {
-    let machine = MigrationStateMachine::load(&state_path())?;
-    let warnings = validate_state(machine.state_file())?;
+    let (machine, mut warnings) = load_state_with_warnings(&state_path())?;
+    warnings.extend(validate_state(machine.state_file())?);
     Ok((json!({ "valid": true }), warnings))
 }
 
 /// `state get <module>`：查询指定模块迁移状态。
 fn cmd_state_get(module: &str) -> CmdResult {
-    let machine = MigrationStateMachine::load(&state_path())?;
+    let (machine, warnings) = load_state_with_warnings(&state_path())?;
     let state_file = machine.state_file();
     match state_file.modules.get(module) {
         Some(m) => Ok((
@@ -709,7 +735,7 @@ fn cmd_state_get(module: &str) -> CmdResult {
                 "status": m.status.to_string(),
                 "state": serde_json::to_value(m)?,
             }),
-            Vec::new(),
+            warnings,
         )),
         None => Err(MigrateError::Config(format!("模块不存在: {module}"))),
     }
@@ -725,12 +751,16 @@ fn cmd_state_get(module: &str) -> CmdResult {
 /// 恢复须 `--force`。转换的 blocked 恢复、degrade 重置等副作用由 core
 /// [`MigrationStateMachine::transition_module`] 处理，落盘走 tmp-fsync-rename 原子写。
 fn cmd_state_transition(
-    module: &str,
+    module: Option<&str>,
     to: Option<&str>,
     substatus: Option<&str>,
     reason: Option<&str>,
     force: bool,
 ) -> CmdResult {
+    // 无 --module：项目级 ProjectState 转换（profile→…→sprint_loop→graduate）。
+    let Some(module) = module else {
+        return cmd_state_transition_project(to, substatus, force);
+    };
     if to.is_none() && substatus.is_none() {
         return Err(MigrateError::Config(
             "state transition 至少需指定 --to 或 --substatus 之一".to_owned(),
@@ -748,7 +778,7 @@ fn cmd_state_transition(
     };
 
     let path = state_path();
-    let mut machine = MigrationStateMachine::load(&path)?;
+    let (mut machine, warnings) = load_state_with_warnings(&path)?;
     machine.transition_module(module, target, substatus, reason, force)?;
     machine.save(&path)?;
 
@@ -764,7 +794,48 @@ fn cmd_state_transition(
             "substatus": updated.substatus,
             "state": serde_json::to_value(updated)?,
         }),
-        Vec::new(),
+        warnings,
+    ))
+}
+
+/// `state transition --to <ProjectState>`（无 `--module`）：项目级状态机转换。
+///
+/// 驱动 `init→profile→plan→scaffold→sprint_loop→graduate`（合法性由
+/// [`ProjectState::can_transition_to`] 校验），是 `/migrate analyze`（推进到 `profile`）
+/// 与 `/migrate run`（前置要求 `sprint_loop`）之间的衔接接入点。`--substatus`/`--force`
+/// 为模块级概念，项目级不适用——显式拒绝以免静默吞参。
+fn cmd_state_transition_project(
+    to: Option<&str>,
+    substatus: Option<&str>,
+    force: bool,
+) -> CmdResult {
+    if substatus.is_some() || force {
+        return Err(MigrateError::Config(
+            "项目级 state transition（无 --module）不支持 --substatus / --force（仅模块级适用）"
+                .to_owned(),
+        ));
+    }
+    let to = to.ok_or_else(|| {
+        MigrateError::Config("项目级 state transition 必须指定 --to <ProjectState>".to_owned())
+    })?;
+    let target = to.parse::<ProjectState>().map_err(|_| {
+        MigrateError::Config(format!(
+            "非法 ProjectState: {to}（合法值: init/profile/plan/scaffold/sprint_loop/graduate）"
+        ))
+    })?;
+
+    let path = state_path();
+    let (mut machine, warnings) = load_state_with_warnings(&path)?;
+    let from = machine.current_state();
+    machine.transition(target)?;
+    machine.save(&path)?;
+
+    Ok((
+        json!({
+            "from": from.to_string(),
+            "state": target.to_string(),
+        }),
+        warnings,
     ))
 }
 

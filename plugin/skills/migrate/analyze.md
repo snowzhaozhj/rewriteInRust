@@ -95,7 +95,7 @@ COMPLETED = .metadata.graph_build_completed
 ### Step 7: 输出摘要
 向用户展示项目画像摘要：源语言、代码行数、模块数、依赖数、建议迁移策略。释放全局锁（Step 0）。
 
-> **状态衔接**：附录 B 的 analyze 骨架 Step 3 将项目 state 推进到 `profile`。`/migrate run` 前置要求的 `sprint_loop`（经 PLAN/SCAFFOLD 状态）依赖项目级 `state transition` 落盘（M1-STATE-04，当前 TODO），Phase 4 接入。故当前 analyze 完成后 state 停在 `profile`；待 Phase 4 落地后再提示执行 `/migrate run`。
+> **状态衔接**：附录 B 的 analyze 骨架 Step 3 将项目 state 推进到 `profile`（经 `rustmigrate state transition --to profile`，无 `--module` 即项目级转换）。`/migrate run` 前置要求的 `sprint_loop` 经 `plan → scaffold → sprint_loop` 推进，同样用项目级 `state transition`（Phase 4 已接入 CLI）。analyze 完成后 state 停在 `profile`，由 `/migrate run` 序列驱动后续推进。
 
 ## 失败处理
 任一 SubAgent 调用（Step 2.5/4/6）校验失败时，按 [SKILL.md](./SKILL.md) 的失败恢复三步处理（记录→诊断重试→降级/回滚）。回滚清理范围见 `09-appendix-schemas.md` 附录 B「关键检查点的失败恢复规则」表；`intermediate/attempts/*` 始终保留。

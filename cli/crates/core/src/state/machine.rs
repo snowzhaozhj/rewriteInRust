@@ -20,6 +20,9 @@ const STATE_SCHEMA_VERSION: &str = "1.0.0";
 pub struct MigrationStateMachine {
     /// 内部状态文件数据。
     state_file: MigrationStateFile,
+    /// 运行时标志（不序列化）：本次 [`load`](Self::load) 是否因主文件损坏而回退到 `.backup`。
+    /// 为真表示拿到的是上一次成功保存前的旧状态，最近进度可能丢失，调用方应向用户告警。
+    recovered_from_backup: bool,
 }
 
 impl MigrationStateMachine {
@@ -34,8 +37,8 @@ impl MigrationStateMachine {
     ///
     /// 注意：回退到 backup 意味着拿到的是**上一次成功保存前**的旧状态，最近一次
     /// 保存的进度可能丢失。load 本身不自愈主文件（损坏文件残留，依赖下次 save 覆盖）。
-    /// TODO(M1-INTEG)：CLI 接线时，应把"已从 backup 恢复、最新进度可能丢失"作为
-    /// warning 经统一响应（`Response::ok_with_warnings`）上报给用户。
+    /// 回退发生时 [`recovered_from_backup`](Self::recovered_from_backup) 置真，CLI 接线据此
+    /// 经统一响应向用户告警「已从 backup 恢复、最近进度可能丢失」。
     pub fn load(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Err(MigrateError::FileNotFound(path.to_path_buf()));
@@ -47,17 +50,35 @@ impl MigrationStateMachine {
                 let backup = sibling_with_suffix(path, ".backup");
                 // backup 不存在时 load_file 返回 Io 错误，与"backup 也损坏"一并落入
                 // 兜底：返回 primary 错误，不掩盖主文件故障现场。
-                Self::load_file(&backup).map_err(|_| primary)
+                Self::load_file(&backup)
+                    .map(Self::mark_recovered)
+                    .map_err(|_| primary)
             }
             Err(other) => Err(other),
         }
+    }
+
+    /// 标记本次加载来自 backup 回退（供 [`load`](Self::load) 内部使用）。
+    fn mark_recovered(mut self) -> Self {
+        self.recovered_from_backup = true;
+        self
+    }
+
+    /// 本次 [`load`](Self::load) 是否因主文件损坏回退到 `.backup`。
+    ///
+    /// CLI 接线据此向用户告警「已从 backup 恢复、最近进度可能丢失」（经统一响应降级 warning）。
+    pub fn recovered_from_backup(&self) -> bool {
+        self.recovered_from_backup
     }
 
     /// 从指定路径读取并反序列化状态文件。
     fn load_file(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let state_file: MigrationStateFile = serde_json::from_str(&content)?;
-        Ok(Self { state_file })
+        Ok(Self {
+            state_file,
+            recovered_from_backup: false,
+        })
     }
 
     /// 保存状态到文件（crash-safe）。
@@ -139,7 +160,10 @@ impl MigrationStateMachine {
             }),
         };
 
-        Self { state_file }
+        Self {
+            state_file,
+            recovered_from_backup: false,
+        }
     }
 
     /// 返回当前项目状态。
@@ -734,6 +758,23 @@ mod tests {
         let loaded = MigrationStateMachine::load(&path).expect("应从 backup 恢复");
         // backup 是首次保存的 Init 状态
         assert_eq!(loaded.current_state(), ProjectState::Init);
+        // 回退发生时标志置真，供 CLI 向用户告警进度可能丢失。
+        assert!(
+            loaded.recovered_from_backup(),
+            "回退 backup 应置 recovered 标志"
+        );
+    }
+
+    #[test]
+    fn test_normal_load_not_marked_recovered() {
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
+        let path = dir.path().join("migration-state.json");
+        new_machine().save(&path).expect("保存失败");
+        let loaded = MigrationStateMachine::load(&path).expect("加载失败");
+        assert!(
+            !loaded.recovered_from_backup(),
+            "正常加载不应标记 recovered"
+        );
     }
 
     #[test]
