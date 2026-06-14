@@ -502,6 +502,29 @@ fn smoke_stats_loc_missing_rust_root() {
 }
 
 #[test]
+fn smoke_stats_loc_overlapping_roots_warns() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        std::fs::create_dir_all("src/rust").unwrap();
+        std::fs::write("src/a.ts", "export const x = 1;\n").unwrap();
+        std::fs::write("src/rust/a.rs", "pub fn x() -> i32 {\n    1\n}\n").unwrap();
+        // rust_root 嵌在 source_root 下 → 应告警 LOC 可能重复计数。
+        let (code, json) = run(&["stats", "loc", "--source", "src", "--rust", "src/rust"]);
+        assert_eq!(code, 0, "stats loc 应成功: {json}");
+        assert_eq!(json["status"], "warning");
+        assert!(
+            json["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w.as_str().unwrap_or("").contains("包含关系")),
+            "应含包含关系 warning: {json}"
+        );
+    });
+}
+
+#[test]
 fn smoke_stats_compare_placeholder() {
     let tmp = tempfile::tempdir().unwrap();
     with_cwd(tmp.path(), || {

@@ -785,6 +785,16 @@ fn cmd_stats_loc(source: Option<&Path>, rust: Option<&Path>) -> CmdResult {
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from(&cfg.project.rust_root));
 
+    // 包含关系检测：一侧是另一侧的子目录时，被包含侧的文件会被外侧 tokei 递归计入，
+    // 造成跨 source/rust 重复计数 + 源码侧混入 Rust（EXCLUDED_DIRS 不含 rust_root）。
+    // M1 仅显式告警（不静默），完整去重（扫外侧时排除内侧）留待 M2。
+    if let Some(outer) = roots_overlap(&source_root, &rust_root) {
+        warnings.push(format!(
+            "source 与 rust 目录存在包含关系（{outer} 包含另一侧），LOC 可能重复计数且源码侧会混入 Rust；\
+             建议将 source_root / rust_root 配置为互不包含的目录"
+        ));
+    }
+
     let source_loc = count_loc_side(&source_root, "source", &mut warnings);
     let rust_loc = count_loc_side(&rust_root, "rust", &mut warnings);
 
@@ -795,6 +805,22 @@ fn cmd_stats_loc(source: Option<&Path>, rust: Option<&Path>) -> CmdResult {
         }),
         warnings,
     ))
+}
+
+/// 检测两个 root 是否存在包含关系（含相等）。返回**外层**目录的展示路径（供告警）。
+///
+/// 优先按 [`std::fs::canonicalize`] 比较真实路径（解析符号链接/`.`/`..`），任一侧无法
+/// 规范化（如目录不存在）时回退到原始路径的 [`Path::starts_with`] 词法比较。无包含返回 `None`。
+fn roots_overlap(source: &Path, rust: &Path) -> Option<String> {
+    let cs = std::fs::canonicalize(source).unwrap_or_else(|_| source.to_path_buf());
+    let cr = std::fs::canonicalize(rust).unwrap_or_else(|_| rust.to_path_buf());
+    if cs == cr || cs.starts_with(&cr) {
+        Some(rust.display().to_string())
+    } else if cr.starts_with(&cs) {
+        Some(source.display().to_string())
+    } else {
+        None
+    }
 }
 
 /// 统计单侧 LOC。三种结果均产生**可区分**的输出/告警，不静默：
