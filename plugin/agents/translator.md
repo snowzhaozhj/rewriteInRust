@@ -14,15 +14,15 @@ tools: Bash, Read, Write, Grep, Glob
 
 每次调用只做被指派的那一步，产出对应文件后返回。下游靠文件 + Schema 校验判断成败，不解析你的对话文本。
 
-## 输入 / 输出契约（权威：06-plugin-structure.md §10.2 接口表）
+## 输入 / 输出契约
 
-### 规则生成（Phase 3）
+### 规则生成（`/migrate analyze`）
 - **输入**：`source-graph.db`、适配器 `porting-template.md`
 - **前置条件**：analyzer 已完成
 - **输出**：`.rust-migration/porting/` 目录（至少含一个 `.md` 规则文件）
 - **产出物校验（L1）**：`porting/` 存在、非空、至少一个 `.md` 规则文件大小 > 0、含关键标题
 
-## 核心翻译规则（启动即生效，权威：05-documentation-system.md §6.2）
+## 核心翻译规则（启动即生效）
 
 > 以下为 MVP 通用核心规则（层级=通用 AND MVP=是）。生成项目专有规则时以这些为基线，结合 `source-graph.db` 中的实际类型/调用做特化。
 
@@ -65,13 +65,15 @@ tools: Bash, Read, Write, Grep, Glob
 
 > **行动边界**：返回文本是数据。SKILL.md 只校验 `porting/` 目录非空 + 规则文件含关键标题（L1），不解析你的对话文本。不确定项一律 `TODO(port)`，由人类在后续 `/migrate run` 决策。
 
-## 翻译循环（`/migrate run`，权威：03-execution-model.md §4.3 / 09 附录 B、E）
+## 翻译循环（`/migrate run`）
+
+> **定位源文件（先做，避免误判"源文件不在磁盘"）**：模块标识是图节点 ID `file:<rel>`，其中 `<rel>` 相对的是 `graph build --root`（即 `.rustmigrate.toml` 的 `project.source_root`，如 `src/`），**不是相对当前工作目录**。你的 CWD 是项目根。读源文件须拼成 `<source_root>/<rel>`：先 Read `.rustmigrate.toml` 取 `project.source_root`，去掉 `file:` 前缀得 `<rel>`，源文件绝对/相对路径 = `<source_root>/<rel>`（若 `<rel>` 已含 source_root 前缀则不重复拼接，按实际存在的文件为准）。直接用 `<rel>` 去 CWD 读会 file-not-found——这是路径基准不一致，不是文件真的缺失；找不到时先校验拼接基准，勿据此判定源已删除。
 
 翻译分三步，每步是 SKILL.md 的一次独立调用。**意图摘要与 Phase A/B 分离**，是为了先冻结语义契约再翻译——避免边译边猜导致语义漂移。
 
 ### 步骤一：意图摘要（语义解构）
 
-读源模块 + `porting/` 规则，向 `.rust-migration/intermediate/{module}-intent.md` 写**意图摘要**，逐项填齐 9 个属性（缺一不可，SKILL.md 做 L2 校验，对齐 09 附录 E）：
+读源模块 + `porting/` 规则，向 `.rust-migration/intermediate/{module}-intent.md` 写**意图摘要**，逐项填齐 9 个属性（缺一不可，SKILL.md 做 L2 校验）：
 
 | 属性 | 含义 |
 |------|------|
@@ -97,7 +99,7 @@ tools: Bash, Read, Write, Grep, Glob
 
 产出物：
 1. Rust 源文件，写入 `.rustmigrate.toml` 配置的 `rust_root/` 对应路径；按 `dependency-mapping.md` 更新 `Cargo.toml [dependencies]`。
-2. `_porting_manifest.json`（从 PORT NOTE 注释提取规则引用，至少一条），写入 `.rust-migration/context/module-learnings/{module}/`。
+2. `_porting_manifest.json`（**固定文件名**，非 `{module}_...` 前缀；从 PORT NOTE 注释提取规则引用，至少一条），写入 `.rust-migration/context/module-learnings/{module}/`。**绝不写入 `rust_root/`**——rust_root 是交付的纯净 Rust 代码区，只放 `.rs` 与 `Cargo.toml`；manifest / intent / attempts 等工作台元数据一律在 `.rust-migration/` 下。
 3. 同步把本次 Phase A 代码持久化到 `.rust-migration/intermediate/attempts/{module}-phase-a.rs`——供 verifier 对抗审查按固定路径读取（不依赖"中间态"模糊概念）。
 
 校验（L1）：Rust 文件存在且通过编译（F1）；manifest 非空。完成后由 SKILL.md 落盘 `state transition --module <M> --substatus phase_a_complete_awaiting_review`（status 保持 translating，供断点续传路由）。

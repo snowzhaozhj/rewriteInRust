@@ -383,6 +383,75 @@ fn smoke_state_transition() {
 }
 
 #[test]
+fn smoke_state_record_subagent_call() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+
+        // 第一条：完整字段（含 started_at/ended_at/error_message）。
+        let (code, json) = run(&[
+            "state",
+            "record-subagent-call",
+            "--step-index",
+            "1",
+            "--subagent-name",
+            "translator",
+            "--status",
+            "success",
+            "--started-at",
+            "2026-06-14T09:05:00Z",
+            "--ended-at",
+            "2026-06-14T09:08:30Z",
+        ]);
+        assert_eq!(code, 0, "记录 subagent 调用应成功: {json}");
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["data"]["recorded"], true);
+        assert_eq!(json["data"]["subagent_calls_count"], 1);
+
+        // 落盘字段正确（直接读文件断言 append-only 数组内容）。
+        let path = std::path::Path::new(".rust-migration").join("migration-state.json");
+        let state: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let calls = state["subagent_calls"].as_array().expect("应为数组");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["step_index"], 1);
+        assert_eq!(calls[0]["subagent_name"], "translator");
+        assert_eq!(calls[0]["status"], "success");
+        assert_eq!(calls[0]["started_at"], "2026-06-14T09:05:00Z");
+        assert_eq!(calls[0]["ended_at"], "2026-06-14T09:08:30Z");
+
+        // 第二条：仅必填字段，started_at 省略由 CLI 取当前时间，error_message 记录失败原因。
+        let (code, json) = run(&[
+            "state",
+            "record-subagent-call",
+            "--step-index",
+            "2",
+            "--subagent-name",
+            "verifier",
+            "--status",
+            "timeout",
+            "--error-message",
+            "exceeded 600s",
+        ]);
+        assert_eq!(code, 0, "第二次记录应成功: {json}");
+        // append 到长度 2。
+        assert_eq!(json["data"]["subagent_calls_count"], 2);
+
+        let state: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let calls = state["subagent_calls"].as_array().expect("应为数组");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1]["subagent_name"], "verifier");
+        assert_eq!(calls[1]["status"], "timeout");
+        assert_eq!(calls[1]["error_message"], "exceeded 600s");
+        // started_at 缺省也应落非空时间戳（schema 必填）。
+        assert!(calls[1]["started_at"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()));
+        // ended_at 省略时不序列化（skip_serializing_if）。
+        assert!(calls[1].get("ended_at").is_none());
+    });
+}
+
+#[test]
 fn smoke_state_transition_invalid_status() {
     let tmp = tempfile::tempdir().unwrap();
     with_cwd(tmp.path(), || {
@@ -651,6 +720,171 @@ fn topo_sort_without_db_errors() {
     with_cwd(tmp.path(), || {
         let (code, json) = run(&["graph", "topo-sort"]);
         assert_eq!(code, 1, "无 db 时应返回一般错误");
+        assert_eq!(json["status"], "error");
+    });
+}
+
+// === state populate-modules（PLAN.md §9.5 M1-PLAN-01：analyze→run 衔接）===
+
+#[test]
+fn e2e_populate_modules_linear_unblocks_run() {
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        let _ = run(&["init"]);
+        let (code, _) = run(&["graph", "build", "--root", "src"]);
+        assert_eq!(code, 0);
+
+        // populate：拓扑序落成 modules + sprint。
+        let (code, json) = run(&["state", "populate-modules"]);
+        assert_eq!(code, 0, "populate 应成功: {json}");
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["data"]["sprint"], 1);
+        let count = json["data"]["module_count"].as_u64().unwrap();
+        assert_eq!(count, 3, "linear-deps 应有 3 个文件模块: {json}");
+
+        // module key = NodeId 原值（file:src/...），与 graph deps 输出一致。
+        let modules = json["data"]["modules"].as_array().unwrap();
+        let utils = modules
+            .iter()
+            .find(|m| m.as_str().unwrap().contains("utils"))
+            .expect("应含 utils 模块")
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(
+            utils.starts_with("file:"),
+            "module key 应为 NodeId 原值: {utils}"
+        );
+
+        // 落盘校验：state 合法 + 模块 status=pending、sprint=1。
+        let (code, json) = run(&["validate", "state"]);
+        assert_eq!(code, 0, "填充后 state 应合法: {json}");
+        let (code, json) = run(&["state", "get", &utils]);
+        assert_eq!(code, 0, "应能读取填充的模块: {json}");
+        assert_eq!(json["data"]["status"], "pending");
+        assert_eq!(json["data"]["state"]["sprint"], 1);
+
+        // 衔接验证：run 阶段依赖门禁用 graph deps 的 key 查 modules，必须一致。
+        let (code, json) = run(&["graph", "deps", &utils]);
+        assert_eq!(code, 0, "graph deps 应成功: {json}");
+        for dep in json["data"]["dependencies"].as_array().unwrap() {
+            assert!(
+                modules.contains(dep),
+                "graph deps 输出的依赖 key {dep} 应在 modules 中（否则 run 依赖门禁失配）"
+            );
+        }
+    });
+}
+
+#[test]
+fn smoke_populate_rejects_cycles() {
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("circular-deps"), tmp.path());
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        let (code, _) = run(&["graph", "build", "--root", "src"]);
+        assert_eq!(code, 0);
+        // 有环：拒绝填充（对齐 topo-sort 门禁）。
+        let (code, json) = run(&["state", "populate-modules"]);
+        assert_eq!(code, 1, "有环应拒绝填充: {json}");
+        assert_eq!(json["status"], "error");
+        assert!(
+            json["data"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("循环依赖"),
+            "错误信息应提示循环依赖: {json}"
+        );
+    });
+}
+
+#[test]
+fn smoke_populate_rejects_active_progress() {
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        let _ = run(&["init"]);
+        let (code, _) = run(&["graph", "build", "--root", "src"]);
+        assert_eq!(code, 0);
+        let (code, _) = run(&["state", "populate-modules"]);
+        assert_eq!(code, 0);
+
+        // 把某模块推进到 translating（模拟迁移进行中）。
+        let utils = {
+            let (_, json) = run(&["graph", "topo-sort"]);
+            json["data"]["order"][0].as_str().unwrap().to_owned()
+        };
+        let (code, _) = run(&[
+            "state",
+            "transition",
+            "--module",
+            &utils,
+            "--to",
+            "translating",
+        ]);
+        assert_eq!(code, 0);
+
+        // 再次 populate：拒绝重填以免重置进度（断点续传安全）。
+        let (code, json) = run(&["state", "populate-modules"]);
+        assert_eq!(code, 1, "存在活跃模块应拒绝重填: {json}");
+        assert_eq!(json["status"], "error");
+    });
+}
+
+#[test]
+fn smoke_populate_idempotent_when_all_pending() {
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        let _ = run(&["init"]);
+        let (code, _) = run(&["graph", "build", "--root", "src"]);
+        assert_eq!(code, 0);
+        let (code, json1) = run(&["state", "populate-modules"]);
+        assert_eq!(code, 0);
+        let count1 = json1["data"]["module_count"].as_u64().unwrap();
+
+        // 全部仍为 pending → 再次 populate 应成功且结果稳定。
+        let (code, json2) = run(&["state", "populate-modules"]);
+        assert_eq!(code, 0, "全 pending 重填应成功: {json2}");
+        assert_eq!(
+            json2["data"]["module_count"].as_u64().unwrap(),
+            count1,
+            "重填后 module_count 应不变"
+        );
+    });
+}
+
+#[test]
+fn smoke_populate_empty_graph_warns() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        // 构建一个无源文件的空图。
+        std::fs::create_dir_all("empty-src").unwrap();
+        let (code, _) = run(&["graph", "build", "--root", "empty-src"]);
+        assert_eq!(code, 0);
+
+        // populate 空图 → warning(status 降级) + module_count=0。
+        let (code, json) = run(&["state", "populate-modules"]);
+        assert_eq!(code, 0, "空图 populate 不应 hard error: {json}");
+        assert_eq!(json["status"], "warning", "空图应降级为 warning: {json}");
+        assert_eq!(json["data"]["module_count"], 0);
+        assert!(
+            json["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w.as_str().unwrap_or("").contains("无文件模块")),
+            "应含'无文件模块'提示: {json}"
+        );
+    });
+}
+
+#[test]
+fn smoke_populate_without_db_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        let (code, json) = run(&["state", "populate-modules"]);
+        assert_eq!(code, 1, "无 db 时应报错");
         assert_eq!(json["status"], "error");
     });
 }

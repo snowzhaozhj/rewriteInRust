@@ -12,6 +12,19 @@
 - **渐进式披露（progressive disclosure）**：细节放 body 或 references/，触发时才加载；摘要放 frontmatter description。SKILL.md body 理想 < 500 行，超了就加一层 references/ 并给清晰指引「何时去读哪个文件」。大参考文件（>300 行）加目录。
 - **输出格式显式化**：用模板 + Input/Output 示例固定产出结构（下游靠文件/Schema 校验，不解析对话文本）。
 
+## 1b. 反模式：提示词 ≠ 设计文档（2026-06-14 全量重写踩坑沉淀）
+
+`plugin/` 是**运行时产物**——Claude 跑 skill/agent 时只读这些文件，**读不到 `docs/design/`**。早期提示词照着设计文档附录骨架抄，留下一堆坑：
+
+1. **禁死引用**：不写 `见 09-appendix §X`、`权威：06 §10.2`、`配合 SKILL.md Step 3.5`——运行时全是死链。需要的信息**内联**进提示词。
+2. **Step 用整数、按执行重组**：不照搬设计附录章节号（早期出现 `0.3/0.5/2.5/2.8/3.5` 这类小数 Step，正是搬章节号的结果）。
+3. **通用约定单点收敛**：锁、CLI 解析、SubAgent 校验等跨命令项放 SKILL.md 一处。散落会**自相矛盾**——曾出现 analyze.md 写"内容锁"、run.md 写"flock"同一把锁两种实现。
+4. **删评审级 why**：保留执行必需的约束理由（如"降级须 --force，因是人类决策"），删"为何这样设计"的设计论证（如"为何用内容锁而非 flock"占 18 行）。
+5. **重排 Step 必同步跨文件 Step 引用**：断点续传路由表、porting-template、agent body 里凡按 Step 号跳转/引用处，一起改。
+6. **根因**：CLAUDE.md「不二次文档化、设计为唯一权威」只约束**实现代码**（对照设计写即可），**不约束提示词**——提示词必须自包含。别把这条规则套到 `plugin/`。
+
+> 改完用 `grep -rnE '0[0-9]-[a-z]+\.md|§ ?[0-9]|附录 [A-Z]|Step [0-9]|权威：|flock' plugin/skills plugin/agents` 自检，应全空。
+
 ## 2. SubAgent 定义文件（`agents/*.md`）
 
 ### Frontmatter

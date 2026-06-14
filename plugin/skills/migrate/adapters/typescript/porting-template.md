@@ -10,9 +10,9 @@ confidence: high
 
 # TypeScript → Rust 迁移规则模板
 
-供 translator SubAgent 在 `/migrate analyze` Step 4 读取，作为生成项目专有规则（`.rust-migration/porting/`）的初始基线。translator 须结合 `source-graph.db` 中的实际类型与调用，把下面的通用规则**特化**为本项目的具体映射。
+translator 在 `/migrate analyze` 的规则生成步骤读取本模板，作为项目专有规则（`.rust-migration/porting/`）的基线，须结合 `source-graph.db` 的实际类型与调用**特化**为本项目映射。
 
-> **覆盖范围（M1 Phase 3 范围声明）**：设计 §11.2.1 要求模板「应含所有与源语言存在惯用法差异的 MVP 通用规则类对应节」（层级=通用 AND MVP=是 共 13 类：RULE-2/3/4/5/7/8/10/11/12/15/17/19/20）。本模板 M1 Phase 3 先落 **5 条对 TS→Rust 惯用法差异最显著的核心规则**：RULE-2（类型映射）/ RULE-3（错误处理）/ RULE-7（字符串）/ RULE-8（命名）/ RULE-20（不确定性）。**推迟 Phase 4 / M2 补全**：RULE-4 内存/所有权、RULE-5 指针/引用、RULE-10 标准库映射、RULE-11 禁止模式、RULE-12 unsafe 策略、RULE-15 全局状态、RULE-17 测试模式、RULE-19 惯用法映射。
+> **覆盖范围**：M1 先落 TS→Rust 惯用法差异最显著的 5 条核心规则——RULE-2（类型映射）/ RULE-3（错误处理）/ RULE-7（字符串）/ RULE-8（命名）/ RULE-20（不确定性）。其余推迟 M2：RULE-4 所有权、RULE-5 引用、RULE-10 标准库、RULE-11 禁止模式、RULE-12 unsafe、RULE-15 全局状态、RULE-17 测试、RULE-19 惯用法。
 
 ## 类型映射
 
@@ -77,4 +77,4 @@ translator 据本模板写入 `.rust-migration/porting/` 时，至少产出：
 - `dependency-mapping.md`：源项目外部依赖 → Rust crate 映射（基于实际 `imports` 边）。
 - `core-rules.md`：上述规则在本项目的具体化（含项目真实出现的类型/错误/命名实例）。
 
-每个生成文件须带 YAML frontmatter（含 `language_id`、`rule_version`）并至少含 `## 类型映射` 标题，以通过 analyze Step 4 的 L1 校验。
+每个生成文件须带 YAML frontmatter（含 `language_id`、`rule_version`）并至少含 `## 类型映射` 标题，以通过规则生成步骤的 L1 校验。

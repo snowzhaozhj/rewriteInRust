@@ -282,6 +282,13 @@ impl MigrationStateMachine {
                 module.attempts.clear();
             }
             module.status = target;
+            // graduate 到 Done：清空 testing/review 阶段残留的 substatus（如
+            // phase_b_optimization_in_progress / incomplete_*），避免污染 review 仪表板。
+            // 仅清 Done；degrade_*（DegradeFfi/Manual/Skip）的 substatus 含降级原因须保留。
+            // 清空在前、显式 substatus 覆盖在后，故 done 时显式传 substatus 仍能设上。
+            if target == ModuleStatus::Done {
+                module.substatus = None;
+            }
         }
 
         // 显式 substatus 覆盖（在转换副作用之后，允许恢复转换同时指定新 substatus）。
@@ -300,6 +307,39 @@ impl MigrationStateMachine {
             });
         }
         Ok(())
+    }
+
+    /// 追加一条 SubAgent 调用记录到顶层 `subagent_calls` 数组（append-only，不去重）。
+    ///
+    /// 对齐 `docs/design/09-appendix-schemas.md § subagent_calls 字段说明`：每次 SubAgent
+    /// 调用（含重试）追加一条 `{step_index, subagent_name, started_at, ended_at, status,
+    /// error_message}`，用于诊断卡死与统计重试次数。本方法只负责入库，时间戳/状态由调用方
+    /// 构造好的 [`SubAgentCall`] 决定（不做任何校验或合并）。
+    ///
+    /// `started_at` 为 `None` 时取当前 UTC 时间（schema 中该字段必填，给出合理缺省以便
+    /// 编排器在调用开始时即可记录），返回追加后数组的长度。
+    pub fn push_subagent_call(
+        &mut self,
+        step_index: u32,
+        subagent_name: String,
+        status: String,
+        started_at: Option<Timestamp>,
+        ended_at: Option<Timestamp>,
+        error_message: Option<String>,
+    ) -> usize {
+        let started_at =
+            started_at.unwrap_or_else(|| Timestamp::new(chrono::Utc::now().to_rfc3339()));
+        self.state_file
+            .subagent_calls
+            .push(crate::types::state::SubAgentCall {
+                step_index,
+                subagent_name,
+                started_at,
+                ended_at,
+                status,
+                error_message,
+            });
+        self.state_file.subagent_calls.len()
     }
 
     /// 设置 sprint 信息。
@@ -655,6 +695,67 @@ mod tests {
         assert_eq!(module.status, ModuleStatus::Translating);
         assert!(module.substatus.is_none());
         assert!(module.attempts.is_empty());
+    }
+
+    #[test]
+    fn test_transition_module_to_done_clears_substatus() {
+        // graduate 到 Done 时清空 testing/review 阶段残留的 substatus。
+        let mut m = new_machine();
+        let mut module = module_with_status(ModuleStatus::Reviewing);
+        module.substatus = Some("phase_b_optimization_in_progress".to_owned());
+        m.update_module("a", module);
+        m.transition_module("a", Some(ModuleStatus::Done), None, None, false)
+            .unwrap();
+        let module = &m.state_file().modules["a"];
+        assert_eq!(module.status, ModuleStatus::Done);
+        assert!(module.substatus.is_none());
+    }
+
+    #[test]
+    fn test_transition_module_to_done_explicit_substatus_wins() {
+        // done 时显式传 substatus：清空在前、显式覆盖在后，最终应保留显式值。
+        let mut m = new_machine();
+        let mut module = module_with_status(ModuleStatus::Reviewing);
+        module.substatus = Some("incomplete_stub".to_owned());
+        m.update_module("a", module);
+        m.transition_module(
+            "a",
+            Some(ModuleStatus::Done),
+            Some("graduated_with_note"),
+            None,
+            false,
+        )
+        .unwrap();
+        let module = &m.state_file().modules["a"];
+        assert_eq!(module.status, ModuleStatus::Done);
+        assert_eq!(module.substatus.as_deref(), Some("graduated_with_note"));
+    }
+
+    #[test]
+    fn test_transition_degrade_preserves_substatus() {
+        // degrade_* 的 substatus 含降级原因,Done 的清空逻辑不得误清。
+        // 回归防护：若 `if target == Done` 误写为 `if target.is_terminal()`
+        // (is_terminal 含 DegradeFfi/Manual/Skip),降级原因会被静默清空。
+        let mut m = new_machine();
+        let module = module_with_status(ModuleStatus::CompileFixing);
+        m.update_module("a", module);
+        m.transition_module("a", Some(ModuleStatus::Paused), None, None, false)
+            .unwrap();
+        m.transition_module(
+            "a",
+            Some(ModuleStatus::DegradeManual),
+            Some("async_too_complex"),
+            None,
+            false,
+        )
+        .unwrap();
+        let module = &m.state_file().modules["a"];
+        assert_eq!(module.status, ModuleStatus::DegradeManual);
+        assert_eq!(
+            module.substatus.as_deref(),
+            Some("async_too_complex"),
+            "degrade_* 的 substatus(降级原因)必须保留"
+        );
     }
 
     #[test]
