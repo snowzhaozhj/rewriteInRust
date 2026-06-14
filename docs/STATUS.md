@@ -5,25 +5,28 @@
 ## 当前位置
 
 - **Milestone**: M1 MVP
-- **Phase**: Phase 1/2/3 ✅ → 收尾 3 项 ✅（PR #7）→ **Phase 4 翻译循环提示词主体 ✅（PR #9，待合并）** → **M1 收尾：analyze→run 衔接缺口（§9.5，新会话接续）** → M1 graduate
-- **下一步**（**新会话从这里开始**）: **PR #9 合并后，实现 PLAN 填充缺口（PLAN.md §9.5 M1-PLAN-01/02）让 analyze→run 真正跑通 → TRANS-06 MVP 验收 → M1 graduate**
+- **Phase**: §9.5 analyze→run 衔接 ✅（M1-PLAN-01/02）+ BOOT-01/DIAG-01 ✅ + **Live 验证 4 fixture ✅**（linear+diamond 完整迁移，实跑确认）+ 批量修 8 缺口 + 产物优化 ✅ → **审查闭环 + PR + M1 graduate**
+- **下一步**（**新会话从这里开始**）: design-checker（本会话进行中）+ /code-review → 修复 → 提 PR（`feat/m1-plan-populate`）→ M1 graduate
 
 ## 进行中的任务
 
-- **PR #5/#3/#7/#8 均已合并 master** ✅
-- **PR #9**（`feat/m1-trans-phase4`）：Phase 4 提示词主体 + 配套修复 + 插件可安装。已过四方审查（code-review/design-checker/code-reviewer/codex）并修复，Live 验证核心通过。**待用户合并。**
+- **PR #5/#3/#7/#8/#9 均已合并 master** ✅
+- **本次分支 `feat/m1-plan-populate`**：M1-PLAN-01/02 + BOOT-01 + DIAG-01 + 批量修 8 缺口 + manifest/测试优化 + M2 探索沉淀。**待提 PR + 审查闭环。**
 
 ## 下一步（PR #9 合并后，新会话接续）
 
-> **M1 graduate 的硬前置**：PR #9 交付了 Phase 4 提示词主体，但 Live 验证（M1-PLG-05）实跑暴露 **analyze→run 状态衔接缺口**——analyze 后 `modules=[]`/`sprint` 缺失/state 停在 `profile`，`/migrate run` 无法执行。**详见 PLAN.md §9.5**（任务 M1-PLAN-01/02 + 2 个设计决策 + 最小可行范围）。
+> **M1-TRANS-06 验收 ✅（本会话达成）**：4 fixture headless Live 实跑（`claude --plugin-dir`）。**linear（3模块）+ diamond（5模块）完整迁移到 done，实跑交叉验证 nextest 33/33 + 12/12、clippy 零**；circular 环暂停正确；edge 含 M2 特性（async/数字枚举）M1 不 done，验证鲁棒性；review 仪表板正确（从权威产物源聚合）；断点续传经 types `--retry` 从 testing 断点重入验证。
 
 | 任务 | 内容 | 状态 |
 |------|------|------|
-| **M1-PLAN-01** | 新增 CLI `state populate-modules`（topo→modules/sprint 落盘） | 🔲 **TRANS-06 硬前置**，~1d |
-| **M1-PLAN-02** | analyze/SKILL 接线 populate + 推进 state 到 sprint_loop | 🔲 **硬前置**，~0.5d |
-| **M1-DIAG-01** | CLI `state record-subagent-call`（subagent_calls 落地） | 🔲 独立小 PR，非阻塞 |
-| **M1-BOOT-01** | ensure-cli.sh / CLI PATH 引导 | 🔲 小，非阻塞 |
-| **M1-TRANS-06** | 3 项目 MVP 验收（依赖 PLAN-01/02 完成） | 🔲 交互会话 |
+| **M1-PLAN-01** | CLI `state populate-modules` | ✅ |
+| **M1-PLAN-02** | analyze/SKILL 接线 populate + 推进 sprint_loop | ✅ |
+| **M1-DIAG-01** | CLI `state record-subagent-call` + 提示词接线 | ✅ |
+| **M1-BOOT-01** | ensure-cli.sh CLI 引导 | ✅ |
+| **M1-TRANS-06** | MVP 验收（4 项完成标志全达成） | ✅ |
+
+> **本会话 Live 暴露并修复**：8 项批量缺口（done-substatus / full-verify.sh / analyze Step4 纯类型误判 / record 接线 / scaffold dev-deps 误述 / translator CWD / verify.sh CLIPPY_CONF_DIR / testing 同态转换）+ manifest 卫生 + 测试粒度优化。
+> **重要发现（沉淀 PLAN §10 M2 P0）**：单文件 module + 完整循环 + 串行对真实项目不实用 → **并行 sprint + 复杂度自适应循环 + 测试分档**（优先于 Sprint 5.5）；无人值守迁移需「默认 TODO 决策策略」（headless 撞 safe-default TODO 必卡，本会话用决策注入解）。
 
 > **Phase 4 提示词主体（PR #9）**：M1-TRANS-01..05 ✅（translator/verifier/run.md/review.md）。
 > **M1-PLG-05 Live 验证结论**：插件加载 ✅、SubAgent 命名空间 = `rust-migrate:analyzer/...` ✅、analyze 端到端触发 SubAgent ✅；缺口见 §9.5。
