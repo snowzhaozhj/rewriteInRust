@@ -5,23 +5,24 @@
 ## 当前位置
 
 - **Milestone**: M1 MVP
-- **Phase**: Phase 1 ✅ → 源码图校验 harness ✅（M1 验收门）→ Phase 2 集成验证 ✅
-- **下一步**: M1 收尾补做 3 项（见下）→ M1 graduate
+- **Phase**: Phase 1 ✅ → 源码图校验 harness ✅（M1 验收门）→ Phase 2 集成验证 ✅ → M1 收尾 3 项 ✅
+- **下一步**: M1 graduate
 
 ## 进行中的任务
 
-- **PR #5**（`feat/m1-graph-validation-harness`）源码图校验 harness（文件级硬门 + 符号级软门 + 建图修复）：已合并 master ✅
-- **PR #3**（`feat/m1-integ-phase2`）Phase 2 集成验证（13 命令路由 + E2E + 契约修复 + 双审查 + merge master）：待验收
+- **PR #5**（`feat/m1-graph-validation-harness`）源码图校验 harness：已合并 master ✅
+- **PR #3**（`feat/m1-integ-phase2`）Phase 2 集成验证：已合并 master ✅（commit bfacff1）
+- **PR（待提）**（`feat/m1-finalize`）M1 收尾 3 项：实现完成，4 层门禁全过，待提 PR
 
 ## 下一步
 
-> **M1 收尾补做（3 项独立小任务）**：集成接线（PR#3）暴露的设计要求子功能 —— 对应 Worker 模块已实现主体，但漏了这几个子项。CLI 当前诚实占位（不糊弄），需在 M1 graduate 前补做。详见 PLAN.md 对应 Worker 任务。
+> **M1 收尾 3 项已实现完成**（分支 `feat/m1-finalize`），4 层质量门全过、design-checker 无 MISMATCH。提 1 个收尾 PR → 审查 → 合并 → **M1 graduate**。
 
-| 任务 | 内容 | 设计出处 | 当前 CLI 状态 |
-|------|------|----------|--------------|
-| **M1-STATE-04** | 模块级 `ModuleStatus` 转换（substatus/reason 落盘 + 合法性校验 + 原子写） | 09-appendix | `state transition` 占位 `implemented:false` |
-| **M1-PROFILE-04** | profile 工具可用性检测（ADAPTER/RUST_TOOL_MISSING，按 `analysis-tools.json`） | 06:90 | profile 占位 + warning |
-| **M1-PROFILE-05** | `stats loc` 改 tokei 源码/Rust LOC | 06:99 | 借用 coverage 迁移进度，语义偏离 |
+| 任务 | 内容 | 设计出处 | 状态 |
+|------|------|----------|------|
+| **M1-STATE-04** | 模块级 `transition_module`（Option<to>/substatus/reason 落盘 + blocked 恢复/degrade 重置副作用 + 合法性校验 + 原子写） | 09-appendix | ✅ 实现 + 6 单测 + 2 e2e |
+| **M1-PROFILE-04** | profile 工具可用性检测（`--adapter-tools` → ADAPTER_TOOL_MISSING；cargo-nextest → RUST_TOOL_MISSING；结果入 `data.tool_checks`） | 06:90/676/677/865 | ✅ `profile/tools.rs` + 6 单测 + 2 e2e + ts adapter analysis-tools.json |
+| **M1-PROFILE-05** | `stats loc` 改 tokei 源码/Rust LOC（`source`/`rust` 双侧 + by_language；路径取 CLI 参数>配置>默认） | 06:99 | ✅ `stats/loc.rs` + 2 单测 + 2 e2e |
 
 > **M2 推迟项**（已在代码 TODO 标注，不在 M1 范围）：增量构建、`graph build --profile` 性能画像、`graph interfaces --deps-of` 批量、`stats compare` 结构对比、ErrorData structured context。
 > **M2 符号级精度提升**：跨文件方法调用 `obj.method()` 解析（PLAN §10 **M2-REFAC-10**，已补 2026-06-14 调研的分档方案/recall ~70% 天花板/stack-graphs 避坑；档1 零歧义增强低成本可先做）。

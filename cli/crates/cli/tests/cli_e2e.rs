@@ -177,19 +177,56 @@ fn smoke_init_idempotent() {
 fn smoke_profile() {
     let project = temp_linear_project();
     let root = project.path().join("src");
+    // 未传 --adapter-tools：跳过适配器工具检测但仍检测 cargo-nextest，产出 warning。
     let (code, json) = run(&["profile", "--root", root.to_str().unwrap()]);
     assert_eq!(code, 0, "profile 应成功: {json}");
-    // 工具可用性检测未实现 → status 为 warning（设计 06:90 要求该检测，缺失须显式告知下游）。
+    assert_eq!(json["status"], "warning");
+    assert_eq!(json["data"]["primary_language"], "typescript");
+    // tool_checks 至少含 cargo-nextest 一项。
+    let checks = json["data"]["tool_checks"].as_array().unwrap();
+    assert!(
+        checks.iter().any(|c| c["tool_id"] == "cargo-nextest"),
+        "tool_checks 应含 cargo-nextest: {json}"
+    );
+    // 未提供 adapter-tools 的跳过提示。
+    assert!(
+        json["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|w| w.as_str().unwrap_or("").contains("adapter-tools")),
+        "应含跳过适配器工具检测的 warning: {json}"
+    );
+}
+
+#[test]
+fn smoke_profile_with_adapter_tools() {
+    let project = temp_linear_project();
+    let root = project.path().join("src");
+    // 含必不存在工具的 analysis-tools.json，验证 ADAPTER_TOOL_MISSING 路径。
+    let tools = project.path().join("analysis-tools.json");
+    std::fs::write(
+        &tools,
+        r#"[{"tool_id":"definitely-not-real-bin-xyz","display_name":"Ghost","min_version":"1.0.0","install_hint":"install ghost","required":true}]"#,
+    )
+    .unwrap();
+    let (code, json) = run(&[
+        "profile",
+        "--root",
+        root.to_str().unwrap(),
+        "--adapter-tools",
+        tools.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "profile 应成功: {json}");
     assert_eq!(json["status"], "warning");
     assert!(
         json["warnings"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|w| w.as_str().unwrap_or("").contains("工具可用性检测")),
-        "profile 应含工具检测未实现的 warning: {json}"
+            .any(|w| w.as_str().unwrap_or("").contains("ADAPTER_TOOL_MISSING")),
+        "应含 ADAPTER_TOOL_MISSING warning: {json}"
     );
-    assert_eq!(json["data"]["primary_language"], "typescript");
 }
 
 #[test]
@@ -284,30 +321,76 @@ fn smoke_validate_state() {
     });
 }
 
+/// 向 init 生成的 migration-state.json 注入一个模块（测试辅助）。
+fn inject_module(status: &str) {
+    let path = std::path::Path::new(".rust-migration").join("migration-state.json");
+    let mut state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    state["modules"]["a"] = serde_json::json!({ "status": status });
+    std::fs::write(&path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+}
+
 #[test]
-fn smoke_state_transition_placeholder() {
-    // 模块级状态转换为占位实现（见 lib.rs cmd_state_transition）：设计要求 --to 取
-    // ModuleStatus 并做合法性校验，属独立的模块级状态机功能，本 PR 未实现，诚实返回
-    // implemented=false + 警告，而非用项目级 ProjectState 语义冒充。
+fn smoke_state_transition() {
     let tmp = tempfile::tempdir().unwrap();
     with_cwd(tmp.path(), || {
         let _ = run(&["init"]);
+        inject_module("pending");
+
+        // 合法转换 pending → translating。
         let (code, json) = run(&[
             "state",
             "transition",
             "--module",
-            "all",
+            "a",
             "--to",
             "translating",
+            "--reason",
+            "kick off",
         ]);
-        assert_eq!(code, 0, "占位响应应成功返回: {json}");
-        // 占位携带「未实现」警告，Response 据此将 status 置为 warning（ok|warning|error 三态）。
-        assert_eq!(json["status"], "warning");
-        assert_eq!(json["data"]["implemented"], false);
-        assert!(
-            !json["warnings"].as_array().unwrap().is_empty(),
-            "应含未实现警告: {json}"
+        assert_eq!(code, 0, "合法转换应成功: {json}");
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["data"]["status"], "translating");
+        // reason 落盘到 attempts。
+        assert_eq!(
+            json["data"]["state"]["attempts"]
+                .as_array()
+                .map(|a| a.len()),
+            Some(1)
         );
+
+        // 仅更新 substatus（无 --to），status 不变。
+        let (code, json) = run(&[
+            "state",
+            "transition",
+            "--module",
+            "a",
+            "--substatus",
+            "phase_a_complete_awaiting_review",
+        ]);
+        assert_eq!(code, 0);
+        assert_eq!(json["data"]["status"], "translating");
+        assert_eq!(
+            json["data"]["substatus"],
+            "phase_a_complete_awaiting_review"
+        );
+
+        // 非法转换 translating → done（缺中间态）应报错。
+        let (code, json) = run(&["state", "transition", "--module", "a", "--to", "done"]);
+        assert_eq!(code, 1, "非法转换应报错: {json}");
+        assert_eq!(json["status"], "error");
+    });
+}
+
+#[test]
+fn smoke_state_transition_invalid_status() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        inject_module("pending");
+        let (code, json) = run(&["state", "transition", "--module", "a", "--to", "bogus"]);
+        assert_eq!(code, 1, "非法 ModuleStatus 应报错: {json}");
+        assert_eq!(json["status"], "error");
     });
 }
 
@@ -327,14 +410,48 @@ fn smoke_stats_loc() {
     let tmp = tempfile::tempdir().unwrap();
     with_cwd(tmp.path(), || {
         let _ = run(&["init"]);
+        // 造源码与 Rust 两侧文件。
+        std::fs::create_dir_all("src").unwrap();
+        std::fs::create_dir_all("rust-src").unwrap();
+        std::fs::write("src/a.ts", "export const x = 1;\n").unwrap();
+        std::fs::write("rust-src/a.rs", "pub fn x() -> i32 {\n    1\n}\n").unwrap();
+
         let (code, json) = run(&["stats", "loc"]);
         assert_eq!(code, 0, "stats loc 应成功: {json}");
-        // 带 tokei 语义偏差告警，Response 据此将 status 置为 warning（见 cmd_stats_loc）。
-        assert_eq!(json["status"], "warning");
-        assert_eq!(json["data"]["total_modules"], 0);
+        assert_eq!(json["status"], "ok");
+        // 源码侧统计到 TypeScript，Rust 侧统计到 Rust。
+        assert!(json["data"]["source"]["code"].as_u64().unwrap() >= 1);
         assert!(
-            json["data"]["note"].is_string(),
-            "应含 note 偏差说明: {json}"
+            json["data"]["source"]["by_language"]["TypeScript"].is_object(),
+            "源码侧应含 TypeScript: {json}"
+        );
+        assert!(json["data"]["rust"]["code"].as_u64().unwrap() >= 1);
+        assert!(
+            json["data"]["rust"]["by_language"]["Rust"].is_object(),
+            "Rust 侧应含 Rust: {json}"
+        );
+    });
+}
+
+#[test]
+fn smoke_stats_loc_missing_rust_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        std::fs::create_dir_all("src").unwrap();
+        std::fs::write("src/a.ts", "export const x = 1;\n").unwrap();
+        // rust-src 不存在 → rust 侧为 null + warning，命令不失败。
+        let (code, json) = run(&["stats", "loc"]);
+        assert_eq!(code, 0, "缺 rust 目录不应失败: {json}");
+        assert_eq!(json["status"], "warning");
+        assert!(json["data"]["rust"].is_null(), "rust 侧应为 null: {json}");
+        assert!(
+            json["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w.as_str().unwrap_or("").contains("rust 目录不存在")),
+            "应含 rust 目录缺失 warning: {json}"
         );
     });
 }

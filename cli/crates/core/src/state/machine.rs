@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use crate::error::{MigrateError, Result};
 use crate::types::common::{SourceLang, Timestamp};
 use crate::types::state::{
-    MigrationMetadata, MigrationStateFile, ModuleState, ModuleStatus, ProjectInfo, ProjectState,
-    StateHistoryEntry,
+    AttemptRecord, MigrationMetadata, MigrationStateFile, ModuleState, ModuleStatus, ProjectInfo,
+    ProjectState, StateHistoryEntry,
 };
 
 /// 状态文件 schema 版本号。
@@ -174,24 +174,82 @@ impl MigrationStateMachine {
         self.state_file.modules.insert(name.to_owned(), module);
     }
 
-    /// 执行模块级状态转换（带合法性校验）。
+    /// 执行模块级状态转换（带合法性校验、substatus/reason 落盘、blocked 恢复副作用）。
     ///
-    /// 校验 [`ModuleStatus::can_transition_to`]（依据 `docs/design/09-appendix-schemas.md`
-    /// 模块状态转换图），非法转换返回 `MigrateError::InvalidTransition`；
-    /// 模块不存在返回 `MigrateError::Config`。仅更新 `status`，保留其余字段。
-    pub fn transition_module(&mut self, name: &str, to: ModuleStatus) -> Result<()> {
+    /// 严格对齐 `docs/design/09-appendix-schemas.md` § 合法状态转换：
+    ///
+    /// - `to == Some(target)` 且 `target != from`：校验
+    ///   [`ModuleStatus::can_transition_to`]，非法转换返回 `MigrateError::InvalidTransition`；
+    ///   合法则更新 `status`，并按转换边执行副作用：
+    ///   - 进入 `blocked`（`from != blocked`）：记录 `pre_blocked_status = from`。
+    ///   - 离开 `blocked`：清除 `blocked_by` 与 `pre_blocked_status`（设计行 207「恢复到
+    ///     进入 blocked 前的状态」，由调用方传 `--to <pre_blocked_status>`）。
+    ///   - `degrade_* → translating`（设计行 381 `--force` 恢复）：清除 `substatus`、
+    ///     清空 `attempts`（重置重试计数，重新进入翻译循环）。
+    /// - `to == Some(from)`（同态）：跳过转换校验，仅落盘 substatus/reason（幂等）。
+    /// - `to == None`：仅更新 substatus（status 不变），对应设计 Step 4/5 的 Phase 进度记录
+    ///   （行 461/485 `state transition --module <M> --substatus <s>`）。
+    /// - `substatus == Some(s)`：显式覆盖 `substatus`（设置在转换副作用之后，故可在
+    ///   恢复转换的同时指定新的 substatus）。
+    /// - `reason == Some(r)`：向 `attempts` 追加一条审计记录（模块级唯一 append-only
+    ///   时间序列），`result` 形如 `transition:from→to reason=r`，供状态报告/排查回溯。
+    ///
+    /// 模块不存在返回 `MigrateError::Config`。
+    pub fn transition_module(
+        &mut self,
+        name: &str,
+        to: Option<ModuleStatus>,
+        substatus: Option<&str>,
+        reason: Option<&str>,
+    ) -> Result<()> {
         let module = self
             .state_file
             .modules
             .get_mut(name)
             .ok_or_else(|| MigrateError::Config(format!("模块不存在: {name}")))?;
-        if !module.status.can_transition_to(to) {
-            return Err(MigrateError::InvalidTransition {
-                from: module.status.to_string(),
-                to: to.to_string(),
+        let from = module.status;
+
+        if let Some(target) = to {
+            if target != from {
+                if !from.can_transition_to(target) {
+                    return Err(MigrateError::InvalidTransition {
+                        from: from.to_string(),
+                        to: target.to_string(),
+                    });
+                }
+                // 进入 blocked：记录恢复锚点。
+                if target == ModuleStatus::Blocked {
+                    module.pre_blocked_status = Some(from);
+                }
+                // 离开 blocked：清除阻塞元数据。
+                if from == ModuleStatus::Blocked {
+                    module.blocked_by = None;
+                    module.pre_blocked_status = None;
+                }
+                // degrade_* → translating（--force 恢复）：清除 substatus + 重置 attempts。
+                if from.is_degraded() && target == ModuleStatus::Translating {
+                    module.substatus = None;
+                    module.attempts.clear();
+                }
+                module.status = target;
+            }
+        }
+
+        // 显式 substatus 覆盖（在转换副作用之后，允许恢复转换同时指定新 substatus）。
+        if let Some(s) = substatus {
+            module.substatus = Some(s.to_owned());
+        }
+
+        // reason 审计落盘：append 到 attempts。
+        if let Some(r) = reason {
+            let now = Timestamp::new(chrono::Utc::now().to_rfc3339());
+            module.attempts.push(AttemptRecord {
+                timestamp: now,
+                result: format!("transition:{from}→{} reason={r}", module.status),
+                retry_count: 0,
+                checkpoint: None,
             });
         }
-        module.status = to;
         Ok(())
     }
 
@@ -426,7 +484,9 @@ mod tests {
     fn test_transition_module_valid() {
         let mut m = new_machine();
         m.update_module("a", module_with_status(ModuleStatus::Pending));
-        assert!(m.transition_module("a", ModuleStatus::Translating).is_ok());
+        assert!(m
+            .transition_module("a", Some(ModuleStatus::Translating), None, None)
+            .is_ok());
         assert_eq!(
             m.state_file().modules["a"].status,
             ModuleStatus::Translating
@@ -438,7 +498,9 @@ mod tests {
         let mut m = new_machine();
         m.update_module("a", module_with_status(ModuleStatus::Done));
         // done 是终态，不可改回 pending（断点续传保护）。
-        let err = m.transition_module("a", ModuleStatus::Pending).unwrap_err();
+        let err = m
+            .transition_module("a", Some(ModuleStatus::Pending), None, None)
+            .unwrap_err();
         assert!(matches!(err, MigrateError::InvalidTransition { .. }));
         assert_eq!(m.state_file().modules["a"].status, ModuleStatus::Done);
     }
@@ -447,9 +509,89 @@ mod tests {
     fn test_transition_module_missing() {
         let mut m = new_machine();
         let err = m
-            .transition_module("ghost", ModuleStatus::Translating)
+            .transition_module("ghost", Some(ModuleStatus::Translating), None, None)
             .unwrap_err();
         assert!(matches!(err, MigrateError::Config(_)));
+    }
+
+    #[test]
+    fn test_transition_module_substatus_only_keeps_status() {
+        // to == None：仅更新 substatus，status 不变（设计行 461/485 Phase 进度记录）。
+        let mut m = new_machine();
+        m.update_module("a", module_with_status(ModuleStatus::Translating));
+        assert!(m
+            .transition_module("a", None, Some("phase_a_complete_awaiting_review"), None)
+            .is_ok());
+        let module = &m.state_file().modules["a"];
+        assert_eq!(module.status, ModuleStatus::Translating);
+        assert_eq!(
+            module.substatus.as_deref(),
+            Some("phase_a_complete_awaiting_review")
+        );
+    }
+
+    #[test]
+    fn test_transition_module_reason_appended_to_attempts() {
+        // reason 落盘到 attempts 作为审计记录。
+        let mut m = new_machine();
+        m.update_module("a", module_with_status(ModuleStatus::Pending));
+        m.transition_module("a", Some(ModuleStatus::Translating), None, Some("kick off"))
+            .unwrap();
+        let attempts = &m.state_file().modules["a"].attempts;
+        assert_eq!(attempts.len(), 1);
+        assert!(attempts[0].result.contains("pending"));
+        assert!(attempts[0].result.contains("translating"));
+        assert!(attempts[0].result.contains("kick off"));
+    }
+
+    #[test]
+    fn test_transition_module_enter_blocked_records_pre_status() {
+        // 进入 blocked 记录 pre_blocked_status。
+        let mut m = new_machine();
+        m.update_module("a", module_with_status(ModuleStatus::Translating));
+        m.transition_module("a", Some(ModuleStatus::Blocked), None, None)
+            .unwrap();
+        assert_eq!(
+            m.state_file().modules["a"].pre_blocked_status,
+            Some(ModuleStatus::Translating)
+        );
+    }
+
+    #[test]
+    fn test_transition_module_leave_blocked_clears_metadata() {
+        // 离开 blocked 清除 blocked_by 与 pre_blocked_status（恢复到 pre_blocked_status）。
+        let mut m = new_machine();
+        let mut module = module_with_status(ModuleStatus::Blocked);
+        module.blocked_by = Some(vec!["core/parser".to_owned()]);
+        module.pre_blocked_status = Some(ModuleStatus::Translating);
+        m.update_module("a", module);
+        m.transition_module("a", Some(ModuleStatus::Translating), None, None)
+            .unwrap();
+        let module = &m.state_file().modules["a"];
+        assert_eq!(module.status, ModuleStatus::Translating);
+        assert!(module.blocked_by.is_none());
+        assert!(module.pre_blocked_status.is_none());
+    }
+
+    #[test]
+    fn test_transition_module_degrade_force_resets_attempts() {
+        // degrade_* → translating 清除 substatus + 清空 attempts。
+        let mut m = new_machine();
+        let mut module = module_with_status(ModuleStatus::DegradeManual);
+        module.substatus = Some("async_too_complex".to_owned());
+        module.attempts.push(AttemptRecord {
+            timestamp: Timestamp::new("2026-06-14T00:00:00Z"),
+            result: "fail".to_owned(),
+            retry_count: 3,
+            checkpoint: None,
+        });
+        m.update_module("a", module);
+        m.transition_module("a", Some(ModuleStatus::Translating), None, None)
+            .unwrap();
+        let module = &m.state_file().modules["a"];
+        assert_eq!(module.status, ModuleStatus::Translating);
+        assert!(module.substatus.is_none());
+        assert!(module.attempts.is_empty());
     }
 
     #[test]
@@ -525,7 +667,8 @@ mod tests {
             let mut m = new_machine();
             m.update_module("a", module_with_status(st));
             assert!(
-                m.transition_module("a", ModuleStatus::Translating).is_ok(),
+                m.transition_module("a", Some(ModuleStatus::Translating), None, None)
+                    .is_ok(),
                 "{st} 应允许恢复到 translating"
             );
         }
