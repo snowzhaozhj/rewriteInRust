@@ -40,7 +40,13 @@ const CONFIG_FILE: &str = ".rustmigrate.toml";
 
 /// CLI 顶层入口。
 #[derive(Parser)]
-#[command(name = "rustmigrate", version, about = "Rust 迁移验证工作台 CLI")]
+// color=Never：CLI 输出统一 JSON，clap 错误/help 文本不应含 ANSI 色码（tty 下会污染 JSON message）。
+#[command(
+    name = "rustmigrate",
+    version,
+    about = "Rust 迁移验证工作台 CLI",
+    color = clap::ColorChoice::Never
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
