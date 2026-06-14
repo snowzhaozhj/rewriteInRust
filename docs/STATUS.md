@@ -24,6 +24,7 @@
 | **M1-PROFILE-05** | `stats loc` 改 tokei 源码/Rust LOC | 06:99 | 借用 coverage 迁移进度，语义偏离 |
 
 > **M2 推迟项**（已在代码 TODO 标注，不在 M1 范围）：增量构建、`graph build --profile` 性能画像、`graph interfaces --deps-of` 批量、`stats compare` 结构对比、ErrorData structured context。
+> **M2 符号级精度提升**：跨文件方法调用 `obj.method()` 解析（PLAN §10 **M2-REFAC-10**，已补 2026-06-14 调研的分档方案/recall ~70% 天花板/stack-graphs 避坑；档1 零歧义增强低成本可先做）。
 
 ## 阻塞项
 
