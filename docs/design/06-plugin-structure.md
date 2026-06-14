@@ -9,17 +9,37 @@
 ### .claude-plugin/plugin.json
 
 ```json
-// .claude-plugin/plugin.json
+// plugin/.claude-plugin/plugin.json
 {
   "name": "rust-migrate",
   "version": "0.1.0",
   "description": "Rust 迁移验证工作台 — AI 辅助的代码迁移 + 验证管线",
-  "author": "rewriteInRust",
-  "skills": "./skills/"
+  "author": { "name": "rewriteInRust" }
 }
 ```
 
-> **注意**：`agents/`、`hooks/` 等目录通过 Plugin 目录约定自动发现，不需要在 plugin.json 中显式声明。Plugin 不支持 `rules/` 目录分发（见 10.1.1 规则分层策略）。
+> **注意**：`skills/`、`agents/`、`hooks/hooks.json` 通过 Plugin 目录约定自动发现，**不在 plugin.json 中显式声明**（`agents`/`commands` 等路径字段是"替换默认"语义，误声明反而绕过默认扫描）。`author` 必须是对象（`{name, ...}`），非字符串——官方校验器强制。Plugin 不支持 `rules/` 目录分发（见 10.1.1 规则分层策略）。
+
+### Monorepo 布局与安装（.claude-plugin/marketplace.json）
+
+本仓库是 monorepo（`cli/` Rust + `plugin/` 插件 + `docs/`），插件本体位于 `plugin/` 子目录。要让用户经标准流程安装，须在**仓库根**放 `.claude-plugin/marketplace.json`，用 `source` 指向插件子目录：
+
+```json
+// .claude-plugin/marketplace.json（仓库根）
+{
+  "name": "rust-migrate-catalog",
+  "description": "Rust 迁移验证工作台插件市场",
+  "owner": { "name": "snowzhaozhj" },
+  "plugins": [
+    { "name": "rust-migrate", "source": "./plugin", "description": "..." }
+  ]
+}
+```
+
+- `source` 相对 marketplace root（即 `.claude-plugin/` 所在目录=仓库根），不能含 `..`。
+- 用户安装：`/plugin marketplace add snowzhaozhj/rewriteInRust` → `/plugin install rust-migrate@rust-migrate-catalog`。
+- 本地开发免 marketplace：`claude --plugin-dir ./plugin`（限单次会话）。
+- 校验（提交前必跑）：`claude plugin validate .`（marketplace）+ `claude plugin validate ./plugin`（插件本体含 skill/agent/hook frontmatter）。
 
 ### Plugin 目录结构（方案 D 混合策略）
 
