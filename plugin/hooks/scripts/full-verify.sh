@@ -5,8 +5,10 @@ set -euo pipefail
 #
 # 全量验证 = 供应链审计（cargo deny + cargo audit）+ 复用 verify.sh 的模块级检查
 # （nextest + clippy）。**须在 rust_root（cargo workspace 根，含 Cargo.toml）下调用**。
-# 工具未安装、或 CWD 无 Cargo.toml 时优雅降级（warning + 跳过，不整体 fail）——把
-# “工具缺失 / 目录未脚手架”与“审计真失败”区分开（Live 实测这俩工具常缺失）。
+# 工具未安装时优雅降级（warning + 跳过，不整体 fail）——把”工具缺失”与”审计真失败”
+# 区分开（Live 实测这俩工具常缺失）。CWD 无 Cargo.toml 则跳过供应链审计（warning），
+# 但仍执行 verify.sh（nextest/clippy）——若 verify.sh 也因无清单失败则整体 fail（正确行为：
+# 调用方须确保在 rust_root 下调用）。
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

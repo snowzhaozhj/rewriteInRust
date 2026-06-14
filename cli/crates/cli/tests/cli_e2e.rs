@@ -831,6 +831,54 @@ fn smoke_populate_rejects_active_progress() {
 }
 
 #[test]
+fn smoke_populate_idempotent_when_all_pending() {
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        let _ = run(&["init"]);
+        let (code, _) = run(&["graph", "build", "--root", "src"]);
+        assert_eq!(code, 0);
+        let (code, json1) = run(&["state", "populate-modules"]);
+        assert_eq!(code, 0);
+        let count1 = json1["data"]["module_count"].as_u64().unwrap();
+
+        // 全部仍为 pending → 再次 populate 应成功且结果稳定。
+        let (code, json2) = run(&["state", "populate-modules"]);
+        assert_eq!(code, 0, "全 pending 重填应成功: {json2}");
+        assert_eq!(
+            json2["data"]["module_count"].as_u64().unwrap(),
+            count1,
+            "重填后 module_count 应不变"
+        );
+    });
+}
+
+#[test]
+fn smoke_populate_empty_graph_warns() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        // 构建一个无源文件的空图。
+        std::fs::create_dir_all("empty-src").unwrap();
+        let (code, _) = run(&["graph", "build", "--root", "empty-src"]);
+        assert_eq!(code, 0);
+
+        // populate 空图 → warning(status 降级) + module_count=0。
+        let (code, json) = run(&["state", "populate-modules"]);
+        assert_eq!(code, 0, "空图 populate 不应 hard error: {json}");
+        assert_eq!(json["status"], "warning", "空图应降级为 warning: {json}");
+        assert_eq!(json["data"]["module_count"], 0);
+        assert!(
+            json["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w.as_str().unwrap_or("").contains("无文件模块")),
+            "应含'无文件模块'提示: {json}"
+        );
+    });
+}
+
+#[test]
 fn smoke_populate_without_db_errors() {
     let tmp = tempfile::tempdir().unwrap();
     with_cwd(tmp.path(), || {

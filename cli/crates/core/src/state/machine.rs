@@ -732,6 +732,33 @@ mod tests {
     }
 
     #[test]
+    fn test_transition_degrade_preserves_substatus() {
+        // degrade_* 的 substatus 含降级原因,Done 的清空逻辑不得误清。
+        // 回归防护：若 `if target == Done` 误写为 `if target.is_terminal()`
+        // (is_terminal 含 DegradeFfi/Manual/Skip),降级原因会被静默清空。
+        let mut m = new_machine();
+        let module = module_with_status(ModuleStatus::CompileFixing);
+        m.update_module("a", module);
+        m.transition_module("a", Some(ModuleStatus::Paused), None, None, false)
+            .unwrap();
+        m.transition_module(
+            "a",
+            Some(ModuleStatus::DegradeManual),
+            Some("async_too_complex"),
+            None,
+            false,
+        )
+        .unwrap();
+        let module = &m.state_file().modules["a"];
+        assert_eq!(module.status, ModuleStatus::DegradeManual);
+        assert_eq!(
+            module.substatus.as_deref(),
+            Some("async_too_complex"),
+            "degrade_* 的 substatus(降级原因)必须保留"
+        );
+    }
+
+    #[test]
     fn test_transition_module_leave_blocked_wrong_target_rejected() {
         // 离开 blocked 必须恢复到 pre_blocked_status，恢复到其他 blockable 态应报错。
         let mut m = new_machine();

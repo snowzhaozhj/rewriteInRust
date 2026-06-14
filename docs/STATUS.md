@@ -4,156 +4,54 @@
 
 ## 当前位置
 
-- **Milestone**: M1 MVP
-- **Phase**: §9.5 analyze→run 衔接 ✅（M1-PLAN-01/02）+ BOOT-01/DIAG-01 ✅ + **Live 验证 4 fixture ✅**（linear+diamond 完整迁移，实跑确认）+ 批量修 8 缺口 + 产物优化 ✅ → **审查闭环 + PR + M1 graduate**
-- **下一步**（**新会话从这里开始**）: design-checker（本会话进行中）+ /code-review → 修复 → 提 PR（`feat/m1-plan-populate`）→ M1 graduate
+- **Milestone**: M1 MVP ✅ → **M2 质量提升**
+- **Phase**: M1 全部任务完成（PR #3/#5/#7/#8/#9/#10 均已合并 master）
+- **下一步**（**新会话从这里开始**）: PLAN §10 M2，优先级 **B 复杂度自适应循环（M2-TIER-01）> A 并行 sprint（M2-SCALE）> Sprint 5.5 类型重构**
 
-## 进行中的任务
+## M1 完成总结
 
-- **PR #5/#3/#7/#8/#9 均已合并 master** ✅
-- **本次分支 `feat/m1-plan-populate`**：M1-PLAN-01/02 + BOOT-01 + DIAG-01 + 批量修 8 缺口 + manifest/测试优化 + M2 探索沉淀。**待提 PR + 审查闭环。**
+| Phase | 内容 | PR | 测试 |
+|-------|------|-----|------|
+| M0 Sprint 0 | Spike S0/S3 假设验证 | — | — |
+| Phase 0 | 冻结合约（types/error/response/schema） | — | cargo check |
+| Phase 1 | 四路并行实现（graph/state/profile/hooks） | PR #5 | 121→202 |
+| Phase 2 | 集成验证（14 命令路由 + E2E） | PR #3 | +25 e2e |
+| Phase 3 | Plugin 实现（4 agent + SKILL + hooks） | PR #8/#9 | Live 验证 |
+| Phase 4 | 翻译循环 + MVP 验收 | PR #9 | 4 fixture Live |
+| §9.5 | analyze→run 衔接 + 审查加固 | PR #10 | +3 e2e, 202 总 |
 
-## 下一步（PR #9 合并后，新会话接续）
+**M1 验收（§9 + §9.5）**：
+- linear(3 模块) + diamond(5 模块) 完整迁移到 done，nextest 33/33 + 12/12、clippy 零
+- circular 环暂停正确；edge 含 M2 特性不 done（验证鲁棒性）
+- review 仪表板、断点续传均验证通过
+- 质量门：202 测试 | clippy -D warnings 零 | fmt | shellcheck | design-checker 零 MISMATCH
 
-> **M1-TRANS-06 验收 ✅（本会话达成）**：4 fixture headless Live 实跑（`claude --plugin-dir`）。**linear（3模块）+ diamond（5模块）完整迁移到 done，实跑交叉验证 nextest 33/33 + 12/12、clippy 零**；circular 环暂停正确；edge 含 M2 特性（async/数字枚举）M1 不 done，验证鲁棒性；review 仪表板正确（从权威产物源聚合）；断点续传经 types `--retry` 从 testing 断点重入验证。
+**M1 已知限制（沉淀到 M2）**：
+- diamond 靠决策注入跑通，headless 无人值守撞 TODO(port) 必卡 → M2「默认 TODO 决策策略」
+- 单文件 module + 完整 11 步循环 + 串行对真实项目不实用 → M2-TIER-01 + M2-SCALE
+- populate 孤儿清理 + 契约加固 → M2-VER-04
 
-| 任务 | 内容 | 状态 |
-|------|------|------|
-| **M1-PLAN-01** | CLI `state populate-modules` | ✅ |
-| **M1-PLAN-02** | analyze/SKILL 接线 populate + 推进 sprint_loop | ✅ |
-| **M1-DIAG-01** | CLI `state record-subagent-call` + 提示词接线 | ✅ |
-| **M1-BOOT-01** | ensure-cli.sh CLI 引导 | ✅ |
-| **M1-TRANS-06** | MVP 验收（4 项完成标志全达成） | ✅ |
+## M2 起点
 
-> **本会话 Live 暴露并修复**：8 项批量缺口（done-substatus / full-verify.sh / analyze Step4 纯类型误判 / record 接线 / scaffold dev-deps 误述 / translator CWD / verify.sh CLIPPY_CONF_DIR / testing 同态转换）+ manifest 卫生 + 测试粒度优化。
-> **重要发现（沉淀 PLAN §10 M2 P0）**：单文件 module + 完整循环 + 串行对真实项目不实用 → **并行 sprint + 复杂度自适应循环 + 测试分档**（优先于 Sprint 5.5）；无人值守迁移需「默认 TODO 决策策略」（headless 撞 safe-default TODO 必卡，本会话用决策注入解）。
+### 优先级排序（PLAN §10）
 
-> **Phase 4 提示词主体（PR #9）**：M1-TRANS-01..05 ✅（translator/verifier/run.md/review.md）。
-> **M1-PLG-05 Live 验证结论**：插件加载 ✅、SubAgent 命名空间 = `rust-migrate:analyzer/...` ✅、analyze 端到端触发 SubAgent ✅；缺口见 §9.5。
-> **PR #9 附带交付**：项目级 `state transition` CLI + `load` backup 回退告警（machine.rs M1-INTEG TODO，含 recovered 后不覆盖好 backup 的安全修复）+ 仓库根 `marketplace.json`（插件可安装，`claude plugin validate` ✔）+ `docs/learnings/agent-skill-prompt-guide.md`（提示词规范沉淀）。
+1. **M2-TIER-01 复杂度自适应循环**（工作量 M）— trivial/standard/full 分档，维度 9 永不跳过
+2. **M2-SCALE 并行 sprint**（工作量 L）— parallel_groups 已实现未消费 + worktree 隔离
+3. **Sprint 5.5 类型安全重构**（M2-REFAC-01..12）— M1 审查遗留
+4. **Sprint 5 验证管线增强**（M2-VER-01..04）
+5. **Sprint 6 高级功能** + Sprint 7 并行与规模 + Sprint 8 M2 验收
 
-> **M2 推迟项**（已在代码 TODO 标注，不在 M1 范围）：增量构建、`graph build --profile` 性能画像、`graph interfaces --deps-of` 批量、`stats compare` 结构对比、ErrorData structured context。
-> **M2 符号级精度提升**：跨文件方法调用 `obj.method()` 解析（PLAN §10 **M2-REFAC-10**，已补 2026-06-14 调研的分档方案/recall ~70% 天花板/stack-graphs 避坑；档1 零歧义增强低成本可先做）。
-> **M2 可用性优先项（P0，2026-06-14 探索沉淀）**：迁移对真实项目慢/费 token 的根因 = 单文件 module + 完整 11 步循环 + 串行。两项优化 **优先于 Sprint 5.5 类型重构**——**B 复杂度自适应循环**（trivial/standard/full 分档，新增 M2-TIER-01，工作量 M）**> A 并行 sprint**（parallel_groups 已实现未消费 + worktree 隔离前置 + 锁改造，工作量 L）。关键约束/落地分层已落实见 **PLAN §10「M2 可用性优先项」**，避免重复探索。
+### 未决设计决策（需团队定夺）
 
-## 阻塞项
+- `done + --force` 重做：设计行 379（暗示可重做）vs 行 209 矩阵（done 硬终态）矛盾
+- blocked 进入：设计行 206「可从任何状态进入」vs 矩阵（仅 blockable 活跃态可进）
 
-- Plugin Live 验证（skill/agent/hook 实际触发）需在交互式会话中补全
-  - 影响范围：仅 Phase 3（Plugin 实现），不阻塞 Phase 1-2
-  - Phase 3 代码已实现（analyzer/translator/scaffolder SubAgent + SKILL.md analyze 8 步骨架 + TS porting-template）；**待 Live 验证**：① `/migrate analyze` 端到端真实执行（M1-PLG-05）② plugin 内 SubAgent `agentType` 是否需 `rust-migrate:` 命名空间前缀
+### M1 历史归档
 
-## Handoff Note
+M1 各 Phase 的详细审查修复记录、提交历史、Live 验证产物见 [STATUS-M1-archive.md](STATUS-M1-archive.md)。
 
-**本次完成**：M1 收尾 3 项（PR #7，分支 `feat/m1-finalize`）实现 + 三方审查 + 两轮修复。
+### M1 deferred TODO（M2 接线时处理）
 
-### M1 收尾 3 项审查闭环（2026-06-14）
-
-- 实现 commit `af0cd68`；审查修复 `0fa9210`（/code-review）+ `ca3b37f`（codex + pr-review-toolkit 5 agent + /code-review 三方汇总）。
-- 质量门全过：fmt + clippy -D warnings + 139 core + 25 e2e；design-checker 无 MISMATCH。
-- **待 PR #7 合并 → M1 graduate**。
-
-**M1-INTEG 接线时需处理的 deferred TODO**（见 PR #7 评论）：
-1. profile 自动定位 analysis-tools.json（需 `CLAUDE_PLUGIN_ROOT` env 约定 + SKILL 接线；当前靠 `--adapter-tools` 显式传参）
+1. profile 自动定位 analysis-tools.json（需 `CLAUDE_PLUGIN_ROOT` env 约定）
 2. 完整子进程超时（当前仅 stdin(null)）
-3. ToolStatus 枚举化 / LocReport 派生 totals（type-design，M2 质量项）
-
-**设计文档歧义（需团队定夺，当前实现遵循转换矩阵）**：
-- `done + --force` 重做：设计行 379（暗示可重做）vs 行 209 矩阵（done 硬终态）矛盾。
-- blocked 进入：设计行 206「可从任何状态进入」vs 矩阵（仅 blockable 活跃态可进）。
-
-### Phase 1 第二轮 code-review 修复（commit `098f164`）
-
-### Phase 1 code-review 修复（2026-06-14）
-
-`/code-review` 一轮对抗审查后修复（persist.rs 由另一会话处理；4 项 Phase-2 接线后再修）：
-
-- **TS 提取**（`lang/typescript.rs`）：`export *`/`export * as` 产生 Imports 边；`export const` 箭头/函数表达式入图为 Function 节点；类数据字段不再误判为 Function；泛型/限定父类型 `extends Bar<T>`/`ns.Base` 归一化；`format!` 内联 NodeId 改 `NodeId::symbol`
-- **跨文件解析**（`build.rs`）：成员调用/命名空间构造剥离基名正确解析；构造/extends 全局兜底改唯一匹配（消除连错文件的虚假边）；import 别名冲突按歧义处理；跨文件边排序插入
-- **确定性**：`GraphStats` 改 BTreeMap；`parallel_groups` 排序；`primary_language` 确定性平局；`compute_level` 递归改迭代（消除深链栈溢出）；自导入识别为环
-- **profile**：复杂度只按源语言行数
-- **hooks**：`fmt.sh`/`on-rust-file-create.sh` 相对被编辑文件定位 Cargo；`verify.sh` 守护 git rev-parse
-
-**最终状态**: 121 测试全过 | clippy `-D warnings` 零警告 | fmt | shellcheck 全过
-
-### Phase 1 审查修复（2026-06-07）
-
-对照 PLAN.md 全面审查后修复的问题：
-
-**图构建 bug 修复**：
-- re-export（`export { x } from './module'`）现在正确生成 import 边
-- `export type` re-export 正确标记 `is_type_only`
-- 跨文件 calls 边通过 import 映射正确解析（`service.ts:clamp → utils.ts:clamp`）
-- extends 边跨文件查找修复（`AuthService implements Serializable` 目标在不同文件时）
-- extends 边的添加时序改为两阶段（先添节点后修正边，避免 add_edge 静默丢弃）
-
-**测试覆盖补全**：
-- 新增 ground-truth 通用验证 harness（19 个测试），自动读取 ground-truth.json 验证节点/边/拓扑约束
-- 覆盖全部 4 个 fixture（linear-deps、diamond-deps、circular-deps、edge-cases）
-- 补充 save_to_db / scaffold_project_with_bin 负例测试
-- 已知限制标注在 ground-truth.json（泛型调用 `f<T>()` / 方法调用类型推断）
-
-**设计一致性**：
-- 补全 Community NodeType（M2 预留，12 种对齐设计文档）
-- 更新 schema.sql、persist.rs 映射
-
-**代码质量**：
-- 全部 pub 类型添加 doc comment
-- precision benchmark ground-truth 更新（re-export import 的正确处理）
-- 修复 query.rs unused import 警告
-
-**最终状态**: 105 测试全过 | clippy 零警告 | fmt 通过
-
-### Phase 1 四路并行实现 ✅
-
-4 个 Worker 并行完成：
-
-| Worker | 模块 | 文件 | 测试数 |
-|--------|------|------|--------|
-| A | graph | build.rs, query.rs, topo.rs, persist.rs, mod.rs | 28 |
-| B | state + validate | machine.rs, mod.rs, rules.rs | 27 |
-| C | profile + scaffold + stats | detect.rs, template.rs, coverage.rs | 23 |
-| D | plugin hooks | hooks.json, on-rust-file-create.sh, post-build.sh, file-guard.sh | shellcheck ✅ |
-
-**之前完成**：M0 Sprint 0 + Phase 0 冻结合约
-
-### M0 Sprint 0 ✅
-
-- Spike S0: Plugin 结构验证 + Release 二进制 743K
-- Spike S3: tree-sitter TS 精度 F1=1.0（三维度全满分）
-- 决策文档: 001-plugin-viability.md + 002-parser-choice.md
-- Sprint 0 GATE 全部通过
-
-### Phase 0 冻结合约 ✅
-
-定义了 Phase 1 并行开发所需的全部公共类型：
-
-| 文件 | 内容 |
-|------|------|
-| `types/common.rs` | NodeId, Span, SourceLang, Complexity, RiskLevel |
-| `types/graph.rs` | NodeType(9种), EdgeType(8种), SourceNode, Dependency, Provenance |
-| `types/state.rs` | ProjectState(6种), ModuleStatus(11种), MigrationStateFile 全结构 |
-| `types/config.rs` | MigrateConfig (.rustmigrate.toml 5 个配置段) |
-| `error.rs` | MigrateError (thiserror, 12 种错误变体) |
-| `response.rs` | Response<T> 统一 JSON 输出 |
-| `schema.sql` | nodes/edges/metadata/schema_versions 四表 |
-
-### Phase 0 完成标志
-
-- [x] `cargo check` 通过，无 warning
-- [x] `cargo clippy -D warnings` 通过
-- [x] 所有 pub struct/enum 有 `///` 文档注释
-- [x] `schema.sql` 包含 nodes/edges/metadata/schema_versions 四表
-- [x] 各类型与 `docs/design/09-appendix-schemas.md` 一致
-
-## 最近完成
-
-| 时间 | 任务 | commit |
-|------|------|--------|
-| 2026-06-07 | 项目脚手架初始化 | 559da00 |
-| 2026-06-07 | PLAN.md v1 + CLAUDE.md + STATUS.md | fd18544 |
-| 2026-06-07 | 实施蓝图重构（PLAN.md v2 + fixtures + tooling） | c3acc34 |
-| 2026-06-07 | M0 Sprint 0 Spike S0+S3 完成 | 777da76 |
-| 2026-06-07 | Phase 0 冻结合约 | b3922c2 |
-| 2026-06-14 | code-review 修复（图提取/跨文件解析/确定性/hooks，121 测试） | 098f164 |
-| 2026-06-14 | 源码图校验 harness（文件级硬门 + 符号级软门 + barrel/interface 修复 + 双审查）PR#5 | 已合并 |
-| 2026-06-14 | Phase 2 集成验证（13 命令路由 + E2E + 契约修复 + codex/code-review 双审查 + merge master）PR#3 | 待验收 |
+3. ToolStatus 枚举化 / LocReport 派生 totals
