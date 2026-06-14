@@ -31,6 +31,7 @@
 
 > **M2 推迟项**（已在代码 TODO 标注，不在 M1 范围）：增量构建、`graph build --profile` 性能画像、`graph interfaces --deps-of` 批量、`stats compare` 结构对比、ErrorData structured context。
 > **M2 符号级精度提升**：跨文件方法调用 `obj.method()` 解析（PLAN §10 **M2-REFAC-10**，已补 2026-06-14 调研的分档方案/recall ~70% 天花板/stack-graphs 避坑；档1 零歧义增强低成本可先做）。
+> **M2 可用性优先项（P0，2026-06-14 探索沉淀）**：迁移对真实项目慢/费 token 的根因 = 单文件 module + 完整 11 步循环 + 串行。两项优化 **优先于 Sprint 5.5 类型重构**——**B 复杂度自适应循环**（trivial/standard/full 分档，新增 M2-TIER-01，工作量 M）**> A 并行 sprint**（parallel_groups 已实现未消费 + worktree 隔离前置 + 锁改造，工作量 L）。关键约束/落地分层已落实见 **PLAN §10「M2 可用性优先项」**，避免重复探索。
 
 ## 阻塞项
 
