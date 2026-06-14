@@ -395,6 +395,51 @@ fn smoke_state_transition_invalid_status() {
 }
 
 #[test]
+fn smoke_state_transition_requires_to_or_substatus() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        inject_module("pending");
+        // --to 与 --substatus 都缺省应报错。
+        let (code, json) = run(&["state", "transition", "--module", "a"]);
+        assert_eq!(code, 1, "缺 --to/--substatus 应报错: {json}");
+        assert_eq!(json["status"], "error");
+    });
+}
+
+#[test]
+fn smoke_state_transition_degrade_force() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        inject_module("degrade_manual");
+        // 不带 --force：degrade_* → translating 应被拒。
+        let (code, json) = run(&[
+            "state",
+            "transition",
+            "--module",
+            "a",
+            "--to",
+            "translating",
+        ]);
+        assert_eq!(code, 1, "degrade 恢复不带 --force 应报错: {json}");
+        assert_eq!(json["status"], "error");
+        // 带 --force：成功。
+        let (code, json) = run(&[
+            "state",
+            "transition",
+            "--module",
+            "a",
+            "--to",
+            "translating",
+            "--force",
+        ]);
+        assert_eq!(code, 0, "degrade 恢复带 --force 应成功: {json}");
+        assert_eq!(json["data"]["status"], "translating");
+    });
+}
+
+#[test]
 fn smoke_state_get_missing_errors() {
     let tmp = tempfile::tempdir().unwrap();
     with_cwd(tmp.path(), || {

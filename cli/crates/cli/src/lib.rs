@@ -145,15 +145,19 @@ pub enum StateCommands {
         #[arg(long)]
         module: String,
         /// 目标 ModuleStatus（translating/compile_fixing/testing/reviewing/done/degrade_*/
-        /// paused/blocked）。省略则仅更新 substatus（status 不变，见 09-appendix § Step 4/5）。
+        /// paused/blocked）。省略则仅更新 substatus（status 不变，见 09-appendix § Step 2/4）。
         #[arg(long)]
         to: Option<String>,
         /// 子状态（如 phase_a_complete_awaiting_review），见 09-appendix-schemas.md。
         #[arg(long)]
         substatus: Option<String>,
-        /// 转换原因说明（写入历史/审计）。
+        /// 转换原因说明（追加到模块 attempts 审计序列）。
         #[arg(long)]
         reason: Option<String>,
+        /// 强制恢复：degrade_* → translating 须显式 --force（降级恢复是人类决策，
+        /// 见设计 § Step 0.3）。其余转换忽略。
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -262,6 +266,7 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
                 to,
                 substatus,
                 reason,
+                force,
             } => emit(
                 writer,
                 cmd_state_transition(
@@ -269,6 +274,7 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
                     to.as_deref(),
                     substatus.as_deref(),
                     reason.as_deref(),
+                    *force,
                 ),
             ),
         },
@@ -420,8 +426,14 @@ fn cmd_profile(root: &Path, adapter_tools: Option<&Path>) -> CmdResult {
                     checks.push(status);
                 }
             }
+            // 清单文件本身读不了/损坏 ≠ 工具缺失，用独立的 MANIFEST 码，
+            // 并区分「路径错」与「内容损坏」，避免污染 ADAPTER_TOOL_MISSING 计数。
+            Err(MigrateError::FileNotFound(_)) => warnings.push(format!(
+                "ADAPTER_TOOLS_MANIFEST_UNREADABLE: analysis-tools.json 不存在（检查 --adapter-tools 路径）：{}",
+                path.display()
+            )),
             Err(e) => warnings.push(format!(
-                "ADAPTER_TOOL_MISSING: 无法读取 analysis-tools.json（{}）：{e}",
+                "ADAPTER_TOOLS_MANIFEST_UNREADABLE: analysis-tools.json 解析失败（文件可能损坏）（{}）：{e}",
                 path.display()
             )),
         },
@@ -443,20 +455,33 @@ fn cmd_profile(root: &Path, adapter_tools: Option<&Path>) -> CmdResult {
     Ok((data, warnings))
 }
 
-/// 构造工具缺失警告文案：`<CODE>: <display> 未安装或版本不足（需 ≥<min>，探测到 <det>）；安装: <hint>`。
+/// 构造工具缺失警告文案，按根因给出**精确**结论，避免误导用户：
+/// - 探测失败（命令存在但执行异常）→「探测失败（<原因>），无法确认是否安装」；
+/// - 命令不存在 →「未安装」；
+/// - 已安装但有 min_version 却解析不出版本 →「版本无法解析…无法确认是否满足 ≥<min>」；
+/// - 已安装但版本不足 →「版本不足（需 ≥<min>，探测到 <det>）」。
+///
+/// 末尾附 `install_hint`（如有）。
 fn format_tool_missing(code: &str, status: &ToolStatus) -> String {
     let mut msg = format!("{code}: {} ", status.display_name);
-    if !status.available {
+    if let Some(err) = &status.probe_error {
+        msg.push_str(&format!("探测失败（{err}），无法确认是否安装"));
+    } else if !status.available {
         msg.push_str("未安装");
+    } else if status.min_version.is_some() && status.detected_version.is_none() {
+        // 命令成功但版本号无法解析：不应断言「版本不足」。
+        if let Some(min) = &status.min_version {
+            msg.push_str(&format!("版本无法解析，无法确认是否满足 ≥{min}"));
+        }
     } else {
         msg.push_str("版本不足");
-    }
-    if let Some(min) = &status.min_version {
-        msg.push_str(&format!("（需 ≥{min}"));
-        if let Some(det) = &status.detected_version {
-            msg.push_str(&format!("，探测到 {det}"));
+        if let Some(min) = &status.min_version {
+            msg.push_str(&format!("（需 ≥{min}"));
+            if let Some(det) = &status.detected_version {
+                msg.push_str(&format!("，探测到 {det}"));
+            }
+            msg.push('）');
         }
-        msg.push('）');
     }
     if let Some(hint) = &status.install_hint {
         msg.push_str(&format!("；安装: {hint}"));
@@ -696,14 +721,15 @@ fn cmd_state_get(module: &str) -> CmdResult {
 /// 设计（`09-appendix-schemas.md` § 合法状态转换）：`--to` 取 ModuleStatus
 /// （translating/compile_fixing/testing/reviewing/done/degrade_*/paused/blocked），
 /// 经 [`ModuleStatus::can_transition_to`] 校验合法转换路径；省略 `--to` 时仅更新
-/// `--substatus`（status 不变，对应 Step 4/5 的 Phase 进度记录）。转换的 blocked
-/// 恢复、degrade `--force` 重置等副作用由 core [`MigrationStateMachine::transition_module`]
-/// 处理，落盘走 tmp-fsync-rename 原子写。
+/// `--substatus`（status 不变，对应 Step 2/4 的 Phase 进度记录）。`degrade_* → translating`
+/// 恢复须 `--force`。转换的 blocked 恢复、degrade 重置等副作用由 core
+/// [`MigrationStateMachine::transition_module`] 处理，落盘走 tmp-fsync-rename 原子写。
 fn cmd_state_transition(
     module: &str,
     to: Option<&str>,
     substatus: Option<&str>,
     reason: Option<&str>,
+    force: bool,
 ) -> CmdResult {
     if to.is_none() && substatus.is_none() {
         return Err(MigrateError::Config(
@@ -723,7 +749,7 @@ fn cmd_state_transition(
 
     let path = state_path();
     let mut machine = MigrationStateMachine::load(&path)?;
-    machine.transition_module(module, target, substatus, reason)?;
+    machine.transition_module(module, target, substatus, reason, force)?;
     machine.save(&path)?;
 
     let updated = machine
@@ -749,8 +775,9 @@ fn cmd_state_transition(
 /// （`src` / `rust-src`）。某一侧目录不存在时该侧报 null 并降级 warning（Rust 端在迁移
 /// 早期通常尚未生成，属正常情形，不应整命令失败）。
 fn cmd_stats_loc(source: Option<&Path>, rust: Option<&Path>) -> CmdResult {
-    // 解析路径：CLI 参数 > 配置文件 > 默认值。
-    let cfg = load_config_or_default();
+    let mut warnings: Vec<String> = Vec::new();
+    // 解析路径：CLI 参数 > 配置文件 > 默认值（配置读取/解析失败会进 warnings）。
+    let cfg = load_config_or_default(&mut warnings);
     let source_root = source
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from(&cfg.project.source_root));
@@ -758,7 +785,6 @@ fn cmd_stats_loc(source: Option<&Path>, rust: Option<&Path>) -> CmdResult {
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from(&cfg.project.rust_root));
 
-    let mut warnings: Vec<String> = Vec::new();
     let source_loc = count_loc_side(&source_root, "source", &mut warnings);
     let rust_loc = count_loc_side(&rust_root, "rust", &mut warnings);
 
@@ -771,10 +797,28 @@ fn cmd_stats_loc(source: Option<&Path>, rust: Option<&Path>) -> CmdResult {
     ))
 }
 
-/// 统计单侧 LOC：目录不存在时返回 `Value::Null` 并追加 warning，其余错误上抛。
+/// 统计单侧 LOC。三种结果均产生**可区分**的输出/告警，不静默：
+/// - 成功：返回序列化后的 `LocReport`；若 `files == 0`（目录存在但未统计到受支持文件）
+///   追加可疑提示。
+/// - 目录不存在：返回 `Null` + warning（迁移早期 Rust 端常未生成，属正常）。
+/// - 序列化失败 / 其余错误：返回 `Null` + warning（**不与"目录不存在"混淆**）。
 fn count_loc_side(root: &Path, label: &str, warnings: &mut Vec<String>) -> serde_json::Value {
     match count_loc(root) {
-        Ok(report) => serde_json::to_value(&report).unwrap_or(serde_json::Value::Null),
+        Ok(report) => {
+            if report.files == 0 {
+                warnings.push(format!(
+                    "{label} 目录存在但未统计到任何受支持语言文件（可能为空/权限不足/全被排除）: {}",
+                    root.display()
+                ));
+            }
+            match serde_json::to_value(&report) {
+                Ok(v) => v,
+                Err(e) => {
+                    warnings.push(format!("{label} LOC 结果序列化失败: {e}"));
+                    serde_json::Value::Null
+                }
+            }
+        }
         Err(MigrateError::FileNotFound(_)) => {
             warnings.push(format!(
                 "{label} 目录不存在，跳过 LOC 统计: {}",
@@ -789,13 +833,30 @@ fn count_loc_side(root: &Path, label: &str, warnings: &mut Vec<String>) -> serde
     }
 }
 
-/// 读取项目根 `.rustmigrate.toml`，失败（不存在/解析错误）回退默认配置。
-fn load_config_or_default() -> rustmigrate_core::types::config::MigrateConfig {
+/// 读取项目根 `.rustmigrate.toml` 回退默认配置。**区分三种情形**，避免静默吞错：
+/// - 文件不存在：静默回退默认（正常，配置可选）。
+/// - 读取失败（权限等非 NotFound IO 错误）/ TOML 解析失败：回退默认并**追加 warning**，
+///   避免用户精心配置的 `source_root` 因 typo 被无声丢弃。
+fn load_config_or_default(
+    warnings: &mut Vec<String>,
+) -> rustmigrate_core::types::config::MigrateConfig {
     use rustmigrate_core::types::config::MigrateConfig;
-    std::fs::read_to_string(config_path())
-        .ok()
-        .and_then(|s| toml::from_str::<MigrateConfig>(&s).ok())
-        .unwrap_or_default()
+    match std::fs::read_to_string(config_path()) {
+        Ok(s) => match toml::from_str::<MigrateConfig>(&s) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                warnings.push(format!(
+                    "{CONFIG_FILE} 解析失败，回退默认配置（路径将用默认值）: {e}"
+                ));
+                MigrateConfig::default()
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => MigrateConfig::default(),
+        Err(e) => {
+            warnings.push(format!("{CONFIG_FILE} 读取失败，回退默认配置: {e}"));
+            MigrateConfig::default()
+        }
+    }
 }
 
 /// `stats compare`：源码与 Rust 结构复杂度对比（推迟 M2）。

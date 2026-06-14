@@ -62,6 +62,11 @@ pub struct ToolStatus {
     pub install_hint: Option<String>,
     /// 是否为必需工具。
     pub required: bool,
+    /// 探测异常原因（命令存在但执行失败：权限/非零退出/环境异常等）。
+    /// 区别于「命令不存在」(`available == false` 且本字段为 `None`)，避免把
+    /// 「无法确认」误报为「未安装」。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_error: Option<String>,
 }
 
 impl ToolStatus {
@@ -69,6 +74,16 @@ impl ToolStatus {
     pub fn is_missing(&self) -> bool {
         self.required && (!self.available || !self.satisfies_min)
     }
+}
+
+/// 工具版本探测结果（区分「未安装」与「探测失败」，避免归并成误导性结论）。
+enum Probe {
+    /// 命令成功执行，捕获到版本输出文本。
+    Found(String),
+    /// 命令不存在（PATH 未找到）——真正的「未安装」。
+    NotFound,
+    /// 命令存在但探测失败（权限不足/非零退出/环境异常），附原因。
+    Failed(String),
 }
 
 /// 读取并解析适配器的 `analysis-tools.json`。
@@ -90,9 +105,8 @@ pub fn check_adapter_tools(tools: &[AnalysisTool]) -> Vec<ToolStatus> {
 
 /// 检测单个工具：运行 `<tool_id> --version` 并解析版本。
 pub fn check_tool(tool: &AnalysisTool) -> ToolStatus {
-    let output = probe_version(&tool.tool_id, &["--version"]);
-    let detected_version = output.as_deref().and_then(parse_version_str);
-    let available = output.is_some();
+    let (available, detected_version, probe_error) =
+        interpret_probe(probe_version(&tool.tool_id, &["--version"]));
     let satisfies_min = match (&tool.min_version, &detected_version) {
         // 无最低版本要求：安装即满足。
         (None, _) => available,
@@ -109,38 +123,65 @@ pub fn check_tool(tool: &AnalysisTool) -> ToolStatus {
         satisfies_min,
         install_hint: tool.install_hint.clone(),
         required: tool.required,
+        probe_error,
     }
 }
 
 /// 检测 Tier 0 Rust 外部二进制 `cargo-nextest`（运行 `cargo nextest --version`）。
 pub fn check_cargo_nextest() -> ToolStatus {
-    let output = probe_version("cargo", &["nextest", "--version"]);
-    let detected_version = output.as_deref().and_then(parse_version_str);
+    let (available, detected_version, probe_error) =
+        interpret_probe(probe_version("cargo", &["nextest", "--version"]));
     ToolStatus {
         tool_id: "cargo-nextest".to_owned(),
         display_name: "cargo-nextest".to_owned(),
-        available: output.is_some(),
+        available,
         detected_version,
         min_version: None,
-        satisfies_min: output.is_some(),
+        satisfies_min: available,
         install_hint: Some("cargo install cargo-nextest --locked".to_owned()),
         required: true,
+        probe_error,
     }
 }
 
-/// 运行 `<bin> <args...>` 探测版本。命令不存在或非零退出返回 `None`，
-/// 成功则返回 stdout（为空时回退 stderr）去空白后的字符串。
-fn probe_version(bin: &str, args: &[&str]) -> Option<String> {
-    let output = Command::new(bin).args(args).output().ok()?;
+/// 把 [`Probe`] 折叠为 `(available, detected_version, probe_error)` 三元组。
+fn interpret_probe(probe: Probe) -> (bool, Option<String>, Option<String>) {
+    match probe {
+        Probe::Found(out) => (true, parse_version_str(&out), None),
+        Probe::NotFound => (false, None, None),
+        Probe::Failed(e) => (false, None, Some(e)),
+    }
+}
+
+/// 运行 `<bin> <args...>` 探测版本，区分「未安装」与「探测失败」：
+/// - spawn 失败且为 `NotFound` → [`Probe::NotFound`]（命令不在 PATH）；
+/// - spawn 失败的其他 IO 错误（权限等）或非零退出 → [`Probe::Failed`]（附原因）；
+/// - 成功 → [`Probe::Found`]，取 stdout（为空回退 stderr）去空白。
+///
+/// `stdin` 置 null，避免工具误等交互输入而挂起。
+fn probe_version(bin: &str, args: &[&str]) -> Probe {
+    let output = match Command::new(bin)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Probe::NotFound,
+        Err(e) => return Probe::Failed(format!("无法执行 {bin}: {e}")),
+    };
     if !output.status.success() {
-        return None;
+        return Probe::Failed(format!("{bin} --version 退出码非零: {}", output.status));
     }
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     if !stdout.is_empty() {
-        return Some(stdout);
+        return Probe::Found(stdout);
     }
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    (!stderr.is_empty()).then_some(stderr)
+    if stderr.is_empty() {
+        Probe::Failed(format!("{bin} --version 无输出"))
+    } else {
+        Probe::Found(stderr)
+    }
 }
 
 /// 从工具版本输出中提取首个形如 `\d+\.\d+(\.\d+)?` 的版本号。

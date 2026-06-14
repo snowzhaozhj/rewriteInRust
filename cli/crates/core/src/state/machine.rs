@@ -185,14 +185,16 @@ impl MigrationStateMachine {
     ///   - 离开 `blocked`：须恢复到 `pre_blocked_status`（设计行 207/218）。已记录时强校验
     ///     `target == pre_blocked_status`，否则报 `InvalidTransition`；随后清除
     ///     `blocked_by` 与 `pre_blocked_status`。
-    ///   - `degrade_* → translating`（设计行 381 `--force` 恢复）：清除 `substatus`、
-    ///     清空 `attempts`（重置重试计数，重新进入翻译循环）。
-    /// - `to == None`：仅更新 substatus（status 不变），对应设计 Step 4/5 的 Phase 进度记录
+    ///   - `degrade_* → translating`（设计行 379-381 `--force` 恢复）：**须 `force == true`**，
+    ///     否则返回 `MigrateError::Config`（降级是人类决策，禁止脚本静默绕过）；通过后
+    ///     清除 `substatus`、清空 `attempts`（重置重试计数，重新进入翻译循环）。
+    /// - `to == None`：仅更新 substatus（status 不变），对应设计 Step 2/4 的 Phase 进度记录
     ///   （行 461/485 `state transition --module <M> --substatus <s>`）。
     /// - `substatus == Some(s)`：显式覆盖 `substatus`（设置在转换副作用之后，故可在
     ///   恢复转换的同时指定新的 substatus）。
     /// - `reason == Some(r)`：向 `attempts` 追加一条审计记录（模块级唯一 append-only
     ///   时间序列），`result` 形如 `transition:from→to reason=r`，供状态报告/排查回溯。
+    /// - `force`：仅对 `degrade_* → translating` 恢复有意义（设计 `--force`），其余转换忽略。
     ///
     /// 模块不存在返回 `MigrateError::Config`。
     pub fn transition_module(
@@ -201,6 +203,7 @@ impl MigrationStateMachine {
         to: Option<ModuleStatus>,
         substatus: Option<&str>,
         reason: Option<&str>,
+        force: bool,
     ) -> Result<()> {
         let module = self
             .state_file
@@ -212,13 +215,19 @@ impl MigrationStateMachine {
         if let Some(target) = to {
             // 显式 --to 一律校验合法转换矩阵（无自环：target==from 也按矩阵判，
             // 故对终态/同态 --to 会正确报 InvalidTransition；幂等的「仅更新 substatus」
-            // 走 to==None 路径，不经此处。设计 Step 501 的「已是 testing 则跳过」由
+            // 走 to==None 路径，不经此处。设计行 501（Step 5）的「已是 testing 则跳过」由
             // 上游 SKILL 不发起该调用保证，CLI 不需支持同态 --to）。
             if !from.can_transition_to(target) {
                 return Err(MigrateError::InvalidTransition {
                     from: from.to_string(),
                     to: target.to_string(),
                 });
+            }
+            // degrade_* → translating 恢复须 --force（设计行 379-381：降级恢复是人类决策）。
+            if from.is_degraded() && target == ModuleStatus::Translating && !force {
+                return Err(MigrateError::Config(format!(
+                    "{from} → translating 恢复需 --force（降级恢复须人类确认，见设计 § Step 0.3）"
+                )));
             }
             // 进入 blocked：记录恢复锚点。
             if target == ModuleStatus::Blocked {
@@ -497,7 +506,7 @@ mod tests {
         let mut m = new_machine();
         m.update_module("a", module_with_status(ModuleStatus::Pending));
         assert!(m
-            .transition_module("a", Some(ModuleStatus::Translating), None, None)
+            .transition_module("a", Some(ModuleStatus::Translating), None, None, false)
             .is_ok());
         assert_eq!(
             m.state_file().modules["a"].status,
@@ -511,7 +520,7 @@ mod tests {
         m.update_module("a", module_with_status(ModuleStatus::Done));
         // done 是终态，不可改回 pending（断点续传保护）。
         let err = m
-            .transition_module("a", Some(ModuleStatus::Pending), None, None)
+            .transition_module("a", Some(ModuleStatus::Pending), None, None, false)
             .unwrap_err();
         assert!(matches!(err, MigrateError::InvalidTransition { .. }));
         assert_eq!(m.state_file().modules["a"].status, ModuleStatus::Done);
@@ -521,7 +530,7 @@ mod tests {
     fn test_transition_module_missing() {
         let mut m = new_machine();
         let err = m
-            .transition_module("ghost", Some(ModuleStatus::Translating), None, None)
+            .transition_module("ghost", Some(ModuleStatus::Translating), None, None, false)
             .unwrap_err();
         assert!(matches!(err, MigrateError::Config(_)));
     }
@@ -532,7 +541,13 @@ mod tests {
         let mut m = new_machine();
         m.update_module("a", module_with_status(ModuleStatus::Translating));
         assert!(m
-            .transition_module("a", None, Some("phase_a_complete_awaiting_review"), None)
+            .transition_module(
+                "a",
+                None,
+                Some("phase_a_complete_awaiting_review"),
+                None,
+                false
+            )
             .is_ok());
         let module = &m.state_file().modules["a"];
         assert_eq!(module.status, ModuleStatus::Translating);
@@ -547,8 +562,14 @@ mod tests {
         // reason 落盘到 attempts 作为审计记录。
         let mut m = new_machine();
         m.update_module("a", module_with_status(ModuleStatus::Pending));
-        m.transition_module("a", Some(ModuleStatus::Translating), None, Some("kick off"))
-            .unwrap();
+        m.transition_module(
+            "a",
+            Some(ModuleStatus::Translating),
+            None,
+            Some("kick off"),
+            false,
+        )
+        .unwrap();
         let attempts = &m.state_file().modules["a"].attempts;
         assert_eq!(attempts.len(), 1);
         assert!(attempts[0].result.contains("pending"));
@@ -561,7 +582,7 @@ mod tests {
         // 进入 blocked 记录 pre_blocked_status。
         let mut m = new_machine();
         m.update_module("a", module_with_status(ModuleStatus::Translating));
-        m.transition_module("a", Some(ModuleStatus::Blocked), None, None)
+        m.transition_module("a", Some(ModuleStatus::Blocked), None, None, false)
             .unwrap();
         assert_eq!(
             m.state_file().modules["a"].pre_blocked_status,
@@ -577,7 +598,7 @@ mod tests {
         module.blocked_by = Some(vec!["core/parser".to_owned()]);
         module.pre_blocked_status = Some(ModuleStatus::Translating);
         m.update_module("a", module);
-        m.transition_module("a", Some(ModuleStatus::Translating), None, None)
+        m.transition_module("a", Some(ModuleStatus::Translating), None, None, false)
             .unwrap();
         let module = &m.state_file().modules["a"];
         assert_eq!(module.status, ModuleStatus::Translating);
@@ -598,7 +619,7 @@ mod tests {
             checkpoint: None,
         });
         m.update_module("a", module);
-        m.transition_module("a", Some(ModuleStatus::Translating), None, None)
+        m.transition_module("a", Some(ModuleStatus::Translating), None, None, true)
             .unwrap();
         let module = &m.state_file().modules["a"];
         assert_eq!(module.status, ModuleStatus::Translating);
@@ -615,7 +636,7 @@ mod tests {
         m.update_module("a", module);
         // 恢复到 translating（≠ pre_blocked_status=testing）应被拒。
         let err = m
-            .transition_module("a", Some(ModuleStatus::Translating), None, None)
+            .transition_module("a", Some(ModuleStatus::Translating), None, None, false)
             .unwrap_err();
         assert!(matches!(err, MigrateError::InvalidTransition { .. }));
         // 状态保持 blocked、锚点未被清除。
@@ -626,7 +647,7 @@ mod tests {
         );
         // 恢复到正确的 pre_blocked_status 成功。
         assert!(m
-            .transition_module("a", Some(ModuleStatus::Testing), None, None)
+            .transition_module("a", Some(ModuleStatus::Testing), None, None, false)
             .is_ok());
         assert_eq!(m.state_file().modules["a"].status, ModuleStatus::Testing);
     }
@@ -637,11 +658,64 @@ mod tests {
         let mut m = new_machine();
         m.update_module("a", module_with_status(ModuleStatus::Done));
         let err = m
-            .transition_module("a", Some(ModuleStatus::Done), None, Some("noop"))
+            .transition_module("a", Some(ModuleStatus::Done), None, Some("noop"), false)
             .unwrap_err();
         assert!(matches!(err, MigrateError::InvalidTransition { .. }));
         // done 模块未被追加伪审计记录。
         assert!(m.state_file().modules["a"].attempts.is_empty());
+    }
+
+    #[test]
+    fn test_transition_module_leave_blocked_without_anchor() {
+        // pre_blocked_status 缺失（如外部工具直接注入 blocked）：退化为只校验 blockable。
+        let mut m = new_machine();
+        m.update_module("a", module_with_status(ModuleStatus::Blocked));
+        // 恢复到任意 blockable 态（translating）成功。
+        assert!(m
+            .transition_module("a", Some(ModuleStatus::Translating), None, None, false)
+            .is_ok());
+        assert_eq!(
+            m.state_file().modules["a"].status,
+            ModuleStatus::Translating
+        );
+
+        // 恢复到非 blockable 态（done）应被矩阵拒绝。
+        let mut m2 = new_machine();
+        m2.update_module("b", module_with_status(ModuleStatus::Blocked));
+        let err = m2
+            .transition_module("b", Some(ModuleStatus::Done), None, None, false)
+            .unwrap_err();
+        assert!(matches!(err, MigrateError::InvalidTransition { .. }));
+    }
+
+    #[test]
+    fn test_transition_module_paused_paths() {
+        // paused 是失败汇聚点 + 降级唯一入口，覆盖进入/降级/恢复三条边。
+        // compile_fixing → paused（进入）。
+        let mut m = new_machine();
+        m.update_module("a", module_with_status(ModuleStatus::CompileFixing));
+        assert!(m
+            .transition_module("a", Some(ModuleStatus::Paused), None, None, false)
+            .is_ok());
+        // paused → degrade_manual（降级决策），不误触发 degrade 重置副作用。
+        assert!(m
+            .transition_module("a", Some(ModuleStatus::DegradeManual), None, None, false)
+            .is_ok());
+        assert_eq!(
+            m.state_file().modules["a"].status,
+            ModuleStatus::DegradeManual
+        );
+
+        // paused → translating（人类选择重试），非 degrade 来源不需 force。
+        let mut m2 = new_machine();
+        m2.update_module("b", module_with_status(ModuleStatus::Paused));
+        assert!(m2
+            .transition_module("b", Some(ModuleStatus::Translating), None, None, false)
+            .is_ok());
+        assert_eq!(
+            m2.state_file().modules["b"].status,
+            ModuleStatus::Translating
+        );
     }
 
     #[test]
@@ -717,9 +791,19 @@ mod tests {
             let mut m = new_machine();
             m.update_module("a", module_with_status(st));
             assert!(
-                m.transition_module("a", Some(ModuleStatus::Translating), None, None)
+                m.transition_module("a", Some(ModuleStatus::Translating), None, None, true)
                     .is_ok(),
                 "{st} 应允许恢复到 translating"
+            );
+            // 不带 force 应被拒（降级恢复须人类确认）。
+            let mut m2 = new_machine();
+            m2.update_module("b", module_with_status(st));
+            assert!(
+                matches!(
+                    m2.transition_module("b", Some(ModuleStatus::Translating), None, None, false),
+                    Err(MigrateError::Config(_))
+                ),
+                "{st} 不带 force 恢复应报 Config 错误"
             );
         }
     }
