@@ -313,6 +313,7 @@ cargo nextest run -p rustmigrate-core --filter-expr 'test(graph::)'
 | M1-STATE-01 | `machine.rs`：状态机（INIT→PROFILE→PLAN→SCAFFOLD→SPRINT_LOOP→GRADUATE） |
 | M1-STATE-02 | `validate.rs`：状态转换前置条件检查 |
 | M1-STATE-03 | `validate/rules.rs`：Tier 0/1/2 验证规则定义 |
+| M1-STATE-04 | 模块级 `ModuleStatus` 转换（CLI `state transition`：解析 ModuleStatus + substatus/reason 落盘 + 合法性前置校验 + 原子写）；区别于 01 的项目级状态机。当前 CLI 诚实占位（`implemented:false`），**M1 收尾补做**（09-appendix） |
 
 **四元组 Done**：
 
@@ -336,6 +337,8 @@ cargo nextest run -p rustmigrate-core --filter-expr 'test(state::) | test(valida
 | M1-PROFILE-01 | `profile/detect.rs`：语言检测 + 文件统计 + 复杂度评估 |
 | M1-PROFILE-02 | `scaffold/template.rs`：生成 Cargo.toml + src/ 骨架 |
 | M1-PROFILE-03 | `stats/coverage.rs`：模块迁移进度 + 覆盖率计算 |
+| M1-PROFILE-04 | profile 工具可用性检测：按 `analysis-tools.json` 验证适配器工具+版本 → `ADAPTER_TOOL_MISSING`；检测 `cargo-nextest` → `RUST_TOOL_MISSING`。当前 CLI 占位 + warning，**M1 收尾补做**（06:90） |
+| M1-PROFILE-05 | `stats loc`：tokei 源码/Rust LOC 统计，替换当前借用 coverage 迁移进度的占位语义。**M1 收尾补做**（06:99） |
 
 **四元组 Done**：
 
