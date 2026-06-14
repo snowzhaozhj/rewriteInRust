@@ -48,9 +48,12 @@ jobs:
         working-directory: cli
     steps:
       - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v1
-        with:
-          manifest-path: cli/Cargo.toml
+      # 用宿主工具链 + 现代 cargo-deny（与 nextest 同款 install-action）。
+      # 弃用 EmbarkStudios/cargo-deny-action@v1：其 Docker 镜像内 cargo 过旧，
+      # 无法解析依赖中 edition 2024 的 manifest，在拉取 crates 阶段即失败。
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-deny
+      - run: cargo deny check
 
   shellcheck:
     runs-on: ubuntu-latest

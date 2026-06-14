@@ -17,4 +17,3 @@ path = "src/main.rs"
 rustmigrate-core = { path = "../core" }
 clap.workspace = true
 serde_json.workspace = true
-anyhow.workspace = true
