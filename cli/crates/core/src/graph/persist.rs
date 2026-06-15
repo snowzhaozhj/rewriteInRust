@@ -244,7 +244,7 @@ struct EdgeRow {
 /// 划分原则见 docs/design/04-toolchain.md § 5.7.1：通用且需查询的字段用独立列，
 /// 类型特有的稀疏字段收进 extra，避免节点表列过宽。
 /// `#[serde(default)]` 保证旧数据缺失的字段（如早期未写入 rust_*）按默认值读取。
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 struct NodeExtra {
     /// Function/Class 专属。
@@ -285,9 +285,9 @@ fn parse_node_extra(extra: Option<&str>, node_id: &str, warnings: &mut Vec<Strin
     let Some(json_str) = extra else {
         return NodeExtra::default();
     };
-    serde_json::from_str(json_str).unwrap_or_else(|_| {
+    serde_json::from_str(json_str).unwrap_or_else(|e| {
         warnings.push(format!(
-            "节点 {node_id} 的 extra 列 JSON 解析失败，扩展属性已按默认值忽略"
+            "节点 {node_id} 的 extra 列 JSON 解析失败（{e}），扩展属性已按默认值忽略"
         ));
         NodeExtra::default()
     })
@@ -659,5 +659,22 @@ mod tests {
         assert_eq!(loaded.edge_count(), 0);
 
         let _ = std::fs::remove_file(&db_path);
+    }
+
+    /// REFAC-05：parse_node_extra 遇到非法 JSON 应返回默认值并在 warnings 中记录含节点 id 的错误。
+    #[test]
+    fn parse_node_extra_invalid_json_emits_warning_with_node_id() {
+        let mut warnings: Vec<String> = Vec::new();
+        let result = parse_node_extra(Some("{ 非法json"), "test-node", &mut warnings);
+        // 应返回默认值
+        assert_eq!(result, NodeExtra::default());
+        // warnings 非空
+        assert!(!warnings.is_empty(), "应有 warning 记录");
+        // warning 文案中含节点 id
+        assert!(
+            warnings[0].contains("test-node"),
+            "warning 应含节点 id，实际: {}",
+            warnings[0]
+        );
     }
 }

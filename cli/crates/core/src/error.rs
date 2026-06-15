@@ -61,6 +61,10 @@ pub enum MigrateError {
     #[error("Schema 校验失败: {0}")]
     SchemaValidation(String),
 
+    /// 状态文件含非法时间戳格式（非 ISO 8601 / RFC 3339）。
+    #[error("非法时间戳格式: {0}")]
+    InvalidTimestamp(String),
+
     /// 并发锁冲突。
     #[error("迁移锁冲突: {0}")]
     LockConflict(String),

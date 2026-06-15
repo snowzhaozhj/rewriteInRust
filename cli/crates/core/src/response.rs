@@ -113,6 +113,7 @@ impl From<MigrateError> for Response<ErrorData> {
             MigrateError::TomlSer(_) => "toml",
             MigrateError::FileNotFound(_) => "file_not_found",
             MigrateError::SchemaValidation(_) => "schema_validation",
+            MigrateError::InvalidTimestamp(_) => "invalid_timestamp",
             MigrateError::LockConflict(_) => "lock_conflict",
             MigrateError::NotImplemented(_) => "not_implemented",
         };

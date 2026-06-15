@@ -178,6 +178,11 @@ impl Timestamp {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// 校验是否为合法 ISO 8601 / RFC 3339 时间戳。
+    pub fn is_valid(&self) -> bool {
+        chrono::DateTime::parse_from_rfc3339(&self.0).is_ok()
+    }
 }
 
 impl std::fmt::Display for Timestamp {
