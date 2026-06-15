@@ -543,11 +543,11 @@ fn cmd_profile(root: &Path, adapter_tools: Option<&Path>) -> CmdResult {
 /// 末尾附 `install_hint`（如有）。
 fn format_tool_missing(code: &str, status: &ToolStatus) -> String {
     let mut msg = format!("{code}: {} ", status.display_name);
-    if let Some(err) = &status.probe_error {
+    if let Some(err) = status.probe_error() {
         msg.push_str(&format!("探测失败（{err}），无法确认是否安装"));
-    } else if !status.available {
+    } else if !status.available() {
         msg.push_str("未安装");
-    } else if status.min_version.is_some() && status.detected_version.is_none() {
+    } else if status.min_version.is_some() && status.detected_version().is_none() {
         // 命令成功但版本号无法解析：不应断言「版本不足」。
         if let Some(min) = &status.min_version {
             msg.push_str(&format!("版本无法解析，无法确认是否满足 ≥{min}"));
@@ -556,7 +556,7 @@ fn format_tool_missing(code: &str, status: &ToolStatus) -> String {
         msg.push_str("版本不足");
         if let Some(min) = &status.min_version {
             msg.push_str(&format!("（需 ≥{min}"));
-            if let Some(det) = &status.detected_version {
+            if let Some(det) = status.detected_version() {
                 msg.push_str(&format!("，探测到 {det}"));
             }
             msg.push('）');
@@ -1084,7 +1084,7 @@ fn roots_overlap(source: &Path, rust: &Path) -> Option<String> {
 fn count_loc_side(root: &Path, label: &str, warnings: &mut Vec<String>) -> serde_json::Value {
     match count_loc(root) {
         Ok(report) => {
-            if report.files == 0 {
+            if report.total_files() == 0 {
                 warnings.push(format!(
                     "{label} 目录存在但未统计到任何受支持语言文件（可能为空/权限不足/全被排除）: {}",
                     root.display()

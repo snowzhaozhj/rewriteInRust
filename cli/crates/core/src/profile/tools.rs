@@ -11,7 +11,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 
 use crate::error::{MigrateError, Result};
 
@@ -40,39 +40,118 @@ fn default_required() -> bool {
     true
 }
 
+/// 工具探测的**状态枚举**——用类型把「命令不存在 / 探测失败 / 可用」三态收敛为
+/// 互斥变体，杜绝旧 `available`+`detected_version`+`probe_error` 三个扁平字段可能拼出的
+/// 非法组合（如 `available=false` 却带 `detected_version=Some`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ToolProbe {
+    /// 命令不存在（PATH 未找到）——真正的「未安装」。
+    Missing,
+    /// 命令存在但探测失败（权限/非零退出/无输出），附原因。
+    ProbeFailed(String),
+    /// 命令可用，附探测到的版本号（解析失败为 `None`）。
+    Available(Option<String>),
+}
+
 /// 单个工具的检测结果。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+///
+/// 探测三态由私有 [`ToolProbe`] 枚举承载（消除非法状态），对外仍通过 getter 暴露
+/// `available()`/`detected_version()`/`probe_error()`/`satisfies_min()`。
+/// 自定义 `Serialize` 把状态摊平回历史扁平结构
+/// （`available`/`detected_version`/`satisfies_min`/`probe_error`），保持 `tool_checks`
+/// JSON 输出契约不变。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolStatus {
     /// 工具可执行文件名。
     pub tool_id: String,
     /// 人类可读名称。
     pub display_name: String,
-    /// 是否检测到（命令可执行且成功退出）。
-    pub available: bool,
-    /// 探测到的版本号（解析成功时）。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub detected_version: Option<String>,
     /// 要求的最低版本（如有）。
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub min_version: Option<String>,
-    /// 是否满足最低版本（无 `min_version` 时只要 available 即 true）。
-    pub satisfies_min: bool,
     /// 安装提示。
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub install_hint: Option<String>,
     /// 是否为必需工具。
     pub required: bool,
-    /// 探测异常原因（命令存在但执行失败：权限/非零退出/环境异常等）。
-    /// 区别于「命令不存在」(`available == false` 且本字段为 `None`)，避免把
-    /// 「无法确认」误报为「未安装」。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub probe_error: Option<String>,
+    /// 探测状态（命令不存在 / 探测失败 / 可用+版本）。
+    probe: ToolProbe,
 }
 
 impl ToolStatus {
+    /// 是否检测到（命令可执行且成功退出）。
+    pub fn available(&self) -> bool {
+        matches!(self.probe, ToolProbe::Available(_))
+    }
+
+    /// 探测到的版本号（仅 `Available` 且解析成功时为 `Some`）。
+    pub fn detected_version(&self) -> Option<&str> {
+        match &self.probe {
+            ToolProbe::Available(v) => v.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// 探测异常原因（命令存在但执行失败：权限/非零退出/环境异常等）。
+    /// 区别于「命令不存在」(`available()==false` 且本方法为 `None`)，避免把
+    /// 「无法确认」误报为「未安装」。
+    pub fn probe_error(&self) -> Option<&str> {
+        match &self.probe {
+            ToolProbe::ProbeFailed(e) => Some(e),
+            _ => None,
+        }
+    }
+
+    /// 是否满足最低版本。
+    ///
+    /// - 不可用（Missing/ProbeFailed）→ false；
+    /// - 可用且无 `min_version` 要求 → true；
+    /// - 可用但有要求却解析不出版本 → false（保守，不误判满足）；
+    /// - 可用且版本可解析 → 与 `min_version` 比较。
+    pub fn satisfies_min(&self) -> bool {
+        match (&self.probe, &self.min_version) {
+            (ToolProbe::Available(_), None) => true,
+            (ToolProbe::Available(Some(det)), Some(min)) => version_satisfies(det, min),
+            _ => false,
+        }
+    }
+
     /// 是否构成「缺失」（必需且不可用或版本不足）。
     pub fn is_missing(&self) -> bool {
-        self.required && (!self.available || !self.satisfies_min)
+        // satisfies_min() 在不可用时已为 false，故无需再单独判 available。
+        self.required && !self.satisfies_min()
+    }
+}
+
+impl Serialize for ToolStatus {
+    /// 摊平为历史扁平结构，保持 `tool_checks` JSON 输出契约不变。
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            tool_id: &'a str,
+            display_name: &'a str,
+            available: bool,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            detected_version: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            min_version: Option<&'a str>,
+            satisfies_min: bool,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            install_hint: Option<&'a str>,
+            required: bool,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            probe_error: Option<&'a str>,
+        }
+        Wire {
+            tool_id: &self.tool_id,
+            display_name: &self.display_name,
+            available: self.available(),
+            detected_version: self.detected_version(),
+            min_version: self.min_version.as_deref(),
+            satisfies_min: self.satisfies_min(),
+            install_hint: self.install_hint.as_deref(),
+            required: self.required,
+            probe_error: self.probe_error(),
+        }
+        .serialize(serializer)
     }
 }
 
@@ -105,51 +184,34 @@ pub fn check_adapter_tools(tools: &[AnalysisTool]) -> Vec<ToolStatus> {
 
 /// 检测单个工具：运行 `<tool_id> --version` 并解析版本。
 pub fn check_tool(tool: &AnalysisTool) -> ToolStatus {
-    let (available, detected_version, probe_error) =
-        interpret_probe(probe_version(&tool.tool_id, &["--version"]));
-    let satisfies_min = match (&tool.min_version, &detected_version) {
-        // 无最低版本要求：安装即满足。
-        (None, _) => available,
-        // 有要求但探测不到版本号：保守判定为不满足。
-        (Some(_), None) => false,
-        (Some(min), Some(det)) => version_satisfies(det, min),
-    };
     ToolStatus {
         tool_id: tool.tool_id.clone(),
         display_name: tool.display_name.clone(),
-        available,
-        detected_version,
         min_version: tool.min_version.clone(),
-        satisfies_min,
         install_hint: tool.install_hint.clone(),
         required: tool.required,
-        probe_error,
+        probe: interpret_probe(probe_version(&tool.tool_id, &["--version"])),
     }
 }
 
 /// 检测 Tier 0 Rust 外部二进制 `cargo-nextest`（运行 `cargo nextest --version`）。
 pub fn check_cargo_nextest() -> ToolStatus {
-    let (available, detected_version, probe_error) =
-        interpret_probe(probe_version("cargo", &["nextest", "--version"]));
     ToolStatus {
         tool_id: "cargo-nextest".to_owned(),
         display_name: "cargo-nextest".to_owned(),
-        available,
-        detected_version,
         min_version: None,
-        satisfies_min: available,
         install_hint: Some("cargo install cargo-nextest --locked".to_owned()),
         required: true,
-        probe_error,
+        probe: interpret_probe(probe_version("cargo", &["nextest", "--version"])),
     }
 }
 
-/// 把 [`Probe`] 折叠为 `(available, detected_version, probe_error)` 三元组。
-fn interpret_probe(probe: Probe) -> (bool, Option<String>, Option<String>) {
+/// 把原始 [`Probe`] 折叠为状态枚举 [`ToolProbe`]。
+fn interpret_probe(probe: Probe) -> ToolProbe {
     match probe {
-        Probe::Found(out) => (true, parse_version_str(&out), None),
-        Probe::NotFound => (false, None, None),
-        Probe::Failed(e) => (false, None, Some(e)),
+        Probe::Found(out) => ToolProbe::Available(parse_version_str(&out)),
+        Probe::NotFound => ToolProbe::Missing,
+        Probe::Failed(e) => ToolProbe::ProbeFailed(e),
     }
 }
 
@@ -244,6 +306,74 @@ fn version_satisfies(detected: &str, min: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// 构造一个指定探测状态的 ToolStatus（测试辅助，绕过命令探测）。
+    fn status_with(min_version: Option<&str>, probe: ToolProbe) -> ToolStatus {
+        ToolStatus {
+            tool_id: "t".to_owned(),
+            display_name: "T".to_owned(),
+            min_version: min_version.map(str::to_owned),
+            install_hint: None,
+            required: true,
+            probe,
+        }
+    }
+
+    #[test]
+    fn test_serialize_keeps_flat_contract() {
+        // 枚举化后 JSON 仍是历史扁平结构（available/detected_version/satisfies_min/...），
+        // 保持 tool_checks 输出契约不变。
+        let status = status_with(
+            Some("16.0.0"),
+            ToolProbe::Available(Some("16.3.0".to_owned())),
+        );
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(json["available"], true);
+        assert_eq!(json["detected_version"], "16.3.0");
+        assert_eq!(json["min_version"], "16.0.0");
+        assert_eq!(json["satisfies_min"], true);
+        // 无 probe_error 时该键省略（非 null）。
+        assert!(json.get("probe_error").is_none());
+        assert!(json.get("install_hint").is_none());
+    }
+
+    #[test]
+    fn test_serialize_probe_failed_and_missing() {
+        // ProbeFailed：available=false、probe_error 出现、detected_version 省略。
+        let failed = status_with(None, ToolProbe::ProbeFailed("权限不足".to_owned()));
+        let j1 = serde_json::to_value(&failed).unwrap();
+        assert_eq!(j1["available"], false);
+        assert_eq!(j1["probe_error"], "权限不足");
+        assert!(j1.get("detected_version").is_none());
+
+        // Missing：available=false 且无 probe_error（区分「未安装」与「探测失败」）。
+        let missing = status_with(None, ToolProbe::Missing);
+        let j2 = serde_json::to_value(&missing).unwrap();
+        assert_eq!(j2["available"], false);
+        assert!(j2.get("probe_error").is_none());
+    }
+
+    #[test]
+    fn test_satisfies_min_derivation() {
+        // 无要求 + 可用 → 满足。
+        assert!(status_with(None, ToolProbe::Available(None)).satisfies_min());
+        // 有要求但版本解析不出 → 保守不满足。
+        assert!(!status_with(Some("1.0.0"), ToolProbe::Available(None)).satisfies_min());
+        // 版本达标 / 不达标。
+        assert!(status_with(
+            Some("1.0.0"),
+            ToolProbe::Available(Some("1.2.0".to_owned()))
+        )
+        .satisfies_min());
+        assert!(!status_with(
+            Some("2.0.0"),
+            ToolProbe::Available(Some("1.2.0".to_owned()))
+        )
+        .satisfies_min());
+        // 不可用一律不满足。
+        assert!(!status_with(None, ToolProbe::Missing).satisfies_min());
+        assert!(!status_with(None, ToolProbe::ProbeFailed("x".to_owned())).satisfies_min());
+    }
+
     #[test]
     fn test_parse_version_str_variants() {
         assert_eq!(
@@ -286,8 +416,8 @@ mod tests {
             required: true,
         };
         let status = check_tool(&tool);
-        assert!(!status.available);
-        assert!(!status.satisfies_min);
+        assert!(!status.available());
+        assert!(!status.satisfies_min());
         assert!(status.is_missing());
     }
 
@@ -301,7 +431,7 @@ mod tests {
             required: false,
         };
         let status = check_tool(&tool);
-        assert!(!status.available);
+        assert!(!status.available());
         assert!(!status.is_missing()); // 非必需，不算缺失
     }
 
