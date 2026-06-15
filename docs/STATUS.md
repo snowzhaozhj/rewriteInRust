@@ -5,8 +5,8 @@
 ## 当前位置
 
 - **Milestone**: M1 MVP ✅ → **M2 质量提升**
-- **Phase**: M1 全部任务完成（PR #3/#5/#7/#8/#9/#10 均已合并 master）
-- **下一步**（**新会话从这里开始**）: PLAN §10 M2，优先级 **B 复杂度自适应循环（M2-TIER-01）> A 并行 sprint（M2-SCALE）> Sprint 5.5 类型重构**
+- **Phase**: M2 计划已完成（`docs/PLAN-M2.md`），待执行
+- **下一步**（**新会话从这里开始**）: 读 `docs/PLAN-M2.md`，从 **Sprint A 基础加固** 开始执行
 
 ## M1 完成总结
 
@@ -33,25 +33,18 @@
 
 ## M2 起点
 
-### 优先级排序（PLAN §10）
+### M2 计划概览（详见 `docs/PLAN-M2.md`）
 
-1. **M2-TIER-01 复杂度自适应循环**（工作量 M）— trivial/standard/full 分档，维度 9 永不跳过
-2. **M2-SCALE 并行 sprint**（工作量 L）— parallel_groups 已实现未消费 + worktree 隔离
-3. **Sprint 5.5 类型安全重构**（M2-REFAC-01..12）— M1 审查遗留
-4. **Sprint 5 验证管线增强**（M2-VER-01..04）
-5. **Sprint 6 高级功能** + Sprint 7 并行与规模 + Sprint 8 M2 验收
+```
+Sprint A (基础加固)  → Sprint B (类型+图精度) → Sprint C (核心功能双线)
+  → Sprint D (并行+高级) ‖ Sprint E (验证+CLI) → Sprint F (验收)
+```
 
-### 未决设计决策（需团队定夺）
-
-- `done + --force` 重做：设计行 379（暗示可重做）vs 行 209 矩阵（done 硬终态）矛盾
-- blocked 进入：设计行 206「可从任何状态进入」vs 矩阵（仅 blockable 活跃态可进）
+- **52 项任务 + 5 项验收活动**，预计 25-33 天纯开发（日历 5-7 周）
+- 4 个设计决策已在计划中推荐（done 终态/blocked 规则/写隔离方案/分档策略）
+- M1 deferred TODO 已分配到对应 M2 任务（ADV-08/09, REFAC-13）
+- 部分设计文档 M2 交付物推迟到 M2.5/M3（状态机程序化、行为录制框架等）
 
 ### M1 历史归档
 
 M1 各 Phase 的详细审查修复记录、提交历史、Live 验证产物见 [STATUS-M1-archive.md](STATUS-M1-archive.md)。
-
-### M1 deferred TODO（M2 接线时处理）
-
-1. profile 自动定位 analysis-tools.json（需 `CLAUDE_PLUGIN_ROOT` env 约定）
-2. 完整子进程超时（当前仅 stdin(null)）
-3. ToolStatus 枚举化 / LocReport 派生 totals
