@@ -5,24 +5,21 @@
 pub mod rules;
 
 use crate::error::{MigrateError, Result};
+use crate::state::STATE_SCHEMA_VERSION;
 use crate::types::state::{MigrationStateFile, ProjectState};
 
 /// 校验状态文件完整性。
 ///
 /// 检查项：
-/// - version 非空
+/// - version 非空且 schema 主版本号与当前 CLI 兼容（见 [`check_version_compat`]）
 /// - state_history 非空且末条状态与当前状态一致
 /// - state_history 相邻状态满足合法转换（Init→Profile→…→Graduate）
 /// - 前置条件：各状态要求的数据字段是否存在
 pub fn validate_state(state_file: &MigrationStateFile) -> Result<Vec<String>> {
     let mut warnings: Vec<String> = Vec::new();
 
-    // 基本完整性：version 非空
-    if state_file.version.is_empty() {
-        return Err(MigrateError::SchemaValidation(
-            "version 字段为空".to_owned(),
-        ));
-    }
+    // schema 版本兼容性：非空 + 主版本号匹配（跨主版本拒绝加载）。
+    check_version_compat(&state_file.version)?;
 
     // state_history 非空
     if state_file.state_history.is_empty() {
@@ -95,6 +92,44 @@ pub fn validate_state(state_file: &MigrationStateFile) -> Result<Vec<String>> {
     }
 
     Ok(warnings)
+}
+
+/// 校验状态文件 schema 版本与当前 CLI 的兼容性。
+///
+/// 规则（语义化版本，对照 [`STATE_SCHEMA_VERSION`]）：
+/// - 空字符串：损坏/缺失，返回 `SchemaValidation`。
+/// - 格式非法（无法解析出主版本号）：返回 `SchemaValidation`。
+/// - **主版本号 ≠ 当前主版本号**：schema 不兼容（破坏性结构变更），返回 `SchemaValidation`
+///   并提示当前 CLI 支持的版本——避免新 CLI 误读旧结构或旧 CLI 误读新字段导致静默错乱。
+/// - 主版本号一致（次/修订号任意）：兼容，放行。
+fn check_version_compat(version: &str) -> Result<()> {
+    if version.is_empty() {
+        return Err(MigrateError::SchemaValidation(
+            "version 字段为空".to_owned(),
+        ));
+    }
+
+    let parse_major = |v: &str| v.split('.').next().and_then(|s| s.parse::<u32>().ok());
+
+    let Some(file_major) = parse_major(version) else {
+        return Err(MigrateError::SchemaValidation(format!(
+            "version 字段格式非法：`{version}`（应为语义化版本，如 `{STATE_SCHEMA_VERSION}`）"
+        )));
+    };
+    // 当前常量来自代码内编译期值，必可解析。
+    let current_major =
+        parse_major(STATE_SCHEMA_VERSION).expect("STATE_SCHEMA_VERSION 应为合法语义化版本");
+
+    if file_major != current_major {
+        // TODO(M2-ERR-01): 错误码细分时改用专属 `SCHEMA_VERSION_UNSUPPORTED`（设计 06 §10.7），
+        // 便于 SKILL.md 按码路由升级/回退；当前 MVP 阶段复用 schema_validation kind。
+        return Err(MigrateError::SchemaValidation(format!(
+            "migration-state.json schema 版本不兼容：文件为 `{version}`（主版本 {file_major}），\
+             当前 CLI 支持主版本 {current_major}（`{STATE_SCHEMA_VERSION}`）。\
+             跨主版本结构不兼容，请改用匹配版本的 rustmigrate 或重新执行 init"
+        )));
+    }
+    Ok(())
 }
 
 /// 前置条件检查：确保进入特定状态前所需数据已就位。
@@ -243,6 +278,44 @@ mod tests {
         match result.unwrap_err() {
             MigrateError::SchemaValidation(msg) => {
                 assert!(msg.contains("version"));
+            }
+            other => panic!("期望 SchemaValidation，实际: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_validate_compatible_minor_version() {
+        // 同主版本不同次/修订号视为兼容（向后读取）。
+        let mut state = minimal_init_state();
+        state.version = "1.5.2".to_owned();
+        assert!(validate_state(&state).is_ok());
+    }
+
+    #[test]
+    fn test_validate_incompatible_major_version() {
+        // 跨主版本：schema 不兼容，拒绝加载并提示当前支持版本。
+        let mut state = minimal_init_state();
+        state.version = "2.0.0".to_owned();
+        match validate_state(&state).unwrap_err() {
+            MigrateError::SchemaValidation(msg) => {
+                assert!(msg.contains("不兼容"), "应提示版本不兼容: {msg}");
+                assert!(
+                    msg.contains(STATE_SCHEMA_VERSION),
+                    "应提示当前支持版本: {msg}"
+                );
+            }
+            other => panic!("期望 SchemaValidation，实际: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_validate_malformed_version() {
+        // 非语义化版本：无法解析主版本号，拒绝。
+        let mut state = minimal_init_state();
+        state.version = "not-a-version".to_owned();
+        match validate_state(&state).unwrap_err() {
+            MigrateError::SchemaValidation(msg) => {
+                assert!(msg.contains("格式非法"), "应提示格式非法: {msg}");
             }
             other => panic!("期望 SchemaValidation，实际: {:?}", other),
         }

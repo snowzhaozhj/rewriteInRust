@@ -26,7 +26,7 @@ use rustmigrate_core::profile::{
 use rustmigrate_core::response::{ErrorData, Response, Status};
 use rustmigrate_core::scaffold::scaffold_project;
 use rustmigrate_core::state::MigrationStateMachine;
-use rustmigrate_core::stats::count_loc;
+use rustmigrate_core::stats::{compare_structure, count_loc};
 use rustmigrate_core::types::common::{NodeId, RiskLevel, Timestamp};
 use rustmigrate_core::types::graph::{EdgeType, NodeType};
 use rustmigrate_core::types::state::{ModuleState, ModuleStatus, ProjectState, SprintState};
@@ -213,8 +213,15 @@ pub enum StatsCommands {
         #[arg(long)]
         rust: Option<PathBuf>,
     },
-    /// 源码与 Rust 结构复杂度对比（M2 落地）。
-    Compare,
+    /// 源码与 Rust 结构复杂度对比（LOC + 函数数 + 控制流嵌套）。
+    Compare {
+        /// 源码根目录（省略则取 `.rustmigrate.toml` 的 `project.source_root`）。
+        #[arg(long)]
+        source: Option<PathBuf>,
+        /// Rust 代码根目录（省略则取 `.rustmigrate.toml` 的 `project.rust_root`）。
+        #[arg(long)]
+        rust: Option<PathBuf>,
+    },
 }
 
 /// Scaffold 子命令。
@@ -342,7 +349,10 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
             StatsCommands::Loc { source, rust } => {
                 emit(writer, cmd_stats_loc(source.as_deref(), rust.as_deref()))
             }
-            StatsCommands::Compare => emit(writer, cmd_stats_compare()),
+            StatsCommands::Compare { source, rust } => emit(
+                writer,
+                cmd_stats_compare(source.as_deref(), rust.as_deref()),
+            ),
         },
         Commands::Scaffold { action } => match action {
             ScaffoldCommands::Workspace { target, name } => {
@@ -903,11 +913,17 @@ fn cmd_state_transition_project(
 /// 可读、依赖门禁（`graph deps` + `modules[dep].status`）才成立。
 ///
 /// 流程：`load_graph` → `migration_sequence()` →（有环则拒绝，对齐 topo-sort 门禁）→
-/// 为每个文件模块写 `ModuleState{status:pending, sprint:1, risk:low}`（module key = NodeId 原值，
+/// 清理孤儿 pending（见下）→ 为每个文件模块写
+/// `ModuleState{status:pending, sprint:1, risk:low}`（module key = NodeId 原值，
 /// 与 `graph deps` 输出一致）→ `set_sprint(current:1)` → 原子落盘。
 ///
 /// **幂等保护**：已有模块处于非 `pending` 活跃态（迁移进行中）时拒绝覆盖，避免把进度重置回
 /// `pending`（断点续传安全）；仅当全部模块仍为 pending（或全新）时才整体重填。
+///
+/// **孤儿 pending 清理**：源码图删文件后重填时，上一轮登记、本轮序列已不含的 pending 模块会成为
+/// "孤儿"（状态中存在但源码图已无对应节点）。重填只新增/覆盖序列内节点，故先用
+/// [`MigrationStateMachine::retain_modules`] 剔除孤儿，保持 `modules` 与当前迁移序列一致，
+/// 避免不存在的模块被 `state report` / 依赖门禁误计入进度；被清理的 key 经 warning 告知用户。
 fn cmd_state_populate_modules() -> CmdResult {
     let graph = load_graph()?;
     let sequence = migration_sequence(&graph);
@@ -945,7 +961,20 @@ fn cmd_state_populate_modules() -> CmdResult {
     }
 
     if sequence.order.is_empty() {
+        // 空源码图：跳过孤儿清理，避免误执行一次空 graph build 后把已登记的 pending 模块整表清空。
         warnings.push("源码图无文件模块，填充结果为空（请确认已运行 graph build）".to_owned());
+    } else {
+        // 孤儿 pending 清理：剔除 key 不在本轮迁移序列中的残留模块（源码图删文件后重填）。
+        let live_keys: std::collections::HashSet<String> =
+            sequence.order.iter().map(|id| id.to_string()).collect();
+        let orphans = machine.retain_modules(&live_keys);
+        if !orphans.is_empty() {
+            warnings.push(format!(
+                "已清理 {} 个孤儿 pending 模块（源码图已无对应节点）: {:?}",
+                orphans.len(),
+                orphans
+            ));
+        }
     }
 
     for node_id in &sequence.order {
@@ -1138,16 +1167,60 @@ fn load_config_or_default(
     }
 }
 
-/// `stats compare`：源码与 Rust 结构复杂度对比（推迟 M2）。
-fn cmd_stats_compare() -> CmdResult {
-    // TODO(M2): 复用 tokei + tree-sitter 函数计数做结构对比（见 06 § CLI 表 stats compare）。
-    Ok((
-        json!({
-            "message": "stats compare 尚未实现（推迟 M2）",
-            "implemented": false,
-        }),
-        vec!["stats compare 推迟 M2，当前返回占位响应".to_owned()],
-    ))
+/// `stats compare`：源码与 Rust 结构复杂度对比（LOC + 函数数 + 控制流嵌套）。
+///
+/// 路径解析与 `stats loc` 同口径：CLI 参数 > 配置文件 > 默认值，并复用包含关系告警。
+/// 任一侧目录不存在时返回 `Null` data + warning（迁移早期 Rust 端常未生成，属正常），
+/// 与 `stats loc` 的「缺目录不报错只告警」行为一致。
+fn cmd_stats_compare(source: Option<&Path>, rust: Option<&Path>) -> CmdResult {
+    let mut warnings: Vec<String> = Vec::new();
+    let cfg = load_config_or_default(&mut warnings);
+    let source_root = source
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(&cfg.project.source_root));
+    let rust_root = rust
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(&cfg.project.rust_root));
+
+    // stats compare 源侧走 tree-sitter-typescript 解析（measure_source 强绑 TS）。非 TS 项目若放行，
+    // 源侧会收集到 0 个文件、静默给出半残比值（functions/nesting 全 0、ratio 为 null）——显式报错
+    // 而非静默半残。Python/C/Go 前端在 M3 按 source_language 分派解析器。
+    if cfg.project.source_language != rustmigrate_core::types::common::SourceLang::TypeScript {
+        return Err(MigrateError::Config(format!(
+            "stats compare 当前仅支持 TypeScript 源（配置 source_language={}）；\
+             Python/C/Go 源的结构对比在 M3 实现",
+            cfg.project.source_language
+        )));
+    }
+
+    // 与 stats loc 同：源/Rust 目录互相包含时统计会污染，显式告警不静默。
+    if let Some(outer) = roots_overlap(&source_root, &rust_root) {
+        warnings.push(format!(
+            "source 与 rust 目录存在包含关系（{outer} 包含另一侧），结构对比可能重复计数；\
+             建议将 source_root / rust_root 配置为互不包含的目录"
+        ));
+    }
+
+    match compare_structure(&source_root, &rust_root) {
+        Ok(report) => match serde_json::to_value(&report) {
+            Ok(v) => Ok((v, warnings)),
+            Err(e) => {
+                warnings.push(format!("结构对比结果序列化失败: {e}"));
+                Ok((serde_json::Value::Null, warnings))
+            }
+        },
+        Err(MigrateError::FileNotFound(p)) => {
+            warnings.push(format!(
+                "源码或 Rust 目录不存在，跳过结构对比: {}",
+                p.display()
+            ));
+            Ok((serde_json::Value::Null, warnings))
+        }
+        Err(e) => {
+            warnings.push(format!("结构对比失败: {e}"));
+            Ok((serde_json::Value::Null, warnings))
+        }
+    }
 }
 
 /// `scaffold workspace`：生成 Cargo lib 项目骨架。

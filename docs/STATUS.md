@@ -20,7 +20,16 @@
   - ⏪ **REFAC-06 已回退**: MigrationSequence 私有化+getter 是**过度封装**——Rust 纯数据 struct 惯例即 pub 字段（无字段间不变量、不跨 crate、外部仅 `&` 只读，私有化零收益、纯增代码）。回退为 pub 字段删 getter，SCALE-P 直接读 `sequence.parallel_groups`
   - ⏪ **REFAC-13 的 LocReport totals 私有化已回退**: 同 REFAC-06 病因，字段改回 pub、删 4 个 getter；**保留 `from_languages`**（把累加收成单一入口，有整洁价值）
   - **教训**：Rust 不套 Java「全字段私有+getter」；私有化仅当 ①字段间有不变量 或 ②跨 crate API 稳定性。M1 review 按惯例提的封装债须按此甄别。211 测试全过、clippy 零
-- **下一步**（**新会话从这里开始**）: Sprint A **C 档（各 1d 含新增逻辑/外部依赖）**：VER-04（populate 数据卫生+e2e）、COMPAT-01（版本检测基础）、ADV-06（stats compare 真实实现，依赖 tokei+tree-sitter）。CTX-01 需真实项目实测。注：M2-TIER-01a 删 risk 时需同步 plugin 提示词 analyze.md:37 的 `risk:low` 表述。**PR 粒度已放宽**（CLAUDE.md 改）：同 Sprint 紧密相关小任务可合批
+- **执行模式（2026-06-15 定，详见 PLAN-M2 §14「并行执行模式」）**：sprint 内独立任务用 **worktree 隔离 subAgent 每波 3-4 路并行**，主会话当瘦编排器（派发→收摘要→review→集中 merge 解冲突→整体 `just ci`→**同 sprint 合批 PR**）。碰同一热点文件（lib.rs/graph.rs/build.rs/machine.rs）的任务合成一个工作单元串行做
+- ✅ **Sprint A C 档收尾（波次1，2 路 worktree 并行，分支 `feat/m2-sprint-a-finish`）**——首次走「并行执行模式」：
+  - ✅ **VER-04**(`70d3a07`): populate 孤儿 pending 清理——新增 `MigrationStateMachine::retain_modules(live_keys)`，重填前剔除源码图已无对应节点的 pending 模块（key 用 `id.to_string()` vs `as_str()` 已核一致），被清理 key 经 warning 降级告知；docstring 补孤儿清理流程；record-subagent-call 无 init 返回 `FileNotFound`（非 panic）e2e
+  - ✅ **COMPAT-01**(`9c7e62e`): version 写入已就位（`STATE_SCHEMA_VERSION="1.0.0"` 改 pub）；validate 新增 `check_version_compat`——语义化**主版本号**判兼容（空/格式非法/跨主版本 → SchemaValidation 并提示当前支持版本，同主版本放行）
+  - ✅ **ADV-06**(`85b6ed4`): stats compare 非占位——`stats/compare.rs` 三维度（LOC/函数数/控制流嵌套）比值 `rust/source`，分母 0→`ratio:null`。源码侧复用 tree-sitter（`build_graph_ts` 同口径），**Rust 侧词法扫描**（无 tree-sitter-rust 依赖，`method` 字段标注手段；偏差经 review 认可——设计评分卡 Rust 侧本标注 tokei/scc）；目录缺→warning 跳过不报错
+  - **质量门 + 审查闭环**：PR [#17](https://github.com/snowzhaozhj/rewriteInRust/pull/17)。design-checker（零必修 MISMATCH）+ code-reviewer（1 important + 2 nit）已闭环修复：char 字面量误吞后续代码（important，含引号 `'"'`）、method→`CountMethod` enum、空源码图跳过孤儿清理（防整表清空）、`version` JSON 键加 serde rename 对齐设计 `schema_version`（06 §10.0.2/§10.7）、错误码 TODO 指向 ERR-01、09 示例同步。整体 `just ci` 全过（clippy/deny/fmt/shellcheck；新增 char/转义/生命周期 3 测试）。strsim/toml duplicate 系 tokei 既有传递依赖非本次引入
+  - **用户复审追加（设计层，commit `3160a55`）**：用户质疑 stats compare ① **强绑 TS**（measure_source 写死 + 非 TS 源静默收集 0 文件给半残比值）② **两侧控制流/函数计数口径不一致**（源 AST 精确 vs Rust 词法启发式，关键字集/算法均不同）。处理——问题1：`cmd_stats_compare` 加 `source_language` gate，非 TS 显式报错 + e2e；问题2 按「文档化 + nesting 降为参考」（**不改算法**，接受为粗粒度信号）——决策写入**设计文档 03 §4.3 Step 4.5**（函数/嵌套比仅作粗粒度告警、行数比为门禁主依据），compare.rs 注释精简指向 03、不二次文档化。**教训**：自动审查链（实现 agent + design-checker + code-reviewer + 主会话）全部只查「局部正确性」，漏了「度量学有效性/功能目的」层——design-checker 还把控制流维度标 MATCH。审查需上升到功能目的层。**待用户审阅合并**
+  - CTX-01 需真实项目实测 → 推迟 Sprint F
+- **下一步**（**新会话从这里开始**）: PR 审查闭环后转 **Sprint B（4 路并行红利最大区）**：7 个独立 REFAC（01/02/03/04/11/12/15）多挤 graph.rs/build.rs，merge 时集中解冲突；REFAC-09→10 串行另起
+  - 注：M2-TIER-01a 删 risk 时需同步 plugin 提示词 analyze.md:37 的 `risk:low` 表述。**PR 粒度已放宽**（CLAUDE.md 改）：同 Sprint 紧密相关小任务可合批
 - **复审结论**：草稿方向正确，已修正 3 处自相矛盾 + 1 处悬空引用 + 撤销 tier_signals 过度设计 + 补 6 项缺口；新增 D5（SQLite 集中 writer）+ 3 任务（DESIGN-03/PERF-BASE/CLI-06 auto-unblock）；任务总数 52→55。3 个战略决策经用户批准（SQLite 门禁降级 / 60min 单模块 / 状态机程序化推迟+抽 auto-unblock）
 - **D3 写隔离方案已定稿（重点，见 [MDR-003](decisions/003-m2-parallel-write-isolation.md)）**：经 codex 四轮对抗审查 + 用户多次质疑收敛为 **git worktree + 约束包**（否决「隔离 crate 副本/轻量 staging/多 crate workspace 作并行单元」）。核心：
   - worktree 内完整 crate 真自检（保留 M1 per-module 编译反馈环）；**两层 done**：`agent_done`(自检) vs `done`(整组 check)

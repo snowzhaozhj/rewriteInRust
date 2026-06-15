@@ -452,6 +452,31 @@ fn smoke_state_record_subagent_call() {
 }
 
 #[test]
+fn e2e_record_subagent_call_without_init_errors() {
+    // 无 init（无 migration-state.json）时调用应返回明确错误，而非 panic 或静默成功。
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let (code, json) = run(&[
+            "state",
+            "record-subagent-call",
+            "--step-index",
+            "1",
+            "--subagent-name",
+            "translator",
+            "--status",
+            "success",
+        ]);
+        assert_eq!(code, 1, "无 init 应报错: {json}");
+        assert_eq!(json["status"], "error");
+        let msg = json["data"]["message"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("文件不存在"),
+            "错误信息应提示状态文件不存在: {json}"
+        );
+    });
+}
+
+#[test]
 fn smoke_state_transition_invalid_status() {
     let tmp = tempfile::tempdir().unwrap();
     with_cwd(tmp.path(), || {
@@ -657,15 +682,99 @@ fn smoke_stats_loc_overlapping_roots_warns() {
 }
 
 #[test]
-fn smoke_stats_compare_placeholder() {
+fn e2e_stats_compare_rejects_non_typescript_source() {
+    // 问题1（M2-ADV-06 审查）：源侧解析强绑 TS。非 TS 项目须显式报错，
+    // 而非源侧静默收集 0 文件、给出半残比值（functions/nesting 全 0）。
     let tmp = tempfile::tempdir().unwrap();
     with_cwd(tmp.path(), || {
-        // stats compare 推迟 M2，返回带 warning 的占位响应。
+        let _ = run(&["init"]);
+        // 将生成的 config 源语言改为非 TS（Python）。
+        let cfg = std::fs::read_to_string(".rustmigrate.toml").unwrap();
+        let cfg = cfg.replace(
+            "source_language = \"typescript\"",
+            "source_language = \"python\"",
+        );
+        std::fs::write(".rustmigrate.toml", &cfg).unwrap();
+        assert!(
+            cfg.contains("source_language = \"python\""),
+            "前置：config 应已改为 python: {cfg}"
+        );
+        std::fs::create_dir_all("src").unwrap();
+        std::fs::create_dir_all("rust-src").unwrap();
+
+        let (code, json) = run(&["stats", "compare", "--source", "src", "--rust", "rust-src"]);
+        assert_eq!(code, 1, "非 TS 源应报错: {json}");
+        assert_eq!(json["status"], "error", "应为 error: {json}");
+        let msg = json["data"]["message"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("仅支持 TypeScript"),
+            "错误信息应说明仅支持 TS: {json}"
+        );
+    });
+}
+
+#[test]
+fn smoke_stats_compare_structure() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        std::fs::create_dir_all("src").unwrap();
+        std::fs::create_dir_all("rust-src").unwrap();
+        // 源码：2 个函数（f + 箭头常量 g）。
+        std::fs::write(
+            "src/a.ts",
+            "export function f(x: number) {\n  if (x > 0) { return x; }\n}\nexport const g = () => {};\n",
+        )
+        .unwrap();
+        // Rust：1 个函数。
+        std::fs::write(
+            "rust-src/a.rs",
+            "pub fn f(x: i64) -> i64 {\n    if x > 0 {\n        return x;\n    }\n    0\n}\n",
+        )
+        .unwrap();
+
+        let (code, json) = run(&["stats", "compare", "--source", "src", "--rust", "rust-src"]);
+        assert_eq!(code, 0, "stats compare 应成功: {json}");
+        // 两侧目录均存在、无 warning → status ok。
+        assert_eq!(json["status"], "ok", "无 warning 应为 ok: {json}");
+        assert_eq!(
+            json["data"]["source"]["functions"], 2,
+            "源码 2 个函数: {json}"
+        );
+        assert_eq!(
+            json["data"]["rust"]["functions"], 1,
+            "Rust 1 个函数: {json}"
+        );
+        assert_eq!(json["data"]["source"]["method"], "tree-sitter");
+        assert_eq!(json["data"]["rust"]["method"], "lexical-scan");
+        // 函数数比 rust/source = 0.5。
+        assert_eq!(json["data"]["function_ratio"]["ratio"], 0.5);
+        assert!(
+            json["data"]["loc_ratio"]["source"].as_f64().unwrap() > 0.0,
+            "源码 LOC 应 > 0: {json}"
+        );
+    });
+}
+
+#[test]
+fn smoke_stats_compare_missing_rust_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        std::fs::create_dir_all("src").unwrap();
+        std::fs::write("src/a.ts", "export const x = 1;\n").unwrap();
+        // rust-src 不存在 → data 为 null + warning，命令不失败。
         let (code, json) = run(&["stats", "compare"]);
-        assert_eq!(code, 0, "占位响应应成功: {json}");
-        // 带 warnings 时 status 为 warning。
+        assert_eq!(code, 0, "缺 rust 目录不应失败: {json}");
         assert_eq!(json["status"], "warning");
-        assert_eq!(json["data"]["implemented"], false);
+        assert!(json["data"].is_null(), "data 应为 null: {json}");
+        assert!(
+            json["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w.as_str().unwrap_or("").contains("跳过结构对比")),
+            "应含跳过对比 warning: {json}"
+        );
     });
 }
 
@@ -773,6 +882,55 @@ fn e2e_populate_modules_linear_unblocks_run() {
                 "graph deps 输出的依赖 key {dep} 应在 modules 中（否则 run 依赖门禁失配）"
             );
         }
+    });
+}
+
+#[test]
+fn e2e_populate_cleans_orphan_pending() {
+    // 源码图删文件后重填：上一轮登记、本轮序列已不含的 pending 模块应被清理为孤儿，
+    // 并经 warning 告知用户，避免不存在的模块被计入进度。
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        let _ = run(&["init"]);
+        let (code, _) = run(&["graph", "build", "--root", "src"]);
+        assert_eq!(code, 0);
+
+        // 首轮填充：linear-deps 3 个模块（index/service/utils），全部 pending。
+        let (code, json) = run(&["state", "populate-modules"]);
+        assert_eq!(code, 0, "首轮填充应成功: {json}");
+        assert_eq!(json["data"]["module_count"], 3);
+
+        // 删 index.ts（根模块，无其他文件 import 它，不破坏剩余依赖）后重建源码图。
+        std::fs::remove_file("src/index.ts").unwrap();
+        let (code, _) = run(&["graph", "build", "--root", "src"]);
+        assert_eq!(code, 0);
+
+        // 重填：序列缩为 2，原 index 模块成孤儿应被清理 + warning 告知。
+        let (code, json) = run(&["state", "populate-modules"]);
+        assert_eq!(code, 0, "重填应成功: {json}");
+        assert_eq!(
+            json["data"]["module_count"], 2,
+            "重填后应只剩 2 个模块: {json}"
+        );
+        assert_eq!(json["status"], "warning", "清理孤儿应降级 warning: {json}");
+        let warnings = json["warnings"].as_array().expect("应有 warnings 数组");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.as_str().unwrap_or_default().contains("孤儿")),
+            "应有孤儿清理 warning: {json}"
+        );
+
+        // 落盘校验：modules 中不再含 index，且 state 合法。
+        let modules = json["data"]["modules"].as_array().unwrap();
+        assert!(
+            !modules
+                .iter()
+                .any(|m| m.as_str().unwrap().contains("index")),
+            "重填后不应再含 index 模块: {json}"
+        );
+        let (code, json) = run(&["validate", "state"]);
+        assert_eq!(code, 0, "清理后 state 应合法: {json}");
     });
 }
 

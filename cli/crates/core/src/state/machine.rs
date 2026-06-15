@@ -12,8 +12,11 @@ use crate::types::state::{
     ProjectState, StateHistoryEntry,
 };
 
-/// 状态文件 schema 版本号。
-const STATE_SCHEMA_VERSION: &str = "1.0.0";
+/// 状态文件 schema 版本号（init 时写入 `migration-state.json` 的 `version` 字段）。
+///
+/// 采用语义化版本：**主版本号**用于 schema 不兼容判定（见 `validate::version` 兼容性检查），
+/// 同主版本视为可读，跨主版本视为不兼容、拒绝加载。变更 schema 破坏性结构时递增主版本号。
+pub const STATE_SCHEMA_VERSION: &str = "1.0.0";
 
 /// 迁移状态机，持有并管理 `MigrationStateFile`。
 #[derive(Debug, Clone)]
@@ -202,6 +205,28 @@ impl MigrationStateMachine {
     /// 破坏断点续传语义。
     pub fn update_module(&mut self, name: &str, module: ModuleState) {
         self.state_file.modules.insert(name.to_owned(), module);
+    }
+
+    /// 清理"孤儿"模块：删除 key 不在 `live_keys` 中的模块条目，返回被删除的 key 列表。
+    ///
+    /// 用于 `populate-modules` 重填场景——源码图删文件后，上一轮 populate 登记的模块会变成
+    /// 状态中存在、源码图已无对应节点的"孤儿"。整体重填只新增/覆盖图内节点，不会主动删除这些
+    /// 残留，导致后续 `state report` / 依赖门禁把不存在的模块计入进度。本方法在重填前剔除它们，
+    /// 保持 `modules` 与当前源码图迁移序列一致。
+    ///
+    /// 仅由调用方在确认全部模块仍为 `pending`（无活跃进度，断点续传安全）后调用。
+    pub fn retain_modules(&mut self, live_keys: &std::collections::HashSet<String>) -> Vec<String> {
+        let orphans: Vec<String> = self
+            .state_file
+            .modules
+            .keys()
+            .filter(|k| !live_keys.contains(*k))
+            .cloned()
+            .collect();
+        for key in &orphans {
+            self.state_file.modules.remove(key);
+        }
+        orphans
     }
 
     /// 执行模块级状态转换（带合法性校验、substatus/reason 落盘、blocked 恢复副作用）。
@@ -445,6 +470,36 @@ mod tests {
         let project = m.state_file().project.as_ref().expect("应有 project");
         assert_eq!(project.name, "test-project");
         assert_eq!(project.source_language, SourceLang::TypeScript);
+    }
+
+    #[test]
+    fn test_retain_modules_removes_orphans() {
+        let mut m = new_machine();
+        m.update_module("file:a", module_with_status(ModuleStatus::Pending));
+        m.update_module("file:b", module_with_status(ModuleStatus::Pending));
+        m.update_module("file:c", module_with_status(ModuleStatus::Pending));
+
+        // 仅保留 a、b；c 应作为孤儿被删除并返回。
+        let live: std::collections::HashSet<String> = ["file:a".to_owned(), "file:b".to_owned()]
+            .into_iter()
+            .collect();
+        let orphans = m.retain_modules(&live);
+
+        assert_eq!(orphans, vec!["file:c".to_owned()]);
+        assert_eq!(m.state_file().modules.len(), 2);
+        assert!(m.state_file().modules.contains_key("file:a"));
+        assert!(m.state_file().modules.contains_key("file:b"));
+        assert!(!m.state_file().modules.contains_key("file:c"));
+    }
+
+    #[test]
+    fn test_retain_modules_no_orphans() {
+        let mut m = new_machine();
+        m.update_module("file:a", module_with_status(ModuleStatus::Pending));
+        let live: std::collections::HashSet<String> = ["file:a".to_owned()].into_iter().collect();
+        // 全部存活：无孤儿、不删除。
+        assert!(m.retain_modules(&live).is_empty());
+        assert_eq!(m.state_file().modules.len(), 1);
     }
 
     #[test]
@@ -999,7 +1054,7 @@ mod tests {
     fn test_load_invalid_timestamp_rejected() {
         // 构造合法 JSON 结构，但 state_history[0].entered_at 值非法。
         let json = r#"{
-            "version": "1.0.0",
+            "schema_version": "1.0.0",
             "state": "init",
             "state_history": [
                 {
