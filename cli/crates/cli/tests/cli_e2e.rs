@@ -682,6 +682,38 @@ fn smoke_stats_loc_overlapping_roots_warns() {
 }
 
 #[test]
+fn e2e_stats_compare_rejects_non_typescript_source() {
+    // 问题1（M2-ADV-06 审查）：源侧解析强绑 TS。非 TS 项目须显式报错，
+    // 而非源侧静默收集 0 文件、给出半残比值（functions/nesting 全 0）。
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        // 将生成的 config 源语言改为非 TS（Python）。
+        let cfg = std::fs::read_to_string(".rustmigrate.toml").unwrap();
+        let cfg = cfg.replace(
+            "source_language = \"typescript\"",
+            "source_language = \"python\"",
+        );
+        std::fs::write(".rustmigrate.toml", &cfg).unwrap();
+        assert!(
+            cfg.contains("source_language = \"python\""),
+            "前置：config 应已改为 python: {cfg}"
+        );
+        std::fs::create_dir_all("src").unwrap();
+        std::fs::create_dir_all("rust-src").unwrap();
+
+        let (code, json) = run(&["stats", "compare", "--source", "src", "--rust", "rust-src"]);
+        assert_eq!(code, 1, "非 TS 源应报错: {json}");
+        assert_eq!(json["status"], "error", "应为 error: {json}");
+        let msg = json["data"]["message"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("仅支持 TypeScript"),
+            "错误信息应说明仅支持 TS: {json}"
+        );
+    });
+}
+
+#[test]
 fn smoke_stats_compare_structure() {
     let tmp = tempfile::tempdir().unwrap();
     with_cwd(tmp.path(), || {

@@ -9,15 +9,12 @@
 //!
 //! 比值定义统一为 `rust / source`（与设计「膨胀比」一致：> 1 表示 Rust 侧更多/更深）。
 //!
-//! **函数 / 控制流计数策略（实现决策，与 PLAN「tree-sitter 函数计数」对齐处与偏差均记录）**：
-//! - **源码侧（TS）**：复用 [`crate::graph::build_graph_ts`] 的真实 tree-sitter 解析，
-//!   按图中 `Function` 节点计数（含方法、箭头/函数表达式常量）——与 `graph build` 口径一致。
-//!   控制流嵌套由 tree-sitter AST 精确计算。
-//! - **Rust 侧**：本项目未引入 `tree-sitter-rust` 语法（避免新增重量级语法依赖 + cargo-deny
-//!   许可证审查成本；设计评分卡表对 Rust 侧函数数本就标注 tokei/scc 而非 AST）。改用
-//!   **剥离注释与字符串字面量后**的轻量词法扫描计 `fn` 声明数与控制流关键字嵌套深度。
-//!   这是已知精度近似（宏内 `fn`、`r#"..."#` raw string 等边角不完美），输出 JSON 以
-//!   `rust_method` 字段标注计数手段，便于门禁与人工判读。
+//! **计数手段（实现层）**：源侧复用 [`crate::graph::build_graph_ts`] 的 tree-sitter 解析
+//! （`Function` 节点含方法/箭头常量 + AST 精确嵌套）；Rust 侧用轻量词法扫描（剥离注释/字符串后
+//! 计 `fn` 与控制流嵌套，无 `tree-sitter-rust` 依赖，已知近似）。JSON 以 `method` 字段标注每侧手段。
+//!
+//! **两侧口径差异、跨语言可比性限制、以及「函数数/嵌套比仅作粗粒度告警、行数比为门禁主依据」
+//! 的决策，见 `03-execution-model.md` § 4.3 Step 4.5（设计权威，不在此重复）。**
 
 use std::path::Path;
 

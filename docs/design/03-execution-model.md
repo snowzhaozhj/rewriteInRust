@@ -138,6 +138,17 @@ Work Unit（一个 Claude Code 会话）:
       与告警线之间的缓冲，避免高频误拦正常翻译。阈值依据与 M1 校准计划见 § 7.5 阈值说明
     - 比例越界 → 标记「Phase A 疑似已优化」，要求 translator 以忠实保留模式重做 Phase A
       再进入 Step 5（门禁，非软提示）。若重做后仍越界，标记 `requires_manual_review` 并进入 paused 状态（与 Phase B 耗尽路径对齐）
+    - **跨侧口径限制（M2-ADV-06 实现确定）**：`stats compare` 源侧用 tree-sitter AST 精确计数、
+      Rust 侧用轻量词法扫描（M2 刻意不引 `tree-sitter-rust` 以省依赖），两侧口径无法严格对齐——
+      源侧函数含箭头函数/方法、Rust 侧数 `fn` 不含闭包；源侧控制流集 `if/for/while/do/switch`、
+      Rust 侧词法集含 `else/loop/match`；且 AST 精确深度 vs `{}` 配平启发式算法本身不同。加之跨语言
+      「函数数/嵌套」可比性天然弱。**结论**：`函数数量比` / `控制流嵌套比` 仅作**粗粒度告警信号**
+      （配合上述宽缓冲带使用，看膨胀方向），不作精确判定；`代码行数比`（tokei 跨语言同口径）是门禁
+      **主依据**。输出 JSON 以 `method` 字段（`tree-sitter` / `lexical-scan`）透明标注每侧计数手段供判读。
+      要让函数/嵌套比达到精确可比，需 Rust 侧改走 AST（引 `tree-sitter-rust` + 统一控制流节点映射），
+      推迟到 M3 多语言前端时一并评估。
+    - **源语言限制**：`stats compare` 源侧解析强绑 TypeScript，非 TS 项目（`source_language != typescript`）
+      显式报错而非静默半残；Python/C/Go 在 M3 按 `source_language` 分派解析器。
 
   Step 5: Phase B — 编译修正 + 惯用化优化
     - 基于审查报告修正语义偏差

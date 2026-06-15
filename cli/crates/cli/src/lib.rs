@@ -1182,6 +1182,17 @@ fn cmd_stats_compare(source: Option<&Path>, rust: Option<&Path>) -> CmdResult {
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from(&cfg.project.rust_root));
 
+    // stats compare 源侧走 tree-sitter-typescript 解析（measure_source 强绑 TS）。非 TS 项目若放行，
+    // 源侧会收集到 0 个文件、静默给出半残比值（functions/nesting 全 0、ratio 为 null）——显式报错
+    // 而非静默半残。Python/C/Go 前端在 M3 按 source_language 分派解析器。
+    if cfg.project.source_language != rustmigrate_core::types::common::SourceLang::TypeScript {
+        return Err(MigrateError::Config(format!(
+            "stats compare 当前仅支持 TypeScript 源（配置 source_language={}）；\
+             Python/C/Go 源的结构对比在 M3 实现",
+            cfg.project.source_language
+        )));
+    }
+
     // 与 stats loc 同：源/Rust 目录互相包含时统计会污染，显式告警不静默。
     if let Some(outer) = roots_overlap(&source_root, &rust_root) {
         warnings.push(format!(
