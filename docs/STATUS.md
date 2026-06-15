@@ -5,8 +5,9 @@
 ## 当前位置
 
 - **Milestone**: M1 MVP ✅ → **M2 质量提升**
-- **Phase**: M2 计划已完成（`docs/PLAN-M2.md`），待执行
-- **下一步**（**新会话从这里开始**）: 读 `docs/PLAN-M2.md`，从 **Sprint A 基础加固** 开始执行
+- **Phase**: M2 计划**已复审定稿**（`docs/PLAN-M2.md`，复审台账 `docs/review/M2-plan-review-2026-06-15.md`），待执行
+- **下一步**（**新会话从这里开始**）: 读 `docs/PLAN-M2.md` + 复审台账，从 **Sprint A 基础加固** 开始；Sprint A 先做 **M2-DESIGN-03**（落实 D3/D4/D5 对设计文档的同步，避免实现漂移）
+- **复审结论**：草稿方向正确，已修正 3 处自相矛盾 + 1 处悬空引用 + 撤销 tier_signals 过度设计 + 补 6 项缺口；新增 D5（SQLite 集中 writer）+ 3 任务（DESIGN-03/PERF-BASE/CLI-06 auto-unblock）；任务总数 52→55。3 个战略决策经用户批准（SQLite 门禁降级 / 60min 单模块 / 状态机程序化推迟+抽 auto-unblock）
 
 ## M1 完成总结
 
