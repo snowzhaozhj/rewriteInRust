@@ -132,7 +132,21 @@ cargo run -- graph build --root fixtures/linear-deps  # 手动验证
 2. 更新 `docs/STATUS.md`
 3. commit 引用任务 ID（如 `feat(M1-GRAPH): 图构建模块`）
 4. 独立分支提 PR
-5. PR 审查：调用 `/pr-review-toolkit:review-pr`，额外运行 `design-checker` agent 检查设计文档一致性；再跑 `codex:codex-rescue`（对抗审查）和 `/code-review` skill
+5. **PR 审查（按 PR 类型分档，避免对小 PR 全套轰炸浪费 token）**：
+
+   | PR 类型 | 审查手段 |
+   |---|---|
+   | **纯文档**（仅 `docs/`） | 改 `docs/design/` → 跑 `design-checker`；其余文档免代码审查 |
+   | **小型代码**（重构 / bugfix / 同 Sprint 小任务批；≤~300 行、无新命令/外部依赖） | `/code-review high` **必跑**；**触及设计契约**（CLI JSON 输出 / schema / 状态机 / types 字段枚举）再加 `design-checker` |
+   | **新功能 / 大改动 / 高风险**（新命令、新模块、并发、状态机、外部依赖、>~300 行） | `/code-review high` + `design-checker` + `/pr-review-toolkit:review-pr`；逻辑复杂或审查结论有分歧再加 `codex:codex-rescue` 对抗审查 |
+
+   工具职责（按需选，不重复跑）：
+   - `/code-review`：diff 的 correctness bug + 简化清理。effort：日常 `high`、发版/高危 `max`、纯小改 `medium`。**几乎所有代码 PR 的默认**。
+   - `design-checker`：实现 vs `docs/design` 字段/枚举/schema 逐项一致。**仅当改动触及设计契约时跑**，否则省略。⚠️ 它会在主仓库 `git checkout` 切分支——跑前必须已 commit，跑后核对 `git branch --show-current` 是否被切回 master。
+   - `pr-review-toolkit:review-pr`：多专家 agent（测试覆盖 / 静默失败 / 类型设计 / 注释）。重，**仅新功能/大改动**用。
+   - `codex:codex-rescue`：第二实现 / 对抗诊断。**仅复杂逻辑或审查有争议**时用。
+
+   审查聚焦迁移质量 + 工程 + 开源成熟度，不过度强调企业级。
 6. 修复 critical/important issues 后通知用户审阅
 
 PR 粒度灵活：优先独立 PR，但紧密相关的小任务（如同 Sprint 的多个 0.5d 重构）可合并为一个 PR，只要审查粒度可控。
