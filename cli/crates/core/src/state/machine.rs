@@ -75,113 +75,12 @@ impl MigrationStateMachine {
     fn load_file(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let state_file: MigrationStateFile = serde_json::from_str(&content)?;
-        let machine = Self {
+        // timestamp 格式校验已下沉到 Timestamp 的自定义 Deserialize（反序列化时即拒非法值），
+        // 此处无需再手写遍历。
+        Ok(Self {
             state_file,
             recovered_from_backup: false,
-        };
-        machine.validate_loaded()?;
-        Ok(machine)
-    }
-
-    /// 加载后置校验：遍历 state_file 内所有 Timestamp 字段，首个非法值返回 InvalidTimestamp。
-    ///
-    /// 校验范围（对齐 `docs/design/09-appendix-schemas.md`）：
-    /// - state_history[*].entered_at / exited_at
-    /// - project.created_at
-    /// - sprint.history[*].started_at / completed_at
-    /// - modules[*].attempts[*].timestamp
-    /// - subagent_calls[*].started_at / ended_at
-    /// - metadata.graph_build_completed_at
-    fn validate_loaded(&self) -> Result<()> {
-        let sf = &self.state_file;
-
-        // state_history
-        for (i, entry) in sf.state_history.iter().enumerate() {
-            if !entry.entered_at.is_valid() {
-                return Err(MigrateError::InvalidTimestamp(format!(
-                    "字段 state_history[{i}].entered_at: {}",
-                    entry.entered_at
-                )));
-            }
-            if let Some(ref ts) = entry.exited_at {
-                if !ts.is_valid() {
-                    return Err(MigrateError::InvalidTimestamp(format!(
-                        "字段 state_history[{i}].exited_at: {ts}"
-                    )));
-                }
-            }
-        }
-
-        // project.created_at
-        if let Some(ref project) = sf.project {
-            if !project.created_at.is_valid() {
-                return Err(MigrateError::InvalidTimestamp(format!(
-                    "字段 project.created_at: {}",
-                    project.created_at
-                )));
-            }
-        }
-
-        // sprint.history
-        if let Some(ref sprint) = sf.sprint {
-            for (i, entry) in sprint.history.iter().enumerate() {
-                if !entry.started_at.is_valid() {
-                    return Err(MigrateError::InvalidTimestamp(format!(
-                        "字段 sprint.history[{i}].started_at: {}",
-                        entry.started_at
-                    )));
-                }
-                if let Some(ref ts) = entry.completed_at {
-                    if !ts.is_valid() {
-                        return Err(MigrateError::InvalidTimestamp(format!(
-                            "字段 sprint.history[{i}].completed_at: {ts}"
-                        )));
-                    }
-                }
-            }
-        }
-
-        // modules[*].attempts[*].timestamp
-        for (mod_name, module) in &sf.modules {
-            for (j, attempt) in module.attempts.iter().enumerate() {
-                if !attempt.timestamp.is_valid() {
-                    return Err(MigrateError::InvalidTimestamp(format!(
-                        "字段 modules[{mod_name}].attempts[{j}].timestamp: {}",
-                        attempt.timestamp
-                    )));
-                }
-            }
-        }
-
-        // subagent_calls
-        for (i, call) in sf.subagent_calls.iter().enumerate() {
-            if !call.started_at.is_valid() {
-                return Err(MigrateError::InvalidTimestamp(format!(
-                    "字段 subagent_calls[{i}].started_at: {}",
-                    call.started_at
-                )));
-            }
-            if let Some(ref ts) = call.ended_at {
-                if !ts.is_valid() {
-                    return Err(MigrateError::InvalidTimestamp(format!(
-                        "字段 subagent_calls[{i}].ended_at: {ts}"
-                    )));
-                }
-            }
-        }
-
-        // metadata.graph_build_completed_at
-        if let Some(ref meta) = sf.metadata {
-            if let Some(ref ts) = meta.graph_build_completed_at {
-                if !ts.is_valid() {
-                    return Err(MigrateError::InvalidTimestamp(format!(
-                        "字段 metadata.graph_build_completed_at: {ts}"
-                    )));
-                }
-            }
-        }
-
-        Ok(())
+        })
     }
 
     /// 保存状态到文件（crash-safe）。
@@ -1095,7 +994,7 @@ mod tests {
         }
     }
 
-    /// VER-05：load 对含非法 timestamp 的合法 JSON 应返回 InvalidTimestamp 错误。
+    /// VER-05：load 对含非法 timestamp 的合法 JSON 应加载失败（自定义 Deserialize 拒非法值 → Json 错误）。
     #[test]
     fn test_load_invalid_timestamp_rejected() {
         // 构造合法 JSON 结构，但 state_history[0].entered_at 值非法。
@@ -1115,14 +1014,17 @@ mod tests {
         tmp.flush().unwrap();
         let result = MigrationStateMachine::load(tmp.path());
         assert!(result.is_err(), "含非法 timestamp 的状态文件应加载失败");
+        // 非法 timestamp 在 Timestamp 自定义 Deserialize 层被拒 → serde 错误 → Json 变体。
+        // load() 对 Json 损坏会尝试 backup 回退，本例无 backup，返回 primary（Json）。
         match result.unwrap_err() {
-            MigrateError::InvalidTimestamp(msg) => {
+            MigrateError::Json(e) => {
+                let msg = e.to_string();
                 assert!(
-                    msg.contains("entered_at"),
-                    "错误消息应指出具体字段，实际: {msg}"
+                    msg.contains("时间戳") || msg.contains("not-a-timestamp"),
+                    "错误消息应指出时间戳格式问题，实际: {msg}"
                 );
             }
-            other => panic!("期望 InvalidTimestamp，实际: {:?}", other),
+            other => panic!("期望 Json（含时间戳格式错误），实际: {:?}", other),
         }
     }
 
