@@ -20,7 +20,12 @@
   - ⏪ **REFAC-06 已回退**: MigrationSequence 私有化+getter 是**过度封装**——Rust 纯数据 struct 惯例即 pub 字段（无字段间不变量、不跨 crate、外部仅 `&` 只读，私有化零收益、纯增代码）。回退为 pub 字段删 getter，SCALE-P 直接读 `sequence.parallel_groups`
   - ⏪ **REFAC-13 的 LocReport totals 私有化已回退**: 同 REFAC-06 病因，字段改回 pub、删 4 个 getter；**保留 `from_languages`**（把累加收成单一入口，有整洁价值）
   - **教训**：Rust 不套 Java「全字段私有+getter」；私有化仅当 ①字段间有不变量 或 ②跨 crate API 稳定性。M1 review 按惯例提的封装债须按此甄别。211 测试全过、clippy 零
-- **下一步**（**新会话从这里开始**）: Sprint A **C 档（各 1d 含新增逻辑/外部依赖）**：VER-04（populate 数据卫生+e2e）、COMPAT-01（版本检测基础）、ADV-06（stats compare 真实实现，依赖 tokei+tree-sitter）。CTX-01 需真实项目实测。注：M2-TIER-01a 删 risk 时需同步 plugin 提示词 analyze.md:37 的 `risk:low` 表述。**PR 粒度已放宽**（CLAUDE.md 改）：同 Sprint 紧密相关小任务可合批
+- **执行模式（2026-06-15 定，详见 PLAN-M2 §14「并行执行模式」）**：sprint 内独立任务用 **worktree 隔离 subAgent 每波 3-4 路并行**，主会话当瘦编排器（派发→收摘要→review→集中 merge 解冲突→整体 `just ci`→**同 sprint 合批 PR**）。碰同一热点文件（lib.rs/graph.rs/build.rs/machine.rs）的任务合成一个工作单元串行做
+- **下一步**（**新会话从这里开始**）: Sprint A **C 档收尾**（**正在并行执行**）：
+  - 波次1（2 路 worktree）：① VER-04+COMPAT-01 合批（都碰 machine.rs，一个 agent）② ADV-06（stats compare，独立 stats/+lib.rs:1143，可能引入 tokei）
+  - CTX-01 需真实项目实测 → 推迟 Sprint F
+  - 收尾后转 **Sprint B（4 路并行红利最大区）**：7 个独立 REFAC（01/02/03/04/11/12/15）多挤 graph.rs/build.rs，merge 时集中解冲突；REFAC-09→10 串行另起
+  - 注：M2-TIER-01a 删 risk 时需同步 plugin 提示词 analyze.md:37 的 `risk:low` 表述。**PR 粒度已放宽**（CLAUDE.md 改）：同 Sprint 紧密相关小任务可合批
 - **复审结论**：草稿方向正确，已修正 3 处自相矛盾 + 1 处悬空引用 + 撤销 tier_signals 过度设计 + 补 6 项缺口；新增 D5（SQLite 集中 writer）+ 3 任务（DESIGN-03/PERF-BASE/CLI-06 auto-unblock）；任务总数 52→55。3 个战略决策经用户批准（SQLite 门禁降级 / 60min 单模块 / 状态机程序化推迟+抽 auto-unblock）
 - **D3 写隔离方案已定稿（重点，见 [MDR-003](decisions/003-m2-parallel-write-isolation.md)）**：经 codex 四轮对抗审查 + 用户多次质疑收敛为 **git worktree + 约束包**（否决「隔离 crate 副本/轻量 staging/多 crate workspace 作并行单元」）。核心：
   - worktree 内完整 crate 真自检（保留 M1 per-module 编译反馈环）；**两层 done**：`agent_done`(自检) vs `done`(整组 check)

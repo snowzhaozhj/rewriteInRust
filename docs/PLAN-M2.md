@@ -653,6 +653,27 @@ Sprint F（依赖 D + E 全部完成）
 5. PR 审查：`/pr-review-toolkit:review-pr` + `design-checker` + `/code-review`
 6. 修复 critical/important issues 后通知用户审阅
 
+### 并行执行模式（subAgent worktree 流水线）
+
+为提速 M2 开发，sprint 内的独立任务采用 worktree 隔离的 subAgent 并行推进，主会话当**瘦编排器**。
+
+**节奏参数**（用户 2026-06-15 定）：
+- **并行度**：每波 **3-4 路** worktree subAgent 并发（任务不足则按实际数量）
+- **审查/PR 粒度**：**同 sprint 合批 PR**——紧密相关任务合一个 PR 统一审查
+
+**工作单元划分**（关键约束）：
+- 按**热点文件冲突**分组：碰同一热点文件（`lib.rs` 命令路由 / `types/graph.rs` / `graph/build.rs` / `state/machine.rs`）的任务**合成一个工作单元**（一个 agent 串行做），不拆多 worktree（避免自冲突）
+- 文件不冲突的任务才拆成独立 worktree 并行
+
+**流程**：
+1. 编排器为每个工作单元派 1 个 subAgent（`isolation: worktree`，`run_in_background`），注入：任务 ID + PLAN-M2 对应行 + 相关设计文档 + 质量门要求 + 「描述与代码现状矛盾则停下回报，不臆测」
+2. agent 在自己 worktree 内：调研 → 实现 → 测试 → 自跑 `just fmt && just lint && just test` → commit（引用任务 ID）→ 回传结构化摘要（worktree 路径 / 分支 / commit / 改动文件 / 关键决策与偏差 / 质量门结果）
+3. 编排器收摘要 → 逐个 review → 从 master 建 sprint 收尾分支，cherry-pick/merge 各 worktree commit（热点文件冲突在此集中解）
+4. 合并后跑**整体 `just ci` 为真门** → 提一个合批 PR → 按 §14 步骤 5 审查路由
+5. 每波完成即 commit + 更新 STATUS.md（断点可续，对齐额度韧性）
+
+**瓶颈认知**：并行写得越快，瓶颈越向「审查 + 编排器 merge」转移；依赖链（A→B→C→D→F）是硬墙，真并行只在 sprint 内。
+
 ### 续接协议
 
 同 PLAN §3 续接协议。新会话读：CLAUDE.md → STATUS.md → 本文件对应 Sprint 段。
