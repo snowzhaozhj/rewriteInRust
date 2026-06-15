@@ -126,6 +126,22 @@ fn make_relative(path: &Path, root: &Path) -> String {
 /// 修正 extends 边：适配器用当前文件路径作为目标前缀，实际目标可能在其他文件。
 /// 在边添加到图之前调用（因为 add_edge 会丢弃目标不存在的边）。
 fn fixup_extends_in_edges(graph: &SourceGraph, mut edges: Vec<Dependency>) -> Vec<Dependency> {
+    // 预建「类型名 → 候选继承目标节点」索引，避免对每条未解析 extends 边都做 O(N)
+    // 全图扫描（原 find_unique_node 逐边线性查找，整体 O(N·E)）。仅收录可作为
+    // extends/implements 目标的类型（Interface/Class/Enum）。
+    let mut heritage_index: HashMap<&str, Vec<&NodeId>> = HashMap::new();
+    for node in graph.nodes() {
+        if matches!(
+            node.node_type,
+            NodeType::Interface | NodeType::Class | NodeType::Enum
+        ) {
+            heritage_index
+                .entry(node.name.as_str())
+                .or_default()
+                .push(&node.id);
+        }
+    }
+
     for edge in &mut edges {
         if edge.edge_type != EdgeType::Extends {
             continue;
@@ -157,14 +173,8 @@ fn fixup_extends_in_edges(graph: &SourceGraph, mut edges: Vec<Dependency>) -> Ve
         //    命中多个同名类型则放弃（保持目标为占位 ID，add_edge 会丢弃该边），
         //    避免把 Extends 边连到同名但错误文件的类型。
         if !resolved {
-            if let Some(target) = find_unique_node(graph, |n| {
-                n.name == name
-                    && matches!(
-                        n.node_type,
-                        NodeType::Interface | NodeType::Class | NodeType::Enum
-                    )
-            }) {
-                edge.target = target;
+            if let Some([target]) = heritage_index.get(name.as_str()).map(Vec::as_slice) {
+                edge.target = (*target).clone();
             }
         }
     }
