@@ -8,6 +8,12 @@
 - **Phase**: M2 计划**已复审定稿**（`docs/PLAN-M2.md`，复审台账 `docs/review/M2-plan-review-2026-06-15.md`），待执行
 - **下一步**（**新会话从这里开始**）: 读 `docs/PLAN-M2.md` + 复审台账，从 **Sprint A 基础加固** 开始；Sprint A 先做 **M2-DESIGN-03**（落实 D3/D4/D5 对设计文档的同步，避免实现漂移）
 - **复审结论**：草稿方向正确，已修正 3 处自相矛盾 + 1 处悬空引用 + 撤销 tier_signals 过度设计 + 补 6 项缺口；新增 D5（SQLite 集中 writer）+ 3 任务（DESIGN-03/PERF-BASE/CLI-06 auto-unblock）；任务总数 52→55。3 个战略决策经用户批准（SQLite 门禁降级 / 60min 单模块 / 状态机程序化推迟+抽 auto-unblock）
+- **D3 写隔离方案已定稿（重点，见 [MDR-003](decisions/003-m2-parallel-write-isolation.md)）**：经 codex 四轮对抗审查 + 用户多次质疑收敛为 **git worktree + 约束包**（否决「隔离 crate 副本/轻量 staging/多 crate workspace 作并行单元」）。核心：
+  - worktree 内完整 crate 真自检（保留 M1 per-module 编译反馈环）；**两层 done**：`agent_done`(自检) vs `done`(整组 check)
+  - 共享编辑策略 **D+A**：porting 规则最小化共享写面（用既有 API/`Error::Other`/`anyhow` 逃生口）+ worktree 自由改+回传 touched-list + 禁删/改签名既有共享 API；**不用声明式 schema**
+  - 共享 .rs 冲突 → 串行 rebase 重译（**非 LLM 手解**）+ **reconcile 轮次上限防活锁**；整组 check 为唯一 done 真门
+  - **进度保证**：结构无死锁，最坏退化全串行=M1 速度、不卡死；headless 靠 ADV-07 自动 degrade（**须改状态机**）+ auto-unblock 推进
+  - **Sprint F 必实测**（判断有不确定性，已留逃生口）：首轮编译通过率 / worktree target 成本 / reconcile 频率；数据 favor 则降级轻量 staging
 
 ## M1 完成总结
 
@@ -41,8 +47,8 @@ Sprint A (基础加固)  → Sprint B (类型+图精度) → Sprint C (核心功
   → Sprint D (并行+高级) ‖ Sprint E (验证+CLI) → Sprint F (验收)
 ```
 
-- **52 项任务 + 5 项验收活动**，预计 25-33 天纯开发（日历 5-7 周）
-- 4 个设计决策已在计划中推荐（done 终态/blocked 规则/写隔离方案/分档策略）
+- **55 项任务 + 5 项验收活动**，预计 25-33 天纯开发（日历 5-7 周）
+- 5 个设计决策已定稿（D1 done 终态 / D2 blocked 规则 / **D3 写隔离=worktree+约束包** / D4 tier 分档 / D5 SQLite 集中 writer）
 - M1 deferred TODO 已分配到对应 M2 任务（ADV-08/09, REFAC-13）
 - 部分设计文档 M2 交付物推迟到 M2.5/M3（状态机程序化、行为录制框架等）
 
