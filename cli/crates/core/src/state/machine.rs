@@ -75,6 +75,8 @@ impl MigrationStateMachine {
     fn load_file(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let state_file: MigrationStateFile = serde_json::from_str(&content)?;
+        // timestamp 格式校验已下沉到 Timestamp 的自定义 Deserialize（反序列化时即拒非法值），
+        // 此处无需再手写遍历。
         Ok(Self {
             state_file,
             recovered_from_backup: false,
@@ -990,5 +992,51 @@ mod tests {
                 "{st} 不带 force 恢复应报 Config 错误"
             );
         }
+    }
+
+    /// VER-05：load 对含非法 timestamp 的合法 JSON 应加载失败（自定义 Deserialize 拒非法值 → Json 错误）。
+    #[test]
+    fn test_load_invalid_timestamp_rejected() {
+        // 构造合法 JSON 结构，但 state_history[0].entered_at 值非法。
+        let json = r#"{
+            "version": "1.0.0",
+            "state": "init",
+            "state_history": [
+                {
+                    "state": "init",
+                    "entered_at": "not-a-timestamp"
+                }
+            ],
+            "modules": {}
+        }"#;
+        let mut tmp = NamedTempFile::new().expect("创建临时文件失败");
+        tmp.write_all(json.as_bytes()).unwrap();
+        tmp.flush().unwrap();
+        let result = MigrationStateMachine::load(tmp.path());
+        assert!(result.is_err(), "含非法 timestamp 的状态文件应加载失败");
+        // 非法 timestamp 在 Timestamp 自定义 Deserialize 层被拒 → serde 错误 → Json 变体。
+        // load() 对 Json 损坏会尝试 backup 回退，本例无 backup，返回 primary（Json）。
+        match result.unwrap_err() {
+            MigrateError::Json(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("时间戳") || msg.contains("not-a-timestamp"),
+                    "错误消息应指出时间戳格式问题，实际: {msg}"
+                );
+            }
+            other => panic!("期望 Json（含时间戳格式错误），实际: {:?}", other),
+        }
+    }
+
+    /// VER-05：合法 timestamp 的状态文件加载成功（正向路径回归）。
+    #[test]
+    fn test_load_valid_timestamps_accepted() {
+        let m = new_machine();
+        let tmp = NamedTempFile::new().expect("创建临时文件失败");
+        let path = tmp.path().to_owned();
+        m.save(&path).expect("保存失败");
+        // chrono 生成的 RFC 3339 时间戳应通过校验。
+        let loaded = MigrationStateMachine::load(&path);
+        assert!(loaded.is_ok(), "合法 timestamp 的状态文件应加载成功");
     }
 }

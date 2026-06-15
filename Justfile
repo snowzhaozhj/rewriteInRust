@@ -63,3 +63,15 @@ validate-graph *repo:
 # 需 npm install ts-morph（钉于 oracle/package.symbol.json），首次自动安装。
 validate-graph-symbol *repo:
     tools/graph-validation/run-symbol.sh {{repo}}
+
+# === 性能基线（M2-PERF-BASE / Sprint F6 回归门）===
+
+# release 构建后测量各 fixture graph build 时长并刷新 baseline.json（刷新须走 PR）。
+perf-baseline:
+    cd cli && cargo build --release --workspace
+    python3 tools/perf-baseline/measure.py snapshot
+
+# 测量当前时长并对比基线，median 超 ±10% 退出非零（F6 用，同机跑）。
+perf-baseline-check:
+    cd cli && cargo build --release --workspace
+    python3 tools/perf-baseline/measure.py check

@@ -163,8 +163,11 @@ pub enum RiskLevel {
 /// 迁移优先级（1 = 最高优先，无依赖的叶节点先迁移）。
 pub type MigrationPriority = u32;
 
-/// 时间戳（ISO 8601 字符串）。
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// 时间戳（ISO 8601 / RFC 3339 字符串）。
+///
+/// 反序列化时即校验格式（见下方手写 [`Deserialize`] 实现），任何从 JSON/外部
+/// 加载的 Timestamp 字段都会被自动校验——由类型层保证全覆盖，无需调用方手写遍历。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
 pub struct Timestamp(String);
 
@@ -177,6 +180,28 @@ impl Timestamp {
     /// 返回内部字符串引用。
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// 校验是否为合法 ISO 8601 / RFC 3339 时间戳。
+    pub fn is_valid(&self) -> bool {
+        chrono::DateTime::parse_from_rfc3339(&self.0).is_ok()
+    }
+}
+
+impl<'de> Deserialize<'de> for Timestamp {
+    /// 反序列化时即校验格式：非法时间戳在此被拒（serde 错误，含非法值）。
+    /// 这样所有含 Timestamp 的结构从外部加载时自动获得校验，无需各处手写遍历。
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let ts = Self(String::deserialize(deserializer)?);
+        if !ts.is_valid() {
+            return Err(serde::de::Error::custom(format!(
+                "时间戳格式非法（期望 ISO 8601 / RFC 3339）: {ts}"
+            )));
+        }
+        Ok(ts)
     }
 }
 

@@ -1,0 +1,91 @@
+{
+  "schema": "perf-baseline/v2",
+  "metadata": {
+    "git_commit": "79a482f",
+    "binary": "cli/target/release/rustmigrate",
+    "profile": "release",
+    "fixture_iterations": 50,
+    "real_iterations": 20,
+    "machine": "Darwin arm64",
+    "note": "时间戳由 git_commit 锚定；刷新基线请走 PR 并在 commit 记录环境。跨机对比有系统偏差，F6 须同机跑 baseline 与 check。"
+  },
+  "graph_build_real": {
+    "rxjs": {
+      "node_count": 807,
+      "edge_count": 2168,
+      "iterations": 20,
+      "min_ms": 92.331,
+      "median_ms": 98.571,
+      "mean_ms": 97.787,
+      "p90_ms": 102.406,
+      "sha": "72bc92191ab9",
+      "src_root": "src/internal"
+    },
+    "fp-ts": {
+      "node_count": 2365,
+      "edge_count": 5828,
+      "iterations": 20,
+      "min_ms": 289.644,
+      "median_ms": 313.547,
+      "mean_ms": 311.91,
+      "p90_ms": 321.788,
+      "sha": "669cd3ed7cb5",
+      "src_root": "src"
+    },
+    "zod": {
+      "node_count": 538,
+      "edge_count": 1207,
+      "iterations": 20,
+      "min_ms": 96.303,
+      "median_ms": 98.819,
+      "mean_ms": 99.071,
+      "p90_ms": 105.477,
+      "sha": "ca42965df46b",
+      "src_root": "src"
+    }
+  },
+  "graph_build_fixture": {
+    "linear-deps": {
+      "node_count": 10,
+      "edge_count": 12,
+      "iterations": 50,
+      "min_ms": 22.396,
+      "median_ms": 23.918,
+      "mean_ms": 23.862,
+      "p90_ms": 25.116
+    },
+    "diamond-deps": {
+      "node_count": 16,
+      "edge_count": 25,
+      "iterations": 50,
+      "min_ms": 21.81,
+      "median_ms": 23.295,
+      "mean_ms": 23.522,
+      "p90_ms": 24.517
+    },
+    "circular-deps": {
+      "node_count": 14,
+      "edge_count": 16,
+      "iterations": 50,
+      "min_ms": 22.134,
+      "median_ms": 23.862,
+      "mean_ms": 24.254,
+      "p90_ms": 25.9
+    },
+    "edge-cases": {
+      "node_count": 6,
+      "edge_count": 3,
+      "iterations": 50,
+      "min_ms": 21.445,
+      "median_ms": 22.573,
+      "mean_ms": 22.698,
+      "p90_ms": 24.154
+    }
+  },
+  "module_translation": {
+    "status": "not_measured",
+    "reason": "单模块翻译为 LLM 驱动，时长受模型负载/网络/上下文影响，波动远超 ±10%，不可脚本化重现；M1 亦未留实测记录。",
+    "protocol": "Sprint F 端到端迁移时人工记录单模块 full 档循环 wall-clock，F6 对该项采用『数量级/趋势』而非严格 ±10%，见 README §3。",
+    "median_ms": null
+  }
+}
