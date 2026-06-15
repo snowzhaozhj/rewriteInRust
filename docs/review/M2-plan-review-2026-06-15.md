@@ -17,7 +17,7 @@
 | 1 | D3 写隔离方案 | ❌ 「隔离 crate 修正版」被推翻（详见下「D3 三轮演进」） | **终定 git worktree + 约束包**（用户拍板） |
 | 2 | `risk` 是零读取死字段 | ✅ `rg '\.risk\b'` 无判断/分支命中 | 删除，但**非「直接删」**：需同步 CLI 构造/测试/插件文档/schema，并入 TIER-01a |
 | 3 | `tier_signals` 自造、零先例、疑似过度设计 | ✅ 全仓零命中 | **撤销**：不进 schema，分档信号改写 run 日志/AttemptRecord |
-| 4 | 方案B 下翻译期 graph 无并发写 | ✅ 唯一写入口 graph build；run 走 state transition 单写 | 据此正式化 D5 |
+| 4 | 翻译期 graph 无并发写（编排器集中 writer） | ✅ 唯一写入口 graph build；run 走 state transition 单写 | 据此正式化 D5（worktree 下仍成立） |
 | 5 | 删 SQLite WAL 测试与设计文档 + PLAN 自身矛盾 | ✅ 08/04 以并发写为默认架构；§1.2/§1.3/F5/Level5 自相矛盾 | **新增 D5**：降级为 WAL 配置回归（用户批准） |
 | 6 | auto-unblock CLI 任务缺失 | ✅ 09:228 承诺 M2 交付，被打包进推迟的状态机程序化 | **新增 M2-CLI-06**（用户批准抽出） |
 | 7 | TIER-01 对 REFAC-10 是伪依赖 | ✅ 分档为模块内 AST 特征，PLAN.md:548 亦称不依赖跨文件 calls | 解依赖：TIER-01a 仅依赖 REFAC-09，路径 A 缩短 3-4d |
@@ -25,7 +25,7 @@
 
 **codex 额外发现（草稿主审漏掉）**：
 - **D4 自相矛盾**：D4 决议删 risk，但 TIER-01a 任务仍写「risk 自动填充」→ 已改为「tier 自动填充」。
-- **D3 vs §7 伪代码矛盾**：§7 行 322–353 还是旧方案B（「SubAgent 不写 Cargo.toml」），与 D3 修正版（SubAgent 在隔离 crate 自 check 必写自己的 Cargo.toml）冲突 → 已改写伪代码并加「主/隔离 Cargo.toml 区分」说明。
+- **D3 vs §7 伪代码矛盾**：§7 伪代码与当时方案不一致 → 最终随 D3 定 worktree 一并重写为「worktree + D+A 通信协议」伪代码（见 MDR-003 / PLAN §7）。
 
 ## 三、用户决策（3 项，均取推荐）
 
@@ -41,11 +41,11 @@
 2. **一度倾向「轻量 staging（不自检）」** → 用户追问「共享改动少是否就不必 worktree」促深挖：发现 worktree 真正价值是 **per-agent 自检**（非冲突检测），而 M1 翻译架构本质是 per-module 编译反馈循环（Phase A 要编译通过 + Phase B 3 轮修复 + compile_fixing 状态）。
 3. **codex 第三轮终审 → 定 git worktree + 约束包**：staging = 取消 M1 反馈环、非等价并行化；worktree target 成本真实但不足以推翻自检收益。纠正：装配需**结构化合并**（Cargo.toml/lib.rs/mod）非纯 copy-out。**诚实标注**：worktree 优于 staging 的核心论据（M1 首轮普遍带编译错误）M1 未留痕、属推断 → Sprint F 实测首轮通过率 + target 成本，数据favor staging 则记录为已论证简化路径。
 
-**约束包**：① worktree 内完整 crate 真自检 ② 禁改共享文件→共享 API 变更回传编排器串行决策（配合叶子优先）③ dependency-mapping 前置强约束生态（防 Frankenstein Cargo.toml）④ merge 后整体 check 为唯一 done 真门 ⑤ 图缺陷（REFAC-10 档1 漏边致假独立）→回退串行+修图。
+**约束包（最终，详见 MDR-003）**：① worktree 内完整 crate 真自检（两层 done：agent_done vs done）② 共享编辑 **D+A**——porting 规则最小化共享写面（用既有 API/`Error::Other`/`anyhow`）+ worktree 自由改 + 回传 touched-list + 禁删/改签名既有共享 API（**否决「禁改+回传批准」**）③ dependency-mapping 前置强约束生态 ④ merge 后整组 check 为唯一 done 真门 ⑤ 共享 .rs 冲突串行 rebase 重译 + reconcile 轮次上限防活锁 ⑥ 图缺陷→回退串行+修图。
 
 **关键认知**：多 crate workspace **不是**长期最优的并行单元（用户质疑促修正）——它只是搬移共享瓶颈、受 crate 间禁环硬约束、且让构建期并行便利污染输出架构（范畴错误）。**并行机制（worktree）与输出 crate 结构正交**。
 
-**orchestrator 二进制 vs CLI 边界（澄清，未改决策）**：CLI=无状态工具箱（做一件事吐 JSON，不决定下一步）；orchestrator=有状态决策循环（决定模块顺序/sprint推进/重试/并发调度）。MVP/M1 该决策角色由 SKILL.md(LLM) 担任；二进制方案把它搬到确定性 Rust 代码。M2 维持 SKILL.md 编排，仅把确定性子项（auto-unblock）下沉为普通 CLI 子命令（进已有 `rustmigrate`，非新二进制）。**残留风险**：并行编排（3 agent+merge）仍非确定性，靠 D3 方案B 的「单写+兜底check+逐个回滚」控制（§13 R2）。
+**orchestrator 二进制 vs CLI 边界（澄清，未改决策）**：CLI=无状态工具箱（做一件事吐 JSON，不决定下一步）；orchestrator=有状态决策循环（决定模块顺序/sprint推进/重试/并发调度）。MVP/M1 该决策角色由 SKILL.md(LLM) 担任；二进制方案把它搬到确定性 Rust 代码。M2 维持 SKILL.md 编排，仅把确定性子项（auto-unblock）下沉为普通 CLI 子命令（进已有 `rustmigrate`，非新二进制）。**残留风险**：并行编排（3 agent+merge）仍非确定性，靠 D3 worktree 的「worktree 隔离自检 + 整组 check 真门 + 串行 reconcile 轮次上限 + 图缺陷回退串行」控制（§13 R2，最坏退化全串行=M1 速度）。
 
 ## 四、PLAN-M2.md 改动清单（共 ~18 处）
 
@@ -57,7 +57,7 @@
 - §6 TIER-01a：risk→tier + 仅依赖 REFAC-09
 - §6 新增「trivial 档维度 9 退化形式」（导出符号/类型签名一致性）
 - §6 完成标志：graduate 措辞对齐 ADV-03（不新增 graduated 状态）
-- §7 伪代码 + compile_fixing 子流程：改写为修正版方案B + 主/隔离 Cargo.toml 区分
+- §7 伪代码 + compile_fixing 子流程：最终重写为 worktree + D+A 通信协议（派发→自检→touched-list 回传→结构化合并→串行 reconcile→整组真门→清理）
 - §7 PETGRAPH-01：删测试→WAL 配置回归
 - §7 完成标志：WAL 合规→配置回归
 - §9 F5/F9：同步降级 + 重定义
@@ -75,4 +75,4 @@
 ## 六、仍需注意（非阻塞）
 
 - D5 对设计文档 04/08 的「并发写架构→集中 writer」改写由 M2-DESIGN-03 执行；改前再跑一次 CLAUDE.md「设计文档一致性检查」grep
-- M2-SCALE-02 实现时须在 translator.md 落实「写隔离 crate 的 Cargo.toml、回传 new_deps、不写主 Cargo.toml」，并把 run.md 旧「直接写 rust_root」语义改为「写隔离目录 + 编排器 merge」
+- M2-SCALE-02 实现时须在 translator.md 落实「worktree 内翻译+自检、按 dependency-mapping 加 deps、porting 规则最小化共享写面、禁删/改签名既有共享 API」，并把 run.md 编排改为「worktree add → 并发翻译 → touched-list 回传 → 结构化合并 + 串行 reconcile → 整组 check 真门 → worktree remove」（详见 MDR-003）
