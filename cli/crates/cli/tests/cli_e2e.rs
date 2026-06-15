@@ -682,15 +682,67 @@ fn smoke_stats_loc_overlapping_roots_warns() {
 }
 
 #[test]
-fn smoke_stats_compare_placeholder() {
+fn smoke_stats_compare_structure() {
     let tmp = tempfile::tempdir().unwrap();
     with_cwd(tmp.path(), || {
-        // stats compare 推迟 M2，返回带 warning 的占位响应。
+        std::fs::create_dir_all("src").unwrap();
+        std::fs::create_dir_all("rust-src").unwrap();
+        // 源码：2 个函数（f + 箭头常量 g）。
+        std::fs::write(
+            "src/a.ts",
+            "export function f(x: number) {\n  if (x > 0) { return x; }\n}\nexport const g = () => {};\n",
+        )
+        .unwrap();
+        // Rust：1 个函数。
+        std::fs::write(
+            "rust-src/a.rs",
+            "pub fn f(x: i64) -> i64 {\n    if x > 0 {\n        return x;\n    }\n    0\n}\n",
+        )
+        .unwrap();
+
+        let (code, json) = run(&["stats", "compare", "--source", "src", "--rust", "rust-src"]);
+        assert_eq!(code, 0, "stats compare 应成功: {json}");
+        // 两侧目录均存在、无 warning → status ok。
+        assert_eq!(json["status"], "ok", "无 warning 应为 ok: {json}");
+        assert_eq!(
+            json["data"]["source"]["functions"], 2,
+            "源码 2 个函数: {json}"
+        );
+        assert_eq!(
+            json["data"]["rust"]["functions"], 1,
+            "Rust 1 个函数: {json}"
+        );
+        assert_eq!(json["data"]["source"]["method"], "tree-sitter");
+        assert_eq!(json["data"]["rust"]["method"], "lexical-scan");
+        // 函数数比 rust/source = 0.5。
+        assert_eq!(json["data"]["function_ratio"]["ratio"], 0.5);
+        assert!(
+            json["data"]["loc_ratio"]["source"].as_f64().unwrap() > 0.0,
+            "源码 LOC 应 > 0: {json}"
+        );
+    });
+}
+
+#[test]
+fn smoke_stats_compare_missing_rust_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        std::fs::create_dir_all("src").unwrap();
+        std::fs::write("src/a.ts", "export const x = 1;\n").unwrap();
+        // rust-src 不存在 → data 为 null + warning，命令不失败。
         let (code, json) = run(&["stats", "compare"]);
-        assert_eq!(code, 0, "占位响应应成功: {json}");
-        // 带 warnings 时 status 为 warning。
+        assert_eq!(code, 0, "缺 rust 目录不应失败: {json}");
         assert_eq!(json["status"], "warning");
-        assert_eq!(json["data"]["implemented"], false);
+        assert!(json["data"].is_null(), "data 应为 null: {json}");
+        assert!(
+            json["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w.as_str().unwrap_or("").contains("跳过结构对比")),
+            "应含跳过对比 warning: {json}"
+        );
     });
 }
 

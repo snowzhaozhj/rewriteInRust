@@ -26,7 +26,7 @@ use rustmigrate_core::profile::{
 use rustmigrate_core::response::{ErrorData, Response, Status};
 use rustmigrate_core::scaffold::scaffold_project;
 use rustmigrate_core::state::MigrationStateMachine;
-use rustmigrate_core::stats::count_loc;
+use rustmigrate_core::stats::{compare_structure, count_loc};
 use rustmigrate_core::types::common::{NodeId, RiskLevel, Timestamp};
 use rustmigrate_core::types::graph::{EdgeType, NodeType};
 use rustmigrate_core::types::state::{ModuleState, ModuleStatus, ProjectState, SprintState};
@@ -213,8 +213,15 @@ pub enum StatsCommands {
         #[arg(long)]
         rust: Option<PathBuf>,
     },
-    /// 源码与 Rust 结构复杂度对比（M2 落地）。
-    Compare,
+    /// 源码与 Rust 结构复杂度对比（LOC + 函数数 + 控制流嵌套）。
+    Compare {
+        /// 源码根目录（省略则取 `.rustmigrate.toml` 的 `project.source_root`）。
+        #[arg(long)]
+        source: Option<PathBuf>,
+        /// Rust 代码根目录（省略则取 `.rustmigrate.toml` 的 `project.rust_root`）。
+        #[arg(long)]
+        rust: Option<PathBuf>,
+    },
 }
 
 /// Scaffold 子命令。
@@ -342,7 +349,10 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
             StatsCommands::Loc { source, rust } => {
                 emit(writer, cmd_stats_loc(source.as_deref(), rust.as_deref()))
             }
-            StatsCommands::Compare => emit(writer, cmd_stats_compare()),
+            StatsCommands::Compare { source, rust } => emit(
+                writer,
+                cmd_stats_compare(source.as_deref(), rust.as_deref()),
+            ),
         },
         Commands::Scaffold { action } => match action {
             ScaffoldCommands::Workspace { target, name } => {
@@ -1156,16 +1166,49 @@ fn load_config_or_default(
     }
 }
 
-/// `stats compare`：源码与 Rust 结构复杂度对比（推迟 M2）。
-fn cmd_stats_compare() -> CmdResult {
-    // TODO(M2): 复用 tokei + tree-sitter 函数计数做结构对比（见 06 § CLI 表 stats compare）。
-    Ok((
-        json!({
-            "message": "stats compare 尚未实现（推迟 M2）",
-            "implemented": false,
-        }),
-        vec!["stats compare 推迟 M2，当前返回占位响应".to_owned()],
-    ))
+/// `stats compare`：源码与 Rust 结构复杂度对比（LOC + 函数数 + 控制流嵌套）。
+///
+/// 路径解析与 `stats loc` 同口径：CLI 参数 > 配置文件 > 默认值，并复用包含关系告警。
+/// 任一侧目录不存在时返回 `Null` data + warning（迁移早期 Rust 端常未生成，属正常），
+/// 与 `stats loc` 的「缺目录不报错只告警」行为一致。
+fn cmd_stats_compare(source: Option<&Path>, rust: Option<&Path>) -> CmdResult {
+    let mut warnings: Vec<String> = Vec::new();
+    let cfg = load_config_or_default(&mut warnings);
+    let source_root = source
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(&cfg.project.source_root));
+    let rust_root = rust
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(&cfg.project.rust_root));
+
+    // 与 stats loc 同：源/Rust 目录互相包含时统计会污染，显式告警不静默。
+    if let Some(outer) = roots_overlap(&source_root, &rust_root) {
+        warnings.push(format!(
+            "source 与 rust 目录存在包含关系（{outer} 包含另一侧），结构对比可能重复计数；\
+             建议将 source_root / rust_root 配置为互不包含的目录"
+        ));
+    }
+
+    match compare_structure(&source_root, &rust_root) {
+        Ok(report) => match serde_json::to_value(&report) {
+            Ok(v) => Ok((v, warnings)),
+            Err(e) => {
+                warnings.push(format!("结构对比结果序列化失败: {e}"));
+                Ok((serde_json::Value::Null, warnings))
+            }
+        },
+        Err(MigrateError::FileNotFound(p)) => {
+            warnings.push(format!(
+                "源码或 Rust 目录不存在，跳过结构对比: {}",
+                p.display()
+            ));
+            Ok((serde_json::Value::Null, warnings))
+        }
+        Err(e) => {
+            warnings.push(format!("结构对比失败: {e}"));
+            Ok((serde_json::Value::Null, warnings))
+        }
+    }
 }
 
 /// `scaffold workspace`：生成 Cargo lib 项目骨架。
