@@ -6,8 +6,10 @@
 
 - **Milestone**: M1 MVP ✅ → **M2 质量提升**
 - **Phase**: M2 质量提升 **Sprint A 进行中**（计划见 `docs/PLAN-M2.md`，复审台账 `docs/review/M2-plan-review-2026-06-15.md`）
-- **已完成**: ✅ **M2-DESIGN-03**（分支 `docs/m2-design-03`，commit `eb8aeb0`）——D3/D4/D5 同步到设计文档：04 §5.7.3 + 08 §M2 + 06 §10.5 集中 writer(D5)；06 §10.5 新增 D3 约束包小节；03 新增 §4.3.2 TIER-01 分档(D4)。design-checker A-E 通过、2 处连带 MISMATCH 已修。**待提 PR**
-- **下一步**（**新会话从这里开始**）: ① 提 DESIGN-03 PR（走 pr-review-toolkit + design-checker + codex-rescue + code-review）② 继续 Sprint A 其余任务：DESIGN-01/02（状态机 done/blocked 语义，docs）、VER-04/05、REFAC-05/06/07/13/14、COMPAT-01、ADV-06、CTX-01、PERF-BASE（多数独立可并行，见 PLAN-M2 §4 并行策略）
+- **已完成（文档系列，分支 `docs/m2-design-03`，整体一个 PR）**:
+  - ✅ **M2-DESIGN-03**（commit `eb8aeb0`）——D3/D4/D5 同步：04 §5.7.3 + 08 §M2 + 06 §10.5 集中 writer(D5)；06 §10.5 新增 D3 约束包小节；03 新增 §4.3.2 TIER-01 分档(D4)。design-checker A-E 通过、2 处连带 MISMATCH 已修
+  - ✅ **M2-DESIGN-01/02**（commit `13ca06a`）——done 硬终态(D1) + blocked 仅活跃状态进入(D2)，02 §3.4 对齐 09 附录 A（09 已正确，仅 02 需改）
+- **下一步**（**新会话从这里开始**）: ① 文档 PR 已提（DESIGN-01/02/03），走 pr-review-toolkit + design-checker + codex-rescue + code-review；修复 critical/important 后通知用户 ② Sprint A 剩余为代码/实证类，**待用户指示后推进**：VER-04/05、REFAC-05/06/07/13/14、COMPAT-01、ADV-06（代码）、CTX-01/PERF-BASE（实证需真实项目/fixture）
 - **复审结论**：草稿方向正确，已修正 3 处自相矛盾 + 1 处悬空引用 + 撤销 tier_signals 过度设计 + 补 6 项缺口；新增 D5（SQLite 集中 writer）+ 3 任务（DESIGN-03/PERF-BASE/CLI-06 auto-unblock）；任务总数 52→55。3 个战略决策经用户批准（SQLite 门禁降级 / 60min 单模块 / 状态机程序化推迟+抽 auto-unblock）
 - **D3 写隔离方案已定稿（重点，见 [MDR-003](decisions/003-m2-parallel-write-isolation.md)）**：经 codex 四轮对抗审查 + 用户多次质疑收敛为 **git worktree + 约束包**（否决「隔离 crate 副本/轻量 staging/多 crate workspace 作并行单元」）。核心：
   - worktree 内完整 crate 真自检（保留 M1 per-module 编译反馈环）；**两层 done**：`agent_done`(自检) vs `done`(整组 check)
