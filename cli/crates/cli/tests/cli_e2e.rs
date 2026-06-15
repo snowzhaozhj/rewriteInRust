@@ -872,6 +872,20 @@ fn e2e_populate_modules_linear_unblocks_run() {
         assert_eq!(code, 0, "应能读取填充的模块: {json}");
         assert_eq!(json["data"]["status"], "pending");
         assert_eq!(json["data"]["state"]["sprint"], 1);
+        // 默认不输出 human 字段（向后兼容）。
+        assert!(
+            json["data"].get("human").is_none(),
+            "默认不应附带 human 字段: {json}"
+        );
+
+        // --human：附加人类友好显示名（去 file: 前缀 / src/ 根 / .ts 扩展），内部 key 不变。
+        let (code, json) = run(&["state", "get", &utils, "--human"]);
+        assert_eq!(code, 0, "--human 应成功: {json}");
+        assert_eq!(json["data"]["module"], utils, "内部 key 应保持不变");
+        assert_eq!(
+            json["data"]["human"], "utils",
+            "human 应为友好显示名: {json}"
+        );
 
         // 衔接验证：run 阶段依赖门禁用 graph deps 的 key 查 modules，必须一致。
         let (code, json) = run(&["graph", "deps", &utils]);

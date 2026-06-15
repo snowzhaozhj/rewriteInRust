@@ -29,7 +29,9 @@ use rustmigrate_core::state::MigrationStateMachine;
 use rustmigrate_core::stats::{compare_structure, count_loc};
 use rustmigrate_core::types::common::{NodeId, RiskLevel, Timestamp};
 use rustmigrate_core::types::graph::{EdgeType, NodeType};
-use rustmigrate_core::types::state::{ModuleState, ModuleStatus, ProjectState, SprintState};
+use rustmigrate_core::types::state::{
+    humanize_module_key, ModuleState, ModuleStatus, ProjectState, SprintState,
+};
 use rustmigrate_core::validate::validate_state;
 
 /// `.rust-migration/` 工作目录名（见 `docs/design/04-toolchain.md § 5.7.3`）。
@@ -139,7 +141,12 @@ pub enum ValidateCommands {
 #[derive(clap::Subcommand)]
 pub enum StateCommands {
     /// 查询指定模块的当前迁移状态。
-    Get { module: String },
+    Get {
+        module: String,
+        /// 在输出 data 中附加人类友好显示名（`human` 字段；不改变内部 module key）。
+        #[arg(long)]
+        human: bool,
+    },
     /// 执行状态机转换（带合法性前置检查）。
     ///
     /// 提供 `--module` 为**模块级**转换（ModuleStatus）；省略 `--module` 为**项目级**转换
@@ -308,7 +315,7 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
             ValidateCommands::State => emit(writer, cmd_validate_state()),
         },
         Commands::State { action } => match action {
-            StateCommands::Get { module } => emit(writer, cmd_state_get(module)),
+            StateCommands::Get { module, human } => emit(writer, cmd_state_get(module, *human)),
             StateCommands::Transition {
                 module,
                 to,
@@ -787,19 +794,25 @@ fn cmd_validate_state() -> CmdResult {
     Ok((json!({ "valid": true }), warnings))
 }
 
-/// `state get <module>`：查询指定模块迁移状态。
-fn cmd_state_get(module: &str) -> CmdResult {
+/// `state get <module> [--human]`：查询指定模块迁移状态。
+///
+/// `--human` 开启时在 data 中附加人类友好显示名（`human` 字段，由
+/// [`humanize_module_key`] 从内部 key 派生）；内部 `module` key 保持不变，向后兼容。
+fn cmd_state_get(module: &str, human: bool) -> CmdResult {
     let (machine, warnings) = load_state_with_warnings(&state_path())?;
     let state_file = machine.state_file();
     match state_file.modules.get(module) {
-        Some(m) => Ok((
-            json!({
+        Some(m) => {
+            let mut data = json!({
                 "module": module,
                 "status": m.status.to_string(),
                 "state": serde_json::to_value(m)?,
-            }),
-            warnings,
-        )),
+            });
+            if human {
+                data["human"] = json!(humanize_module_key(module));
+            }
+            Ok((data, warnings))
+        }
         None => Err(MigrateError::Config(format!("模块不存在: {module}"))),
     }
 }
