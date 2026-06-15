@@ -25,7 +25,7 @@
   - ✅ **VER-04**(`70d3a07`): populate 孤儿 pending 清理——新增 `MigrationStateMachine::retain_modules(live_keys)`，重填前剔除源码图已无对应节点的 pending 模块（key 用 `id.to_string()` vs `as_str()` 已核一致），被清理 key 经 warning 降级告知；docstring 补孤儿清理流程；record-subagent-call 无 init 返回 `FileNotFound`（非 panic）e2e
   - ✅ **COMPAT-01**(`9c7e62e`): version 写入已就位（`STATE_SCHEMA_VERSION="1.0.0"` 改 pub）；validate 新增 `check_version_compat`——语义化**主版本号**判兼容（空/格式非法/跨主版本 → SchemaValidation 并提示当前支持版本，同主版本放行）
   - ✅ **ADV-06**(`85b6ed4`): stats compare 非占位——`stats/compare.rs` 三维度（LOC/函数数/控制流嵌套）比值 `rust/source`，分母 0→`ratio:null`。源码侧复用 tree-sitter（`build_graph_ts` 同口径），**Rust 侧词法扫描**（无 tree-sitter-rust 依赖，`method` 字段标注手段；偏差经 review 认可——设计评分卡 Rust 侧本标注 tokei/scc）；目录缺→warning 跳过不报错
-  - **质量门**：合并后整体 `just ci` 全过（221 测试，新增 18 个；clippy 零；deny ok；strsim/toml duplicate 系 tokei 既有传递依赖非本次引入）。待提合批 PR + 审查
+  - **质量门 + 审查闭环**：PR [#17](https://github.com/snowzhaozhj/rewriteInRust/pull/17)。design-checker（零必修 MISMATCH）+ code-reviewer（1 important + 2 nit）已闭环修复：char 字面量误吞后续代码（important，含引号 `'"'`）、method→`CountMethod` enum、空源码图跳过孤儿清理（防整表清空）、`version` JSON 键加 serde rename 对齐设计 `schema_version`（06 §10.0.2/§10.7）、错误码 TODO 指向 ERR-01、09 示例同步。整体 `just ci` 全过（clippy/deny/fmt/shellcheck；新增 char/转义/生命周期 3 测试）。strsim/toml duplicate 系 tokei 既有传递依赖非本次引入。**待用户审阅合并**
   - CTX-01 需真实项目实测 → 推迟 Sprint F
 - **下一步**（**新会话从这里开始**）: PR 审查闭环后转 **Sprint B（4 路并行红利最大区）**：7 个独立 REFAC（01/02/03/04/11/12/15）多挤 graph.rs/build.rs，merge 时集中解冲突；REFAC-09→10 串行另起
   - 注：M2-TIER-01a 删 risk 时需同步 plugin 提示词 analyze.md:37 的 `risk:low` 表述。**PR 粒度已放宽**（CLAUDE.md 改）：同 Sprint 紧密相关小任务可合批
