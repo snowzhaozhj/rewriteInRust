@@ -166,7 +166,7 @@ M0 收尾时依据 `DESIGN_ASSUMPTIONS.md` 的 Spike 结论，按下表确定进
 - [ ] CI/CD 集成（`rustmigrate` 在 GitHub Actions 中使用；落地设计见 [03-execution-model.md § 4.11](./03-execution-model.md#411-cicd-集成m2-范围)）
 - [ ] Dogfooding fixture 编写与 CI workflow 完成（承接 M1 备料的 fixture，落地 `dogfooding.yml` 并按验收标准升级为 required，0.5-1 天，见 [03 § 4.11.4](./03-execution-model.md#4114-项目自验证dogfooding-m2-概念设计)）
 
-> **图写架构（跨模块并行阶段，D3/D5 定稿）**：M2 跨模块并行采用 git worktree 方案，**翻译期 `source-graph.db` 只读**——并发 SubAgent 在各自 worktree 内只读加载图，**不直写 db**；唯一写入口是 `graph build → save_to_db`，run 期运行时状态写 `migration-state.json` **由编排器集中单写**（见 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径) 与 [04 § 5.7.3](./04-toolchain.md#573-持久化存储)）。**因翻译期无多 writer 并发，原「共享 DB 并发写 + WAL 串行化」架构被集中 writer 取代**；原 WAL 并发写策略（busy_timeout/退避重试/写锁等待门禁）**保留为未来「SubAgent 直写 db」模式的可选回退**，当前仅保留 WAL **配置**回归（断言连接 PRAGMA 正确，非并发压测），「冲突率/锁等待」量化门禁经 **D5 降级为 N/A**。多 agent 的真实冲突面转移到 Rust 代码装配（共享 `.rs`/Cargo.toml/lib.rs），由 D3 约束包治理（见 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径)）。状态机程序化 + schema 向后兼容框架合计 +3–5 人天。
+> **图写架构（跨模块并行阶段，D3/D5 定稿）**：M2 跨模块并行采用 git worktree 方案，**翻译期 SubAgent 在各自 worktree 内只读加载图、不直写 db**；`source-graph.db` 的写者**只有编排器（集中 writer）**——`graph build → save_to_db` 写图结构 + 模块终态把 `migration_status` 回写图节点（与 `migration-state.json` 同序，见 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径) 与 [04 § 5.7.3](./04-toolchain.md#573-持久化存储)）。**因翻译期无多 writer 并发，原「共享 DB 并发写 + WAL 串行化」架构被集中 writer 取代**；原 WAL 并发写策略（busy_timeout/退避重试/写锁等待门禁）**保留为未来「SubAgent 直写 db」模式的可选回退**，当前仅保留 WAL **配置**回归（断言连接 PRAGMA 正确，非并发压测），「冲突率/锁等待」量化门禁经 **D5 降级为 N/A**。多 agent 的真实冲突面转移到 Rust 代码装配（共享 `.rs`/Cargo.toml/lib.rs），由 D3 约束包治理（见 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径)）。状态机程序化 + schema 向后兼容框架合计 +3–5 人天。
 
 **验收指标**：
 - 在 3 个真实 TS 中型项目（5K-20K 行）中完成多模块迁移
