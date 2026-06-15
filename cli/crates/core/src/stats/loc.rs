@@ -28,20 +28,47 @@ pub struct LocLang {
 }
 
 /// 一个目录的 LOC 统计报告。
+///
+/// 纯数据结构体，字段 `pub`（Rust 惯例）。totals 经 [`LocReport::from_languages`]
+/// 由 `by_language` 累加派生——把累加逻辑收成单一入口，避免各处手动累加分散出错。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LocReport {
     /// 统计根目录（字符串形式，便于序列化）。
     pub root: String,
-    /// 总文件数。
+    /// 总文件数（派生自 `by_language`）。
     pub files: usize,
-    /// 总代码行数。
+    /// 总代码行数（派生自 `by_language`）。
     pub code: u64,
-    /// 总注释行数。
+    /// 总注释行数（派生自 `by_language`）。
     pub comments: u64,
-    /// 总空白行数。
+    /// 总空白行数（派生自 `by_language`）。
     pub blanks: u64,
     /// 按 tokei 语言名分组的明细（BTreeMap 保证确定性排序）。
     pub by_language: BTreeMap<String, LocLang>,
+}
+
+impl LocReport {
+    /// 由按语言明细构造报告，totals 全部从 `by_language` 累加派生（保证一致）。
+    pub fn from_languages(root: String, by_language: BTreeMap<String, LocLang>) -> Self {
+        let mut files = 0usize;
+        let mut code = 0u64;
+        let mut comments = 0u64;
+        let mut blanks = 0u64;
+        for lang in by_language.values() {
+            files += lang.files;
+            code += lang.code;
+            comments += lang.comments;
+            blanks += lang.blanks;
+        }
+        Self {
+            root,
+            files,
+            code,
+            comments,
+            blanks,
+            by_language,
+        }
+    }
 }
 
 /// 用 tokei 统计 `root` 目录下所有识别语言的代码行数（含 Rust）。
@@ -60,46 +87,69 @@ pub fn count_loc(root: &Path) -> Result<LocReport> {
     let config = Config::default();
     languages.get_statistics(&[root.to_string_lossy().as_ref()], EXCLUDED_DIRS, &config);
 
-    let mut report = LocReport {
-        root: root.to_string_lossy().into_owned(),
-        files: 0,
-        code: 0,
-        comments: 0,
-        blanks: 0,
-        by_language: BTreeMap::new(),
-    };
-
+    let mut by_language: BTreeMap<String, LocLang> = BTreeMap::new();
     for (lang_type, lang) in &languages {
         if lang.is_empty() {
             continue;
         }
-        let files = lang.reports.len();
-        let code = lang.code as u64;
-        let comments = lang.comments as u64;
-        let blanks = lang.blanks as u64;
-
-        report.files += files;
-        report.code += code;
-        report.comments += comments;
-        report.blanks += blanks;
-        report.by_language.insert(
+        by_language.insert(
             lang_type.to_string(),
             LocLang {
-                files,
-                code,
-                comments,
-                blanks,
+                files: lang.reports.len(),
+                code: lang.code as u64,
+                comments: lang.comments as u64,
+                blanks: lang.blanks as u64,
             },
         );
     }
 
-    Ok(report)
+    // totals 由 by_language 派生，避免手动累加与明细脱节。
+    Ok(LocReport::from_languages(
+        root.to_string_lossy().into_owned(),
+        by_language,
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn test_from_languages_derives_consistent_totals_and_json_shape() {
+        let mut by_lang = BTreeMap::new();
+        by_lang.insert(
+            "Rust".to_owned(),
+            LocLang {
+                files: 2,
+                code: 10,
+                comments: 3,
+                blanks: 1,
+            },
+        );
+        by_lang.insert(
+            "TypeScript".to_owned(),
+            LocLang {
+                files: 1,
+                code: 5,
+                comments: 0,
+                blanks: 2,
+            },
+        );
+        let report = LocReport::from_languages("/tmp/x".to_owned(), by_lang);
+        // totals 为明细之和。
+        assert_eq!(report.files, 3);
+        assert_eq!(report.code, 15);
+        assert_eq!(report.comments, 3);
+        assert_eq!(report.blanks, 3);
+        // JSON 顶层字段名保持 files/code/comments/blanks（私有派生字段不改输出契约）。
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["files"], 3);
+        assert_eq!(json["code"], 15);
+        assert_eq!(json["comments"], 3);
+        assert_eq!(json["blanks"], 3);
+        assert!(json["by_language"].is_object());
+    }
 
     #[test]
     fn test_count_loc_missing_root() {

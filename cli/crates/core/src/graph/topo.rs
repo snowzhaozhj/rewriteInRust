@@ -18,11 +18,14 @@ use crate::types::graph::{EdgeType, NodeType};
 use super::SourceGraph;
 
 /// 迁移序列：包含迁移顺序、可并行组和环信息。
+///
+/// 纯数据结构体，字段 `pub`（Rust 惯例：无字段间不变量、不跨 crate 发布、外部仅 `&` 只读，
+/// 无需私有化 + getter）。仅由本模块 [`migration_sequence`] 构造。
 #[derive(Debug, Clone, Serialize)]
 pub struct MigrationSequence {
     /// 迁移顺序（叶节点在前）。
     pub order: Vec<NodeId>,
-    /// 可并行迁移的分组（同组内节点无依赖关系）。
+    /// 可并行迁移的分组（同组内节点无依赖关系；组索引可映射为 sprint 序号）。
     pub parallel_groups: Vec<Vec<NodeId>>,
     /// 所有检测到的环。
     pub cycles: Vec<Vec<NodeId>>,

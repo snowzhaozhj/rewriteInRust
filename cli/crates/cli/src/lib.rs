@@ -263,6 +263,7 @@ where
                     kind: "cli_parse".to_owned(),
                     message: e.to_string(),
                     context: None,
+                    details: None,
                 },
                 warnings: Vec::new(),
             };
@@ -542,11 +543,11 @@ fn cmd_profile(root: &Path, adapter_tools: Option<&Path>) -> CmdResult {
 /// 末尾附 `install_hint`（如有）。
 fn format_tool_missing(code: &str, status: &ToolStatus) -> String {
     let mut msg = format!("{code}: {} ", status.display_name);
-    if let Some(err) = &status.probe_error {
+    if let Some(err) = status.probe_error() {
         msg.push_str(&format!("探测失败（{err}），无法确认是否安装"));
-    } else if !status.available {
+    } else if !status.available() {
         msg.push_str("未安装");
-    } else if status.min_version.is_some() && status.detected_version.is_none() {
+    } else if status.min_version.is_some() && status.detected_version().is_none() {
         // 命令成功但版本号无法解析：不应断言「版本不足」。
         if let Some(min) = &status.min_version {
             msg.push_str(&format!("版本无法解析，无法确认是否满足 ≥{min}"));
@@ -555,7 +556,7 @@ fn format_tool_missing(code: &str, status: &ToolStatus) -> String {
         msg.push_str("版本不足");
         if let Some(min) = &status.min_version {
             msg.push_str(&format!("（需 ≥{min}"));
-            if let Some(det) = &status.detected_version {
+            if let Some(det) = status.detected_version() {
                 msg.push_str(&format!("，探测到 {det}"));
             }
             msg.push('）');
@@ -653,17 +654,16 @@ fn cmd_graph_topo_sort<W: Write>(writer: &mut W) -> i32 {
                 .iter()
                 .map(|c| c.iter().map(|id| id.to_string()).collect())
                 .collect();
-            // data 形状对齐统一 ErrorData 的 `kind`/`message` 命名（原手搓 `error`/`suggestion`）。
-            // 环路径字段名用 `cycle_path` 对齐设计 09-appendix § Step 2.8（SKILL 据此解析）；
-            // 值为环路径数组（可能多个环），ErrorData 无对应字段故仍用 json! 自构造。
-            // TODO(M2): ErrorData 增加 structured context（如 details: Value），让环路径走统一类型。
+            // 走统一 ErrorData 类型（REFAC-14）：`cycle_path` 经 `details` 的 flatten
+            // 提升到 `data` 顶层，路径保持 `data.cycle_path` 不变——对齐设计
+            // 09-appendix § Step 2.8 + plugin analyze.md（SKILL 直接读 `data.cycle_path`）。
             let resp = Response {
                 status: Status::Error,
-                data: json!({
-                    "kind": "cyclic_dependency",
-                    "message": "存在循环依赖，无法生成拓扑序；请打破环后重试",
-                    "cycle_path": cycle_paths,
-                }),
+                data: ErrorData::new(
+                    "cyclic_dependency",
+                    "存在循环依赖，无法生成拓扑序；请打破环后重试",
+                    Some(json!({ "cycle_path": cycle_paths })),
+                ),
                 warnings: Vec::new(),
             };
             write_json(writer, &resp);
