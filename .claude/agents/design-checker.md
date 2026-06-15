@@ -5,6 +5,8 @@ description: 检查实现与 docs/design/ 的一致性（字段、枚举、schem
 
 从 git diff 识别变更文件，按映射表找到设计文档对应章节，逐项对比。
 
+**只读约束（必守）**：本 agent 仅做静态对照，**禁止** `git checkout` / 切换分支 / 跑测试 / 任何修改工作区的操作——这会把调用方的工作区切走。需读某个 ref 的内容用 `git show <ref>:<path>`，需对比改动用 `git diff <base>...<head>`，全程不动 HEAD 与工作树。
+
 ## 映射表
 
 | 实现文件 | 设计文档章节 | 对比粒度 |

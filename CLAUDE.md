@@ -132,12 +132,12 @@ cargo run -- graph build --root fixtures/linear-deps  # 手动验证
 2. 更新 `docs/STATUS.md`
 3. commit 引用任务 ID（如 `feat(M1-GRAPH): 图构建模块`）
 4. 独立分支提 PR
-5. **PR 审查（按类型选，勿对小 PR 全跑浪费 token）**：
-   - 纯文档：改 `docs/design/` 才跑 `design-checker`，否则免审。
-   - 小型代码（重构/bugfix/小任务批）：`/code-review high` 必跑；触及契约（CLI JSON/schema/状态机/types 字段）加 `design-checker`。
-   - 新功能/高风险（新命令/模块/并发/外部依赖/大改）：上述 + `/pr-review-toolkit:review-pr`；有争议再加 `codex:codex-rescue`。
-   - ⚠️ `design-checker` 会 `git checkout` 切分支——跑前先 commit，跑后核对分支。聚焦迁移质量+工程+开源成熟度。
-6. 修复 critical/important issues 后通知用户审阅
+5. **PR 审查**（按改动路由，命中即跑；agent 走 Agent 工具 subagent_type）：
+   - `/code-review` 主审，必跑（effort 随规模/风险升：日常 high、关键/高危 max）
+   - 涉及错误处理 / 测试 / 注释 / 新类型等专项维度 → `/pr-review-toolkit:review-pr`（增挂专项视角，补充非替代）
+   - 触及设计契约（CLI JSON / state schema / 状态机 / types 字段枚举）→ agent `design-checker`
+   - 关键算法 / 高风险 / 易幻觉处 → agent `codex:codex-rescue`（异构模型交叉验证，破 Claude 自身盲点）
+6. important 必修后合并，nit 可选，pre-existing 记录；修复后通知用户审阅
 
 PR 粒度灵活：优先独立 PR，但紧密相关的小任务（如同 Sprint 的多个 0.5d 重构）可合并为一个 PR，只要审查粒度可控。
 
