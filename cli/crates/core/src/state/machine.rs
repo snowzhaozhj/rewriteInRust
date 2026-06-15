@@ -1054,7 +1054,7 @@ mod tests {
     fn test_load_invalid_timestamp_rejected() {
         // 构造合法 JSON 结构，但 state_history[0].entered_at 值非法。
         let json = r#"{
-            "version": "1.0.0",
+            "schema_version": "1.0.0",
             "state": "init",
             "state_history": [
                 {

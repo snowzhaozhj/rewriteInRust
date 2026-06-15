@@ -11,7 +11,7 @@
 
 ```json
 {
-  "version": "0.9",
+  "schema_version": "1.0.0",
   "state": "sprint_loop",
   "state_history": [
     {

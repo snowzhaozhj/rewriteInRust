@@ -28,6 +28,16 @@ use crate::graph::build::build_graph_ts;
 use crate::stats::loc::count_loc;
 use crate::types::graph::NodeType;
 
+/// 函数/控制流计数手段（JSON 序列化为 kebab-case，与历史输出一致）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CountMethod {
+    /// tree-sitter AST 精确解析（源码侧）。
+    TreeSitter,
+    /// 轻量词法扫描近似（Rust 侧，无 tree-sitter-rust 依赖）。
+    LexicalScan,
+}
+
 /// 单侧结构度量。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct StructureMetrics {
@@ -39,8 +49,8 @@ pub struct StructureMetrics {
     pub functions: usize,
     /// 主控制流（循环/条件分支）最大嵌套层级。
     pub max_nesting: usize,
-    /// 函数计数手段：`tree-sitter`（源码侧）或 `lexical-scan`（Rust 侧近似）。
-    pub method: &'static str,
+    /// 函数计数手段。
+    pub method: CountMethod,
 }
 
 /// 一个维度的对比比值（`rust / source`）。`None` 表示分母为 0（无法计算）。
@@ -116,7 +126,7 @@ fn measure_source(root: &Path) -> Result<StructureMetrics> {
         code: loc.code,
         functions,
         max_nesting,
-        method: "tree-sitter",
+        method: CountMethod::TreeSitter,
     })
 }
 
@@ -139,7 +149,7 @@ fn measure_rust(root: &Path) -> Result<StructureMetrics> {
         code: loc.code,
         functions,
         max_nesting,
-        method: "lexical-scan",
+        method: CountMethod::LexicalScan,
     })
 }
 
@@ -295,6 +305,29 @@ fn strip_comments_and_strings(src: &str) -> String {
             out.push_str("\"\"");
             continue;
         }
+        // 字符字面量：区分 char 字面量与生命周期标注。char 字面量（含内含引号的 `'"'`）
+        // 必须整体跳过，否则其中的 `"` 会被上面的字符串分支误判为字符串起点，吞掉后续真实代码。
+        // 生命周期/标签（`'a` / `'static`，后不紧跟闭合 `'`）原样保留，不进入吞噬。
+        if b == b'\'' {
+            let is_char_lit = (i + 1 < bytes.len() && bytes[i + 1] == b'\\')
+                || (i + 2 < bytes.len() && bytes[i + 2] == b'\'');
+            if is_char_lit {
+                i += 1; // 跳过开引号
+                while i < bytes.len() {
+                    if bytes[i] == b'\\' {
+                        i += 2; // 跳过转义序列起始（\n / \' / \\ 等）
+                        continue;
+                    }
+                    if bytes[i] == b'\'' {
+                        i += 1; // 跳过闭引号
+                        break;
+                    }
+                    i += 1;
+                }
+                out.push_str("''");
+                continue;
+            }
+        }
         out.push(b as char);
         i += 1;
     }
@@ -415,6 +448,30 @@ fn real() {
     }
 
     #[test]
+    fn strip_handles_char_literal_with_quote() {
+        // char 字面量内含双引号：不应被误判为字符串起点而吞掉后续 fn。
+        let src = r#"fn a() { let c = '"'; } fn b() {}"#;
+        let stripped = strip_comments_and_strings(src);
+        assert_eq!(count_rust_fns(&stripped), 2, "两个 fn 都应保留");
+    }
+
+    #[test]
+    fn strip_handles_escaped_char_literal() {
+        // 转义 char `'\''`（被转义的引号）不应破坏后续扫描。
+        let src = r#"fn a() { let q = '\''; let s = "x"; } fn b() {}"#;
+        let stripped = strip_comments_and_strings(src);
+        assert_eq!(count_rust_fns(&stripped), 2);
+    }
+
+    #[test]
+    fn strip_keeps_lifetimes() {
+        // 生命周期 `'a`（非 char 字面量）应原样保留，不进入吞噬。
+        let src = "fn f<'a>(x: &'a str) -> &'a str { x }";
+        let stripped = strip_comments_and_strings(src);
+        assert_eq!(count_rust_fns(&stripped), 1);
+    }
+
+    #[test]
     fn nested_block_comment_stripped() {
         let src = "fn a() { /* outer /* inner fn x() */ still */ let y = 1; }";
         let stripped = strip_comments_and_strings(src);
@@ -472,8 +529,8 @@ fn real() {
         let report = compare_structure(&src_dir, &rust_dir).unwrap();
         assert_eq!(report.source.functions, 2, "源码应有 f + g 两个函数");
         assert_eq!(report.rust.functions, 1, "Rust 应有 1 个函数");
-        assert_eq!(report.source.method, "tree-sitter");
-        assert_eq!(report.rust.method, "lexical-scan");
+        assert_eq!(report.source.method, CountMethod::TreeSitter);
+        assert_eq!(report.rust.method, CountMethod::LexicalScan);
         assert_eq!(report.source.max_nesting, 2, "if>for 嵌套 2 层");
         assert_eq!(report.rust.max_nesting, 1, "Rust 仅 if 一层");
         // 比值 = rust/source

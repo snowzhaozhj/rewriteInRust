@@ -961,19 +961,20 @@ fn cmd_state_populate_modules() -> CmdResult {
     }
 
     if sequence.order.is_empty() {
+        // 空源码图：跳过孤儿清理，避免误执行一次空 graph build 后把已登记的 pending 模块整表清空。
         warnings.push("源码图无文件模块，填充结果为空（请确认已运行 graph build）".to_owned());
-    }
-
-    // 孤儿 pending 清理：剔除 key 不在本轮迁移序列中的残留模块（源码图删文件后重填）。
-    let live_keys: std::collections::HashSet<String> =
-        sequence.order.iter().map(|id| id.to_string()).collect();
-    let orphans = machine.retain_modules(&live_keys);
-    if !orphans.is_empty() {
-        warnings.push(format!(
-            "已清理 {} 个孤儿 pending 模块（源码图已无对应节点）: {:?}",
-            orphans.len(),
-            orphans
-        ));
+    } else {
+        // 孤儿 pending 清理：剔除 key 不在本轮迁移序列中的残留模块（源码图删文件后重填）。
+        let live_keys: std::collections::HashSet<String> =
+            sequence.order.iter().map(|id| id.to_string()).collect();
+        let orphans = machine.retain_modules(&live_keys);
+        if !orphans.is_empty() {
+            warnings.push(format!(
+                "已清理 {} 个孤儿 pending 模块（源码图已无对应节点）: {:?}",
+                orphans.len(),
+                orphans
+            ));
+        }
     }
 
     for node_id in &sequence.order {

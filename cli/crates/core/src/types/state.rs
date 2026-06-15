@@ -250,6 +250,8 @@ pub struct MigrationMetadata {
 /// 迁移状态文件 (migration-state.json) 的完整结构。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MigrationStateFile {
+    /// schema 版本号；JSON 键为 `schema_version`，对齐设计 06 §10.0.2 / §10.7。
+    #[serde(rename = "schema_version")]
     pub version: String,
     pub state: ProjectState,
     #[serde(default)]

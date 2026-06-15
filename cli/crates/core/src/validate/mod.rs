@@ -121,6 +121,8 @@ fn check_version_compat(version: &str) -> Result<()> {
         parse_major(STATE_SCHEMA_VERSION).expect("STATE_SCHEMA_VERSION 应为合法语义化版本");
 
     if file_major != current_major {
+        // TODO(M2-ERR-01): 错误码细分时改用专属 `SCHEMA_VERSION_UNSUPPORTED`（设计 06 §10.7），
+        // 便于 SKILL.md 按码路由升级/回退；当前 MVP 阶段复用 schema_validation kind。
         return Err(MigrateError::SchemaValidation(format!(
             "migration-state.json schema 版本不兼容：文件为 `{version}`（主版本 {file_major}），\
              当前 CLI 支持主版本 {current_major}（`{STATE_SCHEMA_VERSION}`）。\
