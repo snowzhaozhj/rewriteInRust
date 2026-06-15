@@ -112,12 +112,19 @@
 **关键前提**：① M2 编排器是 SKILL.md（**LLM 驱动**，§11 程序化推迟 M2.5），上下文经济靠「SubAgent 写盘（其 worktree）+ 只回传摘要」满足——worktree 同样满足，与隔离目录无差。② `parallel_groups`=拓扑层、同层 import 独立（topo.rs:209-211），run.md:38 翻译前强制依赖全 done——故 worktree 里 done 依赖在场、并发兄弟独立缺席不影响编译。③ **输出 crate 结构与并行机制正交**：M2 沿用单 crate 输出；worktree 是并行机制，对单 crate / 未来 workspace 输出都适用。多 crate workspace 是**输出质量**议题（受 crate 间禁环约束、由目标架构决定），**非并行债**，不在 M2/M3 为并行而做。
 
 - **方案要点（worktree + 约束包）**：
-  1. **每 agent 一个 git worktree**：编排器从 rust_root（cargo init 已 git init）`git worktree add` 出 sprint N 各模块的工作树（含全部 done 代码）。SubAgent 在自己 worktree 内 `translate → cargo check（完整 crate 真自检）→ compile_fix → test`，保留 M1 per-module 循环；代码/rustc 错误/修复全程在子上下文，只回传摘要 `{module, files_changed, new_deps_with_features, check_status, test_status}`。
-  2. **禁止 SubAgent 改共享文件**：`lib.rs` mod 声明、`Cargo.toml`、公共 error enum/trait 等 crate API **不由 SubAgent 直接改**；需要共享 API 变更时 SubAgent **回传变更请求**，由编排器串行决策应用（配合**叶子优先** sprint=1 先把基础模块稳住，使共享 API 在并行前已大体冻结）。
-  3. **dependency-mapping 前置强约束生态选择**：`dependency-mapping.md` 须前置规定唯一生态（anyhow xor thiserror、异步运行时唯一、序列化库唯一等），防止并发模块各引不同 crate 产出 Frankenstein Cargo.toml。new_deps 合并须**并 feature 集**（非仅版本取高）+ 校验 default-feature 不冲突。
-  4. **merge 后整体 check 为唯一 done 真门**：编排器 `git merge`/cherry-pick 各 worktree 的新文件（不同模块=不同文件→无冲突；触同一共享文件→git 报冲突，正是约束 2 的守卫）→ 统一追加 lib.rs mod 声明 + 合并 Cargo.toml deps/features → **整组 `cargo check`/`cargo test`**。worktree 自检过 ≠ done；**只有整体 check 过才置 done**（兜住 orphan/coherence/feature/宏 等只能整体编译暴露的冲突）。
-  5. **图缺陷回退串行 + 修图**：整体 check 若暴露「同层模块间本不该有的跨模块引用」（REFAC-10 档1 图不完整漏边所致），判为**图缺陷**——对相关模块回退串行翻译，并记录待修图（REFAC-10 档2，M3）。
-- **装配是结构化合并,非纯 copy-out**（codex 第三轮纠正）：各模块新增 `.rs` 复制进 rust_root；但 `Cargo.toml`（deps+feature 集）和 `lib.rs`（mod 声明）必须**程序化结构合并**（toml_edit / 语法级），不能简单覆盖；意外的共享 `.rs` 冲突由 git merge / 文件碰撞检测兜住。
+  1. **每 agent 一个 git worktree**：编排器从 rust_root（cargo init 已 git init）`git worktree add` 出 sprint N 各模块的工作树（含全部 done 代码）。SubAgent 在自己 worktree 内 `translate → cargo check（完整 crate 真自检）→ compile_fix → test`，保留 M1 per-module 循环；代码/rustc 错误/修复全程在子上下文，只回传 touched-list `{module, status:agent_done, own_files, shared_touched, self_check, test}`（详见下方通信协议）。
+  2. **共享编辑策略 = D（porting-rule 最小化）+ A（自由改+轻协议）**（codex 第四轮验证排序 D>A>B>C，**否决原「禁止+回传批准」**——它破坏自检+制造同步 round-trip，且 worktree+merge 本就解决 silent 覆盖）：
+     - **D 最小化共享写面（porting 规则）**：并行模块**优先用既有共享 API + `Error::Other(String)`/`anyhow` 逃生口，不擅自扩展共享类型**；真正的复杂共享 API 扩展**留串行 cleanup**。减少共享写面比事后智能合并可靠（编排器是非确定性 LLM）。
+     - **A 执行底座 + 5 条最小协议**：SubAgent 在 worktree 内**自由改任意文件（自检必需）**，回传 `{own_files, shared_touched}`（代码留盘）；**(协议1) 状态只能标 `agent_done`（substatus），不得标最终 `done`**；**(协议3) 禁止删除/改签名既有共享 API，新增只允许 append**；其余协议见要点 4/§7。
+     - ⚠️ **codex 纠正**：共享编辑「文本冲突可控，但语义冲突真实存在」——尤其**孤儿规则逼 `From/Display/Serialize` impl 落进共享类型所在文件**（单 crate + 共享 Error 下不罕见），叶子优先只能压低频率、不能消除。
+  3. **dependency-mapping 前置强约束生态选择**：`dependency-mapping.md` 须前置规定唯一生态（anyhow xor thiserror、异步运行时唯一、序列化库唯一等），防止并发模块各引不同 crate 产出 Frankenstein Cargo.toml。new_deps 合并须**并 feature 集 + 校验 default-feature 不冲突**（非仅版本取高）；**(协议2) Cargo.lock 以合并后重新 `cargo`-解析/验证为准**。
+  4. **两层 done + merge 后整体 check 为唯一真门**：worktree 自检过 = `agent_done`（substatus，**非终态**）；编排器装配（要点「结构化合并」）→ **整组 `cargo check`/`cargo test` 过才置最终 `done`**（兜住 orphan/coherence/feature/宏/命名空间 等只能整组编译暴露的冲突）。**(协议4) git 冲突不由 LLM 编辑**，走串行 rebase 重译。
+  5. **reconcile 机制 + 轮次上限（防活锁）**：非结构化共享 `.rs` git 冲突 → **串行 reconcile**：冲突模块按依赖序逐个 rebase 到已合并主线后**重译该模块**（非编排器手解冲突块）。**(协议5) reconcile 设轮次上限**（默认同 `max_retry_rounds=3`）；超限 → **该 sprint 降级为串行翻译 / 转人工 review**（杜绝 A合并→B重译又改共享→C重译 的活锁）。
+  6. **图缺陷回退串行 + 修图**：整体 check 若暴露「同层模块间本不该有的跨模块引用」（REFAC-10 档1 图不完整漏边所致），判为**图缺陷**——对相关模块回退串行翻译，并记录待修图（REFAC-10 档2，M3）。
+- **装配是结构化合并,非纯 copy-out**（codex 纠正）：各模块新增 `.rs` 复制进 rust_root（同名 helper/trait/`foo.rs` vs `foo/mod.rs` 布局碰撞 → 当冲突处理）；`Cargo.toml`（deps+feature 集）/`lib.rs`（mod 声明）必须**程序化结构合并**（toml_edit / 语法级 union）；其余共享 `.rs` git merge，冲突→要点 5 串行 reconcile。
+- **进度保证（无死锁，最坏退化串行）**：① 翻译期 agent 各在独立 worktree、不持共享锁、互不等待 → 无循环等待土壤 ② reconcile 串行全序 + 轮次上限 → 无活锁 ③ 仅编排器写共享状态（state.json/主 rust_root）→ 无写竞争。**卡住的模块**（自检/整体 check 3 轮不过）→ pause→degrade（headless 由 ADV-07 自动 degrade=ffi/skip 达终态，**依赖 ADV-07 改状态机，见下**）；同 sprint 其他模块照常完成，仅 sprint 推进等其达终态；下游由 auto-unblock（M2-CLI-06）解阻塞。**最坏情况 = 全 sprint 退化串行 = M1 速度，慢但不卡死。**
+- **headless 不挂起依赖状态机改动**（codex 指出）：02/09 现仍写「3 轮失败→paused→人工确认 degrade」。「headless 不挂起」要 **M2-ADV-07 真正把 paused→自动 degrade 写进状态机**（02 §3.4 + 09 附录 A），否则该保证缺文档依据 → ADV-07 须同步改设计文档（并入 DESIGN-03 校对范围）。
+- **sprint barrier 精确定义**（codex 指出缺失）：终态 = `done`/`degrade_*`；`agent_done`/merge-pending/reconcile-pending 均为**非终态**（不触发推进）；失败 worktree 丢弃后模块置 paused（非终态，阻塞本 sprint 推进直至 degrade）。
 - **target dir 策略（实现期，我已定）**：先各 worktree **独立 `CARGO_TARGET_DIR`** 保正确（避免并发 cargo 锁争用），Sprint F 实测启动/编译开销，超标再用 sccache / 共享 target 优化。
 - **回滚与一致性（补 P9/P10）**：worktree 隔离使「回滚一个模块」= 丢弃其 worktree（不污染主树）；partial-batch 失败下，编排器只对**整体 check 通过的模块**置 done 并单写 migration-state.json，未过模块退回 translating/paused，state.json 与 graph migration_status 由编排器同一事务序更新。
 - **数据缺口与逃生口（诚实标注）**：worktree 优于「轻量 staging（agent 不自检、全部错误堆 merge 后修）」的核心论据是「M1 是 per-module 编译反馈循环、首轮普遍带编译错误」——但 codex 复核指出**该频率 M1 未留痕**（migration-state/attempts 未入库），属合理推断非实证。故 **Sprint F 必测两项**：① 首轮（worktree 内自检前）编译通过率 ② worktree target 冷编/锁开销。**若实测首轮通过率高 且 target 成本高 → 记录「降级为轻量 staging」为已论证的简化路径**（staging：agent 只翻译不自检 + 编排器整体 check + 串行修复 + 越界/碰撞拒绝）。即「先上 worktree 保 M1 反馈环，用数据决定是否可简化」，而非反向赌首轮干净。
@@ -281,7 +288,7 @@ cargo nextest run          # 202 测试回归
 | M2-TIER-01b | analyzer.md 扩展：per-module 语义信号输出 | plugin/agents/analyzer.md | 0.5d | TIER-01a |
 | M2-TIER-01c | run.md 分档逻辑：trivial/standard/full 循环路径 | plugin/skills/migrate/run.md | 1d | TIER-01a |
 | M2-TIER-01d | 降档/升档机制 + 可观测日志 | run.md, state machine | 0.5d | TIER-01c |
-| M2-ADV-07 | 默认 TODO 决策策略（headless 模式） | run.md, translator.md | 1-2d | TIER-01c |
+| M2-ADV-07 | 默认 TODO 决策策略（headless 模式）+ **headless 下 paused→自动 degrade 写进状态机**（02 §3.4 + 09 附录 A，否则 D3「不挂起」缺文档依据，codex 第四轮指出） | run.md, translator.md, machine.rs, docs/design/ | 1-2d | TIER-01c |
 
 **M2-TIER-01 分档判据**：
 
@@ -335,37 +342,50 @@ cargo nextest run          # 202 测试回归
 
 | 任务 ID | 内容 | 文件 | 工作量 | 依赖 |
 |---------|------|------|--------|------|
-| M2-SCALE-02 | 写隔离实现（**D3 worktree + 约束包**）：git worktree 编排 + SubAgent worktree 内完整 `cargo check` 自检 + 回传摘要（不回传代码）+ 禁改共享文件/共享变更回传串行决策 + dependency-mapping 前置生态约束 + 编排器 git merge + **merge 后整体 check 为唯一 done 真门** + 图缺陷回退串行 | run.md, translator.md, SKILL.md, scaffold/ | 5-7d | Sprint C SCALE-SPRINT |
+| M2-SCALE-02 | 写隔离实现（**D3 worktree + 约束包**）：git worktree 编排 + worktree 内完整自检（`agent_done`）+ 回传 touched-list（不回传代码）+ **porting 规则最小化共享写面**（用既有 API/逃生口）+ dependency-mapping 前置 + 结构化合并（toml/lib.rs union）+ 共享 .rs 冲突**串行 reconcile（轮次上限）**+ **整组 check 唯一 done 真门** + 图缺陷回退串行 | run.md, translator.md, SKILL.md, scaffold/, machine.rs | 5-7d | Sprint C SCALE-SPRINT |
 | M2-SCALE-01 | Workflow 批量翻译：Agent tool 并发编排 + 错误恢复 | run.md, Workflow 定义 | 2-3d | SCALE-02 |
 | M2-SCALE-LOCK | 全局锁改造：编排器持锁，SubAgent 不取锁 | run.md, SKILL.md | 0.5d | SCALE-01 |
 | M2-PETGRAPH-01 | petgraph 副本隔离验证（SubAgent 各持独立图，无共享内存竞争）+ **WAL 配置回归**（断言 `journal_mode=WAL` + `busy_timeout` 配置正确，**非并发压测**）——翻译期 db 只读、state.json 编排器单写，无并发写场景（见 §2 D5） | 测试代码 | 0.5d | SCALE-01 |
 
 **写隔离实现方案（D3 worktree + 约束包 决策执行）**：
 
+**通信协议（codex 第四轮验证：D+A 组合，无声明式 schema）**：agent 不在翻译中途阻塞等批准——在 worktree 完整翻完（含它需要的共享改动），再一次性回传 touched-list；调和事后做、仅真冲突升级串行。
+
 ```
-编排器（SKILL.md run，LLM 驱动）
-  ├── 获取 sprint N 的模块组（parallel_groups 同层，import 独立；依赖全 done）
-  ├── 前置：dependency-mapping.md 已规定唯一生态（anyhow xor thiserror / 异步运行时唯一 …）
-  ├── 为每个模块 git worktree add 一个工作树（含全部 done 代码，独立 CARGO_TARGET_DIR）
-  ├── Agent tool 并发启动 SubAgent（max_concurrent_agents=3）
-  │   ├── SubAgent 在自己 worktree 内：translate → cargo check（完整 crate 真自检）→ compile_fix → test
-  │   ├── 代码 / rustc 错误 / 修复全程在 SubAgent 子上下文（写盘其 worktree，不回传代码内容）
-  │   ├── 【禁改共享文件】lib.rs mod / Cargo.toml / 公共 error/trait 不直接改；
-  │   │     需共享 API 变更 → 回传变更请求由编排器串行决策
-  │   └── SubAgent 仅回传摘要：{module, files_changed, new_deps_with_features, shared_change_requests?, check_status, test_status}
-  ├── 编排器收集摘要（只收摘要，上下文经济）
-  ├── 串行应用共享 API 变更请求（若有）→ 必要时重跑受影响模块
-  ├── git merge 各 worktree 新文件（异模块=异文件→无冲突；触共享文件→git 报冲突=约束守卫）
-  │   ├── 统一追加 lib.rs mod 声明
-  │   └── 合并 Cargo.toml：deps 并集 + 版本取高 + **feature 集并 + default-feature 冲突校验**
-  ├── 【唯一 done 真门】整组 cargo check / cargo test
-  │   ├── 成功 → 编排器单写 migration-state.json（state + graph migration_status 同序更新）
-  │   └── 失败 → compile_fixing 子流程（见下方）
-  └── sprint 推进检查 + git worktree remove 清理
+① 派发  编排器 → agent
+    git worktree add .wt/{module}（从主 HEAD，含全部 done 代码，独立 CARGO_TARGET_DIR）
+    派 SubAgent，CWD=worktree；注入 intent + 规则 + 依赖接口
+    + porting 规则【最小化共享写面】：优先用既有共享 API；不够时用 Error::Other/anyhow 逃生口；
+      禁删除/改签名既有共享 API，新增只 append；复杂共享扩展标记留串行 cleanup
+
+② 翻译+自检  (全程在 agent 的 worktree，隔离)
+    写 src/{module}.rs；按需 append 式改共享文件
+    cargo check（完整 crate 真自检）→ fix 循环（M1 的 3 轮）→ test
+
+③ 回传  agent → 编排器  (只回 touched-list，代码留盘=上下文经济)
+    { module, status: agent_done,                       // 协议1：非终态
+      own_files: ["src/parser.rs"],
+      shared_touched: ["src/error.rs", "Cargo.toml"],   // 仅文件清单，无声明式 op
+      self_check: pass, test: pass }
+
+④ 合并  编排器（结构化为主）
+    own 文件        → 复制进主 rust_root（同名/布局碰撞→当冲突）
+    Cargo.toml/lib.rs → 结构化 union（toml_edit / mod 追加）；Cargo.lock 合并后重解析  // 协议2
+    其他共享 .rs    → git merge
+
+⑤ reconcile（仅 git 冲突时，协议4/5）
+    冲突模块按依赖序逐个：worktree rebase 到已合并主线 → 重译该模块（非 LLM 手解冲突块）
+    轮次上限（默认 3）；超限 → 本 sprint 降级串行 / 转人工 review
+
+⑥ 真门  整组 cargo check / cargo test    // 协议1：唯一最终 done
+    过 → agent_done 升 done + 编排器单写 state（state + graph migration_status 同序）
+    不过 → compile_fixing 子流程（见下方）
+
+⑦ 清理  git worktree remove
 ```
 
-> **worktree 自检 ≠ done**：worktree 自检覆盖借用/类型/缺 import 等本地错误（done 依赖在场，真实完整 crate 检查）；但 orphan rule/coherence(E0119)、feature 冲突、proc-macro/derive 展开等**跨并发兄弟模块的冲突只能整组编译暴露**，故必须以 merge 后整体 check 为唯一 done 真门。
-> **共享 Cargo.toml 澄清**：worktree 内 SubAgent 的 cargo check 用的是该 worktree 的 Cargo.toml（=当前主 Cargo.toml 快照 + dependency-mapping 约束内的 new_deps）；主 Cargo.toml 的最终合并仍由编排器统一做。translator.md 须同步标注「按 dependency-mapping 加 deps，不擅自引入映射外 crate」。
+> **两层 done**：worktree 自检过 = `agent_done`（substatus，非终态，沿用 phase_*_complete 那套 substatus 模式，不新增顶层状态）；只有 ⑥ 整组 check 过才升最终 `done`。orphan rule/coherence(E0119)、feature 冲突、宏展开、命名空间撞名等**跨并发兄弟冲突只能整组编译暴露**，故 ⑥ 是唯一真门。
+> **为何不要声明式 shared_edits schema**（codex）：schema 追不上 Rust 共享语义（impl 放置 / feature / pub use 命名 / coherence），膨胀且收益低。touched-list + 结构化合并器（toml_edit / mod union）+ git merge 已够。
 
 **compile_fixing 子流程（merge 后整体 check 失败）**：
 ```
@@ -607,7 +627,9 @@ Sprint F（依赖 D + E 全部完成）
 | R1 | REFAC-10 跨文件方法调用工作量超预期 | 中 | 中 | 档 1 先做（低成本高收益），档 2 推 M3 |
 | R2 | 并行 merge 冲突 / 跨模块编译冲突（coherence/feature/宏） | 中 | 高 | **D3 worktree + 约束包**：git 冲突检测守卫共享文件、merge 后整体 check 为真门、worktree 隔离回滚不污染主树 |
 | R2b | **共享 API 变更串行化吞噬并行收益**（约束 2 把改公共 error/trait 的模块打回串行） | 中 | 中 | 叶子优先（sprint=1）先冻结共享基础；统计共享变更频率，过高则前置一轮「公共 API 设计 sprint」 |
-| R2c | **图不完整致同层假独立**（REFAC-10 档1 漏边，两实际耦合模块同组并行） | 中 | 中 | 整体 check 暴露意外跨模块引用→判图缺陷、回退串行+记录修图（D3 要点 5） |
+| R2c | **图不完整致同层假独立**（REFAC-10 档1 漏边，两实际耦合模块同组并行） | 中 | 中 | 整体 check 暴露意外跨模块引用→判图缺陷、回退串行+记录修图（D3 要点 6） |
+| R2d | **reconcile 活锁**（A 合并→B 重译又改共享→C 重译…无限） | 低 | 高 | reconcile 轮次上限（默认 3）+ 超限降级串行/人工（D3 要点 5，codex 第四轮指出） |
+| R2e | **孤儿规则逼共享 impl 进共享文件**（多模块各需 From/Display/Serialize for SharedError，单 crate 下不罕见） | 中 | 中 | porting 规则最小化 + 叶子优先冻结 + 整组 check 兜 E0119；高频则该共享 impl 提前到串行 cleanup |
 | R3 | 真实 5K-20K 项目暴露 M1 未覆盖的 AST 边界 | 高 | 中 | 图精度提升（Sprint B）+ 宽松验收 |
 | R4 | 并行吞吐 <1.5 模块/小时（worktree 启动 + 独立 target 重编开销） | 中 | 中 | 降 max_concurrent_agents=2 重验；Sprint F 实测 target 策略（sccache/共享 target） |
 | R5 | TIER-01 分档判据误判（full 误判为 trivial） | 低 | 高 | 默认 full 兜底 + 失败自动升档 |
