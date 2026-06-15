@@ -29,21 +29,20 @@ pub struct LocLang {
 
 /// 一个目录的 LOC 统计报告。
 ///
-/// totals（`files`/`code`/`comments`/`blanks`）为**私有派生字段**——只能经
-/// [`LocReport::from_languages`] 由 `by_language` 累加得到，杜绝「总计与明细不一致」
-/// 的不变量缺口。Serialize 使用字段名，故 JSON 输出形态不变（顶层仍含 files/code/...）。
+/// 纯数据结构体，字段 `pub`（Rust 惯例）。totals 经 [`LocReport::from_languages`]
+/// 由 `by_language` 累加派生——把累加逻辑收成单一入口，避免各处手动累加分散出错。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LocReport {
     /// 统计根目录（字符串形式，便于序列化）。
     pub root: String,
     /// 总文件数（派生自 `by_language`）。
-    files: usize,
+    pub files: usize,
     /// 总代码行数（派生自 `by_language`）。
-    code: u64,
+    pub code: u64,
     /// 总注释行数（派生自 `by_language`）。
-    comments: u64,
+    pub comments: u64,
     /// 总空白行数（派生自 `by_language`）。
-    blanks: u64,
+    pub blanks: u64,
     /// 按 tokei 语言名分组的明细（BTreeMap 保证确定性排序）。
     pub by_language: BTreeMap<String, LocLang>,
 }
@@ -69,26 +68,6 @@ impl LocReport {
             blanks,
             by_language,
         }
-    }
-
-    /// 总文件数。
-    pub fn total_files(&self) -> usize {
-        self.files
-    }
-
-    /// 总代码行数。
-    pub fn total_code(&self) -> u64 {
-        self.code
-    }
-
-    /// 总注释行数。
-    pub fn total_comments(&self) -> u64 {
-        self.comments
-    }
-
-    /// 总空白行数。
-    pub fn total_blanks(&self) -> u64 {
-        self.blanks
     }
 }
 
@@ -159,10 +138,10 @@ mod tests {
         );
         let report = LocReport::from_languages("/tmp/x".to_owned(), by_lang);
         // totals 为明细之和。
-        assert_eq!(report.total_files(), 3);
-        assert_eq!(report.total_code(), 15);
-        assert_eq!(report.total_comments(), 3);
-        assert_eq!(report.total_blanks(), 3);
+        assert_eq!(report.files, 3);
+        assert_eq!(report.code, 15);
+        assert_eq!(report.comments, 3);
+        assert_eq!(report.blanks, 3);
         // JSON 顶层字段名保持 files/code/comments/blanks（私有派生字段不改输出契约）。
         let json = serde_json::to_value(&report).unwrap();
         assert_eq!(json["files"], 3);
@@ -188,8 +167,8 @@ mod tests {
         .unwrap();
         fs::write(dir.path().join("b.ts"), "export const y = 2;\n").unwrap();
         let report = count_loc(dir.path()).unwrap();
-        assert!(report.total_files() >= 2);
-        assert!(report.total_code() >= 4);
+        assert!(report.files >= 2);
+        assert!(report.code >= 4);
         // Rust 与 TypeScript 均出现在按语言明细中。
         assert!(report.by_language.contains_key("Rust"));
         assert!(report.by_language.contains_key("TypeScript"));

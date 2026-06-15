@@ -18,7 +18,7 @@
   - ✅ **REFAC-14**(`d09109b`): ErrorData 加 `details: Option<Value>` + `#[serde(flatten)]`，`data.cycle_path` 保持顶层（对齐 09 § Step 2.8 + analyze.md），cmd_graph_topo 环分支走统一 ErrorData
   - ✅ **REFAC-13 仅 ToolStatus 保留**(`501b446`): 三态收敛为私有枚举 `ToolProbe{Missing|ProbeFailed|Available}`——**真价值=让非法字段组合不可表示**；自定义 Serialize 保 tool_checks 扁平契约。PLAN 标 types/state.rs 系笔误，实际 profile/tools.rs
   - ⏪ **REFAC-06 已回退**: MigrationSequence 私有化+getter 是**过度封装**——Rust 纯数据 struct 惯例即 pub 字段（无字段间不变量、不跨 crate、外部仅 `&` 只读，私有化零收益、纯增代码）。回退为 pub 字段删 getter，SCALE-P 直接读 `sequence.parallel_groups`
-  - ⚠️ **REFAC-13 的 LocReport totals 私有化经评估同 REFAC-06 病因**（内部 crate + 只读 + 无 mutate 入口，"totals=明细和"无破坏场景）——去留待定
+  - ⏪ **REFAC-13 的 LocReport totals 私有化已回退**: 同 REFAC-06 病因，字段改回 pub、删 4 个 getter；**保留 `from_languages`**（把累加收成单一入口，有整洁价值）
   - **教训**：Rust 不套 Java「全字段私有+getter」；私有化仅当 ①字段间有不变量 或 ②跨 crate API 稳定性。M1 review 按惯例提的封装债须按此甄别。211 测试全过、clippy 零
 - **下一步**（**新会话从这里开始**）: Sprint A **C 档（各 1d 含新增逻辑/外部依赖）**：VER-04（populate 数据卫生+e2e）、COMPAT-01（版本检测基础）、ADV-06（stats compare 真实实现，依赖 tokei+tree-sitter）。CTX-01 需真实项目实测。注：M2-TIER-01a 删 risk 时需同步 plugin 提示词 analyze.md:37 的 `risk:low` 表述。**PR 粒度已放宽**（CLAUDE.md 改）：同 Sprint 紧密相关小任务可合批
 - **复审结论**：草稿方向正确，已修正 3 处自相矛盾 + 1 处悬空引用 + 撤销 tier_signals 过度设计 + 补 6 项缺口；新增 D5（SQLite 集中 writer）+ 3 任务（DESIGN-03/PERF-BASE/CLI-06 auto-unblock）；任务总数 52→55。3 个战略决策经用户批准（SQLite 门禁降级 / 60min 单模块 / 状态机程序化推迟+抽 auto-unblock）

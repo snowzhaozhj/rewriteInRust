@@ -1084,7 +1084,7 @@ fn roots_overlap(source: &Path, rust: &Path) -> Option<String> {
 fn count_loc_side(root: &Path, label: &str, warnings: &mut Vec<String>) -> serde_json::Value {
     match count_loc(root) {
         Ok(report) => {
-            if report.total_files() == 0 {
+            if report.files == 0 {
                 warnings.push(format!(
                     "{label} 目录存在但未统计到任何受支持语言文件（可能为空/权限不足/全被排除）: {}",
                     root.display()
