@@ -65,6 +65,30 @@ pub struct ErrorData {
     /// 可选的上下文信息。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
+    /// 结构化补充上下文（如循环依赖的 `cycle_path` 数组）。
+    ///
+    /// `flatten`：`Some(obj)` 时把 obj 的键**提升到 `data` 顶层**（而非嵌套到
+    /// `data.details`），从而让 `data.cycle_path` 等命名上下文保持稳定，对齐
+    /// `09-appendix § Step 2.8` + plugin `analyze.md`（SKILL 直接读 `data.cycle_path`）；
+    /// `None` 时不输出任何键。值须为 JSON object（其键被展开），不应为标量/数组。
+    #[serde(flatten)]
+    pub details: Option<serde_json::Value>,
+}
+
+impl ErrorData {
+    /// 构造一条带结构化上下文的错误 data（`details` 的键将展开到 `data` 顶层）。
+    pub fn new(
+        kind: impl Into<String>,
+        message: impl Into<String>,
+        details: Option<serde_json::Value>,
+    ) -> Self {
+        Self {
+            kind: kind.into(),
+            message: message.into(),
+            context: None,
+            details,
+        }
+    }
 }
 
 impl Response<ErrorData> {
@@ -76,6 +100,7 @@ impl Response<ErrorData> {
                 kind: "unknown".to_owned(),
                 message: message.into(),
                 context: None,
+                details: None,
             },
             warnings: Vec::new(),
         }
@@ -89,6 +114,7 @@ impl Response<ErrorData> {
                 kind: "unknown".to_owned(),
                 message: message.into(),
                 context: Some(context.into()),
+                details: None,
             },
             warnings: Vec::new(),
         }
@@ -122,6 +148,7 @@ impl From<MigrateError> for Response<ErrorData> {
                 kind: kind.to_owned(),
                 message: err.to_string(),
                 context: None,
+                details: None,
             },
             warnings: Vec::new(),
         }
@@ -147,6 +174,45 @@ mod tests {
         assert_eq!(json["status"], "error");
         assert_eq!(json["data"]["kind"], "not_implemented");
         assert!(json.get("warnings").is_none(), "空 warnings 应省略");
+    }
+
+    #[test]
+    fn test_error_details_flatten_to_data_top_level() {
+        // REFAC-14：details 的键应展开到 data 顶层（保持 `data.cycle_path` 契约），
+        // 而非嵌套到 `data.details`。
+        let resp = Response {
+            status: Status::Error,
+            data: ErrorData::new(
+                "cyclic_dependency",
+                "存在循环依赖",
+                Some(serde_json::json!({ "cycle_path": [["a", "b", "a"]] })),
+            ),
+            warnings: Vec::new(),
+        };
+        let json = serde_json::to_value(resp).unwrap();
+        assert_eq!(json["data"]["kind"], "cyclic_dependency");
+        // 顶层可直接取到 cycle_path，且不存在嵌套的 data.details。
+        assert_eq!(
+            json["data"]["cycle_path"],
+            serde_json::json!([["a", "b", "a"]])
+        );
+        assert!(
+            json["data"].get("details").is_none(),
+            "details 应被 flatten 展开，不应出现嵌套 details 键"
+        );
+    }
+
+    #[test]
+    fn test_error_details_none_omits_keys() {
+        // details=None 时不应产生任何多余键（flatten 空）。
+        let resp: Response<ErrorData> = MigrateError::NotImplemented("x".into()).into();
+        let json = serde_json::to_value(resp).unwrap();
+        let obj = json["data"].as_object().unwrap();
+        // 仅 kind/message（context/details 均 None 省略）。
+        assert!(obj.contains_key("kind"));
+        assert!(obj.contains_key("message"));
+        assert!(!obj.contains_key("context"));
+        assert!(!obj.contains_key("details"));
     }
 
     #[test]
