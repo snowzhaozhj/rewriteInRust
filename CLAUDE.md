@@ -135,7 +135,7 @@ cargo run -- graph build --root fixtures/linear-deps  # 手动验证
 5. PR 审查：调用 `/pr-review-toolkit:review-pr`，额外运行 `design-checker` agent 检查设计文档一致性；再跑 `codex:codex-rescue`（对抗审查）和 `/code-review` skill
 6. 修复 critical/important issues 后通知用户审阅
 
-禁止合并多阶段为一个 PR。
+PR 粒度灵活：优先独立 PR，但紧密相关的小任务（如同 Sprint 的多个 0.5d 重构）可合并为一个 PR，只要审查粒度可控。
 
 ## 续接快速参考
 
