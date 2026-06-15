@@ -101,6 +101,8 @@
 
 ### D3: M2-SCALE 写隔离方案
 
+> 决策记录：[MDR-003](decisions/003-m2-parallel-write-isolation.md)（含被否决方案 + 逃生口 + 审查过程）。
+
 **矛盾**：PLAN P0-A.3 标注"两方案待定"，但 06 §10.5 已预设 worktree 方案。
 
 **推荐决策（本次复审定稿，用户已批准）**：**git worktree + 约束包**——恢复 06 §10.5 原始设计，SubAgent 在 worktree 内做完整 crate 自检，git 冲突检测守卫共享文件编辑，编排器 merge 后整体 check 为唯一 done 真门。
