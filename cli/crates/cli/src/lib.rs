@@ -915,7 +915,7 @@ fn cmd_state_populate_modules() -> CmdResult {
     // 环图拒绝：与 topo-sort 门禁一致——有环无法生成可靠迁移序，须先打破环。
     if sequence.has_cycles() {
         let cycle_paths: Vec<Vec<String>> = sequence
-            .cycles()
+            .cycles
             .iter()
             .map(|c| c.iter().map(|id| id.to_string()).collect())
             .collect();
@@ -944,11 +944,11 @@ fn cmd_state_populate_modules() -> CmdResult {
         )));
     }
 
-    if sequence.order().is_empty() {
+    if sequence.order.is_empty() {
         warnings.push("源码图无文件模块，填充结果为空（请确认已运行 graph build）".to_owned());
     }
 
-    for node_id in sequence.order() {
+    for node_id in &sequence.order {
         machine.update_module(
             node_id.as_str(),
             ModuleState {
@@ -974,7 +974,7 @@ fn cmd_state_populate_modules() -> CmdResult {
     });
     machine.save(&path)?;
 
-    let modules: Vec<String> = sequence.order().iter().map(|id| id.to_string()).collect();
+    let modules: Vec<String> = sequence.order.iter().map(|id| id.to_string()).collect();
     Ok((
         json!({
             "module_count": modules.len(),
