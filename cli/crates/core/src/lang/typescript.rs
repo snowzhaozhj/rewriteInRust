@@ -17,7 +17,7 @@ use tree_sitter::{Node, Parser};
 
 use crate::error::{MigrateError, Result};
 use crate::types::common::{NodeId, SourceLang, Span};
-use crate::types::graph::{Dependency, EdgeType, NodeType, Provenance, SourceNode};
+use crate::types::graph::{Dependency, EdgeSubKind, EdgeType, NodeType, Provenance, SourceNode};
 
 use super::{CallInfo, FileAnalysis, ImportInfo, ImportedSymbol, LanguageAdapter};
 
@@ -620,7 +620,7 @@ fn extract_heritage(class_node: Node, class_id: &str, ctx: &mut AnalysisContext)
                     provenance: Provenance::TreeSitter,
                     weight: 1.0,
                     sub_kind: if is_implements {
-                        Some("implements".to_string())
+                        Some(EdgeSubKind::Implements)
                     } else {
                         None
                     },
@@ -1019,8 +1019,8 @@ export class AuthService implements Serializable {
             .collect();
         assert!(!extends_edges.is_empty(), "should have extends edge");
         assert_eq!(
-            extends_edges[0].sub_kind.as_deref(),
-            Some("implements"),
+            extends_edges[0].sub_kind,
+            Some(EdgeSubKind::Implements),
             "should be implements"
         );
     }

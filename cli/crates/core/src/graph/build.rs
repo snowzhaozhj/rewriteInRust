@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{MigrateError, Result};
 use crate::lang::{FileAnalysis, LanguageAdapter};
 use crate::types::common::{NodeId, EXCLUDED_DIRS};
-use crate::types::graph::{Dependency, EdgeType, NodeType, Provenance, SourceNode};
+use crate::types::graph::{Dependency, EdgeSubKind, EdgeType, NodeType, Provenance, SourceNode};
 
 use super::SourceGraph;
 
@@ -269,7 +269,7 @@ fn add_cross_file_edges(
                         edge_type: EdgeType::Calls,
                         provenance: Provenance::TreeSitter,
                         weight: 1.0,
-                        sub_kind: Some("constructor".to_string()),
+                        sub_kind: Some(EdgeSubKind::Constructor),
                         mapping_notes: None,
                     });
                 }

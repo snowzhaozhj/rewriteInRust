@@ -15,7 +15,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{MigrateError, Result};
 use crate::types::common::{NodeId, Span};
-use crate::types::graph::{Dependency, EdgeType, NodeType, Provenance, SourceNode, Visibility};
+use crate::types::graph::{
+    Dependency, EdgeType, NodeType, Provenance, RustKind, SourceNode, Visibility,
+};
 
 use super::SourceGraph;
 
@@ -55,7 +57,7 @@ pub fn save_to_db(graph: &SourceGraph, db_path: &Path) -> Result<()> {
                 node.line_range.map(|s| s.end_line),
                 node.is_exported,
                 node.complexity.map(|c| c.to_string()),
-                node.migration_status,
+                node.migration_status.map(|s| s.to_string()),
                 node.migration_priority,
                 extra,
             ])?;
@@ -77,7 +79,7 @@ pub fn save_to_db(graph: &SourceGraph, db_path: &Path) -> Result<()> {
                 edge.edge_type.to_string(),
                 edge.provenance.to_string(),
                 edge.weight,
-                edge.sub_kind,
+                edge.sub_kind.map(|s| s.to_string()),
                 edge.mapping_notes,
             ])?;
         }
@@ -154,7 +156,7 @@ pub fn load_from_db(db_path: &Path) -> Result<SourceGraph> {
                 visibility: extra.visibility,
                 is_abstract: extra.is_abstract,
                 decorators: extra.decorators,
-                migration_status: r.migration_status,
+                migration_status: r.migration_status.as_deref().and_then(|s| s.parse().ok()),
                 migration_priority: r.migration_priority,
                 rust_kind: extra.rust_kind,
                 rust_path: extra.rust_path,
@@ -200,7 +202,7 @@ pub fn load_from_db(db_path: &Path) -> Result<SourceGraph> {
                 edge_type,
                 provenance,
                 weight: r.weight,
-                sub_kind: r.sub_kind,
+                sub_kind: r.sub_kind.as_deref().and_then(|s| s.parse().ok()),
                 mapping_notes: r.mapping_notes,
             });
         }
@@ -253,7 +255,7 @@ struct NodeExtra {
     is_abstract: bool,
     decorators: Vec<String>,
     /// RustTarget 专属。
-    rust_kind: Option<String>,
+    rust_kind: Option<RustKind>,
     rust_path: Option<String>,
     crate_name: Option<String>,
 }
@@ -265,7 +267,7 @@ impl From<&SourceNode> for NodeExtra {
             visibility: node.visibility,
             is_abstract: node.is_abstract,
             decorators: node.decorators.clone(),
-            rust_kind: node.rust_kind.clone(),
+            rust_kind: node.rust_kind,
             rust_path: node.rust_path.clone(),
             crate_name: node.crate_name.clone(),
         }
@@ -298,6 +300,7 @@ mod tests {
     use super::*;
     use crate::graph::build::build_graph_ts;
     use crate::types::common::Complexity;
+    use crate::types::state::ModuleStatus;
     use std::path::PathBuf;
 
     fn fixtures_dir() -> PathBuf {
@@ -411,7 +414,7 @@ mod tests {
             visibility: Some(Visibility::Public),
             is_abstract: false,
             decorators: vec!["deprecated".to_string()],
-            migration_status: Some("pending".to_string()),
+            migration_status: Some(ModuleStatus::Pending),
             migration_priority: Some(1),
             rust_kind: None,
             rust_path: None,
@@ -441,7 +444,7 @@ mod tests {
         assert_eq!(node.visibility, Some(Visibility::Public));
         assert!(!node.is_abstract);
         assert_eq!(node.decorators, vec!["deprecated"]);
-        assert_eq!(node.migration_status, Some("pending".to_string()));
+        assert_eq!(node.migration_status, Some(ModuleStatus::Pending));
         assert_eq!(node.migration_priority, Some(1));
 
         let _ = std::fs::remove_file(&db_path);
@@ -466,7 +469,7 @@ mod tests {
             decorators: Vec::new(),
             migration_status: None,
             migration_priority: None,
-            rust_kind: Some("Function".to_string()),
+            rust_kind: Some(RustKind::Function),
             rust_path: Some("my_crate::utils::capitalize".to_string()),
             crate_name: Some("my-crate".to_string()),
         });
@@ -484,7 +487,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(node.node_type, NodeType::RustTarget);
-        assert_eq!(node.rust_kind, Some("Function".to_string()));
+        assert_eq!(node.rust_kind, Some(RustKind::Function));
         assert_eq!(
             node.rust_path,
             Some("my_crate::utils::capitalize".to_string())
