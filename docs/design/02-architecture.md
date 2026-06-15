@@ -153,7 +153,7 @@
                     │          │         └─────────┘
                     ▼          │
                ┌─────────┐    │   ┌─────────────────────────────┐
-               │GRADUATE │    │   │  BLOCKED（可从任意状态进入） │
+               │GRADUATE │    │   │  BLOCKED（仅活跃状态可进入） │
                └─────────┘    │   │  依赖模块降级/阻塞时触发     │
              知识固化+退出     │   │  解除后恢复 pre_blocked_status│
                               │   └─────────────────────────────┘
@@ -172,6 +172,10 @@
   → 重新进入翻译循环，清除降级标记，重置重试计数
   → 适用场景：PORTING 规则更新后、LLM 能力提升后、人工提供了额外指导后
 ```
+
+> **终态与 blocked 进入规则**（M2-DESIGN-01/02 定稿，权威矩阵见 [09 附录 A § 合法状态转换](./09-appendix-schemas.md#合法状态转换)）：
+> - **`done` 是硬终态**：无出边，通过全部验证（Tier 0/1/2 + `TODO(port)`=0）后到达，**不可经 `--force` 重做**（如确需重迁须人工重置该模块状态后重跑）。上图「恢复路径（DEGRADE → TRANSLATE）」的 `--force` **仅适用 `degrade_*` 降级状态、不涉及 `done`**。项目级毕业由 `/migrate graduate` 评估、以模块 `done` 为前置（M2-ADV-03）。
+> - **`blocked` 仅活跃状态可进入**：`pending`/`translating`/`compile_fixing`/`testing`/`reviewing`/`paused` 六个活跃状态可进入 `blocked`；`done`/`degrade_*`（终态/半终态）进入 blocked 无意义、不允许。解除后恢复 `pre_blocked_status`（见上图与 [09 附录 A](./09-appendix-schemas.md#合法状态转换)）。
 
 > **Phase A/B 与状态机的映射**：状态机图中的 `TRANSLATE` 是单一概念状态，但其内部包含 [03 § 4.3](./03-execution-model.md#43-内循环模块级单会话内-phase-ab-双阶段翻译) 的 Phase A（忠实翻译）→ 对抗性审查 → Phase B（惯用化优化）三个子步骤。Phase A/B 是 `TRANSLATE` 状态内的**内部子步骤**，状态转换在 Phase B 首次产出代码后发生：`cargo check` 通过则 `translating` → `testing`；失败则 `translating` → `compile_fixing` 进入重试循环，通过后 `compile_fixing` → `testing` → `reviewing`（映射见 [09 附录](./09-appendix-schemas.md#状态机概念名--json-字段值映射)）。对抗性审查在 TRANSLATE 内部执行（Step 3），不触发状态转移；VERIFY 的 `reviewing` 子状态为测试通过后的最终签批门禁（TODO(port) 清零 + 验收）。
 >

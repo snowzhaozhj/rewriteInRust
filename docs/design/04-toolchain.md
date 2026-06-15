@@ -273,6 +273,14 @@ struct NodeData {
 
 > **MVP 实际触发的子集**（schema 是「一套支持两个产品阶段」的前瞻设计，但 <5K 行项目只会产生其中一部分）：节点限于 `File`/`Module`/`Package`/`Function`/`Class`/`Interface`/`Enum`/`RustTarget`/`TestFixture` 共 **9 类**；边限于 `contains`/`imports`/`calls`/`extends`/`uses_type`/`exports`/`maps_to`/`tested_by` 共 **8 类**。`Community`/`TypeAlias`/`Variable` 等 M2 节点与 `member_of`/`depends_on`/`wraps`/`implements` 等 M2 边虽在 schema 预留，但 MVP <5K 项目不会产生（典型图规模 20-100 节点、100-500 边，不触发社区检测，见 § 5.7.3）。能力首次需要的时机对照见 [08 § M1](./08-roadmap-and-reference.md#m1-mvp6-8-周)。
 
+> **迁移映射机制（`maps_to` 边 / `RustTarget` 节点 / `nodes.migration_status`）的接线状态与定位**：这套结构把「源→Rust 目标映射」建模进图，**接线状态分两类**：
+> - **`migration_status`**：M2 跨模块并行已计划回写——编排器在模块达终态时与 `migration-state.json` **同序更新**（见 [PLAN-M2 § D3](../PLAN-M2.md) SCALE 段、[§ 5.7.3](#573-持久化存储) 集中 writer 模型）。
+> - **`maps_to` / `RustTarget`**：**当前 `graph build` 不产生、翻译链不写回**，为前瞻预留（N:M 源↔目标映射锚点，理由见上「设计决策」三条）。
+>
+> **关键：依赖链翻译不依赖此机制**。模块 B 依赖 A、A 已迁移后翻译 B，所需信息由四件套覆盖——① 源码依赖边（`imports`/`calls`/`uses_type`，表达「B 依赖 A 的哪些符号」）；② `migration-state.json` 状态（「A 是否 `done`/`degrade_*`」，依赖就绪门禁见 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径)）；③ 直读 A 已生成的 `rust_root/*.rs`（A 的**真实 Rust 接口**，是一手 ground truth，比图映射更准）；④ `cargo check` / worktree 整组编译（验证 B 对 A 的调用正确）。A 迁移产物的真实接口自描述于 `.rs` + 由编译器强制，**无需图中间映射表**。
+>
+> `maps_to`/`RustTarget` 真正的价值在**反向/分析用途**（源↔目标可追溯报告/可视化、FFI 降级的 `wraps` 边分析、N:M 重组审计），而非依赖链翻译；其接线时机由这些具体需求拉动。未被具体功能拉动前保持预留，避免成为类似已删 `risk` 的死字段（见 [03 § 4.3.2](./03-execution-model.md#432-复杂度自适应分档tier-01m2)）。
+
 ### 5.7.2 内存图引擎
 
 **选型：petgraph + newtype 索引**（借鉴 Guppy 的封装模式）：
@@ -390,17 +398,19 @@ INSERT INTO metadata (key, value) VALUES ('graph_integrity', 'full');
 
 **连接配置**（借鉴 CodeGraph）：WAL 模式、64MB 页缓存、mmap I/O、`PRAGMA synchronous=NORMAL`（WAL 下平衡性能与崩溃安全）。
 
-**并发写入策略**（M2+ Workflow 批量模式：多 agent 在独立 worktree 并行迁移、共享单一 `source-graph.db`，见 [03 § 4.2.1](./03-execution-model.md#421-执行模式分层)）：
+**图写隔离与 WAL 回退策略**（M2+ Workflow 批量模式：多 agent 在独立 worktree 并行迁移、共享主 worktree 的 `source-graph.db`，见 [03 § 4.2.1](./03-execution-model.md#421-执行模式分层)；**D5 定稿：翻译期图只读 + 编排器集中 writer 为主架构，WAL 多 writer 为可选回退，详见下方**）：
 
-> **MVP 不需要本节策略**：MVP 单模块串行，所有写操作由单个 CLI writer（如 `graph build`）或单个 SubAgent 顺序执行，无并发锁争夺。MVP 期对 `source-graph.db` 的写串行化**不依赖** WAL + `busy_timeout`，而由两层既有机制保障：(a) 每个 `/migrate` 命令在 Step 0 以 `flock -n .rust-migration/.migration-lock` 获取**全局命令锁**，禁止两个 `/migrate` 实例并发（含 Sprint Planning 中调用 `graph build` 增量重建与分析并发，见 [06 § 10.5 多终端并发隔离](./06-plugin-structure.md#105-编排调度路径)）；(b) `file-guard.sh` 对 `source-graph.db` 加 `flock` 排他锁，防御指令跟随失败导致的意外并发（见 [06 § 10.3](./06-plugin-structure.md#103-hooks自动化门禁)）。analyzer→translator→scaffolder 严格串行（序列见 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径)）。下方的 WAL + `busy_timeout` 策略仅 M2+ 并行模式需要。
+> **MVP 不需要本节策略**：MVP 单模块串行，所有写操作由单个 CLI writer（如 `graph build`）或单个 SubAgent 顺序执行，无并发锁争夺。MVP 期对 `source-graph.db` 的写串行化**不依赖** WAL + `busy_timeout`，而由两层既有机制保障：(a) 每个 `/migrate` 命令在 Step 0 以 `flock -n .rust-migration/.migration-lock` 获取**全局命令锁**，禁止两个 `/migrate` 实例并发（含 Sprint Planning 中调用 `graph build` 增量重建与分析并发，见 [06 § 10.5 多终端并发隔离](./06-plugin-structure.md#105-编排调度路径)）；(b) `file-guard.sh` 对 `source-graph.db` 加 `flock` 排他锁，防御指令跟随失败导致的意外并发（见 [06 § 10.3](./06-plugin-structure.md#103-hooks自动化门禁)）。analyzer→translator→scaffolder 严格串行（序列见 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径)）。下方的 WAL + `busy_timeout` **多 writer** 策略经 **D5 降级**：M2 主架构为编排器集中 writer（翻译期图只读、无多 writer 并发），该策略仅在未来「SubAgent 直写 db」回退模式才需要（见下）。
 
-- **隔离与重试**：SQLite WAL 支持「单 writer + 多 reader」并发。每个连接设 `PRAGMA busy_timeout=5000`；写操作遇 `SQLITE_BUSY` 时按指数退避重试（最多 3 次）后上报。rusqlite 经 libsqlite3 透传上述 PRAGMA 与 busy handler。
-- **写入序列化**：`graph build` / 增量更新的写入由 CLI 侧 writer 排他锁串行化（reader 信号量 ≤ N，writer 独占），避免多 agent 同时改图。M2 多 agent 并发时，默认策略为 analyzer/scaffolder 对 `nodes`/`edges` 表的写入通过 SQLite WAL 串行化（rusqlite 的 `busy_timeout` + 指数退避重试保证一致性）；若 M2 实测写锁等待 >50ms，降级为「SubAgent 只读 + 集中 writer」模型（见 [06 §10.5 M2 扩展表](./06-plugin-structure.md#105-编排调度路径) 与 [08 §M2 图并发写策略](./08-roadmap-and-reference.md#m2-质量提升8-12-周)）。汇总 agent 在所有并行 agent 完成后负责 WAL checkpoint。
-- **petgraph 副本隔离（M2 无内存竞态）**：petgraph 是进程内内存结构、无 WAL，故 M2 并发**不共享内存图**。各 SubAgent 启动时从 SQLite 加载**独立**的 petgraph 内存副本（`rustmigrate graph build --load-from-db`），进程内只读该副本。新增节点/边先写入 SQLite（经上述 WAL 串行化），后续 agent 启动时从 SQLite 重新加载——以「SQLite 为单一真相源 + 各 agent 内存副本隔离」规避内存竞态，代价是启动加载延迟（可接受，纳入 M2 性能门禁）。这同时回答了「中间态持久化（写 SQLite）/ 副本合并（不合并，各自从 DB 重载）/ 冲突检测（由 SQLite 写串行化兜底，无需独立算法）」三问。
+> **D3/D5 定稿：编排器集中 writer 取代共享 DB 并发写架构**（见 [MDR-003](../decisions/003-m2-parallel-write-isolation.md) 与 [08 § M2](./08-roadmap-and-reference.md#m2-质量提升8-12-周)）。M2 跨模块并行采用 git worktree 方案：**翻译期各 SubAgent 在自己 worktree 内只读加载图、不直写 db**；`source-graph.db` 的写者**只有编排器（集中 writer）**，写两类内容——① `graph build → save_to_db` 的图构建/增量重建；② 模块达终态时把 `migration_status` 回写图节点（与 `migration-state.json` **同序更新**，见 [PLAN-M2 § D3](../PLAN-M2.md) SCALE 段）。run 期运行时状态的主权威是 `migration-state.json`、亦由编排器单写。因此 M2 翻译期**不存在多 writer 并发**（SubAgent 只读、编排器单写），下方「WAL + busy_timeout 多 writer 串行化」策略**降级为未来「SubAgent 直写 db」模式的可选回退**，当前不启用。
+
+- **编排器集中 writer（M2 主架构）**：翻译期 **SubAgent 对 `source-graph.db` 无写者**（只读）；`source-graph.db` 的写者只有编排器——`graph build`（单进程）写图结构 + 模块终态把 `migration_status` 回写图节点（与 `migration-state.json` 同序）。各 worktree 的 SubAgent 通过 `[workspace] shared_db_path`（绝对路径、只读，见下「存储位置」）加载独立 petgraph 内存副本，进程内只读该副本。无并发写者 → 无 `SQLITE_BUSY` 争夺；集中 writer 提交事务后做一次 WAL checkpoint。这同时回答了 M2 并发三问：**中间态持久化**（模块翻译产物落在各 worktree 的 Rust 代码、不写图）/ **副本合并**（图不合并——各 agent 只读，装配的是 Rust 代码，见 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径)）/ **写冲突检测**（翻译期无图写者，N/A）。
+- **petgraph 副本隔离（M2 无内存竞态）**：petgraph 是进程内内存结构、无 WAL，故 M2 并发**不共享内存图**。各 SubAgent 启动时从 SQLite 加载**独立**的只读 petgraph 内存副本（`rustmigrate graph build --load-from-db`）。以「SQLite 为单一真相源 + 各 agent 内存副本隔离」规避内存竞态，代价是启动加载延迟（可接受，纳入 M2 性能门禁）。翻译期 graph 只读 → 无中间态写回、无副本合并、无写冲突检测问题。
+- **WAL 多 writer 串行化（可选回退，当前不启用）**：保留 WAL 连接配置（`PRAGMA journal_mode=WAL` + `busy_timeout`）作为防御性配置回归基线（防未来回退并发写模式时配置丢失，见 [08 § M2](./08-roadmap-and-reference.md#m2-质量提升8-12-周) WAL 配置回归）。**仅当未来改为「SubAgent 直写 db」模式才启用**：SQLite WAL 支持「单 writer + 多 reader」，每连接设 `PRAGMA busy_timeout=5000`，写操作遇 `SQLITE_BUSY` 按指数退避重试（最多 3 次）后上报（rusqlite 经 libsqlite3 透传 PRAGMA 与 busy handler）；`graph build`/增量更新由 CLI 侧 writer 排他锁串行化（reader 信号量 ≤ N，writer 独占），汇总 agent 完成后做 WAL checkpoint。该模式的「冲突率/锁等待」量化门禁经 **D5 降级为 N/A**（见 [08 § M2](./08-roadmap-and-reference.md#m2-质量提升8-12-周)）。
 - **增量更新的原子性**（MVP 与 M2 通用，与并发无关）：§ 5.7.5 的 STRUCTURAL 变更需「删除旧节点+边 → 重新解析插入」，必须包在**单个 `BEGIN IMMEDIATE TRANSACTION ... COMMIT` 事务**内完成，避免中间态触发外键约束违反（`edges.source/target` 引用 `nodes.id`）。删除按「先边后节点」顺序，插入按「先节点后边」顺序。MVP 期该事务由单个 `graph build` 进程持有、提交后才写 `metadata.graph_build_completed`（见 [09 附录 A](./09-appendix-schemas.md#附录-amigration-statejson-schema)），保证下游 analyzer 不会读到半成品图。
 - **跨文件一致性**：`migration-state.json` 与 `source-graph.db` 间无分布式事务，采用「先提交 DB 事务并 WAL checkpoint，再用 atomic rename（写临时文件后 `rename`）落 state.json」的顺序，保证 state.json 永不引用尚未持久化的图状态（all-or-nothing 语义）。
 
-> 多 agent 写竞争属于 12.1 风险矩阵「多 agent 冲突」的缓解面；MVP（单模块串行）不涉及并发写，以上为 M2 实现约束。
+> 「多 agent 冲突」见 12.1 风险矩阵；**D5 定稿后 M2 翻译期图为只读、无并发写竞争**，多 agent 的真实冲突面转移到 Rust 代码装配（共享 `.rs`/Cargo.toml/lib.rs），由 D3 约束包（worktree 自检 + reconcile + 整组 check 真门）治理，见 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径)。MVP（单模块串行）不涉及任何并发。
 
 **存储位置**：`.rust-migration/source-graph.db`（与 `migration-state.json` 同目录）。M2 多 agent 共享的 `source-graph.db` 固定位于**主 worktree** 的 `.rust-migration/source-graph.db`，各 agent worktree 通过 `.rustmigrate.toml` 的 `[workspace] shared_db_path`（绝对路径，由 Workflow 启动脚本注入）引用。
 
@@ -498,7 +508,7 @@ fn transitive_update(file, max_depth = 3):
 | 反向 BFS 耗时 | @100 / 300 / 500 文件项目 | O(V+E)，~O(文件数) | [Spike TBD] | >预期则评估增量缓存 |
 | 熔断命中率 | 「> 50 直接导入者」节点占比 | 罕见（浅链） | [Spike TBD] | 命中频繁则上调 N 或改分层截断 |
 
-> 熔断截断为「仅直接导入者」会丢失间接导入者的影响面——对长链项目可能造成图不一致，故熔断触发须记 warning 并提示用户对受影响子图做一次全量 `graph build`。熔断逻辑在截断时须原子写入 `source-graph.db` metadata 表字段 `graph_integrity`（值为 `"full"` | `"truncated_at_<ISO8601>"`），与变更事务同提交；全量 `graph build` 完成后重置为 `"full"`。下游 `topo-sort` 依赖此字段做前置检查（见 § 5.7.6）。M2+ 多 agent 并行时，增量更新写锁竞争纳入 [§ 5.7.3 并发写策略](#573-持久化存储) 与 [08 § M2 SQLite 并发写门禁](./08-roadmap-and-reference.md#m2-质量提升8-12-周) 评估。
+> 熔断截断为「仅直接导入者」会丢失间接导入者的影响面——对长链项目可能造成图不一致，故熔断触发须记 warning 并提示用户对受影响子图做一次全量 `graph build`。熔断逻辑在截断时须原子写入 `source-graph.db` metadata 表字段 `graph_integrity`（值为 `"full"` | `"truncated_at_<ISO8601>"`），与变更事务同提交；全量 `graph build` 完成后重置为 `"full"`。下游 `topo-sort` 依赖此字段做前置检查（见 § 5.7.6）。M2+ 增量更新（`graph build` 重建）仍由集中 writer 单进程执行（**D5：翻译期图只读、无多 agent 并发写**），写竞争评估按 [§ 5.7.3 图写隔离与 WAL 回退策略](#573-持久化存储)；原「08 § M2 SQLite 并发写门禁」经 D5 降级为 N/A，仅未来「SubAgent 直写 db」回退模式才重新适用。
 
 ### 5.7.6 图查询能力清单
 

@@ -98,7 +98,7 @@ M0 收尾时依据 `DESIGN_ASSUMPTIONS.md` 的 Spike 结论，按下表确定进
 - **M0 内**：Spike 0（Plugin 骨架）是前置，必须最先通过；Spike 1/2/3/4/5 在 Spike 0 通过后可并行。
 - **M1 内串行链**：`analyzer SubAgent` → `translator 生成 porting 规则`（**按项目即时生成，非预训练**，规则随 3 个真实项目迁移逐步产出）→ `TS 适配器 detect/extract` 脚本对接。三者非循环——适配器脚本提供输入，analyzer 消费图，translator 据图与陷阱清单生成规则。
 - 可并行项：Hook 脚本、`.rustmigrate.toml`、Plugin 打包结构与 CLI 核心命令开发互不阻塞，可与上述链并行推进。
-- **运行时串行边界（显式锁定）**：MVP 运行时 analyzer/scaffolder **严格串行执行**（`/migrate analyze` 的 3 次 SubAgent 调用顺序见 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径)），Spike 1 验证的正是这条串行路径的可靠性，**不预期 MVP 内并行**；跨模块并行属 M2 范围（图并发写策略见下方 M2 段落）。上述「可并行项」指开发期任务可并行，与运行时 SubAgent 串行无关。
+- **运行时串行边界（显式锁定）**：MVP 运行时 analyzer/scaffolder **严格串行执行**（`/migrate analyze` 的 3 次 SubAgent 调用顺序见 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径)），Spike 1 验证的正是这条串行路径的可靠性，**不预期 MVP 内并行**；跨模块并行属 M2 范围（图写架构见下方 M2 段落）。上述「可并行项」指开发期任务可并行，与运行时 SubAgent 串行无关。
 
 **M1 工作量分解（粗估）**：
 
@@ -155,7 +155,7 @@ M0 收尾时依据 `DESIGN_ASSUMPTIONS.md` 的 Spike 结论，按下表确定进
 - [ ] Sprint 循环外循环支持
 - [ ] Workflow 定义文件（ultracode 格式）
 - [ ] 多 agent worktree 隔离机制
-- [ ] petgraph 副本策略验证与 SQLite 并发写合规性测试（各 agent 从 DB 加载独立内存副本、WAL 串行写，见 [04 § 5.7.3](./04-toolchain.md#573-持久化存储)，1-2 人天）
+- [ ] petgraph 副本策略验证 + WAL **配置**回归测试（**D5 定稿：翻译期图只读、编排器集中 writer**，各 agent 从 DB 加载独立只读内存副本；断言 `PRAGMA journal_mode=WAL` + `busy_timeout` 配置正确，**非并发写压测**，见 [04 § 5.7.3](./04-toolchain.md#573-持久化存储)，1-2 人天）
 - [ ] 自定义 lint crate 架构（如 M1 确认需语义规则占比 > 30% 或规则 > 15 条，见 [04 § 5.2](./04-toolchain.md#52-tier-0硬性门禁)，预估 3-5 人天）
 - [ ] 规则治理工具化（含规则元数据 schema、deprecation 工具、社区评审检查清单自动化，承接 M1 模板驱动方案；MVP=模板驱动、M2=工具驱动，见 [05 § 6.2.1](./05-documentation-system.md#621-26-类规则的演化路径)，预估 2-3 人天）
 - [ ] 状态机程序化实现（独立 Rust orchestrator 二进制，确定性编排，替代 MVP 的 SKILL.md 指令驱动；见 [02 § 3.4.1](./02-architecture.md#341-mvp--m2-演进与向后兼容)）
@@ -166,7 +166,7 @@ M0 收尾时依据 `DESIGN_ASSUMPTIONS.md` 的 Spike 结论，按下表确定进
 - [ ] CI/CD 集成（`rustmigrate` 在 GitHub Actions 中使用；落地设计见 [03-execution-model.md § 4.11](./03-execution-model.md#411-cicd-集成m2-范围)）
 - [ ] Dogfooding fixture 编写与 CI workflow 完成（承接 M1 备料的 fixture，落地 `dogfooding.yml` 并按验收标准升级为 required，0.5-1 天，见 [03 § 4.11.4](./03-execution-model.md#4114-项目自验证dogfooding-m2-概念设计)）
 
-> **图并发写策略（跨模块并行阶段）**：M2 的跨模块并行下，并发 SubAgent 实例共享 `source-graph.db`（见 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径)），单 SQLite 同一时刻仅一个写者。除上方「SQLite 并发写冲突率」门禁外，M2 规划阶段还需实测并发 agent 对 `nodes`/`edges` 表的并发写在 WAL 模式（[04 § 5.7.3](./04-toolchain.md#573-持久化存储)已选用）下的写锁等待：若单次 ≤ 20ms，记为「WAL 足够，记录锁行为」；若 > 50ms，采用「共享只读图 + 写批量化」或「每 agent 写分片后合并」并记录权衡。此为 M2 规划项，不进 M0 Spike（M0 Spike 仅验证 MVP 串行关键路径）。状态机程序化 + schema 向后兼容框架合计 +3–5 人天。
+> **图写架构（跨模块并行阶段，D3/D5 定稿）**：M2 跨模块并行采用 git worktree 方案，**翻译期 SubAgent 在各自 worktree 内只读加载图、不直写 db**；`source-graph.db` 的写者**只有编排器（集中 writer）**——`graph build → save_to_db` 写图结构 + 模块终态把 `migration_status` 回写图节点（与 `migration-state.json` 同序，见 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径) 与 [04 § 5.7.3](./04-toolchain.md#573-持久化存储)）。**因翻译期无多 writer 并发，原「共享 DB 并发写 + WAL 串行化」架构被集中 writer 取代**；原 WAL 并发写策略（busy_timeout/退避重试/写锁等待门禁）**保留为未来「SubAgent 直写 db」模式的可选回退**，当前仅保留 WAL **配置**回归（断言连接 PRAGMA 正确，非并发压测），「冲突率/锁等待」量化门禁经 **D5 降级为 N/A**。多 agent 的真实冲突面转移到 Rust 代码装配（共享 `.rs`/Cargo.toml/lib.rs），由 D3 约束包治理（见 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径)）。状态机程序化 + schema 向后兼容框架合计 +3–5 人天。
 
 **验收指标**：
 - 在 3 个真实 TS 中型项目（5K-20K 行）中完成多模块迁移
@@ -179,12 +179,12 @@ M0 收尾时依据 `DESIGN_ASSUMPTIONS.md` 的 Spike 结论，按下表确定进
 | 指标 | 阈值 | 测试方法 |
 |------|------|---------|
 | 多 agent 并行吞吐 | ≥ 1.5 模块/小时（`max_concurrent_agents=3`，假设条件见 [03 § 4.10(2)](./03-execution-model.md#410-性能与并行转换指南)） | 在中型验收项目上跑 Workflow 批量模式，统计同批内 3 agent 并行完成模块数 / 墙钟小时；**记录同批模块耗时分布（P50/P95/P99）**，确认 1.5 baseline 基于 P50/平均值；若 P99 超预期（> 50% 模块），重新评估目标可达成性或调整 `max_concurrent_agents`；不含人工审阅 |
-| SQLite 并发写冲突率 | < 10%（3 agent 负载下） | 3 agent 并发写 source-graph.db，统计 `SQLITE_BUSY`/重试次数 占总写操作比例（WAL 模式连接配置见 04-toolchain.md § 5.7）。**关联**：冲突率 > 10% 或单次锁等待 > 20ms 时，预期吞吐下降 5-15%，需调整并发度或写批量化 |
+| WAL 配置回归（D5：取代「并发写冲突率」门禁） | 连接配置正确 | 断言 `PRAGMA journal_mode=WAL` + `busy_timeout` 配置正确（防御未来回退并发写模式时配置丢失）。**D5 定稿：翻译期图只读、编排器集中 writer，原「3 agent 并发写冲突率 < 10% / 锁等待 ≤ 20ms」量化门禁 N/A**；该门禁仅在未来「SubAgent 直写 db」回退模式重新激活 |
 | 性能基准无退化 | 相对 M1 基线波动 ≤ ±10% | 复用 M1 性能门禁三项（图构建、单 agent 流程、上下文利用率），在相同测试项目上回归对比 |
 
 > M2 并行吞吐指标上限按 `max_concurrent_agents=3` 设定，与 MVP 范围一致；不引入未规划的 4+ agent 并行（属 M4 优化项）。
 
-**M2 → M3 升级判据**：M2 验收通过（即可进入 M3 多语言支持）的充要条件为以下全部满足——(a) P50 ≥ 1.5 模块/小时；(b) P99 ≥ 0.8 模块/小时（允许部分低效批次但不破此线）；(c) SQLite 并发写冲突率 < 10% 且单次锁等待 ≤ 20ms；(d) 相对 M1 基线性能波动 ≤ ±10%（上表已定）。理论上 3 agent 理想并行可达 ~5 模块/小时（35 分钟/模块 ÷ 3），1.5 为含 SQLite 锁争夺 + worktree 启动开销后的**及格线**而非天花板。若 (a)-(d) 全过则验收通过；任一不满足则 M2 增 1-2 周优化（SQLite 分片 / worktree 缓存等），或降 `max_concurrent_agents` 至 2 后重新验收。实测 P99 分布须与 [03 § 4.10(2)](./03-execution-model.md#410-性能与并行转换指南) 假设条件对标，超预期须在 MDR 记录偏差根因。
+**M2 → M3 升级判据**：M2 验收通过（即可进入 M3 多语言支持）的充要条件为以下全部满足——(a) P50 ≥ 1.5 模块/小时；(b) P99 ≥ 0.8 模块/小时（允许部分低效批次但不破此线）；(c) **（D5 定稿）集中 writer 模型，SQLite 并发写门禁 N/A；仅保留 WAL 配置回归**（断言连接 PRAGMA 正确）；(d) 相对 M1 基线性能波动 ≤ ±10%（上表已定）。理论上 3 agent 理想并行可达 ~5 模块/小时（35 分钟/模块 ÷ 3），1.5 为含 worktree 启动开销后的**及格线**而非天花板。若 (a)-(d) 全过则验收通过；任一不满足则 M2 增 1-2 周优化（SQLite 分片 / worktree 缓存等），或降 `max_concurrent_agents` 至 2 后重新验收。实测 P99 分布须与 [03 § 4.10(2)](./03-execution-model.md#410-性能与并行转换指南) 假设条件对标，超预期须在 MDR 记录偏差根因。
 
 ### M3: 多语言支持（8-16 周）
 

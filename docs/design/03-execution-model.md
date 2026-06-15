@@ -218,6 +218,29 @@ Work Unit（一个 Claude Code 会话）:
 - **灰色情况处理权限**：Phase B 期间 verifier 发现摘要与代码不符，视为「意图漂移」（区别于「摘要表述不清」），触发更新 `{module}-intent.md` 并由 verifier 记入 MDR；该修改**不计为违反 Step 2.5 人工确认**——因其源自后续代码生成的新发现，而非原始摘要问题（更新频率上限见 § 4.3 Step 6）。
 - **验收标准映射**（取代独立质量配置项）：意图摘要质量以「§ 4.3.1 用户应拒绝的 5 个特征 ↔ § 4.3 Step 2 的 7 字段完整性 ↔ [09 附录 E](./09-appendix-schemas.md#附录-e意图摘要module-intentmd内容规范) JSON Schema」三者映射判定，不引入 `intent_summary_min_quality` 配置项。
 
+### 4.3.2 复杂度自适应分档（TIER-01，M2）
+
+> M2 引入。M1 对所有模块跑完整 11 步内循环；M2 按模块复杂度分档，让简单模块走短路径，减少无效 token 消耗（决策见 [PLAN-M2 §2 D4](../PLAN-M2.md)）。分档结果记入 `ModuleState.tier`（`Trivial`/`Standard`/`Full`），由 `rustmigrate detect` 在 per-module AST 语义特征上自动评估（M2-TIER-01a），analyzer 输出语义信号供复核。
+
+**与 `NodeData.complexity` 的关系（消歧）**：两者是**正交的两套分级**，不可混用——
+
+- `NodeData.complexity`（[04 § 5.7.1](./04-toolchain.md#571-图数据模型)，`Simple`/`Moderate`/`Complex`）按 **LOC** 估算，是图层面的规模标注，用于批次划分/优先级提示。
+- `ModuleState.tier`（本节，`Trivial`/`Standard`/`Full`）按 **AST 语义特征**驱动，**决定翻译循环路径**。**短 ≠ 低风险**（`utils.clamp` 几行但含 NaN 陷阱 → `Full`），故 tier 不从 complexity 推导。
+
+> 实现注：M2 同处**删除 M1 起恒为 `Low` 的死字段 `ModuleState.risk`/`default_risk()`**（零读取点），由「填 risk」改为「填 tier」，详见 [PLAN-M2 §2 D4](../PLAN-M2.md)。分档理由（危险信号，如 `["async","try-catch"]`）写入 run 日志 + `AttemptRecord` 供失败升档定位，**不**新增持久化 `tier_signals` 字段（过度设计）。
+
+**分档判据（基于 AST 可见语义特征，非 LOC）**：
+
+| 档位 | 判据 | 循环 | 测试 |
+|------|------|------|------|
+| **Trivial** | 纯类型文件（仅 interface/type/enum 导出）或常量文件或 barrel（仅 re-export） | 批量直翻 + 编译 + 签批，**跳 Phase B** | 仅验编译 + 导出可见性 |
+| **Standard** | 无下列任何危险信号的普通模块 | 保留意图摘要 + Phase A + 审查 + 测试 | 语义等价测试 |
+| **Full** | 含**任一危险信号**：副作用 I/O / 并发(Promise.all/async) / 错误路径(try-catch) / 数值计算 / 全局状态 / 动态类型操作 / 条件类型/泛型约束 / unknown·never 不可判定 | 完整 11 步（见 § 4.3） | 完整 Tier 0+1+2 |
+
+**关键原则**：
+- 任一危险信号或 `unknown` → **不降档**（默认 `Full` 兜底）；分档可观测（state 记录结果）+ 失败自动升档重跑（M2-TIER-01d）。
+- **维度 9 意图一致性永不跳过**（见 § 7.7）。`Trivial` 无运行时行为可比对，其维度 9 **退化为「导出符号 + 类型签名集合一致性」核对**——源导出的 `interface/type/enum/const` 名称与签名 ⇿ Rust 侧 `pub` 类型/常量逐项对应（核对类型契约而非行为契约，故「永不跳过」成立，`Trivial` 不生成完整 7 字段 intent.md）；`Standard`/`Full` 仍为完整 7 字段核对。
+
 ## 4.4 三层反馈循环
 
 | 层级 | 触发时机 | 延迟 | 内容 | 处理方式 |
@@ -353,7 +376,7 @@ max_concurrent_agents = min(LLM_API_并发限制, 磁盘 I/O 饱和点, 可用 w
 
 参考配置：激进 = 5 / 平衡 = 3（默认）/ 保守 = 1。`.rustmigrate.toml` 注释中应说明「3」是平衡配置默认值。
 
-> **M2 吞吐 ≥ 1.5 模块/小时（[08 § M2 验收](./08-roadmap-and-reference.md#m2-质量提升8-12-周)）的假设条件**：同批模块平均 1-2K 行、LLM 处理延迟 P50 ≤ 5 分钟、SQLite 写竞争占用 < 5% 总耗时（冲突率 < 10%）。任一实际超出该假设将影响可达成性，须在 M2 验收时按实测分布（P50/P95/P99）重新校准（验收口径见 08 § M2）。
+> **M2 吞吐 ≥ 1.5 模块/小时（[08 § M2 验收](./08-roadmap-and-reference.md#m2-质量提升8-12-周)）的假设条件**：同批模块平均 1-2K 行、LLM 处理延迟 P50 ≤ 5 分钟、worktree 启动 + target 冷编开销 < 5% 总耗时。**（D5 定稿：翻译期图只读、编排器集中 writer，无 SQLite 并发写竞争，原「SQLite 写竞争占用 / 冲突率」假设已移除，见 [04 § 5.7.3](./04-toolchain.md#573-持久化存储)）** 任一实际超出该假设将影响可达成性，须在 M2 验收时按实测分布（P50/P95/P99）重新校准（验收口径见 08 § M2）。
 
 **(3) 性能瓶颈分层**
 
@@ -373,7 +396,7 @@ max_concurrent_agents = min(LLM_API_并发限制, 磁盘 I/O 饱和点, 可用 w
 
 满足任一时，提示「考虑切换 Workflow 批量模式」。是否升级由用户决策（M1/M2 并存，不强制）。
 
-> 此处为「**何时考虑** M1→M2 升级」的启动条件（可观测、非硬性）；M2 验收通过并进入 M3 的**充要判据**（P50/P99/锁等待/波动四项）见 [08 § M2 → M3 升级判据](./08-roadmap-and-reference.md#m2-质量提升8-12-周)，两者勿混淆。
+> 此处为「**何时考虑** M1→M2 升级」的启动条件（可观测、非硬性）；M2 验收通过并进入 M3 的**充要判据**（P50/P99/**WAL 配置回归**/波动四项；D5 定稿：原「SQLite 锁等待」门禁经集中 writer 架构降级为 N/A）见 [08 § M2 → M3 升级判据](./08-roadmap-and-reference.md#m2-质量提升8-12-周)，两者勿混淆。
 
 ## 4.11 CI/CD 集成（M2 范围）
 

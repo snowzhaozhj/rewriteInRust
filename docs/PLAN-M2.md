@@ -151,7 +151,7 @@
 **矛盾**：08 §M2（line 169/181/182/187）+ 04 §5.7.3（line 393-399）以「多 agent 共享 `source-graph.db` 并发写 + WAL 串行化」为 M2 默认架构，并把「SQLite 冲突率<10% 且锁等待≤20ms」列为 M2→M3 硬性升级判据(c)。但 D3 选定 worktree 方案（编排器单写 `migration-state.json` + SubAgent 在 worktree 内只读 graph、不直写 db），**并发写场景不存在**，该门禁失去测试对象。复审草稿直接删 WAL 测试，却留下 §1.2/§1.3/F5/Level5 仍要求该项的自相矛盾。
 
 **决策（用户已批：降级为 WAL 配置回归）**：
-- 翻译期 `source-graph.db` 只读：唯一写入口为 `graph build → save_to_db`（lib.rs:585 / persist.rs:25）；run 期状态走 `state transition` 写 `migration-state.json`，由编排器单写（codex 确认无 SubAgent 直写 graph 路径）。
+- 翻译期 **SubAgent 对 `source-graph.db` 只读**（worktree 内只读加载图、不直写 db，codex 确认无 SubAgent 直写 graph 路径）；`source-graph.db` 写者只有编排器（集中 writer）：① `graph build → save_to_db`（lib.rs:585 / persist.rs:25）写图结构 ② **模块达终态时回写 `migration_status`**（与 `migration-state.json` 同序，见本节 line 129/381 与 §7 SCALE）。run 期运行时状态主权威是 `migration-state.json`、亦由编排器单写。**关键：仍无多 writer 并发**（SubAgent 只读、编排器单写），D5 集中 writer 论断成立。〔修正：原表述「唯一写入口 graph build」遗漏了 run 期编排器对 `migration_status` 的回写，与本节 line 129/381 不一致，现统一为「编排器集中 writer，写图结构 + 终态 migration_status」。〕
 - 保留**一条 WAL 配置回归测试**：断言 `PRAGMA journal_mode=WAL` + `busy_timeout` 连接配置正确（防御未来回退并发写模式时配置丢失），**移除「冲突率/锁等待」量化门禁**。
 - M2→M3 升级判据(c) 改为「集中 writer 模型，SQLite 并发写门禁 N/A；仅保留 WAL 配置回归」。
 - 同步更新设计文档 04 §5.7.3 / 08 §M2：标注「D3 worktree 下编排器集中 writer 取代原共享 DB 并发写架构；原 WAL 并发写策略保留为未来 SubAgent 直写 db 模式的可选回退」——并入 M2-DESIGN-03。
