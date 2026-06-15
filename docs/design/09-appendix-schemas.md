@@ -124,6 +124,8 @@
 }
 ```
 
+> **module `risk` 字段分期（M2-DESIGN-03 / D4）**：上方示例中的 `risk`（`low`/`medium`/`high`）是 **M1 起恒为 `low` 的死字段**（零读取点）。**M2-TIER-01a 删除 `risk`，改填复杂度自适应分档 `tier`**（`Trivial`/`Standard`/`Full`，`Option<ModuleTier>`，由 AST 语义特征驱动、决定翻译循环路径，见 [03 § 4.3.2](./03-execution-model.md#432-复杂度自适应分档tier-01m2)）。分档理由（危险信号）记入 run 日志 + `AttemptRecord`，**不**新增持久化 `tier_signals` 字段。
+
 **`metadata` 字段说明**：
 
 | 字段 | 类型 | 含义 |
