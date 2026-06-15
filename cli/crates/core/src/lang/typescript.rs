@@ -325,20 +325,6 @@ fn walk_ast(node: Node, ctx: &mut AnalysisContext) {
     }
 }
 
-fn walk_ast_calls_only(node: Node, ctx: &mut AnalysisContext) {
-    match node.kind() {
-        "call_expression" => extract_call(node, ctx),
-        "new_expression" => extract_new(node, ctx),
-        _ => {}
-    }
-    let count = node.child_count();
-    for i in 0..count {
-        if let Some(child) = node.child(i) {
-            walk_ast_calls_only(child, ctx);
-        }
-    }
-}
-
 fn extract_function(node: Node, ctx: &mut AnalysisContext) {
     if let Some(name_node) = node.child_by_field_name("name") {
         let name = text(name_node, ctx.source);
@@ -461,12 +447,16 @@ fn extract_class(node: Node, ctx: &mut AnalysisContext) {
     // extends / implements
     extract_heritage(node, class_id.as_str(), ctx);
 
-    // 递归处理 body 内所有子节点（方法体内的 call/new 也要提取）
+    // 递归处理 body 内所有子节点。此处必须走完整的 walk_ast 而非 calls-only：
+    // 方法体内可能嵌套 class/function/dynamic import 等需独立提取的结构（如
+    // `class Outer { m() { import('./x'); class Inner {…} } }`），calls-only
+    // 仅采集 call/new、会漏掉嵌套 class 节点与其 dynamic import。method_definition
+    // 本身不是 walk_ast 的匹配分支，故不会与上面的 extract_methods 重复采集方法。
     if let Some(body) = node.child_by_field_name("body") {
         let count = body.child_count();
         for i in 0..count {
             if let Some(child) = body.child(i) {
-                walk_ast_calls_only(child, ctx);
+                walk_ast(child, ctx);
             }
         }
     }
@@ -1240,6 +1230,52 @@ async function load() {
         assert!(
             !extends_targets.iter().any(|t| t.contains('<')),
             "不应有 type_arguments 噪声边: {extends_targets:?}"
+        );
+    }
+
+    #[test]
+    fn nested_class_method_dynamic_import_is_captured() {
+        // 回归：walk_ast 必须递归进入 class body。嵌套在 class 方法内的
+        // dynamic import（含嵌套 class 内部）应被采集为 is_dynamic 的 ImportInfo，
+        // 嵌套 class 的方法也应生成 Function 节点。
+        let mut adapter = TypeScriptAdapter::new().unwrap();
+        let source = r#"
+class Outer {
+    async load() {
+        const a = await import('./feature-a');
+        class Inner {
+            run() { import('./feature-b'); }
+        }
+    }
+}
+"#;
+        let result = adapter.analyze_file(source, "nested.ts").unwrap();
+
+        let dynamic: Vec<&str> = result
+            .imports
+            .iter()
+            .filter(|i| i.is_dynamic)
+            .map(|i| i.module_path.as_str())
+            .collect();
+        assert!(
+            dynamic.contains(&"./feature-a"),
+            "class 方法内的 dynamic import 应被捕获: {dynamic:?}"
+        );
+        assert!(
+            dynamic.contains(&"./feature-b"),
+            "嵌套 class 方法内的 dynamic import 应被捕获: {dynamic:?}"
+        );
+
+        // 嵌套 class 的方法应作为 Function 节点入图（验证完整递归而非 calls-only）
+        let methods: Vec<&str> = result
+            .nodes
+            .iter()
+            .filter(|n| n.node_type == NodeType::Function)
+            .map(|n| n.name.as_str())
+            .collect();
+        assert!(
+            methods.contains(&"Inner.run"),
+            "嵌套 class Inner 的方法 run 应生成 Function 节点: {methods:?}"
         );
     }
 
