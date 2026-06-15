@@ -14,7 +14,7 @@
 
 | # | 草稿断言 | 核验 | 处理 |
 |---|---------|------|------|
-| 1 | D3 选「方案B修正版」（隔离 crate + 自 check + 写盘不回传 + 编排器 merge） | ✅ 方向正确，translator.md:100 确有写盘要求 | 保留，但修正 §7 旧伪代码（见 D3-fix） |
+| 1 | D3 写隔离方案 | ❌ 「隔离 crate 修正版」被推翻（详见下「D3 三轮演进」） | **终定 git worktree + 约束包**（用户拍板） |
 | 2 | `risk` 是零读取死字段 | ✅ `rg '\.risk\b'` 无判断/分支命中 | 删除，但**非「直接删」**：需同步 CLI 构造/测试/插件文档/schema，并入 TIER-01a |
 | 3 | `tier_signals` 自造、零先例、疑似过度设计 | ✅ 全仓零命中 | **撤销**：不进 schema，分档信号改写 run 日志/AttemptRecord |
 | 4 | 方案B 下翻译期 graph 无并发写 | ✅ 唯一写入口 graph build；run 走 state transition 单写 | 据此正式化 D5 |
@@ -34,6 +34,16 @@
 | SQLite 并发门禁 | 降级为 WAL 配置回归 | M2→M3 判据(c) 改 N/A；§1.2/§1.3/F5/Level5/PETGRAPH-01 同步 |
 | 全流程 60min 口径 | 单模块 full 档<60min | §1.2/F9 重定义；多模块归吞吐门禁 |
 | 状态机程序化 | 推迟二进制 + 抽 auto-unblock 到 M2 | 二进制留 M2.5；新增 M2-CLI-06 |
+
+### D3 三轮演进（写隔离方案，本次复审最大争点）
+
+1. **草稿「隔离完整 crate 副本 + 自检」** → 用户三点质疑（=手搓 worktree / 改主干共享 crate / 模块间依赖）+ codex 第二轮对抗审查推翻：Rust 编译单元是 crate 不是文件，隔离单模块副本要么编译不过要么=低配 worktree；且 orphan/coherence/feature/宏 冲突只有整 crate 编译能发现（任何隔离方案的盲区）。
+2. **一度倾向「轻量 staging（不自检）」** → 用户追问「共享改动少是否就不必 worktree」促深挖：发现 worktree 真正价值是 **per-agent 自检**（非冲突检测），而 M1 翻译架构本质是 per-module 编译反馈循环（Phase A 要编译通过 + Phase B 3 轮修复 + compile_fixing 状态）。
+3. **codex 第三轮终审 → 定 git worktree + 约束包**：staging = 取消 M1 反馈环、非等价并行化；worktree target 成本真实但不足以推翻自检收益。纠正：装配需**结构化合并**（Cargo.toml/lib.rs/mod）非纯 copy-out。**诚实标注**：worktree 优于 staging 的核心论据（M1 首轮普遍带编译错误）M1 未留痕、属推断 → Sprint F 实测首轮通过率 + target 成本，数据favor staging 则记录为已论证简化路径。
+
+**约束包**：① worktree 内完整 crate 真自检 ② 禁改共享文件→共享 API 变更回传编排器串行决策（配合叶子优先）③ dependency-mapping 前置强约束生态（防 Frankenstein Cargo.toml）④ merge 后整体 check 为唯一 done 真门 ⑤ 图缺陷（REFAC-10 档1 漏边致假独立）→回退串行+修图。
+
+**关键认知**：多 crate workspace **不是**长期最优的并行单元（用户质疑促修正）——它只是搬移共享瓶颈、受 crate 间禁环硬约束、且让构建期并行便利污染输出架构（范畴错误）。**并行机制（worktree）与输出 crate 结构正交**。
 
 **orchestrator 二进制 vs CLI 边界（澄清，未改决策）**：CLI=无状态工具箱（做一件事吐 JSON，不决定下一步）；orchestrator=有状态决策循环（决定模块顺序/sprint推进/重试/并发调度）。MVP/M1 该决策角色由 SKILL.md(LLM) 担任；二进制方案把它搬到确定性 Rust 代码。M2 维持 SKILL.md 编排，仅把确定性子项（auto-unblock）下沉为普通 CLI 子命令（进已有 `rustmigrate`，非新二进制）。**残留风险**：并行编排（3 agent+merge）仍非确定性，靠 D3 方案B 的「单写+兜底check+逐个回滚」控制（§13 R2）。
 
