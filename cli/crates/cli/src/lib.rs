@@ -903,11 +903,17 @@ fn cmd_state_transition_project(
 /// 可读、依赖门禁（`graph deps` + `modules[dep].status`）才成立。
 ///
 /// 流程：`load_graph` → `migration_sequence()` →（有环则拒绝，对齐 topo-sort 门禁）→
-/// 为每个文件模块写 `ModuleState{status:pending, sprint:1, risk:low}`（module key = NodeId 原值，
+/// 清理孤儿 pending（见下）→ 为每个文件模块写
+/// `ModuleState{status:pending, sprint:1, risk:low}`（module key = NodeId 原值，
 /// 与 `graph deps` 输出一致）→ `set_sprint(current:1)` → 原子落盘。
 ///
 /// **幂等保护**：已有模块处于非 `pending` 活跃态（迁移进行中）时拒绝覆盖，避免把进度重置回
 /// `pending`（断点续传安全）；仅当全部模块仍为 pending（或全新）时才整体重填。
+///
+/// **孤儿 pending 清理**：源码图删文件后重填时，上一轮登记、本轮序列已不含的 pending 模块会成为
+/// "孤儿"（状态中存在但源码图已无对应节点）。重填只新增/覆盖序列内节点，故先用
+/// [`MigrationStateMachine::retain_modules`] 剔除孤儿，保持 `modules` 与当前迁移序列一致，
+/// 避免不存在的模块被 `state report` / 依赖门禁误计入进度；被清理的 key 经 warning 告知用户。
 fn cmd_state_populate_modules() -> CmdResult {
     let graph = load_graph()?;
     let sequence = migration_sequence(&graph);
@@ -946,6 +952,18 @@ fn cmd_state_populate_modules() -> CmdResult {
 
     if sequence.order.is_empty() {
         warnings.push("源码图无文件模块，填充结果为空（请确认已运行 graph build）".to_owned());
+    }
+
+    // 孤儿 pending 清理：剔除 key 不在本轮迁移序列中的残留模块（源码图删文件后重填）。
+    let live_keys: std::collections::HashSet<String> =
+        sequence.order.iter().map(|id| id.to_string()).collect();
+    let orphans = machine.retain_modules(&live_keys);
+    if !orphans.is_empty() {
+        warnings.push(format!(
+            "已清理 {} 个孤儿 pending 模块（源码图已无对应节点）: {:?}",
+            orphans.len(),
+            orphans
+        ));
     }
 
     for node_id in &sequence.order {
