@@ -27,6 +27,20 @@ pub struct FileAnalysis {
     pub exported_names: std::collections::HashSet<String>,
 }
 
+/// 导入的种类（互斥，枚举消除原 `is_type_only`/`is_side_effect`/`is_dynamic`
+/// 三个布尔字段的非法组合，如「同时是 side-effect 又是 dynamic」）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportKind {
+    /// 普通值导入（`import { a } from 'x'`）。
+    StaticValue,
+    /// type-only 导入（`import type { T } from 'x'`）。
+    StaticType,
+    /// side-effect 导入（`import 'x'`，无符号）。
+    SideEffect,
+    /// 动态导入（`import('x')`）。
+    Dynamic,
+}
+
 /// 导入信息。
 #[derive(Debug, Clone)]
 pub struct ImportInfo {
@@ -34,12 +48,20 @@ pub struct ImportInfo {
     pub module_path: String,
     /// 导入的符号列表。
     pub symbols: Vec<ImportedSymbol>,
-    /// 是否为 type-only import。
-    pub is_type_only: bool,
-    /// 是否为 side-effect import（无符号导入）。
-    pub is_side_effect: bool,
-    /// 是否为动态 import。
-    pub is_dynamic: bool,
+    /// 导入种类。
+    pub kind: ImportKind,
+}
+
+/// 导入符号的种类（互斥，枚举消除原 `is_default`/`is_namespace`
+/// 同时为真的非法组合）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SymbolKind {
+    /// 具名导入（`import { a }`）。
+    Named,
+    /// 默认导入（`import X`）。
+    Default,
+    /// namespace 导入（`import * as X`）。
+    Namespace,
 }
 
 /// 单个导入符号。
@@ -49,10 +71,8 @@ pub struct ImportedSymbol {
     pub name: String,
     /// 别名（如有）。
     pub alias: Option<String>,
-    /// 是否为默认导入。
-    pub is_default: bool,
-    /// 是否为 namespace 导入（`* as X`）。
-    pub is_namespace: bool,
+    /// 符号种类。
+    pub kind: SymbolKind,
 }
 
 /// 函数调用信息。

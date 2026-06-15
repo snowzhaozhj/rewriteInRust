@@ -1,5 +1,5 @@
 use rustmigrate_core::lang::typescript::TypeScriptAdapter;
-use rustmigrate_core::lang::{FileAnalysis, LanguageAdapter};
+use rustmigrate_core::lang::{FileAnalysis, ImportKind, LanguageAdapter, SymbolKind};
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
@@ -12,20 +12,35 @@ fn to_string_sets(analysis: &FileAnalysis) -> (HashSet<String>, HashSet<String>,
     let exports: HashSet<String> = analysis.exported_names.clone();
 
     for imp in &analysis.imports {
-        if imp.is_side_effect {
-            imports.insert(format!("<-{}", imp.module_path));
-        } else if imp.is_dynamic {
-            imports.insert(format!("dynamic<-{}", imp.module_path));
-        } else {
-            for sym in &imp.symbols {
-                let prefix = if imp.is_type_only { "type:" } else { "" };
-                if sym.is_namespace {
-                    let alias = sym.alias.as_deref().unwrap_or("*");
-                    imports.insert(format!("{prefix}*:{alias}<-{}", imp.module_path));
-                } else if sym.is_default {
-                    imports.insert(format!("{prefix}default:{}<-{}", sym.name, imp.module_path));
+        match imp.kind {
+            ImportKind::SideEffect => {
+                imports.insert(format!("<-{}", imp.module_path));
+            }
+            ImportKind::Dynamic => {
+                imports.insert(format!("dynamic<-{}", imp.module_path));
+            }
+            ImportKind::StaticValue | ImportKind::StaticType => {
+                let prefix = if imp.kind == ImportKind::StaticType {
+                    "type:"
                 } else {
-                    imports.insert(format!("{prefix}{}<-{}", sym.name, imp.module_path));
+                    ""
+                };
+                for sym in &imp.symbols {
+                    match sym.kind {
+                        SymbolKind::Namespace => {
+                            let alias = sym.alias.as_deref().unwrap_or("*");
+                            imports.insert(format!("{prefix}*:{alias}<-{}", imp.module_path));
+                        }
+                        SymbolKind::Default => {
+                            imports.insert(format!(
+                                "{prefix}default:{}<-{}",
+                                sym.name, imp.module_path
+                            ));
+                        }
+                        SymbolKind::Named => {
+                            imports.insert(format!("{prefix}{}<-{}", sym.name, imp.module_path));
+                        }
+                    }
                 }
             }
         }

@@ -19,7 +19,9 @@ use crate::error::{MigrateError, Result};
 use crate::types::common::{NodeId, SourceLang, Span};
 use crate::types::graph::{Dependency, EdgeSubKind, EdgeType, NodeType, Provenance, SourceNode};
 
-use super::{CallInfo, FileAnalysis, ImportInfo, ImportedSymbol, LanguageAdapter};
+use super::{
+    CallInfo, FileAnalysis, ImportInfo, ImportKind, ImportedSymbol, LanguageAdapter, SymbolKind,
+};
 
 /// TypeScript 语言适配器（基于 tree-sitter-typescript）。
 pub struct TypeScriptAdapter {
@@ -284,8 +286,7 @@ fn walk_ast(node: Node, ctx: &mut AnalysisContext) {
                                         symbols.push(ImportedSymbol {
                                             name,
                                             alias,
-                                            is_default: false,
-                                            is_namespace: false,
+                                            kind: SymbolKind::Named,
                                         });
                                     }
                                 }
@@ -299,9 +300,11 @@ fn walk_ast(node: Node, ctx: &mut AnalysisContext) {
                 ctx.imports.push(ImportInfo {
                     module_path,
                     symbols,
-                    is_type_only,
-                    is_side_effect: false,
-                    is_dynamic: false,
+                    kind: if is_type_only {
+                        ImportKind::StaticType
+                    } else {
+                        ImportKind::StaticValue
+                    },
                 });
             }
         }
@@ -767,14 +770,20 @@ fn extract_import(node: Node, ctx: &mut AnalysisContext) {
         }
     }
 
-    let is_side_effect = !has_clause;
+    // 无 import_clause 即 side-effect 导入（`import 'x'`）；type-only 必带 clause，
+    // 二者互斥，故按优先级映射到单一 ImportKind。
+    let kind = if !has_clause {
+        ImportKind::SideEffect
+    } else if is_type_only {
+        ImportKind::StaticType
+    } else {
+        ImportKind::StaticValue
+    };
 
     ctx.imports.push(ImportInfo {
         module_path,
         symbols,
-        is_type_only,
-        is_side_effect,
-        is_dynamic: false,
+        kind,
     });
 }
 
@@ -796,8 +805,7 @@ fn extract_import_clause(node: Node, source: &str, symbols: &mut Vec<ImportedSym
                 symbols.push(ImportedSymbol {
                     name: text(child, source),
                     alias: None,
-                    is_default: true,
-                    is_namespace: false,
+                    kind: SymbolKind::Default,
                 });
             }
             "named_imports" => {
@@ -815,8 +823,7 @@ fn extract_import_clause(node: Node, source: &str, symbols: &mut Vec<ImportedSym
                         symbols.push(ImportedSymbol {
                             name: original,
                             alias,
-                            is_default: false,
-                            is_namespace: false,
+                            kind: SymbolKind::Named,
                         });
                     }
                 }
@@ -831,8 +838,7 @@ fn extract_import_clause(node: Node, source: &str, symbols: &mut Vec<ImportedSym
                         symbols.push(ImportedSymbol {
                             name: "*".to_string(),
                             alias: Some(text(id, source)),
-                            is_default: false,
-                            is_namespace: true,
+                            kind: SymbolKind::Namespace,
                         });
                     }
                 }
@@ -863,9 +869,7 @@ fn extract_call(node: Node, ctx: &mut AnalysisContext) {
                     ctx.imports.push(ImportInfo {
                         module_path: src.to_string(),
                         symbols: Vec::new(),
-                        is_type_only: false,
-                        is_side_effect: false,
-                        is_dynamic: true,
+                        kind: ImportKind::Dynamic,
                     });
                     break;
                 }
@@ -970,7 +974,10 @@ export class Calc {}
 
         assert_eq!(result.imports.len(), 2);
         assert!(result.imports.iter().any(|i| i.module_path == "fs"));
-        assert!(result.imports.iter().any(|i| i.is_type_only));
+        assert!(result
+            .imports
+            .iter()
+            .any(|i| i.kind == ImportKind::StaticType));
 
         let export_edges: Vec<_> = result
             .edges
@@ -1085,7 +1092,11 @@ obj.method();
         let mut adapter = TypeScriptAdapter::new().unwrap();
         let source = "const m = import('./module');";
         let result = adapter.analyze_file(source, "dyn.ts").unwrap();
-        let dynamic: Vec<_> = result.imports.iter().filter(|i| i.is_dynamic).collect();
+        let dynamic: Vec<_> = result
+            .imports
+            .iter()
+            .filter(|i| i.kind == ImportKind::Dynamic)
+            .collect();
         assert_eq!(dynamic.len(), 1);
         assert_eq!(dynamic[0].module_path, "./module");
     }
@@ -1254,7 +1265,7 @@ class Outer {
         let dynamic: Vec<&str> = result
             .imports
             .iter()
-            .filter(|i| i.is_dynamic)
+            .filter(|i| i.kind == ImportKind::Dynamic)
             .map(|i| i.module_path.as_str())
             .collect();
         assert!(
