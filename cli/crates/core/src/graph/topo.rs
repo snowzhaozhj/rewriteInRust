@@ -18,17 +18,36 @@ use crate::types::graph::{EdgeType, NodeType};
 use super::SourceGraph;
 
 /// 迁移序列：包含迁移顺序、可并行组和环信息。
+///
+/// 字段私有 + 只读 getter：构造仅由本模块的 [`migration_sequence`] 完成，
+/// 外部不可绕过拓扑计算直接拼装一个不自洽的序列（order/parallel_groups/cycles 必须同源）。
+/// `Serialize` 不受字段可见性影响，导出 JSON 字段名仍为 `order`/`parallel_groups`/`cycles`。
 #[derive(Debug, Clone, Serialize)]
 pub struct MigrationSequence {
     /// 迁移顺序（叶节点在前）。
-    pub order: Vec<NodeId>,
+    order: Vec<NodeId>,
     /// 可并行迁移的分组（同组内节点无依赖关系）。
-    pub parallel_groups: Vec<Vec<NodeId>>,
+    parallel_groups: Vec<Vec<NodeId>>,
     /// 所有检测到的环。
-    pub cycles: Vec<Vec<NodeId>>,
+    cycles: Vec<Vec<NodeId>>,
 }
 
 impl MigrationSequence {
+    /// 迁移顺序（叶节点在前）。
+    pub fn order(&self) -> &[NodeId] {
+        &self.order
+    }
+
+    /// 可并行迁移的分组（按层级，组索引可映射为 sprint 序号）。
+    pub fn parallel_groups(&self) -> &[Vec<NodeId>] {
+        &self.parallel_groups
+    }
+
+    /// 所有检测到的环。
+    pub fn cycles(&self) -> &[Vec<NodeId>] {
+        &self.cycles
+    }
+
     /// 是否存在循环依赖。
     pub fn has_cycles(&self) -> bool {
         !self.cycles.is_empty()
@@ -395,13 +414,13 @@ mod tests {
         let seq = migration_sequence(&graph);
 
         assert!(!seq.has_cycles(), "linear-deps 不应有环");
-        assert!(seq.cycles.is_empty());
-        assert!(!seq.order.is_empty());
-        assert!(!seq.parallel_groups.is_empty());
+        assert!(seq.cycles().is_empty());
+        assert!(!seq.order().is_empty());
+        assert!(!seq.parallel_groups().is_empty());
 
         // 验证并行组的层级关系
         // 第 0 组应包含叶节点（utils.ts），最后一组应包含根节点（index.ts）
-        let first_group = &seq.parallel_groups[0];
+        let first_group = &seq.parallel_groups()[0];
         let has_leaf = first_group.iter().any(|id| {
             let s = id.as_str();
             s.ends_with("utils.ts")
@@ -519,9 +538,9 @@ mod tests {
         let seq = migration_sequence(&graph);
 
         assert!(seq.has_cycles(), "circular-deps 应标记 has_cycles=true");
-        assert!(!seq.cycles.is_empty(), "应包含环信息");
+        assert!(!seq.cycles().is_empty(), "应包含环信息");
         // 即使有环也应生成排序
-        assert!(!seq.order.is_empty(), "有环时仍应生成尽力排序");
+        assert!(!seq.order().is_empty(), "有环时仍应生成尽力排序");
     }
 
     // === 边界情况测试 ===
@@ -545,9 +564,9 @@ mod tests {
     fn migration_sequence_empty_graph() {
         let graph = SourceGraph::new();
         let seq = migration_sequence(&graph);
-        assert!(seq.order.is_empty());
-        assert!(seq.parallel_groups.is_empty());
+        assert!(seq.order().is_empty());
+        assert!(seq.parallel_groups().is_empty());
         assert!(!seq.has_cycles());
-        assert!(seq.cycles.is_empty());
+        assert!(seq.cycles().is_empty());
     }
 }

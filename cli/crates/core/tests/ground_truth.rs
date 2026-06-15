@@ -543,10 +543,10 @@ fn ground_truth_linear_deps_migration_sequence() {
     let seq = migration_sequence(&graph);
 
     assert!(!seq.has_cycles(), "linear-deps 不应有环");
-    assert!(!seq.order.is_empty(), "迁移序列不应为空");
-    assert!(!seq.parallel_groups.is_empty(), "应有至少一个并行组");
+    assert!(!seq.order().is_empty(), "迁移序列不应为空");
+    assert!(!seq.parallel_groups().is_empty(), "应有至少一个并行组");
 
-    let first_group = &seq.parallel_groups[0];
+    let first_group = &seq.parallel_groups()[0];
     let has_leaf = first_group
         .iter()
         .any(|id| id.as_str().contains("utils.ts"));
@@ -560,5 +560,5 @@ fn ground_truth_circular_deps_migration_sequence() {
     let seq = migration_sequence(&graph);
 
     assert!(seq.has_cycles(), "circular-deps 应标记有环");
-    assert!(!seq.order.is_empty(), "有环时仍应生成尽力排序");
+    assert!(!seq.order().is_empty(), "有环时仍应生成尽力排序");
 }
