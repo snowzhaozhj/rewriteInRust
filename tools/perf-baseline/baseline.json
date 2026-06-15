@@ -1,0 +1,56 @@
+{
+  "schema": "perf-baseline/v1",
+  "metadata": {
+    "git_commit": "dd2d0a3",
+    "binary": "cli/target/release/rustmigrate",
+    "profile": "release",
+    "iterations": 50,
+    "warmup": 5,
+    "machine": "Darwin arm64",
+    "note": "时间戳由 git_commit 锚定；刷新基线请走 PR 并在 commit 记录环境"
+  },
+  "graph_build": {
+    "linear-deps": {
+      "node_count": 10,
+      "edge_count": 12,
+      "iterations": 50,
+      "min_ms": 21.114,
+      "median_ms": 22.088,
+      "mean_ms": 22.397,
+      "p90_ms": 23.576
+    },
+    "diamond-deps": {
+      "node_count": 16,
+      "edge_count": 25,
+      "iterations": 50,
+      "min_ms": 20.533,
+      "median_ms": 22.245,
+      "mean_ms": 22.222,
+      "p90_ms": 23.246
+    },
+    "circular-deps": {
+      "node_count": 14,
+      "edge_count": 16,
+      "iterations": 50,
+      "min_ms": 20.818,
+      "median_ms": 22.502,
+      "mean_ms": 23.005,
+      "p90_ms": 24.436
+    },
+    "edge-cases": {
+      "node_count": 6,
+      "edge_count": 3,
+      "iterations": 50,
+      "min_ms": 20.626,
+      "median_ms": 22.19,
+      "mean_ms": 22.269,
+      "p90_ms": 23.263
+    }
+  },
+  "module_translation": {
+    "status": "not_measured",
+    "reason": "单模块翻译为 LLM 驱动，时长受模型负载/网络/上下文影响，波动远超 ±10%，不可脚本化重现；M1 亦未留实测记录。",
+    "protocol": "Sprint F 端到端迁移时人工记录单模块 full 档循环 wall-clock，F6 对该项采用『数量级/趋势』而非严格 ±10%，见 README §3。",
+    "median_ms": null
+  }
+}
