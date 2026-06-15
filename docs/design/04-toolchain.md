@@ -390,9 +390,9 @@ INSERT INTO metadata (key, value) VALUES ('graph_integrity', 'full');
 
 **连接配置**（借鉴 CodeGraph）：WAL 模式、64MB 页缓存、mmap I/O、`PRAGMA synchronous=NORMAL`（WAL 下平衡性能与崩溃安全）。
 
-**并发写入策略**（M2+ Workflow 批量模式：多 agent 在独立 worktree 并行迁移、共享单一 `source-graph.db`，见 [03 § 4.2.1](./03-execution-model.md#421-执行模式分层)）：
+**图写隔离与 WAL 回退策略**（M2+ Workflow 批量模式：多 agent 在独立 worktree 并行迁移、共享主 worktree 的 `source-graph.db`，见 [03 § 4.2.1](./03-execution-model.md#421-执行模式分层)；**D5 定稿：翻译期图只读 + 编排器集中 writer 为主架构，WAL 多 writer 为可选回退，详见下方**）：
 
-> **MVP 不需要本节策略**：MVP 单模块串行，所有写操作由单个 CLI writer（如 `graph build`）或单个 SubAgent 顺序执行，无并发锁争夺。MVP 期对 `source-graph.db` 的写串行化**不依赖** WAL + `busy_timeout`，而由两层既有机制保障：(a) 每个 `/migrate` 命令在 Step 0 以 `flock -n .rust-migration/.migration-lock` 获取**全局命令锁**，禁止两个 `/migrate` 实例并发（含 Sprint Planning 中调用 `graph build` 增量重建与分析并发，见 [06 § 10.5 多终端并发隔离](./06-plugin-structure.md#105-编排调度路径)）；(b) `file-guard.sh` 对 `source-graph.db` 加 `flock` 排他锁，防御指令跟随失败导致的意外并发（见 [06 § 10.3](./06-plugin-structure.md#103-hooks自动化门禁)）。analyzer→translator→scaffolder 严格串行（序列见 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径)）。下方的 WAL + `busy_timeout` 策略仅 M2+ 并行模式需要。
+> **MVP 不需要本节策略**：MVP 单模块串行，所有写操作由单个 CLI writer（如 `graph build`）或单个 SubAgent 顺序执行，无并发锁争夺。MVP 期对 `source-graph.db` 的写串行化**不依赖** WAL + `busy_timeout`，而由两层既有机制保障：(a) 每个 `/migrate` 命令在 Step 0 以 `flock -n .rust-migration/.migration-lock` 获取**全局命令锁**，禁止两个 `/migrate` 实例并发（含 Sprint Planning 中调用 `graph build` 增量重建与分析并发，见 [06 § 10.5 多终端并发隔离](./06-plugin-structure.md#105-编排调度路径)）；(b) `file-guard.sh` 对 `source-graph.db` 加 `flock` 排他锁，防御指令跟随失败导致的意外并发（见 [06 § 10.3](./06-plugin-structure.md#103-hooks自动化门禁)）。analyzer→translator→scaffolder 严格串行（序列见 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径)）。下方的 WAL + `busy_timeout` **多 writer** 策略经 **D5 降级**：M2 主架构为编排器集中 writer（翻译期图只读、无多 writer 并发），该策略仅在未来「SubAgent 直写 db」回退模式才需要（见下）。
 
 > **D3/D5 定稿：编排器集中 writer 取代共享 DB 并发写架构**（见 [MDR-003](../decisions/003-m2-parallel-write-isolation.md) 与 [08 § M2](./08-roadmap-and-reference.md#m2-质量提升8-12-周)）。M2 跨模块并行采用 git worktree 方案：**翻译期 `source-graph.db` 只读**——各 SubAgent 在自己 worktree 内只读加载图、不直写 db；唯一写入口是 `graph build → save_to_db`（图构建/增量重建），run 期运行时状态走 `state transition` 写 `migration-state.json`，**由编排器单写**。因此 M2 翻译期**不存在多 writer 并发**，下方「WAL + busy_timeout 多 writer 串行化」策略**降级为未来「SubAgent 直写 db」模式的可选回退**，当前不启用。
 
@@ -500,7 +500,7 @@ fn transitive_update(file, max_depth = 3):
 | 反向 BFS 耗时 | @100 / 300 / 500 文件项目 | O(V+E)，~O(文件数) | [Spike TBD] | >预期则评估增量缓存 |
 | 熔断命中率 | 「> 50 直接导入者」节点占比 | 罕见（浅链） | [Spike TBD] | 命中频繁则上调 N 或改分层截断 |
 
-> 熔断截断为「仅直接导入者」会丢失间接导入者的影响面——对长链项目可能造成图不一致，故熔断触发须记 warning 并提示用户对受影响子图做一次全量 `graph build`。熔断逻辑在截断时须原子写入 `source-graph.db` metadata 表字段 `graph_integrity`（值为 `"full"` | `"truncated_at_<ISO8601>"`），与变更事务同提交；全量 `graph build` 完成后重置为 `"full"`。下游 `topo-sort` 依赖此字段做前置检查（见 § 5.7.6）。M2+ 多 agent 并行时，增量更新写锁竞争纳入 [§ 5.7.3 并发写策略](#573-持久化存储) 与 [08 § M2 SQLite 并发写门禁](./08-roadmap-and-reference.md#m2-质量提升8-12-周) 评估。
+> 熔断截断为「仅直接导入者」会丢失间接导入者的影响面——对长链项目可能造成图不一致，故熔断触发须记 warning 并提示用户对受影响子图做一次全量 `graph build`。熔断逻辑在截断时须原子写入 `source-graph.db` metadata 表字段 `graph_integrity`（值为 `"full"` | `"truncated_at_<ISO8601>"`），与变更事务同提交；全量 `graph build` 完成后重置为 `"full"`。下游 `topo-sort` 依赖此字段做前置检查（见 § 5.7.6）。M2+ 增量更新（`graph build` 重建）仍由集中 writer 单进程执行（**D5：翻译期图只读、无多 agent 并发写**），写竞争评估按 [§ 5.7.3 图写隔离与 WAL 回退策略](#573-持久化存储)；原「08 § M2 SQLite 并发写门禁」经 D5 降级为 N/A，仅未来「SubAgent 直写 db」回退模式才重新适用。
 
 ### 5.7.6 图查询能力清单
 
