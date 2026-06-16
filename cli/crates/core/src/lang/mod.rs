@@ -26,8 +26,8 @@ pub struct FileAnalysis {
     pub calls: Vec<CallInfo>,
     /// 所有导出名称（含 re-export、type-only export、default）。
     pub exported_names: std::collections::HashSet<String>,
-    /// 本地构造绑定（`const x = new Foo()` → `"x" → "Foo"`）。
-    /// 用于跨文件方法调用解析：`x.method()` → 查 `Foo.method` 方法节点。
+    // TODO(M3): constructor_bindings / ImportKind::StaticType / SymbolKind::Default
+    // 是 TS 特有概念，M3 多语言扩展时应下沉到 TS adapter 或用通用 metadata 传递。
     pub constructor_bindings: HashMap<String, String>,
 }
 

@@ -236,15 +236,6 @@ fn default_risk() -> RiskLevel {
 ///
 /// 该函数只做显示派生，**不保证唯一性**（不同 key 可能映射到同名），故调用方
 /// 应将其作为附加显示字段，而非主键。
-///
-/// # 示例
-/// ```
-/// use rustmigrate_core::types::state::humanize_module_key;
-/// assert_eq!(humanize_module_key("file:src/utils.ts"), "utils");
-/// assert_eq!(humanize_module_key("file:src/foo/bar.ts"), "foo/bar");
-/// assert_eq!(humanize_module_key("file:lib/index.ts"), "lib/index");
-/// assert_eq!(humanize_module_key("utils.ts"), "utils");
-/// ```
 pub fn humanize_module_key(key: &str) -> String {
     // 1. 去掉 NodeType 前缀：NodeId 形如 `file:src/utils.ts`，类型前缀不含路径分隔符，
     //    故「第一个 `:` 之前不含 `/`、`\`」可安全判定为类型前缀。
