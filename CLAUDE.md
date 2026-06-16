@@ -132,11 +132,15 @@ cargo run -- graph build --root fixtures/linear-deps  # 手动验证
 2. 更新 `docs/STATUS.md`
 3. commit 引用任务 ID（如 `feat(M1-GRAPH): 图构建模块`）
 4. 独立分支提 PR
-5. **PR 审查**（按改动路由，命中即跑；agent 走 Agent 工具 subagent_type）：
-   - `/code-review` 主审，必跑（effort 随规模/风险升：日常 high、关键/高危 max）
-   - 涉及错误处理 / 测试 / 注释 / 新类型等专项维度 → `/pr-review-toolkit:review-pr`（增挂专项视角，补充非替代）
-   - 触及设计契约（CLI JSON / state schema / 状态机 / types 字段枚举）→ agent `design-checker`
-   - 关键算法 / 高风险 / 易幻觉处 → agent `codex:codex-rescue`（异构模型交叉验证，破 Claude 自身盲点）
+5. **PR 审查**——4 个视角**默认全跑**，同一消息内并行启动 Agent。跳过须满足豁免条件且输出 `[视角] skipped: <reason>`。
+
+   | 视角 | subagent_type | 豁免条件（全部满足才可跳过） |
+   |------|--------------|---------------------------|
+   | 主审 | `/code-review` skill | **不可跳过** |
+   | 设计契约 | `design-checker` | 改动不涉及 `types/` / CLI JSON 输出 / state schema / 状态机 / 枚举定义，且不新增/删除 pub 字段 |
+   | 专项 | `pr-review-toolkit:review-pr` | 改动 <30 行且不涉及错误处理 / 新类型 / 测试 / 注释变更 |
+   | 异构交叉 | `codex:codex-rescue` | 改动 <50 行且仅涉及注释/文案/格式/单文件局部修复，不涉及算法/状态机/并发/解析器/图遍历/serde 格式 |
+
 6. important 必修后合并，nit 可选，pre-existing 记录；修复后通知用户审阅
 
 PR 粒度灵活：优先独立 PR，但紧密相关的小任务（如同 Sprint 的多个 0.5d 重构）可合并为一个 PR，只要审查粒度可控。
