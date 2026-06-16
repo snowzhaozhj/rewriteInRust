@@ -6,6 +6,7 @@
 
 pub mod typescript;
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::error::Result;
@@ -25,6 +26,9 @@ pub struct FileAnalysis {
     pub calls: Vec<CallInfo>,
     /// 所有导出名称（含 re-export、type-only export、default）。
     pub exported_names: std::collections::HashSet<String>,
+    /// 本地构造绑定（`const x = new Foo()` → `"x" → "Foo"`）。
+    /// 用于跨文件方法调用解析：`x.method()` → 查 `Foo.method` 方法节点。
+    pub constructor_bindings: HashMap<String, String>,
 }
 
 /// 导入的种类（互斥，枚举消除原 `is_type_only`/`is_side_effect`/`is_dynamic`

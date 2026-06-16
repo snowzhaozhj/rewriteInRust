@@ -298,8 +298,6 @@ fn add_cross_file_edges(
                     });
                 } else if let Some(src_file) = import_map.get(callee_base) {
                     // 2. 通过 import 解析到其他文件的函数。
-                    //    命名空间调用 `ns.fn()`：剥离基名后用 `fn` 查找目标模块的函数；
-                    //    普通导入 `fn()`：cross_symbol_name 返回完整 `fn`。
                     let sym = cross_symbol_name(&call.callee, callee_base);
                     let cross_id = NodeId::symbol(NodeType::Function, src_file, sym);
                     if graph.node_index(&cross_id).is_some() {
@@ -312,6 +310,62 @@ fn add_cross_file_edges(
                             sub_kind: None,
                             mapping_notes: None,
                         });
+                    }
+                } else if call.callee.contains('.') {
+                    // 3. 方法调用解析（REFAC-10 档1）：
+                    //    `obj.method()` — 若 obj 是本地构造绑定（`const obj = new Foo()`），
+                    //    用 Foo + import_map 找到源文件，查 `function:{file}:Foo.method`。
+                    //    若 obj 直接是导入类名，也尝试在同文件或导入源查方法节点。
+                    if let Some(dot_pos) = call.callee.find('.') {
+                        let receiver = &call.callee[..dot_pos];
+                        let method = &call.callee[dot_pos + 1..];
+                        let class_name = analysis
+                            .constructor_bindings
+                            .get(receiver)
+                            .map(String::as_str)
+                            .unwrap_or(receiver);
+                        let qualified = format!("{class_name}.{method}");
+                        // 当前文件内的方法
+                        let local_id = NodeId::symbol(NodeType::Function, rel, &qualified);
+                        if graph.node_index(&local_id).is_some() {
+                            graph.add_edge(Dependency {
+                                source: file_id.clone(),
+                                target: local_id,
+                                edge_type: EdgeType::Calls,
+                                provenance: Provenance::TreeSitter,
+                                weight: 1.0,
+                                sub_kind: None,
+                                mapping_notes: None,
+                            });
+                        } else if let Some(src_file) = import_map.get(class_name) {
+                            let cross_id = NodeId::symbol(NodeType::Function, src_file, &qualified);
+                            if graph.node_index(&cross_id).is_some() {
+                                graph.add_edge(Dependency {
+                                    source: file_id.clone(),
+                                    target: cross_id,
+                                    edge_type: EdgeType::Calls,
+                                    provenance: Provenance::TreeSitter,
+                                    weight: 1.0,
+                                    sub_kind: None,
+                                    mapping_notes: None,
+                                });
+                            }
+                        } else {
+                            // 全图唯一方法名兜底
+                            if let Some(target) = find_unique_node(graph, |n| {
+                                n.name == qualified && n.node_type == NodeType::Function
+                            }) {
+                                graph.add_edge(Dependency {
+                                    source: file_id.clone(),
+                                    target,
+                                    edge_type: EdgeType::Calls,
+                                    provenance: Provenance::TreeSitter,
+                                    weight: 1.0,
+                                    sub_kind: None,
+                                    mapping_notes: None,
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -541,6 +595,76 @@ mod tests {
         assert_eq!(
             resolve_import("./Button", "components/App.tsx", &files, TS_EXTS),
             Some("components/Button.tsx".to_string())
+        );
+    }
+
+    #[test]
+    fn cross_file_method_call_via_constructor_binding() {
+        let dir = std::env::temp_dir().join("rustmigrate_method_call_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("service.ts"),
+            "export class Greeter {\n  greet() { return 'hi'; }\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("app.ts"),
+            "import { Greeter } from './service';\nconst g = new Greeter();\ng.greet();\n",
+        )
+        .unwrap();
+
+        let graph = build_graph_ts(&dir).unwrap();
+        let has_method_call = graph.edges().any(|e| {
+            e.edge_type == EdgeType::Calls
+                && e.source.as_str() == "file:app.ts"
+                && e.target.as_str() == "function:service.ts:Greeter.greet"
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            has_method_call,
+            "跨文件方法调用 g.greet() 应通过构造绑定解析为 Greeter.greet Calls 边"
+        );
+    }
+
+    #[test]
+    fn cross_file_method_call_unique_fallback() {
+        let dir = std::env::temp_dir().join("rustmigrate_method_unique_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("worker.ts"),
+            "export class Worker {\n  run() {}\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("main.ts"),
+            "import { Worker } from './worker';\nconst w = new Worker();\nw.run();\n",
+        )
+        .unwrap();
+
+        let graph = build_graph_ts(&dir).unwrap();
+        let has_call = graph.edges().any(|e| {
+            e.edge_type == EdgeType::Calls
+                && e.source.as_str() == "file:main.ts"
+                && e.target.as_str() == "function:worker.ts:Worker.run"
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(has_call, "方法调用应解析到 Worker.run");
+    }
+
+    #[test]
+    fn diamond_deps_method_call_resolves() {
+        let root = fixtures_dir().join("diamond-deps/src");
+        let graph = build_graph_ts(&root).unwrap();
+        let has_authenticate = graph.edges().any(|e| {
+            e.edge_type == EdgeType::Calls
+                && e.source.as_str() == "file:index.ts"
+                && e.target.as_str() == "function:auth.ts:AuthService.authenticate"
+        });
+        assert!(
+            has_authenticate,
+            "diamond-deps: service.authenticate() 应解析为跨文件方法调用 Calls 边"
         );
     }
 }

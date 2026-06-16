@@ -70,6 +70,7 @@ impl LanguageAdapter for TypeScriptAdapter {
             imports: Vec::new(),
             calls: Vec::new(),
             exported_names: std::collections::HashSet::new(),
+            constructor_bindings: std::collections::HashMap::new(),
         };
 
         // 第一遍：收集 export 名称
@@ -108,6 +109,7 @@ impl LanguageAdapter for TypeScriptAdapter {
             imports: ctx.imports,
             calls: ctx.calls,
             exported_names: ctx.exported_names,
+            constructor_bindings: ctx.constructor_bindings,
         })
     }
 }
@@ -120,6 +122,8 @@ struct AnalysisContext<'a> {
     imports: Vec<ImportInfo>,
     calls: Vec<CallInfo>,
     exported_names: std::collections::HashSet<String>,
+    /// 本地构造绑定（`const x = new Foo()` → `"x" → "Foo"`）。
+    constructor_bindings: std::collections::HashMap<String, String>,
 }
 
 // === Export 收集 ===
@@ -246,6 +250,7 @@ fn walk_ast(node: Node, ctx: &mut AnalysisContext) {
         // （不 return，继续递归以提取箭头体内的 call/new）
         "lexical_declaration" | "variable_declaration" => {
             extract_var_functions(node, ctx);
+            collect_constructor_bindings(node, ctx);
         }
         "export_statement" => {
             if let Some(decl) = node.child_by_field_name("declaration") {
@@ -383,6 +388,47 @@ fn extract_var_functions(node: Node, ctx: &mut AnalysisContext) {
         sn.is_exported = is_exported;
         sn.is_async = is_async;
         ctx.nodes.push(sn);
+    }
+}
+
+/// `const x = new Foo()` → 记录 `"x" → "Foo"` 到 constructor_bindings。
+fn collect_constructor_bindings(node: Node, ctx: &mut AnalysisContext) {
+    let count = node.child_count();
+    for i in 0..count {
+        let Some(declarator) = node.child(i) else {
+            continue;
+        };
+        if declarator.kind() != "variable_declarator" {
+            continue;
+        }
+        let Some(name_node) = declarator.child_by_field_name("name") else {
+            continue;
+        };
+        if name_node.kind() != "identifier" {
+            continue;
+        }
+        let Some(value) = declarator.child_by_field_name("value") else {
+            continue;
+        };
+        // 穿透 `await new Foo()`
+        let new_expr = if value.kind() == "await_expression" {
+            (0..value.child_count())
+                .find_map(|j| value.child(j).filter(|c| c.kind() == "new_expression"))
+        } else if value.kind() == "new_expression" {
+            Some(value)
+        } else {
+            None
+        };
+        let Some(new_expr) = new_expr else {
+            continue;
+        };
+        if let Some(constructor) = new_expr.child_by_field_name("constructor") {
+            let class_name = text(constructor, ctx.source);
+            if !class_name.is_empty() {
+                let var_name = text(name_node, ctx.source);
+                ctx.constructor_bindings.insert(var_name, class_name);
+            }
+        }
     }
 }
 
