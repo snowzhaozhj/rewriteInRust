@@ -399,27 +399,24 @@ mod tests {
     fn persist_preserves_node_attributes() {
         // 构建一个带扩展属性的节点的图
         let mut graph = SourceGraph::new();
-        graph.add_node(SourceNode {
-            id: NodeId::new("file:test.ts"),
-            node_type: NodeType::File,
-            name: "test.ts".to_string(),
-            file_path: "test.ts".to_string(),
-            line_range: Some(Span {
-                start_line: 1,
-                end_line: 50,
-            }),
-            is_exported: true,
-            complexity: Some(Complexity::Complex),
-            is_async: true,
-            visibility: Some(Visibility::Public),
-            is_abstract: false,
-            decorators: vec!["deprecated".to_string()],
-            migration_status: Some(ModuleStatus::Pending),
-            migration_priority: Some(1),
-            rust_kind: None,
-            rust_path: None,
-            crate_name: None,
+        let mut n = SourceNode::new(
+            NodeId::new("file:test.ts"),
+            NodeType::File,
+            "test.ts".to_string(),
+            "test.ts".to_string(),
+        );
+        n.line_range = Some(Span {
+            start_line: 1,
+            end_line: 50,
         });
+        n.is_exported = true;
+        n.complexity = Some(Complexity::Complex);
+        n.is_async = true;
+        n.visibility = Some(Visibility::Public);
+        n.decorators = vec!["deprecated".to_string()];
+        n.migration_status = Some(ModuleStatus::Pending);
+        n.migration_priority = Some(1);
+        graph.add_node(n);
 
         let db_path = temp_db_path("attrs");
         save_to_db(&graph, &db_path).unwrap();
@@ -455,24 +452,16 @@ mod tests {
         // RustTarget 专属字段（rust_kind / rust_path / crate_name）经 extra JSON
         // round-trip 后应完整保留，而非被静默丢弃。
         let mut graph = SourceGraph::new();
-        graph.add_node(SourceNode {
-            id: NodeId::new("rust_target:my_crate::utils::capitalize"),
-            node_type: NodeType::RustTarget,
-            name: "capitalize".to_string(),
-            file_path: String::new(),
-            line_range: None,
-            is_exported: false,
-            complexity: None,
-            is_async: false,
-            visibility: None,
-            is_abstract: false,
-            decorators: Vec::new(),
-            migration_status: None,
-            migration_priority: None,
-            rust_kind: Some(RustKind::Function),
-            rust_path: Some("my_crate::utils::capitalize".to_string()),
-            crate_name: Some("my-crate".to_string()),
-        });
+        let mut n = SourceNode::new(
+            NodeId::new("rust_target:my_crate::utils::capitalize"),
+            NodeType::RustTarget,
+            "capitalize".to_string(),
+            String::new(),
+        );
+        n.rust_kind = Some(RustKind::Function);
+        n.rust_path = Some("my_crate::utils::capitalize".to_string());
+        n.crate_name = Some("my-crate".to_string());
+        graph.add_node(n);
 
         let db_path = temp_db_path("rust_target");
         save_to_db(&graph, &db_path).unwrap();
@@ -500,42 +489,18 @@ mod tests {
     #[test]
     fn persist_preserves_edges() {
         let mut graph = SourceGraph::new();
-        graph.add_node(SourceNode {
-            id: NodeId::new("file:a.ts"),
-            node_type: NodeType::File,
-            name: "a.ts".to_string(),
-            file_path: "a.ts".to_string(),
-            line_range: None,
-            is_exported: false,
-            complexity: None,
-            is_async: false,
-            visibility: None,
-            is_abstract: false,
-            decorators: Vec::new(),
-            migration_status: None,
-            migration_priority: None,
-            rust_kind: None,
-            rust_path: None,
-            crate_name: None,
-        });
-        graph.add_node(SourceNode {
-            id: NodeId::new("file:b.ts"),
-            node_type: NodeType::File,
-            name: "b.ts".to_string(),
-            file_path: "b.ts".to_string(),
-            line_range: None,
-            is_exported: false,
-            complexity: None,
-            is_async: false,
-            visibility: None,
-            is_abstract: false,
-            decorators: Vec::new(),
-            migration_status: None,
-            migration_priority: None,
-            rust_kind: None,
-            rust_path: None,
-            crate_name: None,
-        });
+        graph.add_node(SourceNode::new(
+            NodeId::new("file:a.ts"),
+            NodeType::File,
+            "a.ts".to_string(),
+            "a.ts".to_string(),
+        ));
+        graph.add_node(SourceNode::new(
+            NodeId::new("file:b.ts"),
+            NodeType::File,
+            "b.ts".to_string(),
+            "b.ts".to_string(),
+        ));
         graph.add_edge(Dependency {
             source: NodeId::new("file:a.ts"),
             target: NodeId::new("file:b.ts"),
@@ -567,64 +532,28 @@ mod tests {
 
         // 第一次写入
         let mut g1 = SourceGraph::new();
-        g1.add_node(SourceNode {
-            id: NodeId::new("file:old.ts"),
-            node_type: NodeType::File,
-            name: "old.ts".to_string(),
-            file_path: "old.ts".to_string(),
-            line_range: None,
-            is_exported: false,
-            complexity: None,
-            is_async: false,
-            visibility: None,
-            is_abstract: false,
-            decorators: Vec::new(),
-            migration_status: None,
-            migration_priority: None,
-            rust_kind: None,
-            rust_path: None,
-            crate_name: None,
-        });
+        g1.add_node(SourceNode::new(
+            NodeId::new("file:old.ts"),
+            NodeType::File,
+            "old.ts".to_string(),
+            "old.ts".to_string(),
+        ));
         save_to_db(&g1, &db_path).unwrap();
 
         // 第二次写入（不同的图）
         let mut g2 = SourceGraph::new();
-        g2.add_node(SourceNode {
-            id: NodeId::new("file:new1.ts"),
-            node_type: NodeType::File,
-            name: "new1.ts".to_string(),
-            file_path: "new1.ts".to_string(),
-            line_range: None,
-            is_exported: false,
-            complexity: None,
-            is_async: false,
-            visibility: None,
-            is_abstract: false,
-            decorators: Vec::new(),
-            migration_status: None,
-            migration_priority: None,
-            rust_kind: None,
-            rust_path: None,
-            crate_name: None,
-        });
-        g2.add_node(SourceNode {
-            id: NodeId::new("file:new2.ts"),
-            node_type: NodeType::File,
-            name: "new2.ts".to_string(),
-            file_path: "new2.ts".to_string(),
-            line_range: None,
-            is_exported: false,
-            complexity: None,
-            is_async: false,
-            visibility: None,
-            is_abstract: false,
-            decorators: Vec::new(),
-            migration_status: None,
-            migration_priority: None,
-            rust_kind: None,
-            rust_path: None,
-            crate_name: None,
-        });
+        g2.add_node(SourceNode::new(
+            NodeId::new("file:new1.ts"),
+            NodeType::File,
+            "new1.ts".to_string(),
+            "new1.ts".to_string(),
+        ));
+        g2.add_node(SourceNode::new(
+            NodeId::new("file:new2.ts"),
+            NodeType::File,
+            "new2.ts".to_string(),
+            "new2.ts".to_string(),
+        ));
         save_to_db(&g2, &db_path).unwrap();
 
         // 加载应只包含第二次写入的数据

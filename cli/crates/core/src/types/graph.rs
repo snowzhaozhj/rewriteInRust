@@ -155,6 +155,30 @@ pub struct SourceNode {
     pub crate_name: Option<String>,
 }
 
+impl SourceNode {
+    /// 构造器：四必填字段，其余默认。
+    pub fn new(id: NodeId, node_type: NodeType, name: String, file_path: String) -> Self {
+        Self {
+            id,
+            node_type,
+            name,
+            file_path,
+            line_range: None,
+            is_exported: false,
+            complexity: None,
+            is_async: false,
+            visibility: None,
+            is_abstract: false,
+            decorators: Vec::new(),
+            migration_status: None,
+            migration_priority: None,
+            rust_kind: None,
+            rust_path: None,
+            crate_name: None,
+        }
+    }
+}
+
 /// 源码图边（依赖关系）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Dependency {

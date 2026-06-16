@@ -76,24 +76,12 @@ impl LanguageAdapter for TypeScriptAdapter {
         collect_exports(tree.root_node(), source, &mut ctx.exported_names);
 
         // 添加 File 节点
-        ctx.nodes.push(SourceNode {
-            id: NodeId::file(rel_path),
-            node_type: NodeType::File,
-            name: rel_path.to_string(),
-            file_path: rel_path.to_string(),
-            line_range: None,
-            is_exported: false,
-            complexity: None,
-            is_async: false,
-            visibility: None,
-            is_abstract: false,
-            decorators: Vec::new(),
-            migration_status: None,
-            migration_priority: None,
-            rust_kind: None,
-            rust_path: None,
-            crate_name: None,
-        });
+        ctx.nodes.push(SourceNode::new(
+            NodeId::file(rel_path),
+            NodeType::File,
+            rel_path.to_string(),
+            rel_path.to_string(),
+        ));
 
         // 第二遍：提取符号节点、边、导入、调用
         walk_ast(tree.root_node(), &mut ctx);
@@ -333,24 +321,16 @@ fn extract_function(node: Node, ctx: &mut AnalysisContext) {
         let name = text(name_node, ctx.source);
         let is_async = has_anon_child(node, "async");
         let is_exported = ctx.exported_names.contains(&name);
-        ctx.nodes.push(SourceNode {
-            id: NodeId::symbol(NodeType::Function, ctx.rel_path, &name),
-            node_type: NodeType::Function,
+        let mut sn = SourceNode::new(
+            NodeId::symbol(NodeType::Function, ctx.rel_path, &name),
+            NodeType::Function,
             name,
-            file_path: ctx.rel_path.to_string(),
-            line_range: Some(node_span(node)),
-            is_exported,
-            complexity: None,
-            is_async,
-            visibility: None,
-            is_abstract: false,
-            decorators: Vec::new(),
-            migration_status: None,
-            migration_priority: None,
-            rust_kind: None,
-            rust_path: None,
-            crate_name: None,
-        });
+            ctx.rel_path.to_string(),
+        );
+        sn.line_range = Some(node_span(node));
+        sn.is_exported = is_exported;
+        sn.is_async = is_async;
+        ctx.nodes.push(sn);
     }
 }
 
@@ -393,24 +373,16 @@ fn extract_var_functions(node: Node, ctx: &mut AnalysisContext) {
         }
         let is_async = has_anon_child(value, "async");
         let is_exported = ctx.exported_names.contains(&name);
-        ctx.nodes.push(SourceNode {
-            id: NodeId::symbol(NodeType::Function, ctx.rel_path, &name),
-            node_type: NodeType::Function,
+        let mut sn = SourceNode::new(
+            NodeId::symbol(NodeType::Function, ctx.rel_path, &name),
+            NodeType::Function,
             name,
-            file_path: ctx.rel_path.to_string(),
-            line_range: Some(node_span(declarator)),
-            is_exported,
-            complexity: None,
-            is_async,
-            visibility: None,
-            is_abstract: false,
-            decorators: Vec::new(),
-            migration_status: None,
-            migration_priority: None,
-            rust_kind: None,
-            rust_path: None,
-            crate_name: None,
-        });
+            ctx.rel_path.to_string(),
+        );
+        sn.line_range = Some(node_span(declarator));
+        sn.is_exported = is_exported;
+        sn.is_async = is_async;
+        ctx.nodes.push(sn);
     }
 }
 
@@ -423,24 +395,16 @@ fn extract_class(node: Node, ctx: &mut AnalysisContext) {
     let is_abstract = node.kind() == "abstract_class_declaration";
     let class_id = NodeId::symbol(NodeType::Class, ctx.rel_path, &name);
 
-    ctx.nodes.push(SourceNode {
-        id: class_id.clone(),
-        node_type: NodeType::Class,
-        name: name.clone(),
-        file_path: ctx.rel_path.to_string(),
-        line_range: Some(node_span(node)),
-        is_exported,
-        complexity: None,
-        is_async: false,
-        visibility: None,
-        is_abstract,
-        decorators: Vec::new(),
-        migration_status: None,
-        migration_priority: None,
-        rust_kind: None,
-        rust_path: None,
-        crate_name: None,
-    });
+    let mut sn = SourceNode::new(
+        class_id.clone(),
+        NodeType::Class,
+        name.clone(),
+        ctx.rel_path.to_string(),
+    );
+    sn.line_range = Some(node_span(node));
+    sn.is_exported = is_exported;
+    sn.is_abstract = is_abstract;
+    ctx.nodes.push(sn);
 
     // 方法
     if let Some(body) = node.child_by_field_name("body") {
@@ -508,24 +472,15 @@ fn extract_methods(body: Node, class_id: &str, class_name: &str, ctx: &mut Analy
             &format!("{class_name}.{method_name}"),
         );
 
-        ctx.nodes.push(SourceNode {
-            id: method_id.clone(),
-            node_type: NodeType::Function,
-            name: format!("{class_name}.{method_name}"),
-            file_path: ctx.rel_path.to_string(),
-            line_range: Some(node_span(child)),
-            is_exported: false,
-            complexity: None,
-            is_async,
-            visibility: None,
-            is_abstract: false,
-            decorators: Vec::new(),
-            migration_status: None,
-            migration_priority: None,
-            rust_kind: None,
-            rust_path: None,
-            crate_name: None,
-        });
+        let mut sn = SourceNode::new(
+            method_id.clone(),
+            NodeType::Function,
+            format!("{class_name}.{method_name}"),
+            ctx.rel_path.to_string(),
+        );
+        sn.line_range = Some(node_span(child));
+        sn.is_async = is_async;
+        ctx.nodes.push(sn);
 
         ctx.edges.push(Dependency {
             source: NodeId::new(class_id),
@@ -641,24 +596,15 @@ fn extract_interface(node: Node, ctx: &mut AnalysisContext) {
     let name = text(name_node, ctx.source);
     let is_exported = ctx.exported_names.contains(&name);
     let interface_id = NodeId::symbol(NodeType::Interface, ctx.rel_path, &name);
-    ctx.nodes.push(SourceNode {
-        id: interface_id.clone(),
-        node_type: NodeType::Interface,
+    let mut sn = SourceNode::new(
+        interface_id.clone(),
+        NodeType::Interface,
         name,
-        file_path: ctx.rel_path.to_string(),
-        line_range: Some(node_span(node)),
-        is_exported,
-        complexity: None,
-        is_async: false,
-        visibility: None,
-        is_abstract: false,
-        decorators: Vec::new(),
-        migration_status: None,
-        migration_priority: None,
-        rust_kind: None,
-        rust_path: None,
-        crate_name: None,
-    });
+        ctx.rel_path.to_string(),
+    );
+    sn.line_range = Some(node_span(node));
+    sn.is_exported = is_exported;
+    ctx.nodes.push(sn);
 
     // `interface Foo extends Bar` → Extends 边。interface 的继承节点是
     // `extends_type_clause`（区别于 class 的 `class_heritage > extends_clause`），
@@ -719,24 +665,15 @@ fn extract_enum(node: Node, ctx: &mut AnalysisContext) {
     if let Some(name_node) = node.child_by_field_name("name") {
         let name = text(name_node, ctx.source);
         let is_exported = ctx.exported_names.contains(&name);
-        ctx.nodes.push(SourceNode {
-            id: NodeId::symbol(NodeType::Enum, ctx.rel_path, &name),
-            node_type: NodeType::Enum,
+        let mut sn = SourceNode::new(
+            NodeId::symbol(NodeType::Enum, ctx.rel_path, &name),
+            NodeType::Enum,
             name,
-            file_path: ctx.rel_path.to_string(),
-            line_range: Some(node_span(node)),
-            is_exported,
-            complexity: None,
-            is_async: false,
-            visibility: None,
-            is_abstract: false,
-            decorators: Vec::new(),
-            migration_status: None,
-            migration_priority: None,
-            rust_kind: None,
-            rust_path: None,
-            crate_name: None,
-        });
+            ctx.rel_path.to_string(),
+        );
+        sn.line_range = Some(node_span(node));
+        sn.is_exported = is_exported;
+        ctx.nodes.push(sn);
     }
 }
 
