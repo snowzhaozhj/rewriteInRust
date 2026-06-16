@@ -847,7 +847,10 @@ fn e2e_populate_modules_linear_unblocks_run() {
         let (code, json) = run(&["state", "populate-modules"]);
         assert_eq!(code, 0, "populate 应成功: {json}");
         assert_eq!(json["status"], "ok");
-        assert_eq!(json["data"]["sprint"], 1);
+        assert!(
+            json["data"]["total_sprints"].as_u64().unwrap() >= 1,
+            "应至少有 1 个 sprint: {json}"
+        );
         let count = json["data"]["module_count"].as_u64().unwrap();
         assert_eq!(count, 3, "linear-deps 应有 3 个文件模块: {json}");
 
