@@ -374,6 +374,77 @@ impl MigrationStateMachine {
         self.state_file.sprint = Some(sprint);
     }
 
+    /// 尝试推进 sprint：如果当前 sprint 所有模块均已终态，推进到下一 sprint。
+    ///
+    /// 返回 `Some(new_sprint)` 表示推进成功，`None` 表示当前 sprint 尚有非终态模块。
+    /// 推进时：① current += 1 ② 当前 sprint 条目补 `completed_at` + `completed_modules`
+    /// ③ 若新 sprint 有目标模块则创建新 history 条目。
+    pub fn try_advance_sprint(&mut self) -> Option<u32> {
+        let sprint_state = self.state_file.sprint.as_mut()?;
+        let current = sprint_state.current;
+
+        // 收集当前 sprint 的所有模块。
+        let current_modules: Vec<(String, &ModuleState)> = self
+            .state_file
+            .modules
+            .iter()
+            .filter(|(_, m)| m.sprint == Some(current))
+            .map(|(k, v)| (k.clone(), v))
+            .collect();
+
+        // 空 sprint（无模块分配到该 sprint）视为可推进。
+        if !current_modules.is_empty()
+            && !current_modules.iter().all(|(_, m)| m.status.is_terminal())
+        {
+            return None;
+        }
+
+        let now = Timestamp::new(chrono::Utc::now().to_rfc3339());
+
+        // 关闭当前 sprint history 条目。
+        if let Some(entry) = sprint_state
+            .history
+            .iter_mut()
+            .find(|e| e.id == current && e.completed_at.is_none())
+        {
+            entry.completed_at = Some(now.clone());
+            entry.completed_modules = current_modules
+                .iter()
+                .filter(|(_, m)| m.status == ModuleStatus::Done)
+                .map(|(k, _)| k.clone())
+                .collect();
+        }
+
+        let new_sprint = current + 1;
+
+        // 收集下一 sprint 的目标模块。
+        let next_targets: Vec<String> = self
+            .state_file
+            .modules
+            .iter()
+            .filter(|(_, m)| m.sprint == Some(new_sprint))
+            .map(|(k, _)| k.clone())
+            .collect();
+
+        // 有下一 sprint 的模块才推进（否则所有 sprint 已完成）。
+        if next_targets.is_empty() {
+            return None;
+        }
+
+        sprint_state.current = new_sprint;
+        sprint_state.history.push(crate::types::state::SprintEntry {
+            id: new_sprint,
+            started_at: now,
+            completed_at: None,
+            target_modules: next_targets,
+            completed_modules: Vec::new(),
+            notes: None,
+            porting_md_version: None,
+        });
+
+        Some(new_sprint)
+    }
+
     /// 设置最后错误信息。
     pub fn set_last_error(&mut self, error: Option<String>) {
         let metadata = self.state_file.metadata.get_or_insert(MigrationMetadata {
@@ -435,6 +506,7 @@ fn sibling_with_suffix(path: &Path, suffix: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::state::{SprintEntry, SprintState};
     use tempfile::NamedTempFile;
 
     /// 辅助：构造指定状态的最小模块记录。
@@ -1092,5 +1164,97 @@ mod tests {
         // chrono 生成的 RFC 3339 时间戳应通过校验。
         let loaded = MigrationStateMachine::load(&path);
         assert!(loaded.is_ok(), "合法 timestamp 的状态文件应加载成功");
+    }
+
+    #[test]
+    fn test_advance_sprint_all_terminal() {
+        let mut m = new_machine();
+        // 模拟 populate 分配了 2 个 sprint。
+        m.update_module("a", {
+            let mut ms = module_with_status(ModuleStatus::Done);
+            ms.sprint = Some(1);
+            ms
+        });
+        m.update_module("b", {
+            let mut ms = module_with_status(ModuleStatus::Pending);
+            ms.sprint = Some(2);
+            ms
+        });
+        m.set_sprint(SprintState {
+            current: 1,
+            history: vec![SprintEntry {
+                id: 1,
+                started_at: Timestamp::new("2026-06-17T00:00:00Z"),
+                completed_at: None,
+                target_modules: vec!["a".to_owned()],
+                completed_modules: Vec::new(),
+                notes: None,
+                porting_md_version: None,
+            }],
+        });
+        // sprint 1 全终态 → 应推进到 2。
+        assert_eq!(m.try_advance_sprint(), Some(2));
+        assert_eq!(m.state_file().sprint.as_ref().unwrap().current, 2);
+        // history 应有 2 条记录。
+        assert_eq!(m.state_file().sprint.as_ref().unwrap().history.len(), 2);
+        // sprint 1 应有 completed_at。
+        assert!(m.state_file().sprint.as_ref().unwrap().history[0]
+            .completed_at
+            .is_some());
+    }
+
+    #[test]
+    fn test_advance_sprint_not_all_terminal() {
+        let mut m = new_machine();
+        m.update_module("a", {
+            let mut ms = module_with_status(ModuleStatus::Translating);
+            ms.sprint = Some(1);
+            ms
+        });
+        m.set_sprint(SprintState {
+            current: 1,
+            history: Vec::new(),
+        });
+        // sprint 1 有非终态模块 → 不推进。
+        assert_eq!(m.try_advance_sprint(), None);
+        assert_eq!(m.state_file().sprint.as_ref().unwrap().current, 1);
+    }
+
+    #[test]
+    fn test_advance_sprint_no_next_sprint() {
+        let mut m = new_machine();
+        // 只有 sprint 1 的模块且全终态，但无 sprint 2 模块。
+        m.update_module("a", {
+            let mut ms = module_with_status(ModuleStatus::Done);
+            ms.sprint = Some(1);
+            ms
+        });
+        m.set_sprint(SprintState {
+            current: 1,
+            history: Vec::new(),
+        });
+        // 无下一 sprint → 不推进（所有 sprint 已完成）。
+        assert_eq!(m.try_advance_sprint(), None);
+    }
+
+    #[test]
+    fn test_advance_sprint_degrade_counts_as_terminal() {
+        let mut m = new_machine();
+        m.update_module("a", {
+            let mut ms = module_with_status(ModuleStatus::DegradeFfi);
+            ms.sprint = Some(1);
+            ms
+        });
+        m.update_module("b", {
+            let mut ms = module_with_status(ModuleStatus::Pending);
+            ms.sprint = Some(2);
+            ms
+        });
+        m.set_sprint(SprintState {
+            current: 1,
+            history: Vec::new(),
+        });
+        // degrade 是终态 → 应推进。
+        assert_eq!(m.try_advance_sprint(), Some(2));
     }
 }

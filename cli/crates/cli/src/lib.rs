@@ -216,6 +216,11 @@ pub enum StateCommands {
         #[arg(long)]
         error_message: Option<String>,
     },
+    /// 推进 sprint：当前 sprint 所有模块终态时，自动推进到下一 sprint。
+    ///
+    /// sprint N 全模块 done/degrade_* → current=N+1 + history 回填。
+    /// 无可推进 sprint 或尚有非终态模块时返回 status:ok + advanced:false。
+    AdvanceSprint,
 }
 
 /// Stats 子命令。
@@ -367,6 +372,7 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
                     error_message.as_deref(),
                 ),
             ),
+            StateCommands::AdvanceSprint => emit(writer, cmd_state_advance_sprint()),
         },
         Commands::Stats { action } => match action {
             StatsCommands::Loc { source, rust } => {
@@ -1131,6 +1137,44 @@ fn detect_tiers_for_modules(
 ///
 /// 设计（`09-appendix-schemas.md § subagent_calls 字段说明` + `06 § 10.5`）：顶层 append-only
 /// 数组，每次 SubAgent 调用（含重试）追加一条，用于诊断卡死与统计重试次数。本命令构造
+/// `state advance-sprint`：当前 sprint 所有模块终态时推进到下一 sprint。
+///
+/// 检查当前 sprint（`sprint.current`）下所有 `modules[*].sprint == current` 的模块是否均
+/// 为终态（done/degrade_*）。若是，推进 `sprint.current` + 1，更新 history，原子落盘。
+/// 无可推进 sprint（尚有非终态模块或已达最后 sprint）时不报错，返回 `advanced:false`。
+fn cmd_state_advance_sprint() -> CmdResult {
+    let path = state_path();
+    let (mut machine, warnings) = load_state_with_warnings(&path)?;
+
+    match machine.try_advance_sprint() {
+        Some(new_sprint) => {
+            machine.save(&path)?;
+            Ok((
+                json!({
+                    "advanced": true,
+                    "new_sprint": new_sprint,
+                }),
+                warnings,
+            ))
+        }
+        None => {
+            let current = machine
+                .state_file()
+                .sprint
+                .as_ref()
+                .map(|s| s.current)
+                .unwrap_or(0);
+            Ok((
+                json!({
+                    "advanced": false,
+                    "current_sprint": current,
+                }),
+                warnings,
+            ))
+        }
+    }
+}
+
 /// [`SubAgentCall`] 后经 core [`MigrationStateMachine::push_subagent_call`] 入库，落盘走 tmp-fsync-rename
 /// 原子写。`started_at` schema 必填——省略时取当前 UTC 时间（编排器在调用开始即可记录、结束再补登一条）。
 fn cmd_state_record_subagent_call(
