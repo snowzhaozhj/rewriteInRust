@@ -362,6 +362,8 @@ CREATE TABLE edges (
     edge_type TEXT NOT NULL,
     provenance TEXT NOT NULL DEFAULT 'tree-sitter',
     weight REAL DEFAULT 1.0,
+    sub_kind TEXT,          -- § 5.7.1 EdgeData.sub_kind
+    mapping_notes TEXT,     -- § 5.7.1 EdgeData.mapping_notes
     PRIMARY KEY (source, target, edge_type)
 );
 

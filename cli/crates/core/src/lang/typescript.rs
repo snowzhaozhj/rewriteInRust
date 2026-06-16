@@ -17,7 +17,7 @@ use tree_sitter::{Node, Parser};
 
 use crate::error::{MigrateError, Result};
 use crate::types::common::{NodeId, SourceLang, Span};
-use crate::types::graph::{Dependency, EdgeSubKind, EdgeType, NodeType, Provenance, SourceNode};
+use crate::types::graph::{Dependency, EdgeSubKind, EdgeType, NodeType, SourceNode};
 
 use super::{
     CallInfo, FileAnalysis, ImportInfo, ImportKind, ImportedSymbol, LanguageAdapter, SymbolKind,
@@ -85,21 +85,17 @@ impl LanguageAdapter for TypeScriptAdapter {
         ));
 
         // 第二遍：提取符号节点、边、导入、调用
-        walk_ast(tree.root_node(), &mut ctx);
+        walk_ast(tree.root_node(), &mut ctx, true);
 
         // 生成 Exports 边
         let file_id = NodeId::file(rel_path);
         for node in &ctx.nodes {
             if node.is_exported && node.node_type != NodeType::File {
-                ctx.edges.push(Dependency {
-                    source: file_id.clone(),
-                    target: node.id.clone(),
-                    edge_type: EdgeType::Exports,
-                    provenance: Provenance::TreeSitter,
-                    weight: 1.0,
-                    sub_kind: None,
-                    mapping_notes: None,
-                });
+                ctx.edges.push(Dependency::new(
+                    file_id.clone(),
+                    node.id.clone(),
+                    EdgeType::Exports,
+                ));
             }
         }
 
@@ -231,9 +227,13 @@ fn declaration_names(decl: Node, source: &str) -> Vec<String> {
 
 // === AST 遍历 ===
 
-fn walk_ast(node: Node, ctx: &mut AnalysisContext) {
+/// `top_level` = true：文件顶层遍历，提取所有结构（函数/变量绑定/import/export）。
+/// `top_level` = false：class body 内部遍历，跳过 lexical_declaration（避免方法体内的
+/// 局部函数/构造绑定泄漏到文件级）、function_declaration（局部函数）、
+/// import/export（方法体内不合法）。
+fn walk_ast(node: Node, ctx: &mut AnalysisContext, top_level: bool) {
     match node.kind() {
-        "function_declaration" | "generator_function_declaration" => {
+        "function_declaration" | "generator_function_declaration" if top_level => {
             extract_function(node, ctx);
         }
         "class_declaration" | "abstract_class_declaration" => {
@@ -246,18 +246,14 @@ fn walk_ast(node: Node, ctx: &mut AnalysisContext) {
         "enum_declaration" => {
             extract_enum(node, ctx);
         }
-        // `const f = () => {}` / `const f = function() {}` 等函数表达式绑定
-        // （不 return，继续递归以提取箭头体内的 call/new）
-        "lexical_declaration" | "variable_declaration" => {
-            extract_var_functions(node, ctx);
-            collect_constructor_bindings(node, ctx);
+        "lexical_declaration" | "variable_declaration" if top_level => {
+            process_var_declaration(node, ctx);
         }
-        "export_statement" => {
+        "export_statement" if top_level => {
             if let Some(decl) = node.child_by_field_name("declaration") {
-                walk_ast(decl, ctx);
+                walk_ast(decl, ctx, true);
                 return;
             }
-            // re-export: `export { x } from './module'` — 也生成 ImportInfo
             if let Some(module_path) = get_source_string(node, ctx.source) {
                 let is_type_only = has_anon_child(node, "type");
                 let mut symbols = Vec::new();
@@ -287,9 +283,6 @@ fn walk_ast(node: Node, ctx: &mut AnalysisContext) {
                         }
                     }
                 }
-                // 即使 symbols 为空（`export * from`、`export * as ns from`）也要
-                // 产生 ImportInfo，否则 build.rs 不会建立 file→file 的 Imports 边，
-                // barrel 文件的依赖会对拓扑排序不可见
                 ctx.imports.push(ImportInfo {
                     module_path,
                     symbols,
@@ -301,7 +294,7 @@ fn walk_ast(node: Node, ctx: &mut AnalysisContext) {
                 });
             }
         }
-        "import_statement" => {
+        "import_statement" if top_level => {
             extract_import(node, ctx);
         }
         "call_expression" => {
@@ -316,7 +309,7 @@ fn walk_ast(node: Node, ctx: &mut AnalysisContext) {
     let count = node.child_count();
     for i in 0..count {
         if let Some(child) = node.child(i) {
-            walk_ast(child, ctx);
+            walk_ast(child, ctx, top_level);
         }
     }
 }
@@ -347,10 +340,10 @@ fn is_function_value(kind: &str) -> bool {
     )
 }
 
-/// 从 `lexical_declaration`/`variable_declaration` 中提取函数表达式绑定为 Function 节点。
-/// 例如 `export const handler = () => {}` —— 仅 `export function` 会被 walk_ast 的
-/// function_declaration 分支处理，箭头/函数表达式常量此前完全不入图。
-fn extract_var_functions(node: Node, ctx: &mut AnalysisContext) {
+/// 从 `lexical_declaration`/`variable_declaration` 中提取：
+/// 1. 函数表达式绑定（`const f = () => {}`）→ Function 节点
+/// 2. 构造绑定（`const x = new Foo()`）→ constructor_bindings 映射
+fn process_var_declaration(node: Node, ctx: &mut AnalysisContext) {
     let count = node.child_count();
     for i in 0..count {
         let Some(declarator) = node.child(i) else {
@@ -359,58 +352,38 @@ fn extract_var_functions(node: Node, ctx: &mut AnalysisContext) {
         if declarator.kind() != "variable_declarator" {
             continue;
         }
-        let Some(value) = declarator.child_by_field_name("value") else {
-            continue;
-        };
-        if !is_function_value(value.kind()) {
-            continue;
-        }
         let Some(name_node) = declarator.child_by_field_name("name") else {
             continue;
         };
-        // 仅处理简单标识符绑定（跳过解构 `const { a } = ...`）
         if name_node.kind() != "identifier" {
             continue;
         }
-        let name = text(name_node, ctx.source);
-        if name.is_empty() {
+        let Some(value) = declarator.child_by_field_name("value") else {
             continue;
-        }
-        let is_async = has_anon_child(value, "async");
-        let is_exported = ctx.exported_names.contains(&name);
-        let mut sn = SourceNode::new(
-            NodeId::symbol(NodeType::Function, ctx.rel_path, &name),
-            NodeType::Function,
-            name,
-            ctx.rel_path.to_string(),
-        );
-        sn.line_range = Some(node_span(declarator));
-        sn.is_exported = is_exported;
-        sn.is_async = is_async;
-        ctx.nodes.push(sn);
-    }
-}
+        };
 
-/// `const x = new Foo()` → 记录 `"x" → "Foo"` 到 constructor_bindings。
-fn collect_constructor_bindings(node: Node, ctx: &mut AnalysisContext) {
-    let count = node.child_count();
-    for i in 0..count {
-        let Some(declarator) = node.child(i) else {
-            continue;
-        };
-        if declarator.kind() != "variable_declarator" {
+        // 1. 函数表达式绑定 → Function 节点
+        if is_function_value(value.kind()) {
+            let name = text(name_node, ctx.source);
+            if name.is_empty() {
+                continue;
+            }
+            let is_async = has_anon_child(value, "async");
+            let is_exported = ctx.exported_names.contains(&name);
+            let mut sn = SourceNode::new(
+                NodeId::symbol(NodeType::Function, ctx.rel_path, &name),
+                NodeType::Function,
+                name,
+                ctx.rel_path.to_string(),
+            );
+            sn.line_range = Some(node_span(declarator));
+            sn.is_exported = is_exported;
+            sn.is_async = is_async;
+            ctx.nodes.push(sn);
             continue;
         }
-        let Some(name_node) = declarator.child_by_field_name("name") else {
-            continue;
-        };
-        if name_node.kind() != "identifier" {
-            continue;
-        }
-        let Some(value) = declarator.child_by_field_name("value") else {
-            continue;
-        };
-        // 穿透 `await new Foo()`
+
+        // 2. 构造绑定：`const x = new Foo()` / `const x = await new Foo()`
         let new_expr = if value.kind() == "await_expression" {
             (0..value.child_count())
                 .find_map(|j| value.child(j).filter(|c| c.kind() == "new_expression"))
@@ -419,14 +392,13 @@ fn collect_constructor_bindings(node: Node, ctx: &mut AnalysisContext) {
         } else {
             None
         };
-        let Some(new_expr) = new_expr else {
-            continue;
-        };
-        if let Some(constructor) = new_expr.child_by_field_name("constructor") {
-            let class_name = text(constructor, ctx.source);
-            if !class_name.is_empty() {
-                let var_name = text(name_node, ctx.source);
-                ctx.constructor_bindings.insert(var_name, class_name);
+        if let Some(new_expr) = new_expr {
+            if let Some(constructor) = new_expr.child_by_field_name("constructor") {
+                let class_name = text(constructor, ctx.source);
+                if !class_name.is_empty() {
+                    let var_name = text(name_node, ctx.source);
+                    ctx.constructor_bindings.insert(var_name, class_name);
+                }
             }
         }
     }
@@ -452,24 +424,15 @@ fn extract_class(node: Node, ctx: &mut AnalysisContext) {
     sn.is_abstract = is_abstract;
     ctx.nodes.push(sn);
 
-    // 方法
-    if let Some(body) = node.child_by_field_name("body") {
-        extract_methods(body, class_id.as_str(), &name, ctx);
-    }
-
     // extends / implements
     extract_heritage(node, class_id.as_str(), ctx);
 
-    // 递归处理 body 内所有子节点。此处必须走完整的 walk_ast 而非 calls-only：
-    // 方法体内可能嵌套 class/function/dynamic import 等需独立提取的结构（如
-    // `class Outer { m() { import('./x'); class Inner {…} } }`），calls-only
-    // 仅采集 call/new、会漏掉嵌套 class 节点与其 dynamic import。method_definition
-    // 本身不是 walk_ast 的匹配分支，故不会与上面的 extract_methods 重复采集方法。
     if let Some(body) = node.child_by_field_name("body") {
+        extract_methods(body, class_id.as_str(), &name, ctx);
         let count = body.child_count();
         for i in 0..count {
             if let Some(child) = body.child(i) {
-                walk_ast(child, ctx);
+                walk_ast(child, ctx, false);
             }
         }
     }
@@ -528,15 +491,11 @@ fn extract_methods(body: Node, class_id: &str, class_name: &str, ctx: &mut Analy
         sn.is_async = is_async;
         ctx.nodes.push(sn);
 
-        ctx.edges.push(Dependency {
-            source: NodeId::new(class_id),
-            target: method_id,
-            edge_type: EdgeType::Contains,
-            provenance: Provenance::TreeSitter,
-            weight: 1.0,
-            sub_kind: None,
-            mapping_notes: None,
-        });
+        ctx.edges.push(Dependency::new(
+            NodeId::new(class_id),
+            method_id,
+            EdgeType::Contains,
+        ));
     }
 }
 
@@ -617,19 +576,11 @@ fn extract_heritage(class_node: Node, class_id: &str, ctx: &mut AnalysisContext)
                 }
                 // 目标 ID 暂用 interface 前缀，build.rs 在图完成后会修正
                 let target_id = NodeId::symbol(NodeType::Interface, ctx.rel_path, &target_name);
-                ctx.edges.push(Dependency {
-                    source: NodeId::new(class_id),
-                    target: target_id,
-                    edge_type: EdgeType::Extends,
-                    provenance: Provenance::TreeSitter,
-                    weight: 1.0,
-                    sub_kind: if is_implements {
-                        Some(EdgeSubKind::Implements)
-                    } else {
-                        None
-                    },
-                    mapping_notes: None,
-                });
+                let mut dep = Dependency::new(NodeId::new(class_id), target_id, EdgeType::Extends);
+                if is_implements {
+                    dep = dep.with_sub_kind(EdgeSubKind::Implements);
+                }
+                ctx.edges.push(dep);
             }
         }
     }
@@ -694,15 +645,11 @@ fn extract_interface_heritage(node: Node, interface_id: &str, ctx: &mut Analysis
             if target_name.is_empty() {
                 continue;
             }
-            ctx.edges.push(Dependency {
-                source: NodeId::new(interface_id),
-                target: NodeId::symbol(NodeType::Interface, ctx.rel_path, &target_name),
-                edge_type: EdgeType::Extends,
-                provenance: Provenance::TreeSitter,
-                weight: 1.0,
-                sub_kind: None,
-                mapping_notes: None,
-            });
+            ctx.edges.push(Dependency::new(
+                NodeId::new(interface_id),
+                NodeId::symbol(NodeType::Interface, ctx.rel_path, &target_name),
+                EdgeType::Extends,
+            ));
         }
     }
 }
@@ -1270,6 +1217,48 @@ class Outer {
         assert!(
             methods.contains(&"Inner.run"),
             "嵌套 class Inner 的方法 run 应生成 Function 节点: {methods:?}"
+        );
+    }
+
+    #[test]
+    fn method_body_local_bindings_do_not_leak_to_file_scope() {
+        let mut adapter = TypeScriptAdapter::new().unwrap();
+        let source = r#"
+class Service {
+    init() {
+        const helper = () => 42;
+        function localFn() {}
+        const svc = new OtherService();
+    }
+}
+"#;
+        let result = adapter.analyze_file(source, "scope.ts").unwrap();
+
+        let fn_names: Vec<&str> = result
+            .nodes
+            .iter()
+            .filter(|n| n.node_type == NodeType::Function)
+            .map(|n| n.name.as_str())
+            .collect();
+        // 方法体内的 const helper / function localFn 不应成为文件级节点
+        assert!(
+            !fn_names.contains(&"helper"),
+            "方法体内 const helper 不应成为文件级 Function 节点: {fn_names:?}"
+        );
+        assert!(
+            !fn_names.contains(&"localFn"),
+            "方法体内 function localFn 不应成为文件级 Function 节点: {fn_names:?}"
+        );
+        // Service.init 应正常存在
+        assert!(
+            fn_names.contains(&"Service.init"),
+            "Service.init 方法应为 Function 节点: {fn_names:?}"
+        );
+        // 方法体内的 constructor binding 不应泄漏到文件级
+        assert!(
+            result.constructor_bindings.is_empty(),
+            "方法体内 const svc = new OtherService() 不应泄漏到 constructor_bindings: {:?}",
+            result.constructor_bindings
         );
     }
 

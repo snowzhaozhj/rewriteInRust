@@ -7,9 +7,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::error::{MigrateError, Result};
-use crate::lang::{FileAnalysis, LanguageAdapter};
+use crate::lang::{FileAnalysis, LanguageAdapter, SymbolKind};
 use crate::types::common::{NodeId, EXCLUDED_DIRS};
-use crate::types::graph::{Dependency, EdgeSubKind, EdgeType, NodeType, Provenance, SourceNode};
+use crate::types::graph::{Dependency, EdgeSubKind, EdgeType, NodeType};
 
 use super::SourceGraph;
 
@@ -181,20 +181,6 @@ fn fixup_extends_in_edges(graph: &SourceGraph, mut edges: Vec<Dependency>) -> Ve
     edges
 }
 
-/// 按谓词在图中查找唯一节点；命中多个时返回 None（避免在歧义时猜测）。
-fn find_unique_node<F>(graph: &SourceGraph, pred: F) -> Option<NodeId>
-where
-    F: Fn(&SourceNode) -> bool,
-{
-    let mut it = graph.nodes().filter(|n| pred(n));
-    let first = it.next()?;
-    if it.next().is_some() {
-        None
-    } else {
-        Some(first.id.clone())
-    }
-}
-
 /// 剥离 callee 的导入基名前缀，得到目标模块内的符号名。
 /// `ns.clamp`（base=`ns`）→ `clamp`；`fn`（base=`fn`）→ `fn`。
 fn cross_symbol_name<'a>(callee: &'a str, base: &str) -> &'a str {
@@ -212,6 +198,23 @@ fn add_cross_file_edges(
     file_set: &HashSet<String>,
     resolve_exts: &[&str],
 ) {
+    // 名称索引：用于 O(1) 唯一名称查找，替代逐边 O(N) 的 find_unique_node。
+    let mut class_index: HashMap<String, Vec<NodeId>> = HashMap::new();
+    let mut fn_index: HashMap<String, Vec<NodeId>> = HashMap::new();
+    for node in graph.nodes() {
+        match node.node_type {
+            NodeType::Class => class_index
+                .entry(node.name.clone())
+                .or_default()
+                .push(node.id.clone()),
+            NodeType::Function => fn_index
+                .entry(node.name.clone())
+                .or_default()
+                .push(node.id.clone()),
+            _ => {}
+        }
+    }
+
     // 按文件相对路径排序遍历，保证跨文件边的插入顺序确定（analyses 是 HashMap）
     let mut rels: Vec<&String> = analyses.keys().collect();
     rels.sort();
@@ -223,19 +226,17 @@ fn add_cross_file_edges(
         let mut import_map: HashMap<String, String> = HashMap::new();
         // 同一本地别名被绑定到不同模块时视为歧义，移除并禁用，避免把调用连到错误模块
         let mut ambiguous: HashSet<String> = HashSet::new();
+        // 别名 → 原名映射（仅 Named import；namespace import 跳过以免污染）
+        let mut alias_to_original: HashMap<String, String> = HashMap::new();
         for import in &analysis.imports {
             if let Some(target_rel) =
                 resolve_import(&import.module_path, rel, file_set, resolve_exts)
             {
-                graph.add_edge(Dependency {
-                    source: file_id.clone(),
-                    target: NodeId::file(&target_rel),
-                    edge_type: EdgeType::Imports,
-                    provenance: Provenance::TreeSitter,
-                    weight: 1.0,
-                    sub_kind: None,
-                    mapping_notes: None,
-                });
+                graph.add_edge(Dependency::new(
+                    file_id.clone(),
+                    NodeId::file(&target_rel),
+                    EdgeType::Imports,
+                ));
                 for sym in &import.symbols {
                     let local_name = sym.alias.as_deref().unwrap_or(&sym.name);
                     if ambiguous.contains(local_name) {
@@ -250,6 +251,18 @@ fn add_cross_file_edges(
                             import_map.insert(local_name.to_string(), target_rel.clone());
                         }
                     }
+                    if sym.kind == SymbolKind::Named {
+                        if let Some(alias) = &sym.alias {
+                            match alias_to_original.get(alias.as_str()) {
+                                Some(existing) if existing != &sym.name => {
+                                    alias_to_original.remove(alias.as_str());
+                                }
+                                _ => {
+                                    alias_to_original.insert(alias.clone(), sym.name.clone());
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -262,109 +275,86 @@ fn add_cross_file_edges(
                 let resolved = if graph.node_index(&target_id).is_some() {
                     Some(target_id)
                 } else if let Some(src_file) = import_map.get(callee_base) {
-                    // 命名空间构造 `new ns.Foo()`：剥离基名后用 `Foo` 在目标模块查找
                     let sym = cross_symbol_name(&call.callee, callee_base);
-                    let cross_id = NodeId::symbol(NodeType::Class, src_file, sym);
+                    let original = alias_to_original
+                        .get(sym)
+                        .map(String::as_str)
+                        .unwrap_or(sym);
+                    let cross_id = NodeId::symbol(NodeType::Class, src_file, original);
                     graph.node_index(&cross_id).is_some().then_some(cross_id)
                 } else {
                     // 全局唯一同名兜底（命中多个则放弃，避免连到错误文件）
-                    find_unique_node(graph, |n| {
-                        n.name == call.callee && n.node_type == NodeType::Class
-                    })
+                    class_index
+                        .get(call.callee.as_str())
+                        .and_then(|ids| match ids.as_slice() {
+                            [single] => Some(single.clone()),
+                            _ => None,
+                        })
                 };
                 if let Some(target) = resolved {
-                    graph.add_edge(Dependency {
-                        source: file_id.clone(),
-                        target,
-                        edge_type: EdgeType::Calls,
-                        provenance: Provenance::TreeSitter,
-                        weight: 1.0,
-                        sub_kind: Some(EdgeSubKind::Constructor),
-                        mapping_notes: None,
-                    });
+                    graph.add_edge(
+                        Dependency::new(file_id.clone(), target, EdgeType::Calls)
+                            .with_sub_kind(EdgeSubKind::Constructor),
+                    );
                 }
             } else {
                 // 1. 当前文件的函数
                 let target_id = NodeId::symbol(NodeType::Function, rel, &call.callee);
                 if graph.node_index(&target_id).is_some() {
-                    graph.add_edge(Dependency {
-                        source: file_id.clone(),
-                        target: target_id,
-                        edge_type: EdgeType::Calls,
-                        provenance: Provenance::TreeSitter,
-                        weight: 1.0,
-                        sub_kind: None,
-                        mapping_notes: None,
-                    });
+                    graph.add_edge(Dependency::new(file_id.clone(), target_id, EdgeType::Calls));
                 } else if let Some(src_file) = import_map.get(callee_base) {
                     // 2. 通过 import 解析到其他文件的函数。
                     let sym = cross_symbol_name(&call.callee, callee_base);
                     let cross_id = NodeId::symbol(NodeType::Function, src_file, sym);
                     if graph.node_index(&cross_id).is_some() {
-                        graph.add_edge(Dependency {
-                            source: file_id.clone(),
-                            target: cross_id,
-                            edge_type: EdgeType::Calls,
-                            provenance: Provenance::TreeSitter,
-                            weight: 1.0,
-                            sub_kind: None,
-                            mapping_notes: None,
-                        });
+                        graph.add_edge(Dependency::new(file_id.clone(), cross_id, EdgeType::Calls));
                     }
-                } else if call.callee.contains('.') {
+                } else if let Some(dot_pos) = call.callee.find('.') {
                     // 3. 方法调用解析（REFAC-10 档1）：
                     //    `obj.method()` — 若 obj 是本地构造绑定（`const obj = new Foo()`），
                     //    用 Foo + import_map 找到源文件，查 `function:{file}:Foo.method`。
                     //    若 obj 直接是导入类名，也尝试在同文件或导入源查方法节点。
-                    if let Some(dot_pos) = call.callee.find('.') {
-                        let receiver = &call.callee[..dot_pos];
-                        let method = &call.callee[dot_pos + 1..];
-                        let class_name = analysis
-                            .constructor_bindings
-                            .get(receiver)
+                    let receiver = &call.callee[..dot_pos];
+                    let method = &call.callee[dot_pos + 1..];
+                    let class_name = analysis
+                        .constructor_bindings
+                        .get(receiver)
+                        .map(String::as_str)
+                        .unwrap_or(receiver);
+                    let qualified = format!("{class_name}.{method}");
+                    let local_id = NodeId::symbol(NodeType::Function, rel, &qualified);
+                    if graph.node_index(&local_id).is_some() {
+                        graph.add_edge(Dependency::new(file_id.clone(), local_id, EdgeType::Calls));
+                    } else if let Some(src_file) = import_map.get(class_name) {
+                        let original = alias_to_original
+                            .get(class_name)
                             .map(String::as_str)
-                            .unwrap_or(receiver);
-                        let qualified = format!("{class_name}.{method}");
-                        // 当前文件内的方法
-                        let local_id = NodeId::symbol(NodeType::Function, rel, &qualified);
-                        if graph.node_index(&local_id).is_some() {
-                            graph.add_edge(Dependency {
-                                source: file_id.clone(),
-                                target: local_id,
-                                edge_type: EdgeType::Calls,
-                                provenance: Provenance::TreeSitter,
-                                weight: 1.0,
-                                sub_kind: None,
-                                mapping_notes: None,
-                            });
-                        } else if let Some(src_file) = import_map.get(class_name) {
-                            let cross_id = NodeId::symbol(NodeType::Function, src_file, &qualified);
-                            if graph.node_index(&cross_id).is_some() {
-                                graph.add_edge(Dependency {
-                                    source: file_id.clone(),
-                                    target: cross_id,
-                                    edge_type: EdgeType::Calls,
-                                    provenance: Provenance::TreeSitter,
-                                    weight: 1.0,
-                                    sub_kind: None,
-                                    mapping_notes: None,
-                                });
-                            }
-                        } else {
-                            // 全图唯一方法名兜底
-                            if let Some(target) = find_unique_node(graph, |n| {
-                                n.name == qualified && n.node_type == NodeType::Function
-                            }) {
-                                graph.add_edge(Dependency {
-                                    source: file_id.clone(),
-                                    target,
-                                    edge_type: EdgeType::Calls,
-                                    provenance: Provenance::TreeSitter,
-                                    weight: 1.0,
-                                    sub_kind: None,
-                                    mapping_notes: None,
-                                });
-                            }
+                            .unwrap_or(class_name);
+                        let cross_qualified = format!("{original}.{method}");
+                        let cross_id =
+                            NodeId::symbol(NodeType::Function, src_file, &cross_qualified);
+                        if graph.node_index(&cross_id).is_some() {
+                            graph.add_edge(Dependency::new(
+                                file_id.clone(),
+                                cross_id,
+                                EdgeType::Calls,
+                            ));
+                        }
+                    } else {
+                        // 全图唯一方法名兜底
+                        if let Some(target) =
+                            fn_index
+                                .get(qualified.as_str())
+                                .and_then(|ids| match ids.as_slice() {
+                                    [single] => Some(single.clone()),
+                                    _ => None,
+                                })
+                        {
+                            graph.add_edge(Dependency::new(
+                                file_id.clone(),
+                                target,
+                                EdgeType::Calls,
+                            ));
                         }
                     }
                 }
@@ -665,6 +655,35 @@ mod tests {
         assert!(
             has_authenticate,
             "diamond-deps: service.authenticate() 应解析为跨文件方法调用 Calls 边"
+        );
+    }
+
+    #[test]
+    fn cross_file_method_call_with_import_alias() {
+        let dir = std::env::temp_dir().join("rustmigrate_alias_method_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("service.ts"),
+            "export class Greeter {\n  hello() { return 'hi'; }\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("app.ts"),
+            "import { Greeter as G } from './service';\nconst g = new G();\ng.hello();\n",
+        )
+        .unwrap();
+
+        let graph = build_graph_ts(&dir).unwrap();
+        let has_call = graph.edges().any(|e| {
+            e.edge_type == EdgeType::Calls
+                && e.source.as_str() == "file:app.ts"
+                && e.target.as_str() == "function:service.ts:Greeter.hello"
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            has_call,
+            "import 别名场景下方法调用应解析到原类名 Greeter.hello"
         );
     }
 }

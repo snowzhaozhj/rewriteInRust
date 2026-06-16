@@ -195,6 +195,26 @@ pub struct Dependency {
     pub mapping_notes: Option<String>,
 }
 
+impl Dependency {
+    /// 构造器：三必填字段，其余使用 TreeSitter/1.0/None 默认值。
+    pub fn new(source: NodeId, target: NodeId, edge_type: EdgeType) -> Self {
+        Self {
+            source,
+            target,
+            edge_type,
+            provenance: Provenance::TreeSitter,
+            weight: 1.0,
+            sub_kind: None,
+            mapping_notes: None,
+        }
+    }
+
+    pub fn with_sub_kind(mut self, sub_kind: EdgeSubKind) -> Self {
+        self.sub_kind = Some(sub_kind);
+        self
+    }
+}
+
 fn default_provenance() -> Provenance {
     Provenance::TreeSitter
 }

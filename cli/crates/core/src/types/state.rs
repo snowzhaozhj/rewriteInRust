@@ -223,12 +223,12 @@ fn default_risk() -> RiskLevel {
 
 /// 从内部 module key 派生「人类友好显示名」（纯函数，不改变内部 key）。
 ///
-/// 内部 module key 形如 NodeId 原值（见 `types/common.rs`）：
-/// `file:src/utils.ts`、`file:src/foo/bar.ts`，对人类不友好。本函数归一化为
-/// 可辨识的短名，供 `--human` 标志在 CLI 输出中附带显示映射：
+/// **仅适用于 `file:` 前缀的 module key**（如 `file:src/utils.ts`）。
+/// 非 `file:` 类型的 NodeId（如 `function:src/utils.ts:clamp`）因含多个冒号，
+/// `split_once(':')` 仅剥离第一段、后续路径会被截断，输出不保证有意义。
 ///
 /// 归一化规则（保守、无歧义）：
-/// 1. 去掉 NodeType 前缀（`file:` / `function:` 等，即第一个 `:` 之前的部分）；
+/// 1. 去掉 NodeType 前缀（`file:` 等，即第一个 `:` 之前的部分）；
 ///    无前缀时按原样处理路径。
 /// 2. 去掉常见源码根目录前缀（`src/`），保留其余目录层级以保证可辨识。
 /// 3. 去掉文件名扩展名（仅末段 basename 的最后一个 `.` 之后）。

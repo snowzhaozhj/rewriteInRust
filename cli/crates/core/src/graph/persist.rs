@@ -141,7 +141,18 @@ pub fn load_from_db(db_path: &Path) -> Result<SourceGraph> {
                 _ => None,
             };
 
-            let complexity = r.complexity.as_deref().and_then(|s| s.parse().ok());
+            let complexity = parse_or_warn(
+                r.complexity.as_deref(),
+                "complexity",
+                &r.id,
+                &mut graph.warnings,
+            );
+            let migration_status = parse_or_warn(
+                r.migration_status.as_deref(),
+                "migration_status",
+                &r.id,
+                &mut graph.warnings,
+            );
             let extra = parse_node_extra(r.extra.as_deref(), &r.id, &mut graph.warnings);
 
             graph.add_node(SourceNode {
@@ -156,7 +167,7 @@ pub fn load_from_db(db_path: &Path) -> Result<SourceGraph> {
                 visibility: extra.visibility,
                 is_abstract: extra.is_abstract,
                 decorators: extra.decorators,
-                migration_status: r.migration_status.as_deref().and_then(|s| s.parse().ok()),
+                migration_status,
                 migration_priority: r.migration_priority,
                 rust_kind: extra.rust_kind,
                 rust_path: extra.rust_path,
@@ -196,13 +207,20 @@ pub fn load_from_db(db_path: &Path) -> Result<SourceGraph> {
                 file: String::new(),
             })?;
 
+            let edge_id = format!("{}→{}", r.source, r.target);
+            let sub_kind = parse_or_warn(
+                r.sub_kind.as_deref(),
+                "sub_kind",
+                &edge_id,
+                &mut graph.warnings,
+            );
             graph.add_edge(Dependency {
                 source: NodeId::new(r.source),
                 target: NodeId::new(r.target),
                 edge_type,
                 provenance,
                 weight: r.weight,
-                sub_kind: r.sub_kind.as_deref().and_then(|s| s.parse().ok()),
+                sub_kind,
                 mapping_notes: r.mapping_notes,
             });
         }
@@ -251,10 +269,12 @@ struct EdgeRow {
 struct NodeExtra {
     /// Function/Class 专属。
     is_async: bool,
+    #[serde(default, deserialize_with = "lenient_enum")]
     visibility: Option<Visibility>,
     is_abstract: bool,
     decorators: Vec<String>,
     /// RustTarget 专属。
+    #[serde(default, deserialize_with = "lenient_enum")]
     rust_kind: Option<RustKind>,
     rust_path: Option<String>,
     crate_name: Option<String>,
@@ -271,6 +291,44 @@ impl From<&SourceNode> for NodeExtra {
             rust_path: node.rust_path.clone(),
             crate_name: node.crate_name.clone(),
         }
+    }
+}
+
+/// 解析枚举值，失败时记录 warning 而非静默丢弃（前向兼容：未来新增枚举变体时旧版本能
+/// 感知而非静默降级为 None）。
+fn parse_or_warn<T: std::str::FromStr>(
+    value: Option<&str>,
+    field: &str,
+    id: &str,
+    warnings: &mut Vec<String>,
+) -> Option<T> {
+    value.and_then(|s| match s.parse() {
+        Ok(v) => Some(v),
+        Err(_) => {
+            warnings.push(format!("{id} 的 {field} '{s}' 无法识别，已按 None 处理"));
+            None
+        }
+    })
+}
+
+/// serde 宽容反序列化器：未知枚举值降级为 None，避免单个字段失败导致整个 struct
+/// 反序列化失败（保护 NodeExtra 的其他字段不被级联丢失）。
+fn lenient_enum<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    use serde::Deserialize;
+    let v: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    match v {
+        None => Ok(None),
+        Some(val) => match serde_json::from_value::<T>(val.clone()) {
+            Ok(parsed) => Ok(Some(parsed)),
+            Err(_) => {
+                eprintln!("[warn] NodeExtra 字段值 '{val}' 无法识别，已按 None 处理");
+                Ok(None)
+            }
+        },
     }
 }
 
@@ -562,6 +620,48 @@ mod tests {
         assert!(loaded.node_index(&NodeId::new("file:old.ts")).is_none());
         assert!(loaded.node_index(&NodeId::new("file:new1.ts")).is_some());
         assert!(loaded.node_index(&NodeId::new("file:new2.ts")).is_some());
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn unknown_enum_values_produce_warnings_not_silent_loss() {
+        let db_path = temp_db_path("unknown_enum");
+
+        // 写入一个正常的节点
+        let mut graph = SourceGraph::new();
+        graph.add_node(SourceNode::new(
+            NodeId::new("file:test.ts"),
+            NodeType::File,
+            "test.ts".to_string(),
+            "test.ts".to_string(),
+        ));
+        save_to_db(&graph, &db_path).unwrap();
+
+        // 手动写入不在枚举中的 migration_status 值
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "UPDATE nodes SET migration_status = 'future_status' WHERE id = 'file:test.ts'",
+            [],
+        )
+        .unwrap();
+
+        let loaded = load_from_db(&db_path).unwrap();
+        let node = loaded
+            .nodes()
+            .find(|n| n.id.as_str() == "file:test.ts")
+            .unwrap();
+        // 未知值应降级为 None 而非 panic
+        assert_eq!(node.migration_status, None);
+        // 但应产生 warning
+        assert!(
+            loaded
+                .warnings()
+                .iter()
+                .any(|w| w.contains("future_status")),
+            "未知 migration_status 应产生 warning: {:?}",
+            loaded.warnings()
+        );
 
         let _ = std::fs::remove_file(&db_path);
     }

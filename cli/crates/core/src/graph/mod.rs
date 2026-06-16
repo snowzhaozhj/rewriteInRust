@@ -95,7 +95,7 @@ impl Default for SourceGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::graph::{Dependency, EdgeType, NodeType, Provenance};
+    use crate::types::graph::{Dependency, EdgeType, NodeType};
 
     fn test_node(id: &str, name: &str) -> SourceNode {
         SourceNode::new(
@@ -120,15 +120,11 @@ mod tests {
     fn add_edge_nonexistent_returns_none() {
         let mut g = SourceGraph::new();
         g.add_node(test_node("function:test.ts:foo", "foo"));
-        let result = g.add_edge(Dependency {
-            source: NodeId::new("function:test.ts:foo"),
-            target: NodeId::new("function:test.ts:missing"),
-            edge_type: EdgeType::Calls,
-            provenance: Provenance::TreeSitter,
-            weight: 1.0,
-            sub_kind: None,
-            mapping_notes: None,
-        });
+        let result = g.add_edge(Dependency::new(
+            NodeId::new("function:test.ts:foo"),
+            NodeId::new("function:test.ts:missing"),
+            EdgeType::Calls,
+        ));
         assert!(result.is_none());
         assert_eq!(g.edge_count(), 0);
     }
