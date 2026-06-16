@@ -33,7 +33,7 @@ use std::process::ExitCode;
 use rustmigrate_core::graph::build::build_graph_ts;
 use rustmigrate_core::graph::SourceGraph;
 use rustmigrate_core::types::common::NodeId;
-use rustmigrate_core::types::graph::{EdgeType, NodeType};
+use rustmigrate_core::types::graph::{EdgeSubKind, EdgeType, NodeType};
 use serde::Serialize;
 
 /// 调用边的一端（callee 侧；caller 侧只有 file）。
@@ -127,7 +127,7 @@ fn main() -> ExitCode {
         let Some(callee) = symbol_ref(&graph, &e.target) else {
             continue;
         };
-        let is_constructor = e.sub_kind.as_deref() == Some("constructor")
+        let is_constructor = e.sub_kind == Some(EdgeSubKind::Constructor)
             || e.target.kind() == Some(NodeType::Class);
         call_set.insert(CallEdgeOut {
             caller_file,
@@ -145,7 +145,7 @@ fn main() -> ExitCode {
         else {
             continue;
         };
-        let is_implements = e.sub_kind.as_deref() == Some("implements");
+        let is_implements = e.sub_kind == Some(EdgeSubKind::Implements);
         let edge = HeritageEdgeOut {
             child,
             parent,

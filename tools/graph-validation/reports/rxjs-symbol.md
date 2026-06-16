@@ -60,8 +60,8 @@ ajax/ajax -> ajax/types
 自研 caller 侧无 enclosing 符号（Calls 边 source 是文件节点），caller 符号无法对齐；
 此处仅给 callee 符号名集合的 Jaccard 重合度作弱参考：
 
-- 自研 callee 符号名：190　oracle callee 符号名：161
-- 交集：108　Jaccard：0.4444
+- 自研 callee 符号名：196　oracle callee 符号名：161
+- 交集：114　Jaccard：0.4691
 
 > 符号级精确对比的口径对齐难点见 `tools/graph-validation/SYMBOL-PRECISION.md`。
 

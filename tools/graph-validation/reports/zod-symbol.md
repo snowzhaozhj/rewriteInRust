@@ -60,8 +60,8 @@ types -> helpers/parseUtil
 自研 caller 侧无 enclosing 符号（Calls 边 source 是文件节点），caller 符号无法对齐；
 此处仅给 callee 符号名集合的 Jaccard 重合度作弱参考：
 
-- 自研 callee 符号名：87　oracle callee 符号名：164
-- 交集：26　Jaccard：0.1156
+- 自研 callee 符号名：89　oracle callee 符号名：164
+- 交集：28　Jaccard：0.1244
 
 > 符号级精确对比的口径对齐难点见 `tools/graph-validation/SYMBOL-PRECISION.md`。
 

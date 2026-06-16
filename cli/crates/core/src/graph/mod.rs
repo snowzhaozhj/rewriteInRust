@@ -95,27 +95,15 @@ impl Default for SourceGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::graph::{Dependency, EdgeType, NodeType, Provenance};
+    use crate::types::graph::{Dependency, EdgeType, NodeType};
 
     fn test_node(id: &str, name: &str) -> SourceNode {
-        SourceNode {
-            id: NodeId::new(id),
-            node_type: NodeType::Function,
-            name: name.to_string(),
-            file_path: "test.ts".to_string(),
-            line_range: None,
-            is_exported: false,
-            complexity: None,
-            is_async: false,
-            visibility: None,
-            is_abstract: false,
-            decorators: Vec::new(),
-            migration_status: None,
-            migration_priority: None,
-            rust_kind: None,
-            rust_path: None,
-            crate_name: None,
-        }
+        SourceNode::new(
+            NodeId::new(id),
+            NodeType::Function,
+            name.to_string(),
+            "test.ts".to_string(),
+        )
     }
 
     #[test]
@@ -132,15 +120,11 @@ mod tests {
     fn add_edge_nonexistent_returns_none() {
         let mut g = SourceGraph::new();
         g.add_node(test_node("function:test.ts:foo", "foo"));
-        let result = g.add_edge(Dependency {
-            source: NodeId::new("function:test.ts:foo"),
-            target: NodeId::new("function:test.ts:missing"),
-            edge_type: EdgeType::Calls,
-            provenance: Provenance::TreeSitter,
-            weight: 1.0,
-            sub_kind: None,
-            mapping_notes: None,
-        });
+        let result = g.add_edge(Dependency::new(
+            NodeId::new("function:test.ts:foo"),
+            NodeId::new("function:test.ts:missing"),
+            EdgeType::Calls,
+        ));
         assert!(result.is_none());
         assert_eq!(g.edge_count(), 0);
     }

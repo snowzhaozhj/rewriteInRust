@@ -27,3 +27,4 @@ fixtures/*/dist/
 
 # Lock (review loop)
 docs/review/.loop-lock
+.rust-migration/

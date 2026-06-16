@@ -221,6 +221,52 @@ fn default_risk() -> RiskLevel {
     RiskLevel::Low
 }
 
+/// 从内部 module key 派生「人类友好显示名」（纯函数，不改变内部 key）。
+///
+/// **仅适用于 `file:` 前缀的 module key**（如 `file:src/utils.ts`）。
+/// 非 `file:` 类型的 NodeId（如 `function:src/utils.ts:clamp`）因含多个冒号，
+/// `split_once(':')` 仅剥离第一段、后续路径会被截断，输出不保证有意义。
+///
+/// 归一化规则（保守、无歧义）：
+/// 1. 去掉 NodeType 前缀（`file:` 等，即第一个 `:` 之前的部分）；
+///    无前缀时按原样处理路径。
+/// 2. 去掉常见源码根目录前缀（`src/`），保留其余目录层级以保证可辨识。
+/// 3. 去掉文件名扩展名（仅末段 basename 的最后一个 `.` 之后）。
+/// 4. 统一路径分隔符为 `/`（兼容 Windows 风格 `\`）。
+///
+/// 该函数只做显示派生，**不保证唯一性**（不同 key 可能映射到同名），故调用方
+/// 应将其作为附加显示字段，而非主键。
+pub fn humanize_module_key(key: &str) -> String {
+    // 1. 去掉 NodeType 前缀：NodeId 形如 `file:src/utils.ts`，类型前缀不含路径分隔符，
+    //    故「第一个 `:` 之前不含 `/`、`\`」可安全判定为类型前缀。
+    let after_prefix = match key.split_once(':') {
+        Some((prefix, rest)) if !prefix.contains('/') && !prefix.contains('\\') => rest,
+        _ => key,
+    };
+
+    // 4. 统一分隔符。
+    let normalized = after_prefix.replace('\\', "/");
+
+    // 2. 去掉常见源码根目录前缀。
+    let without_root = normalized
+        .strip_prefix("src/")
+        .unwrap_or(normalized.as_str());
+
+    // 3. 去掉末段 basename 的扩展名，保留目录层级。
+    match without_root.rsplit_once('/') {
+        Some((dir, base)) => format!("{dir}/{}", strip_extension(base)),
+        None => strip_extension(without_root).to_owned(),
+    }
+}
+
+/// 去掉文件名最后一个扩展名（无扩展名或隐藏文件如 `.gitignore` 则原样返回）。
+fn strip_extension(name: &str) -> &str {
+    match name.rsplit_once('.') {
+        Some((stem, _)) if !stem.is_empty() => stem,
+        _ => name,
+    }
+}
+
 /// SubAgent 调用记录。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SubAgentCall {
@@ -361,6 +407,33 @@ mod tests {
         for to in [Translating, Testing, Reviewing, Pending, Blocked, Paused] {
             assert!(!Done.can_transition_to(to), "done 不应可转出到 {to}");
         }
+    }
+
+    #[test]
+    fn test_humanize_module_key() {
+        // 典型 NodeId（file 前缀 + src 根 + .ts 扩展）。
+        assert_eq!(humanize_module_key("file:src/utils.ts"), "utils");
+        // 保留中间目录层级。
+        assert_eq!(humanize_module_key("file:src/foo/bar.ts"), "foo/bar");
+        // 非 src 根目录前缀保留。
+        assert_eq!(humanize_module_key("file:lib/index.ts"), "lib/index");
+        // 无 file 前缀（裸路径）。
+        assert_eq!(humanize_module_key("utils.ts"), "utils");
+        assert_eq!(humanize_module_key("src/a/b.ts"), "a/b");
+        // 其他 NodeType 前缀同样剥离（module key 实际只用 file 型，此处仅验证健壮性）：
+        // `function:` 前缀剥离后剩 `src/utils.ts:clamp`，去 src/ 根 → `utils.ts:clamp`，
+        // basename 无 `/`，扩展名按最后一个 `.` 切分（`utils` | `ts:clamp`）→ `utils`。
+        assert_eq!(humanize_module_key("function:src/utils.ts:clamp"), "utils");
+        // 无扩展名。
+        assert_eq!(humanize_module_key("file:src/mod"), "mod");
+        // Windows 风格分隔符归一。
+        assert_eq!(humanize_module_key("file:src\\foo\\bar.ts"), "foo/bar");
+        // 隐藏文件（前导点）不被误删。
+        assert_eq!(humanize_module_key("file:.gitignore"), ".gitignore");
+        // 多重扩展只去末段。
+        assert_eq!(humanize_module_key("file:src/types.d.ts"), "types.d");
+        // 空字符串安全。
+        assert_eq!(humanize_module_key(""), "");
     }
 
     #[test]

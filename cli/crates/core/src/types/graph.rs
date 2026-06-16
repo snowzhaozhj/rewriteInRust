@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString};
 
 use super::common::{Complexity, MigrationPriority, NodeId, Span, Timestamp};
+use super::state::ModuleStatus;
 
 /// 图节点类型（12 种：MVP 9 + M2 预留 3）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Display, EnumString)]
@@ -87,6 +88,35 @@ pub enum Visibility {
     Private,
 }
 
+/// RustTarget 节点的 Rust 类型种类（迁移映射目标端的实体类别）。
+///
+/// 对应 `docs/design/04-toolchain.md § 5.7.1` 的 `rust_kind: Option<RustKind>`。
+/// 序列化保持 PascalCase（与既有落库数据 `"Function"` 等一致）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Display, EnumString)]
+pub enum RustKind {
+    Struct,
+    Enum,
+    Trait,
+    Function,
+    Module,
+    Crate,
+}
+
+/// 边的子类型（在同一 `EdgeType` 下进一步区分语义）。
+///
+/// 对应 `docs/design/04-toolchain.md § 5.7.1` 的 `sub_kind`：
+/// - `Extends` 边用 `Implements` 区分「实现接口」与「继承」（继承为 `None`）。
+/// - `Calls` 边用 `Constructor` 标注构造调用（`new Foo()`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Display, EnumString)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum EdgeSubKind {
+    /// `Extends` 边：Class 实现 Interface（区别于继承）。
+    Implements,
+    /// `Calls` 边：构造调用 `new Foo()`。
+    Constructor,
+}
+
 /// 源码图节点。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SourceNode {
@@ -108,19 +138,45 @@ pub struct SourceNode {
     pub is_abstract: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub decorators: Vec<String>,
+    /// 模块迁移状态（编排器在模块达终态时回写，见 04 § 5.7.1）；
+    /// 复用 `ModuleStatus`——graph 节点状态与 `migration-state.json` 同口径。
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub migration_status: Option<String>,
+    pub migration_status: Option<ModuleStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub migration_priority: Option<MigrationPriority>,
     /// RustTarget 节点的 Rust 类型种类（Struct/Enum/Trait/Function/Module/Crate）。
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub rust_kind: Option<String>,
+    pub rust_kind: Option<RustKind>,
     /// RustTarget 节点的 Rust 模块路径。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rust_path: Option<String>,
     /// RustTarget 节点所属的 crate 名称。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub crate_name: Option<String>,
+}
+
+impl SourceNode {
+    /// 构造器：四必填字段，其余默认。
+    pub fn new(id: NodeId, node_type: NodeType, name: String, file_path: String) -> Self {
+        Self {
+            id,
+            node_type,
+            name,
+            file_path,
+            line_range: None,
+            is_exported: false,
+            complexity: None,
+            is_async: false,
+            visibility: None,
+            is_abstract: false,
+            decorators: Vec::new(),
+            migration_status: None,
+            migration_priority: None,
+            rust_kind: None,
+            rust_path: None,
+            crate_name: None,
+        }
+    }
 }
 
 /// 源码图边（依赖关系）。
@@ -134,9 +190,29 @@ pub struct Dependency {
     #[serde(default = "default_weight")]
     pub weight: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub sub_kind: Option<String>,
+    pub sub_kind: Option<EdgeSubKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mapping_notes: Option<String>,
+}
+
+impl Dependency {
+    /// 构造器：三必填字段，其余使用 TreeSitter/1.0/None 默认值。
+    pub fn new(source: NodeId, target: NodeId, edge_type: EdgeType) -> Self {
+        Self {
+            source,
+            target,
+            edge_type,
+            provenance: Provenance::TreeSitter,
+            weight: 1.0,
+            sub_kind: None,
+            mapping_notes: None,
+        }
+    }
+
+    pub fn with_sub_kind(mut self, sub_kind: EdgeSubKind) -> Self {
+        self.sub_kind = Some(sub_kind);
+        self
+    }
 }
 
 fn default_provenance() -> Provenance {

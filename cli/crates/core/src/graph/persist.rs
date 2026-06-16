@@ -15,7 +15,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{MigrateError, Result};
 use crate::types::common::{NodeId, Span};
-use crate::types::graph::{Dependency, EdgeType, NodeType, Provenance, SourceNode, Visibility};
+use crate::types::graph::{
+    Dependency, EdgeType, NodeType, Provenance, RustKind, SourceNode, Visibility,
+};
 
 use super::SourceGraph;
 
@@ -55,7 +57,7 @@ pub fn save_to_db(graph: &SourceGraph, db_path: &Path) -> Result<()> {
                 node.line_range.map(|s| s.end_line),
                 node.is_exported,
                 node.complexity.map(|c| c.to_string()),
-                node.migration_status,
+                node.migration_status.map(|s| s.to_string()),
                 node.migration_priority,
                 extra,
             ])?;
@@ -77,7 +79,7 @@ pub fn save_to_db(graph: &SourceGraph, db_path: &Path) -> Result<()> {
                 edge.edge_type.to_string(),
                 edge.provenance.to_string(),
                 edge.weight,
-                edge.sub_kind,
+                edge.sub_kind.map(|s| s.to_string()),
                 edge.mapping_notes,
             ])?;
         }
@@ -139,7 +141,18 @@ pub fn load_from_db(db_path: &Path) -> Result<SourceGraph> {
                 _ => None,
             };
 
-            let complexity = r.complexity.as_deref().and_then(|s| s.parse().ok());
+            let complexity = parse_or_warn(
+                r.complexity.as_deref(),
+                "complexity",
+                &r.id,
+                &mut graph.warnings,
+            );
+            let migration_status = parse_or_warn(
+                r.migration_status.as_deref(),
+                "migration_status",
+                &r.id,
+                &mut graph.warnings,
+            );
             let extra = parse_node_extra(r.extra.as_deref(), &r.id, &mut graph.warnings);
 
             graph.add_node(SourceNode {
@@ -154,7 +167,7 @@ pub fn load_from_db(db_path: &Path) -> Result<SourceGraph> {
                 visibility: extra.visibility,
                 is_abstract: extra.is_abstract,
                 decorators: extra.decorators,
-                migration_status: r.migration_status,
+                migration_status,
                 migration_priority: r.migration_priority,
                 rust_kind: extra.rust_kind,
                 rust_path: extra.rust_path,
@@ -194,13 +207,20 @@ pub fn load_from_db(db_path: &Path) -> Result<SourceGraph> {
                 file: String::new(),
             })?;
 
+            let edge_id = format!("{}→{}", r.source, r.target);
+            let sub_kind = parse_or_warn(
+                r.sub_kind.as_deref(),
+                "sub_kind",
+                &edge_id,
+                &mut graph.warnings,
+            );
             graph.add_edge(Dependency {
                 source: NodeId::new(r.source),
                 target: NodeId::new(r.target),
                 edge_type,
                 provenance,
                 weight: r.weight,
-                sub_kind: r.sub_kind,
+                sub_kind,
                 mapping_notes: r.mapping_notes,
             });
         }
@@ -249,11 +269,13 @@ struct EdgeRow {
 struct NodeExtra {
     /// Function/Class 专属。
     is_async: bool,
+    #[serde(default, deserialize_with = "lenient_enum")]
     visibility: Option<Visibility>,
     is_abstract: bool,
     decorators: Vec<String>,
     /// RustTarget 专属。
-    rust_kind: Option<String>,
+    #[serde(default, deserialize_with = "lenient_enum")]
+    rust_kind: Option<RustKind>,
     rust_path: Option<String>,
     crate_name: Option<String>,
 }
@@ -265,10 +287,48 @@ impl From<&SourceNode> for NodeExtra {
             visibility: node.visibility,
             is_abstract: node.is_abstract,
             decorators: node.decorators.clone(),
-            rust_kind: node.rust_kind.clone(),
+            rust_kind: node.rust_kind,
             rust_path: node.rust_path.clone(),
             crate_name: node.crate_name.clone(),
         }
+    }
+}
+
+/// 解析枚举值，失败时记录 warning 而非静默丢弃（前向兼容：未来新增枚举变体时旧版本能
+/// 感知而非静默降级为 None）。
+fn parse_or_warn<T: std::str::FromStr>(
+    value: Option<&str>,
+    field: &str,
+    id: &str,
+    warnings: &mut Vec<String>,
+) -> Option<T> {
+    value.and_then(|s| match s.parse() {
+        Ok(v) => Some(v),
+        Err(_) => {
+            warnings.push(format!("{id} 的 {field} '{s}' 无法识别，已按 None 处理"));
+            None
+        }
+    })
+}
+
+/// serde 宽容反序列化器：未知枚举值降级为 None，避免单个字段失败导致整个 struct
+/// 反序列化失败（保护 NodeExtra 的其他字段不被级联丢失）。
+fn lenient_enum<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    use serde::Deserialize;
+    let v: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    match v {
+        None => Ok(None),
+        Some(val) => match serde_json::from_value::<T>(val.clone()) {
+            Ok(parsed) => Ok(Some(parsed)),
+            Err(_) => {
+                eprintln!("[warn] NodeExtra 字段值 '{val}' 无法识别，已按 None 处理");
+                Ok(None)
+            }
+        },
     }
 }
 
@@ -298,6 +358,7 @@ mod tests {
     use super::*;
     use crate::graph::build::build_graph_ts;
     use crate::types::common::Complexity;
+    use crate::types::state::ModuleStatus;
     use std::path::PathBuf;
 
     fn fixtures_dir() -> PathBuf {
@@ -396,27 +457,24 @@ mod tests {
     fn persist_preserves_node_attributes() {
         // 构建一个带扩展属性的节点的图
         let mut graph = SourceGraph::new();
-        graph.add_node(SourceNode {
-            id: NodeId::new("file:test.ts"),
-            node_type: NodeType::File,
-            name: "test.ts".to_string(),
-            file_path: "test.ts".to_string(),
-            line_range: Some(Span {
-                start_line: 1,
-                end_line: 50,
-            }),
-            is_exported: true,
-            complexity: Some(Complexity::Complex),
-            is_async: true,
-            visibility: Some(Visibility::Public),
-            is_abstract: false,
-            decorators: vec!["deprecated".to_string()],
-            migration_status: Some("pending".to_string()),
-            migration_priority: Some(1),
-            rust_kind: None,
-            rust_path: None,
-            crate_name: None,
+        let mut n = SourceNode::new(
+            NodeId::new("file:test.ts"),
+            NodeType::File,
+            "test.ts".to_string(),
+            "test.ts".to_string(),
+        );
+        n.line_range = Some(Span {
+            start_line: 1,
+            end_line: 50,
         });
+        n.is_exported = true;
+        n.complexity = Some(Complexity::Complex);
+        n.is_async = true;
+        n.visibility = Some(Visibility::Public);
+        n.decorators = vec!["deprecated".to_string()];
+        n.migration_status = Some(ModuleStatus::Pending);
+        n.migration_priority = Some(1);
+        graph.add_node(n);
 
         let db_path = temp_db_path("attrs");
         save_to_db(&graph, &db_path).unwrap();
@@ -441,7 +499,7 @@ mod tests {
         assert_eq!(node.visibility, Some(Visibility::Public));
         assert!(!node.is_abstract);
         assert_eq!(node.decorators, vec!["deprecated"]);
-        assert_eq!(node.migration_status, Some("pending".to_string()));
+        assert_eq!(node.migration_status, Some(ModuleStatus::Pending));
         assert_eq!(node.migration_priority, Some(1));
 
         let _ = std::fs::remove_file(&db_path);
@@ -452,24 +510,16 @@ mod tests {
         // RustTarget 专属字段（rust_kind / rust_path / crate_name）经 extra JSON
         // round-trip 后应完整保留，而非被静默丢弃。
         let mut graph = SourceGraph::new();
-        graph.add_node(SourceNode {
-            id: NodeId::new("rust_target:my_crate::utils::capitalize"),
-            node_type: NodeType::RustTarget,
-            name: "capitalize".to_string(),
-            file_path: String::new(),
-            line_range: None,
-            is_exported: false,
-            complexity: None,
-            is_async: false,
-            visibility: None,
-            is_abstract: false,
-            decorators: Vec::new(),
-            migration_status: None,
-            migration_priority: None,
-            rust_kind: Some("Function".to_string()),
-            rust_path: Some("my_crate::utils::capitalize".to_string()),
-            crate_name: Some("my-crate".to_string()),
-        });
+        let mut n = SourceNode::new(
+            NodeId::new("rust_target:my_crate::utils::capitalize"),
+            NodeType::RustTarget,
+            "capitalize".to_string(),
+            String::new(),
+        );
+        n.rust_kind = Some(RustKind::Function);
+        n.rust_path = Some("my_crate::utils::capitalize".to_string());
+        n.crate_name = Some("my-crate".to_string());
+        graph.add_node(n);
 
         let db_path = temp_db_path("rust_target");
         save_to_db(&graph, &db_path).unwrap();
@@ -484,7 +534,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(node.node_type, NodeType::RustTarget);
-        assert_eq!(node.rust_kind, Some("Function".to_string()));
+        assert_eq!(node.rust_kind, Some(RustKind::Function));
         assert_eq!(
             node.rust_path,
             Some("my_crate::utils::capitalize".to_string())
@@ -497,42 +547,18 @@ mod tests {
     #[test]
     fn persist_preserves_edges() {
         let mut graph = SourceGraph::new();
-        graph.add_node(SourceNode {
-            id: NodeId::new("file:a.ts"),
-            node_type: NodeType::File,
-            name: "a.ts".to_string(),
-            file_path: "a.ts".to_string(),
-            line_range: None,
-            is_exported: false,
-            complexity: None,
-            is_async: false,
-            visibility: None,
-            is_abstract: false,
-            decorators: Vec::new(),
-            migration_status: None,
-            migration_priority: None,
-            rust_kind: None,
-            rust_path: None,
-            crate_name: None,
-        });
-        graph.add_node(SourceNode {
-            id: NodeId::new("file:b.ts"),
-            node_type: NodeType::File,
-            name: "b.ts".to_string(),
-            file_path: "b.ts".to_string(),
-            line_range: None,
-            is_exported: false,
-            complexity: None,
-            is_async: false,
-            visibility: None,
-            is_abstract: false,
-            decorators: Vec::new(),
-            migration_status: None,
-            migration_priority: None,
-            rust_kind: None,
-            rust_path: None,
-            crate_name: None,
-        });
+        graph.add_node(SourceNode::new(
+            NodeId::new("file:a.ts"),
+            NodeType::File,
+            "a.ts".to_string(),
+            "a.ts".to_string(),
+        ));
+        graph.add_node(SourceNode::new(
+            NodeId::new("file:b.ts"),
+            NodeType::File,
+            "b.ts".to_string(),
+            "b.ts".to_string(),
+        ));
         graph.add_edge(Dependency {
             source: NodeId::new("file:a.ts"),
             target: NodeId::new("file:b.ts"),
@@ -564,64 +590,28 @@ mod tests {
 
         // 第一次写入
         let mut g1 = SourceGraph::new();
-        g1.add_node(SourceNode {
-            id: NodeId::new("file:old.ts"),
-            node_type: NodeType::File,
-            name: "old.ts".to_string(),
-            file_path: "old.ts".to_string(),
-            line_range: None,
-            is_exported: false,
-            complexity: None,
-            is_async: false,
-            visibility: None,
-            is_abstract: false,
-            decorators: Vec::new(),
-            migration_status: None,
-            migration_priority: None,
-            rust_kind: None,
-            rust_path: None,
-            crate_name: None,
-        });
+        g1.add_node(SourceNode::new(
+            NodeId::new("file:old.ts"),
+            NodeType::File,
+            "old.ts".to_string(),
+            "old.ts".to_string(),
+        ));
         save_to_db(&g1, &db_path).unwrap();
 
         // 第二次写入（不同的图）
         let mut g2 = SourceGraph::new();
-        g2.add_node(SourceNode {
-            id: NodeId::new("file:new1.ts"),
-            node_type: NodeType::File,
-            name: "new1.ts".to_string(),
-            file_path: "new1.ts".to_string(),
-            line_range: None,
-            is_exported: false,
-            complexity: None,
-            is_async: false,
-            visibility: None,
-            is_abstract: false,
-            decorators: Vec::new(),
-            migration_status: None,
-            migration_priority: None,
-            rust_kind: None,
-            rust_path: None,
-            crate_name: None,
-        });
-        g2.add_node(SourceNode {
-            id: NodeId::new("file:new2.ts"),
-            node_type: NodeType::File,
-            name: "new2.ts".to_string(),
-            file_path: "new2.ts".to_string(),
-            line_range: None,
-            is_exported: false,
-            complexity: None,
-            is_async: false,
-            visibility: None,
-            is_abstract: false,
-            decorators: Vec::new(),
-            migration_status: None,
-            migration_priority: None,
-            rust_kind: None,
-            rust_path: None,
-            crate_name: None,
-        });
+        g2.add_node(SourceNode::new(
+            NodeId::new("file:new1.ts"),
+            NodeType::File,
+            "new1.ts".to_string(),
+            "new1.ts".to_string(),
+        ));
+        g2.add_node(SourceNode::new(
+            NodeId::new("file:new2.ts"),
+            NodeType::File,
+            "new2.ts".to_string(),
+            "new2.ts".to_string(),
+        ));
         save_to_db(&g2, &db_path).unwrap();
 
         // 加载应只包含第二次写入的数据
@@ -630,6 +620,48 @@ mod tests {
         assert!(loaded.node_index(&NodeId::new("file:old.ts")).is_none());
         assert!(loaded.node_index(&NodeId::new("file:new1.ts")).is_some());
         assert!(loaded.node_index(&NodeId::new("file:new2.ts")).is_some());
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn unknown_enum_values_produce_warnings_not_silent_loss() {
+        let db_path = temp_db_path("unknown_enum");
+
+        // 写入一个正常的节点
+        let mut graph = SourceGraph::new();
+        graph.add_node(SourceNode::new(
+            NodeId::new("file:test.ts"),
+            NodeType::File,
+            "test.ts".to_string(),
+            "test.ts".to_string(),
+        ));
+        save_to_db(&graph, &db_path).unwrap();
+
+        // 手动写入不在枚举中的 migration_status 值
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "UPDATE nodes SET migration_status = 'future_status' WHERE id = 'file:test.ts'",
+            [],
+        )
+        .unwrap();
+
+        let loaded = load_from_db(&db_path).unwrap();
+        let node = loaded
+            .nodes()
+            .find(|n| n.id.as_str() == "file:test.ts")
+            .unwrap();
+        // 未知值应降级为 None 而非 panic
+        assert_eq!(node.migration_status, None);
+        // 但应产生 warning
+        assert!(
+            loaded
+                .warnings()
+                .iter()
+                .any(|w| w.contains("future_status")),
+            "未知 migration_status 应产生 warning: {:?}",
+            loaded.warnings()
+        );
 
         let _ = std::fs::remove_file(&db_path);
     }

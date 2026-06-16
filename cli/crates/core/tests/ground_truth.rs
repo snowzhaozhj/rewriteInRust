@@ -1,6 +1,7 @@
 use rustmigrate_core::graph::build::build_graph_ts;
 use rustmigrate_core::graph::topo::{detect_cycles, migration_sequence, topological_sort};
 use rustmigrate_core::types::common::NodeId;
+use rustmigrate_core::types::graph::EdgeSubKind;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -321,7 +322,7 @@ fn ground_truth_diamond_deps_extends() {
     let has_implements = extends_edges.iter().any(|e| {
         e.source.as_str().contains("AuthService")
             && e.target.as_str().contains("Serializable")
-            && e.sub_kind.as_deref() == Some("implements")
+            && e.sub_kind == Some(EdgeSubKind::Implements)
     });
     assert!(
         has_implements,
