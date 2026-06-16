@@ -68,7 +68,6 @@ pub fn compute_stats(state: &MigrationStateFile) -> MigrationStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::common::RiskLevel;
     use crate::types::state::{ModuleState, ProjectState};
     use std::collections::HashMap;
 
@@ -82,7 +81,7 @@ mod tests {
             test_pass_rate: None,
             coverage: None,
             known_differences: 0,
-            risk: RiskLevel::Low,
+            tier: None,
             phase_a_version: None,
             phase_a_audit_passed: None,
             blocked_by: None,

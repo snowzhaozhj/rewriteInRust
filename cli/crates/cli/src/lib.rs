@@ -27,10 +27,11 @@ use rustmigrate_core::response::{ErrorData, Response, Status};
 use rustmigrate_core::scaffold::scaffold_project;
 use rustmigrate_core::state::MigrationStateMachine;
 use rustmigrate_core::stats::{compare_structure, count_loc};
-use rustmigrate_core::types::common::{NodeId, RiskLevel, Timestamp};
+use rustmigrate_core::detect::detect_tier;
+use rustmigrate_core::types::common::{NodeId, Timestamp};
 use rustmigrate_core::types::graph::{EdgeType, NodeType};
 use rustmigrate_core::types::state::{
-    humanize_module_key, ModuleState, ModuleStatus, ProjectState, SprintState,
+    humanize_module_key, ModuleState, ModuleStatus, ModuleTier, ProjectState, SprintState,
 };
 use rustmigrate_core::validate::validate_state;
 
@@ -175,11 +176,16 @@ pub enum StateCommands {
     /// 用源码图的迁移序列填充 `migration-state.json` 的 `modules`/`sprint`（PLAN 操作）。
     ///
     /// 读取 `source-graph.db` → `migration_sequence()` 拓扑序 → 为每个文件模块写入
-    /// `ModuleState{status:pending, sprint:1, risk:low}` 并设 `sprint{current:1}`，原子落盘。
+    /// `ModuleState{status:pending, sprint:1, tier:auto}` 并设 `sprint{current:1}`，原子落盘。
     /// module key 用 NodeId 原值（与 `graph deps` 输出一致，保证 run 阶段依赖门禁匹配）。
     /// 环图（`migration_sequence().has_cycles()`）拒绝填充，须先打破环（对齐 topo-sort 门禁）。
     /// 是 `/migrate analyze`→`/migrate run` 衔接的缺失 PLAN 步骤（见 PLAN.md §9.5 M1-PLAN-01）。
-    PopulateModules,
+    PopulateModules {
+        /// 源码根目录，用于 per-module 复杂度分档（M2-TIER-01a）。
+        /// 省略则尝试从当前目录解析源文件。
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
     /// 追加一条 SubAgent 调用记录到顶层 `subagent_calls`（诊断卡死 / 统计重试，append-only）。
     ///
     /// 对齐 `09-appendix-schemas.md § subagent_calls 字段说明`：每次 SubAgent 调用（含重试）
@@ -332,7 +338,9 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
                     *force,
                 ),
             ),
-            StateCommands::PopulateModules => emit(writer, cmd_state_populate_modules()),
+            StateCommands::PopulateModules { root } => {
+                emit(writer, cmd_state_populate_modules(root.as_deref()))
+            }
             StateCommands::RecordSubagentCall {
                 step_index,
                 subagent_name,
@@ -927,7 +935,7 @@ fn cmd_state_transition_project(
 ///
 /// 流程：`load_graph` → `migration_sequence()` →（有环则拒绝，对齐 topo-sort 门禁）→
 /// 清理孤儿 pending（见下）→ 为每个文件模块写
-/// `ModuleState{status:pending, sprint:1, risk:low}`（module key = NodeId 原值，
+/// `ModuleState{status:pending, sprint:1, tier:auto}`（module key = NodeId 原值，
 /// 与 `graph deps` 输出一致）→ `set_sprint(current:1)` → 原子落盘。
 ///
 /// **幂等保护**：已有模块处于非 `pending` 活跃态（迁移进行中）时拒绝覆盖，避免把进度重置回
@@ -937,7 +945,7 @@ fn cmd_state_transition_project(
 /// "孤儿"（状态中存在但源码图已无对应节点）。重填只新增/覆盖序列内节点，故先用
 /// [`MigrationStateMachine::retain_modules`] 剔除孤儿，保持 `modules` 与当前迁移序列一致，
 /// 避免不存在的模块被 `state report` / 依赖门禁误计入进度；被清理的 key 经 warning 告知用户。
-fn cmd_state_populate_modules() -> CmdResult {
+fn cmd_state_populate_modules(root: Option<&Path>) -> CmdResult {
     let graph = load_graph()?;
     let sequence = migration_sequence(&graph);
 
@@ -990,7 +998,11 @@ fn cmd_state_populate_modules() -> CmdResult {
         }
     }
 
+    // 复杂度分档（M2-TIER-01a）：按 AST 语义特征自动评估每个模块的 tier。
+    let tier_map = detect_tiers_for_modules(&sequence.order, root, &mut warnings);
+
     for node_id in &sequence.order {
+        let tier = tier_map.get(node_id.as_str()).copied().flatten();
         machine.update_module(
             node_id.as_str(),
             ModuleState {
@@ -1001,7 +1013,7 @@ fn cmd_state_populate_modules() -> CmdResult {
                 test_pass_rate: None,
                 coverage: None,
                 known_differences: 0,
-                risk: RiskLevel::Low,
+                tier,
                 phase_a_version: None,
                 phase_a_audit_passed: None,
                 blocked_by: None,
@@ -1016,7 +1028,16 @@ fn cmd_state_populate_modules() -> CmdResult {
     });
     machine.save(&path)?;
 
-    let modules: Vec<String> = sequence.order.iter().map(|id| id.to_string()).collect();
+    let modules: Vec<serde_json::Value> = sequence
+        .order
+        .iter()
+        .map(|id| {
+            let tier = tier_map
+                .get(id.as_str())
+                .and_then(|t| t.map(|t| t.to_string()));
+            json!({ "id": id.to_string(), "tier": tier })
+        })
+        .collect();
     Ok((
         json!({
             "module_count": modules.len(),
@@ -1025,6 +1046,49 @@ fn cmd_state_populate_modules() -> CmdResult {
         }),
         warnings,
     ))
+}
+
+/// 对迁移序列中的所有模块运行复杂度分档检测（M2-TIER-01a）。
+///
+/// 从 NodeId 解析文件路径 → 在 `root`（或 CWD）下查找源文件 → `detect_tier` 评估。
+/// 文件不存在时静默跳过（tier 为 best-effort，不阻塞 populate）；
+/// 仅在检测逻辑本身失败时记 warning。
+fn detect_tiers_for_modules(
+    order: &[NodeId],
+    root: Option<&Path>,
+    warnings: &mut Vec<String>,
+) -> std::collections::HashMap<String, Option<ModuleTier>> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let base = root.unwrap_or(&cwd);
+
+    let mut tiers = std::collections::HashMap::new();
+    for node_id in order {
+        let file_path = match node_id.file_path() {
+            Some(p) => p,
+            None => {
+                tiers.insert(node_id.to_string(), None);
+                continue;
+            }
+        };
+
+        let full_path = base.join(file_path);
+        if full_path.exists() {
+            match detect_tier(&full_path) {
+                Ok(tier) => {
+                    tiers.insert(node_id.to_string(), Some(tier));
+                }
+                Err(e) => {
+                    warnings.push(format!(
+                        "模块 `{node_id}` 复杂度检测失败（默认不分档）: {e}"
+                    ));
+                    tiers.insert(node_id.to_string(), None);
+                }
+            }
+        } else {
+            tiers.insert(node_id.to_string(), None);
+        }
+    }
+    tiers
 }
 
 /// `state record-subagent-call`：追加一条 SubAgent 调用记录到 `subagent_calls`（诊断 / 重试统计）。

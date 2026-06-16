@@ -435,7 +435,6 @@ fn sibling_with_suffix(path: &Path, suffix: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::common::RiskLevel;
     use tempfile::NamedTempFile;
 
     /// 辅助：构造指定状态的最小模块记录。
@@ -448,7 +447,7 @@ mod tests {
             test_pass_rate: None,
             coverage: None,
             known_differences: 0,
-            risk: RiskLevel::Low,
+            tier: None,
             phase_a_version: None,
             phase_a_audit_passed: None,
             blocked_by: None,
