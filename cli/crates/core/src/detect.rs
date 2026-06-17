@@ -1,51 +1,30 @@
-//! 模块复杂度分档——纯策略映射层。
+//! 模块复杂度分档——文件 I/O + 语言分发。
 //!
-//! 本模块**不含任何语言特定 AST 逻辑**。语言特定的信号扫描由各
-//! `LanguageAdapter::detect_tier_signals()` 实现（如 `lang/typescript.rs`），
-//! 本层只做语言无关的 `TierSignals → ModuleTier` 映射。
-//!
-//! 判据对齐 `docs/design/03-execution-model.md § 4.3.2`：
-//! - **Trivial**：纯类型 / 常量 / barrel（仅 re-export）
-//! - **Full**：含任一危险信号（async/try-catch/I·O/数值/全局状态等）
-//! - **Standard**：其余
+//! 本模块**不含任何语言特定逻辑**。分档判据（什么算"危险信号"）
+//! 完全由各 `LanguageAdapter::detect_tier()` 实现决定。
+//! 本层只负责：读文件 → 选 adapter → 调 `detect_tier()`。
 
 use std::path::Path;
 
 use crate::error::{MigrateError, Result};
 use crate::lang::typescript::TypeScriptAdapter;
-use crate::lang::{LanguageAdapter, TierSignals};
+use crate::lang::LanguageAdapter;
 use crate::types::state::ModuleTier;
 
 /// 对单个源文件进行复杂度分档。
-///
-/// 读取文件 → 按扩展名选择语言 adapter → adapter 扫描 AST 产出 `TierSignals`
-/// → 本层映射为 `ModuleTier`。
 pub fn detect_tier(file_path: &Path) -> Result<ModuleTier> {
     let source = std::fs::read_to_string(file_path).map_err(MigrateError::Io)?;
     let mut adapter = TypeScriptAdapter::new()?;
     if !adapter.can_handle(file_path) {
         return Ok(ModuleTier::Full);
     }
-    let signals = adapter.detect_tier_signals(&source);
-    Ok(map_signals_to_tier(&signals))
+    Ok(adapter.detect_tier(&source))
 }
 
-/// 从源码字符串分档（供测试和已加载源码的场景使用）。
+/// 从源码字符串分档（供测试使用，默认 TypeScript）。
 pub fn detect_tier_from_source(source: &str) -> Result<ModuleTier> {
     let mut adapter = TypeScriptAdapter::new()?;
-    let signals = adapter.detect_tier_signals(source);
-    Ok(map_signals_to_tier(&signals))
-}
-
-/// 语言无关的信号→分档映射。
-fn map_signals_to_tier(signals: &TierSignals) -> ModuleTier {
-    if signals.has_any_danger() {
-        ModuleTier::Full
-    } else if signals.has_non_trivial_content {
-        ModuleTier::Standard
-    } else {
-        ModuleTier::Trivial
-    }
+    Ok(adapter.detect_tier(source))
 }
 
 #[cfg(test)]

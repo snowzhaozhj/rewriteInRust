@@ -109,37 +109,35 @@ impl LanguageAdapter for TypeScriptAdapter {
         })
     }
 
-    fn detect_tier_signals(&mut self, source: &str) -> super::TierSignals {
+    fn detect_tier(&mut self, source: &str) -> crate::types::state::ModuleTier {
+        use crate::types::state::ModuleTier;
         let tree = match self.parser.parse(source, None) {
             Some(t) => t,
-            None => return all_danger_signals(),
+            None => return ModuleTier::Full,
         };
         let root = tree.root_node();
         if root.has_error() {
-            return all_danger_signals();
+            return ModuleTier::Full;
         }
-        scan_tier_signals(root, source)
+        let signals = scan_tier_signals(root, source);
+        if signals.has_danger {
+            ModuleTier::Full
+        } else if signals.has_non_trivial_content {
+            ModuleTier::Standard
+        } else {
+            ModuleTier::Trivial
+        }
     }
 }
 
-fn all_danger_signals() -> super::TierSignals {
-    super::TierSignals {
-        has_async: true,
-        has_error_handling: true,
-        has_concurrency: true,
-        has_io: true,
-        has_numeric: true,
-        has_global_mutable_state: true,
-        has_dynamic_types: true,
-        has_conditional_types: true,
-        has_unresolvable_types: true,
-        has_non_trivial_content: true,
-        has_side_effects: true,
-    }
+#[derive(Default)]
+struct TsTierSignals {
+    has_danger: bool,
+    has_non_trivial_content: bool,
 }
 
-fn scan_tier_signals(root: Node, source: &str) -> super::TierSignals {
-    let mut s = super::TierSignals::default();
+fn scan_tier_signals(root: Node, source: &str) -> TsTierSignals {
+    let mut s = TsTierSignals::default();
 
     let mut cursor = root.walk();
     for child in root.children(&mut cursor) {
@@ -152,7 +150,7 @@ fn scan_tier_signals(root: Node, source: &str) -> super::TierSignals {
             }
             "import_statement" => {
                 if is_io_import(child, source) {
-                    s.has_io = true;
+                    s.has_danger = true;
                 }
             }
             "interface_declaration" | "type_alias_declaration" | "enum_declaration" => {}
@@ -165,19 +163,19 @@ fn scan_tier_signals(root: Node, source: &str) -> super::TierSignals {
                     s.has_non_trivial_content = true;
                     let text = ts_node_text(child, source);
                     if text.starts_with("let ") || text.starts_with("var ") {
-                        s.has_global_mutable_state = true;
+                        s.has_danger = true;
                     }
                 }
                 scan_subtree_signals(child, source, &mut s);
             }
             "expression_statement" => {
                 s.has_non_trivial_content = true;
-                s.has_side_effects = true;
+                s.has_danger = true;
             }
             "try_statement" | "if_statement" | "for_statement" | "for_in_statement"
             | "while_statement" | "do_statement" | "switch_statement" => {
                 s.has_non_trivial_content = true;
-                s.has_side_effects = true;
+                s.has_danger = true;
             }
             _ => {}
         }
@@ -185,12 +183,12 @@ fn scan_tier_signals(root: Node, source: &str) -> super::TierSignals {
     s
 }
 
-fn scan_subtree_signals(node: Node, source: &str, s: &mut super::TierSignals) {
+fn scan_subtree_signals(node: Node, source: &str, s: &mut TsTierSignals) {
     let mut stack = vec![node];
     while let Some(current) = stack.pop() {
         match current.kind() {
-            "await_expression" => s.has_async = true,
-            "try_statement" | "throw_statement" => s.has_error_handling = true,
+            "await_expression" => s.has_danger = true,
+            "try_statement" | "throw_statement" => s.has_danger = true,
             "call_expression" => {
                 if let Some(func) = current.child_by_field_name("function") {
                     let text = ts_node_text(func, source);
@@ -206,7 +204,7 @@ fn scan_subtree_signals(node: Node, source: &str, s: &mut super::TierSignals) {
                             | "process.nextTick"
                             | "queueMicrotask"
                     ) {
-                        s.has_concurrency = true;
+                        s.has_danger = true;
                     }
                     if text.starts_with("Math.")
                         || matches!(
@@ -218,27 +216,27 @@ fn scan_subtree_signals(node: Node, source: &str, s: &mut super::TierSignals) {
                                 | "Number.isFinite"
                         )
                     {
-                        s.has_numeric = true;
+                        s.has_danger = true;
                     }
                 }
             }
             "import_statement" => {
                 if is_io_import(current, source) {
-                    s.has_io = true;
+                    s.has_danger = true;
                 }
             }
-            "conditional_type" => s.has_conditional_types = true,
+            "conditional_type" => s.has_danger = true,
             "predefined_type" => {
                 let text = ts_node_text(current, source);
                 if text == "never" || text == "unknown" || text == "any" {
-                    s.has_unresolvable_types = true;
+                    s.has_danger = true;
                 }
             }
-            "typeof_expression" | "instanceof_expression" => s.has_dynamic_types = true,
+            "typeof_expression" | "instanceof_expression" => s.has_danger = true,
             "as_expression" => {
                 let text = ts_node_text(current, source);
                 if text.ends_with("as any") || text.ends_with("as unknown") {
-                    s.has_dynamic_types = true;
+                    s.has_danger = true;
                 }
             }
             "function_declaration"
@@ -249,13 +247,13 @@ fn scan_subtree_signals(node: Node, source: &str, s: &mut super::TierSignals) {
                     || ts_node_text(current, source).starts_with("async ")
                     || ts_node_text(current, source).starts_with("async\n")
                 {
-                    s.has_async = true;
+                    s.has_danger = true;
                 }
             }
             "identifier" => {
                 let text = ts_node_text(current, source);
                 if text == "NaN" || text == "Infinity" {
-                    s.has_numeric = true;
+                    s.has_danger = true;
                 }
             }
             _ => {}

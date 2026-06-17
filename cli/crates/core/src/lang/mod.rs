@@ -88,52 +88,6 @@ pub struct CallInfo {
     pub is_constructor: bool,
 }
 
-/// 模块复杂度分档的语言无关信号（由各语言 adapter 的 AST 扫描产出）。
-///
-/// `detect` 模块据此映射为 `ModuleTier`（Trivial/Standard/Full），
-/// 映射策略与语言无关——adapter 只负责报告"有什么"，策略层决定"算什么档"。
-#[derive(Debug, Clone, Default)]
-pub struct TierSignals {
-    /// 是否含 async/await。
-    pub has_async: bool,
-    /// 是否含 try-catch / throw 错误路径。
-    pub has_error_handling: bool,
-    /// 是否含并发模式（Promise.all 等）。
-    pub has_concurrency: bool,
-    /// 是否含 I/O 操作（fs/net/http 等模块导入）。
-    pub has_io: bool,
-    /// 是否含数值计算（Math.* / parseInt / NaN 等）。
-    pub has_numeric: bool,
-    /// 是否含全局可变状态（顶层 let/var）。
-    pub has_global_mutable_state: bool,
-    /// 是否含动态类型操作（typeof / instanceof / as any / as unknown）。
-    pub has_dynamic_types: bool,
-    /// 是否含条件类型或复杂泛型约束。
-    pub has_conditional_types: bool,
-    /// 是否含 unknown / never / any 类型注解。
-    pub has_unresolvable_types: bool,
-    /// 是否含非 trivial 内容（函数体/类/运行时逻辑等）。
-    pub has_non_trivial_content: bool,
-    /// 是否含顶层副作用表达式。
-    pub has_side_effects: bool,
-}
-
-impl TierSignals {
-    /// 是否含任一危险信号（映射 Full 的充分条件）。
-    pub fn has_any_danger(&self) -> bool {
-        self.has_async
-            || self.has_error_handling
-            || self.has_concurrency
-            || self.has_io
-            || self.has_numeric
-            || self.has_global_mutable_state
-            || self.has_dynamic_types
-            || self.has_conditional_types
-            || self.has_unresolvable_types
-            || self.has_side_effects
-    }
-}
-
 /// 语言适配器 trait。
 ///
 /// M1 实现 TypeScript，M3 扩展 Python/C/Go。
@@ -156,8 +110,10 @@ pub trait LanguageAdapter: Send {
     /// `source` 为文件内容，`rel_path` 为相对于项目根的路径。
     fn analyze_file(&mut self, source: &str, rel_path: &str) -> Result<FileAnalysis>;
 
-    /// 扫描源码产出复杂度分档信号（语言特定 AST 扫描，结果为语言无关信号）。
+    /// 评估源码的翻译复杂度分档。
     ///
-    /// `detect` 模块据此映射为 `ModuleTier`。解析失败时返回全 true 信号（保守不降档）。
-    fn detect_tier_signals(&mut self, source: &str) -> TierSignals;
+    /// 什么算"危险信号"是语言特定的判断（TS: async/conditional_type；
+    /// Python: metaclass/dynamic_attr），由各 adapter 内部决定。
+    /// 解析失败时返回 Full（保守不降档）。
+    fn detect_tier(&mut self, source: &str) -> crate::types::state::ModuleTier;
 }
