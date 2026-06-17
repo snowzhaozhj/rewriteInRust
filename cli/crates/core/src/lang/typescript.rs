@@ -108,6 +108,247 @@ impl LanguageAdapter for TypeScriptAdapter {
             constructor_bindings: ctx.constructor_bindings,
         })
     }
+
+    fn detect_tier_signals(&mut self, source: &str) -> super::TierSignals {
+        let tree = match self.parser.parse(source, None) {
+            Some(t) => t,
+            None => return all_danger_signals(),
+        };
+        let root = tree.root_node();
+        if root.has_error() {
+            return all_danger_signals();
+        }
+        scan_tier_signals(root, source)
+    }
+}
+
+fn all_danger_signals() -> super::TierSignals {
+    super::TierSignals {
+        has_async: true,
+        has_error_handling: true,
+        has_concurrency: true,
+        has_io: true,
+        has_numeric: true,
+        has_global_mutable_state: true,
+        has_dynamic_types: true,
+        has_conditional_types: true,
+        has_unresolvable_types: true,
+        has_non_trivial_content: true,
+        has_side_effects: true,
+    }
+}
+
+fn scan_tier_signals(root: Node, source: &str) -> super::TierSignals {
+    let mut s = super::TierSignals::default();
+
+    let mut cursor = root.walk();
+    for child in root.children(&mut cursor) {
+        match child.kind() {
+            "export_statement" => {
+                if has_non_trivial_declaration(child, source) {
+                    s.has_non_trivial_content = true;
+                }
+                scan_subtree_signals(child, source, &mut s);
+            }
+            "import_statement" => {
+                if is_io_import(child, source) {
+                    s.has_io = true;
+                }
+            }
+            "interface_declaration" | "type_alias_declaration" | "enum_declaration" => {}
+            "function_declaration" | "class_declaration" | "abstract_class_declaration" => {
+                s.has_non_trivial_content = true;
+                scan_subtree_signals(child, source, &mut s);
+            }
+            "lexical_declaration" | "variable_declaration" => {
+                if ts_is_mutable_or_complex_var(child, source) {
+                    s.has_non_trivial_content = true;
+                    let text = ts_node_text(child, source);
+                    if text.starts_with("let ") || text.starts_with("var ") {
+                        s.has_global_mutable_state = true;
+                    }
+                }
+                scan_subtree_signals(child, source, &mut s);
+            }
+            "expression_statement" => {
+                s.has_non_trivial_content = true;
+                s.has_side_effects = true;
+            }
+            "try_statement" | "if_statement" | "for_statement" | "for_in_statement"
+            | "while_statement" | "do_statement" | "switch_statement" => {
+                s.has_non_trivial_content = true;
+                s.has_side_effects = true;
+            }
+            _ => {}
+        }
+    }
+    s
+}
+
+fn scan_subtree_signals(node: Node, source: &str, s: &mut super::TierSignals) {
+    let mut stack = vec![node];
+    while let Some(current) = stack.pop() {
+        match current.kind() {
+            "await_expression" => s.has_async = true,
+            "try_statement" | "throw_statement" => s.has_error_handling = true,
+            "call_expression" => {
+                if let Some(func) = current.child_by_field_name("function") {
+                    let text = ts_node_text(func, source);
+                    if matches!(
+                        text,
+                        "Promise.all"
+                            | "Promise.race"
+                            | "Promise.allSettled"
+                            | "Promise.any"
+                            | "setTimeout"
+                            | "setInterval"
+                            | "setImmediate"
+                            | "process.nextTick"
+                            | "queueMicrotask"
+                    ) {
+                        s.has_concurrency = true;
+                    }
+                    if text.starts_with("Math.")
+                        || matches!(
+                            text,
+                            "parseFloat"
+                                | "parseInt"
+                                | "Number"
+                                | "Number.isNaN"
+                                | "Number.isFinite"
+                        )
+                    {
+                        s.has_numeric = true;
+                    }
+                }
+            }
+            "import_statement" => {
+                if is_io_import(current, source) {
+                    s.has_io = true;
+                }
+            }
+            "conditional_type" => s.has_conditional_types = true,
+            "predefined_type" => {
+                let text = ts_node_text(current, source);
+                if text == "never" || text == "unknown" || text == "any" {
+                    s.has_unresolvable_types = true;
+                }
+            }
+            "typeof_expression" | "instanceof_expression" => s.has_dynamic_types = true,
+            "as_expression" => {
+                let text = ts_node_text(current, source);
+                if text.ends_with("as any") || text.ends_with("as unknown") {
+                    s.has_dynamic_types = true;
+                }
+            }
+            "function_declaration"
+            | "method_definition"
+            | "arrow_function"
+            | "function_expression" => {
+                if current.child_by_field_name("async").is_some()
+                    || ts_node_text(current, source).starts_with("async ")
+                    || ts_node_text(current, source).starts_with("async\n")
+                {
+                    s.has_async = true;
+                }
+            }
+            "identifier" => {
+                let text = ts_node_text(current, source);
+                if text == "NaN" || text == "Infinity" {
+                    s.has_numeric = true;
+                }
+            }
+            _ => {}
+        }
+        let mut cursor = current.walk();
+        for child in current.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+}
+
+fn has_non_trivial_declaration(export_node: Node, source: &str) -> bool {
+    let mut cursor = export_node.walk();
+    for child in export_node.children(&mut cursor) {
+        match child.kind() {
+            "interface_declaration" | "type_alias_declaration" | "enum_declaration" => {}
+            "function_declaration" | "class_declaration" | "abstract_class_declaration" => {
+                return true;
+            }
+            "lexical_declaration" | "variable_declaration" => {
+                if ts_is_mutable_or_complex_var(child, source) {
+                    return true;
+                }
+            }
+            "export_clause" | "namespace_export" => {}
+            "identifier" | "string" | "number" | "true" | "false" | "null" => {}
+            _ => {}
+        }
+    }
+    false
+}
+
+fn ts_is_mutable_or_complex_var(decl_node: Node, source: &str) -> bool {
+    let text = ts_node_text(decl_node, source);
+    if text.starts_with("let ") || text.starts_with("var ") {
+        return true;
+    }
+    ts_contains_kind(
+        decl_node,
+        &["arrow_function", "function", "function_expression"],
+    ) || ts_contains_kind(decl_node, &["call_expression", "new_expression"])
+}
+
+fn ts_contains_kind(node: Node, kinds: &[&str]) -> bool {
+    let mut cursor = node.walk();
+    let mut stack = vec![node];
+    while let Some(current) = stack.pop() {
+        if kinds.contains(&current.kind()) {
+            return true;
+        }
+        cursor.reset(current);
+        for child in current.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    false
+}
+
+fn is_io_import(node: Node, source: &str) -> bool {
+    let text = ts_node_text(node, source);
+    const IO_MODULES: &[&str] = &[
+        "\"fs\"",
+        "'fs'",
+        "\"fs/promises\"",
+        "'fs/promises'",
+        "\"path\"",
+        "'path'",
+        "\"http\"",
+        "'http'",
+        "\"https\"",
+        "'https'",
+        "\"net\"",
+        "'net'",
+        "\"child_process\"",
+        "'child_process'",
+        "\"os\"",
+        "'os'",
+        "\"stream\"",
+        "'stream'",
+        "\"dgram\"",
+        "'dgram'",
+        "\"tty\"",
+        "'tty'",
+        "\"cluster\"",
+        "'cluster'",
+        "\"worker_threads\"",
+        "'worker_threads'",
+    ];
+    IO_MODULES.iter().any(|m| text.contains(m))
+}
+
+fn ts_node_text<'a>(node: Node, source: &'a str) -> &'a str {
+    &source[node.byte_range()]
 }
 
 struct AnalysisContext<'a> {

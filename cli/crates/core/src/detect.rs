@@ -1,7 +1,8 @@
-//! 模块复杂度分档检测。
+//! 模块复杂度分档——纯策略映射层。
 //!
-//! 基于 AST 语义特征（非 LOC）评估单个 TypeScript 源文件的翻译复杂度，
-//! 产出 `ModuleTier`（Trivial / Standard / Full）。
+//! 本模块**不含任何语言特定 AST 逻辑**。语言特定的信号扫描由各
+//! `LanguageAdapter::detect_tier_signals()` 实现（如 `lang/typescript.rs`），
+//! 本层只做语言无关的 `TierSignals → ModuleTier` 映射。
 //!
 //! 判据对齐 `docs/design/03-execution-model.md § 4.3.2`：
 //! - **Trivial**：纯类型 / 常量 / barrel（仅 re-export）
@@ -10,294 +11,41 @@
 
 use std::path::Path;
 
-use tree_sitter::{Node, Parser};
-
 use crate::error::{MigrateError, Result};
+use crate::lang::typescript::TypeScriptAdapter;
+use crate::lang::{LanguageAdapter, TierSignals};
 use crate::types::state::ModuleTier;
 
 /// 对单个源文件进行复杂度分档。
 ///
-/// 读取文件内容 → tree-sitter 解析 → AST 特征扫描 → 返回分档结果。
-/// 解析失败（语法错误文件）默认归 Full（不降档）。
+/// 读取文件 → 按扩展名选择语言 adapter → adapter 扫描 AST 产出 `TierSignals`
+/// → 本层映射为 `ModuleTier`。
 pub fn detect_tier(file_path: &Path) -> Result<ModuleTier> {
     let source = std::fs::read_to_string(file_path).map_err(MigrateError::Io)?;
-    detect_tier_from_source(&source)
+    let mut adapter = TypeScriptAdapter::new()?;
+    if !adapter.can_handle(file_path) {
+        return Ok(ModuleTier::Full);
+    }
+    let signals = adapter.detect_tier_signals(&source);
+    Ok(map_signals_to_tier(&signals))
 }
 
 /// 从源码字符串分档（供测试和已加载源码的场景使用）。
 pub fn detect_tier_from_source(source: &str) -> Result<ModuleTier> {
-    let mut parser = Parser::new();
-    parser
-        .set_language(&tree_sitter_typescript::language_typescript())
-        .map_err(|e| MigrateError::Config(format!("tree-sitter TypeScript 语法加载失败: {e}")))?;
+    let mut adapter = TypeScriptAdapter::new()?;
+    let signals = adapter.detect_tier_signals(source);
+    Ok(map_signals_to_tier(&signals))
+}
 
-    let tree = match parser.parse(source, None) {
-        Some(t) => t,
-        None => return Ok(ModuleTier::Full),
-    };
-
-    let root = tree.root_node();
-    if root.has_error() {
-        return Ok(ModuleTier::Full);
-    }
-
-    let signals = scan_ast(root, source);
-
-    if signals.has_danger_signals {
-        Ok(ModuleTier::Full)
-    } else if signals.is_trivial {
-        Ok(ModuleTier::Trivial)
+/// 语言无关的信号→分档映射。
+fn map_signals_to_tier(signals: &TierSignals) -> ModuleTier {
+    if signals.has_any_danger() {
+        ModuleTier::Full
+    } else if signals.has_non_trivial_content {
+        ModuleTier::Standard
     } else {
-        Ok(ModuleTier::Standard)
+        ModuleTier::Trivial
     }
-}
-
-struct TierSignals {
-    has_danger_signals: bool,
-    is_trivial: bool,
-}
-
-/// 扫描 AST 顶层结构，收集分档信号。
-fn scan_ast(root: Node, source: &str) -> TierSignals {
-    let mut has_danger = false;
-    let mut has_non_trivial_export = false;
-
-    let mut cursor = root.walk();
-    for child in root.children(&mut cursor) {
-        match child.kind() {
-            "export_statement" => {
-                if has_non_trivial_declaration(child, source) {
-                    has_non_trivial_export = true;
-                }
-                if scan_node_for_danger(child, source) {
-                    has_danger = true;
-                }
-            }
-            "import_statement" => {
-                if is_io_import(child, source) {
-                    has_danger = true;
-                }
-            }
-            "interface_declaration" | "type_alias_declaration" | "enum_declaration" => {}
-            "function_declaration" | "class_declaration" | "abstract_class_declaration" => {
-                has_non_trivial_export = true;
-                if scan_node_for_danger(child, source) {
-                    has_danger = true;
-                }
-            }
-            "lexical_declaration" | "variable_declaration" => {
-                if is_mutable_or_complex_variable(child, source) {
-                    has_non_trivial_export = true;
-                    let text = node_text(child, source);
-                    if text.starts_with("let ") || text.starts_with("var ") {
-                        has_danger = true;
-                    }
-                }
-                if scan_node_for_danger(child, source) {
-                    has_danger = true;
-                }
-            }
-            "expression_statement" => {
-                has_non_trivial_export = true;
-                has_danger = true;
-            }
-            "try_statement" | "if_statement" | "for_statement" | "for_in_statement"
-            | "while_statement" | "do_statement" | "switch_statement" => {
-                has_non_trivial_export = true;
-                has_danger = true;
-            }
-            "comment" | "ERROR" => {}
-            _ => {}
-        }
-    }
-
-    let is_trivial = !has_non_trivial_export && !has_danger;
-
-    TierSignals {
-        has_danger_signals: has_danger,
-        is_trivial,
-    }
-}
-
-/// 检查导出声明中是否包含非 trivial 内容。
-///
-/// trivial 导出：type/interface/enum 声明、const 纯字面量、re-export。
-/// 非 trivial 导出：函数声明、类声明、含逻辑的变量。
-fn has_non_trivial_declaration(export_node: Node, source: &str) -> bool {
-    let mut cursor = export_node.walk();
-    for child in export_node.children(&mut cursor) {
-        match child.kind() {
-            "interface_declaration" | "type_alias_declaration" | "enum_declaration" => {}
-            "function_declaration" | "class_declaration" | "abstract_class_declaration" => {
-                return true;
-            }
-            "lexical_declaration" | "variable_declaration" => {
-                if is_mutable_or_complex_variable(child, source) {
-                    return true;
-                }
-            }
-            // export { ... } from '...' 或 export * from '...' → re-export, trivial
-            "export_clause" | "namespace_export" => {}
-            // export default ... → 检查内容
-            "identifier" | "string" | "number" | "true" | "false" | "null" => {}
-            _ => {}
-        }
-    }
-    false
-}
-
-/// 检查变量声明是否为可变或复杂（非纯常量）。
-fn is_mutable_or_complex_variable(decl_node: Node, source: &str) -> bool {
-    let text = node_text(decl_node, source);
-    // let/var 是可变绑定 → 非 trivial
-    if text.starts_with("let ") || text.starts_with("var ") {
-        return true;
-    }
-    // const 中包含函数表达式、箭头函数或函数调用 → 非 trivial
-    if contains_function_expression(decl_node) || contains_call_expression(decl_node) {
-        return true;
-    }
-    false
-}
-
-/// 检查节点子树中是否包含函数表达式。
-fn contains_function_expression(node: Node) -> bool {
-    let mut cursor = node.walk();
-    let mut stack = vec![node];
-    while let Some(current) = stack.pop() {
-        match current.kind() {
-            "arrow_function" | "function" | "function_expression" => return true,
-            _ => {
-                cursor.reset(current);
-                for child in current.children(&mut cursor) {
-                    stack.push(child);
-                }
-            }
-        }
-    }
-    false
-}
-
-/// 检查节点子树中是否包含函数调用（new 表达式也算）。
-fn contains_call_expression(node: Node) -> bool {
-    let mut cursor = node.walk();
-    let mut stack = vec![node];
-    while let Some(current) = stack.pop() {
-        match current.kind() {
-            "call_expression" | "new_expression" => return true,
-            _ => {
-                cursor.reset(current);
-                for child in current.children(&mut cursor) {
-                    stack.push(child);
-                }
-            }
-        }
-    }
-    false
-}
-
-/// 递归扫描节点子树，检查是否包含危险信号。
-fn scan_node_for_danger(node: Node, source: &str) -> bool {
-    let mut stack = vec![node];
-    while let Some(current) = stack.pop() {
-        if is_danger_node(current, source) {
-            return true;
-        }
-        let mut cursor = current.walk();
-        for child in current.children(&mut cursor) {
-            stack.push(child);
-        }
-    }
-    false
-}
-
-/// 判断单个节点是否为危险信号。
-fn is_danger_node(node: Node, source: &str) -> bool {
-    match node.kind() {
-        // 异步：async/await
-        "await_expression" => true,
-        // try-catch 错误路径
-        "try_statement" | "throw_statement" => true,
-        // 并发模式
-        "call_expression" => is_concurrent_call(node, source),
-        // 全局状态：顶层 let/var 赋值
-        // （已在上层 scan_ast 中处理 expression_statement）
-        // I/O 模式：特定 import
-        "import_statement" => is_io_import(node, source),
-        // 条件类型
-        "conditional_type" => true,
-        // never / unknown 类型注解
-        "predefined_type" => {
-            let text = node_text(node, source);
-            text == "never" || text == "unknown" || text == "any"
-        }
-        // async 函数/方法声明（含 function_expression）
-        "function_declaration" | "method_definition" | "arrow_function" | "function_expression" => {
-            node.child_by_field_name("async").is_some()
-                || node_text(node, source).starts_with("async ")
-                || node_text(node, source).starts_with("async\n")
-        }
-        _ => false,
-    }
-}
-
-/// 检查是否为并发相关调用（Promise.all / Promise.race / setTimeout 等）。
-fn is_concurrent_call(node: Node, source: &str) -> bool {
-    if let Some(func) = node.child_by_field_name("function") {
-        let text = node_text(func, source);
-        matches!(
-            text,
-            "Promise.all"
-                | "Promise.race"
-                | "Promise.allSettled"
-                | "Promise.any"
-                | "setTimeout"
-                | "setInterval"
-                | "setImmediate"
-                | "process.nextTick"
-                | "queueMicrotask"
-        )
-    } else {
-        false
-    }
-}
-
-/// 检查 import 是否引入 I/O 模块。
-fn is_io_import(node: Node, source: &str) -> bool {
-    let text = node_text(node, source);
-    const IO_MODULES: &[&str] = &[
-        "\"fs\"",
-        "'fs'",
-        "\"fs/promises\"",
-        "'fs/promises'",
-        "\"path\"",
-        "'path'",
-        "\"http\"",
-        "'http'",
-        "\"https\"",
-        "'https'",
-        "\"net\"",
-        "'net'",
-        "\"child_process\"",
-        "'child_process'",
-        "\"os\"",
-        "'os'",
-        "\"stream\"",
-        "'stream'",
-        "\"dgram\"",
-        "'dgram'",
-        "\"tty\"",
-        "'tty'",
-        "\"cluster\"",
-        "'cluster'",
-        "\"worker_threads\"",
-        "'worker_threads'",
-    ];
-    IO_MODULES.iter().any(|m| text.contains(m))
-}
-
-fn node_text<'a>(node: Node, source: &'a str) -> &'a str {
-    &source[node.byte_range()]
 }
 
 #[cfg(test)]
@@ -510,6 +258,46 @@ export function delay(ms: number): Promise<void> {
     fn full_top_level_expression() {
         let source = r#"
 console.log("side effect");
+"#;
+        assert_eq!(detect_tier_from_source(source).unwrap(), ModuleTier::Full);
+    }
+
+    #[test]
+    fn full_math_operations() {
+        let source = r#"
+export function clamp(x: number, min: number, max: number): number {
+    return Math.max(min, Math.min(max, x));
+}
+"#;
+        assert_eq!(detect_tier_from_source(source).unwrap(), ModuleTier::Full);
+    }
+
+    #[test]
+    fn full_parse_float() {
+        let source = r#"
+export function parse(s: string): number {
+    return parseFloat(s);
+}
+"#;
+        assert_eq!(detect_tier_from_source(source).unwrap(), ModuleTier::Full);
+    }
+
+    #[test]
+    fn full_typeof_guard() {
+        let source = r#"
+export function isString(x: unknown): x is string {
+    return typeof x === "string";
+}
+"#;
+        assert_eq!(detect_tier_from_source(source).unwrap(), ModuleTier::Full);
+    }
+
+    #[test]
+    fn full_as_any_cast() {
+        let source = r#"
+export function unsafe_cast(x: number): string {
+    return x as any;
+}
 "#;
         assert_eq!(detect_tier_from_source(source).unwrap(), ModuleTier::Full);
     }
