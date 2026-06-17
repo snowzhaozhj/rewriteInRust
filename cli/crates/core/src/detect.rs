@@ -153,8 +153,8 @@ fn is_mutable_or_complex_variable(decl_node: Node, source: &str) -> bool {
     if text.starts_with("let ") || text.starts_with("var ") {
         return true;
     }
-    // const 中包含函数表达式或箭头函数 → 非 trivial
-    if contains_function_expression(decl_node) {
+    // const 中包含函数表达式、箭头函数或函数调用 → 非 trivial
+    if contains_function_expression(decl_node) || contains_call_expression(decl_node) {
         return true;
     }
     false
@@ -167,6 +167,24 @@ fn contains_function_expression(node: Node) -> bool {
     while let Some(current) = stack.pop() {
         match current.kind() {
             "arrow_function" | "function" | "function_expression" => return true,
+            _ => {
+                cursor.reset(current);
+                for child in current.children(&mut cursor) {
+                    stack.push(child);
+                }
+            }
+        }
+    }
+    false
+}
+
+/// 检查节点子树中是否包含函数调用（new 表达式也算）。
+fn contains_call_expression(node: Node) -> bool {
+    let mut cursor = node.walk();
+    let mut stack = vec![node];
+    while let Some(current) = stack.pop() {
+        match current.kind() {
+            "call_expression" | "new_expression" => return true,
             _ => {
                 cursor.reset(current);
                 for child in current.children(&mut cursor) {
@@ -211,10 +229,10 @@ fn is_danger_node(node: Node, source: &str) -> bool {
         // never / unknown 类型注解
         "predefined_type" => {
             let text = node_text(node, source);
-            text == "never" || text == "unknown"
+            text == "never" || text == "unknown" || text == "any"
         }
-        // async 函数/方法声明
-        "function_declaration" | "method_definition" | "arrow_function" => {
+        // async 函数/方法声明（含 function_expression）
+        "function_declaration" | "method_definition" | "arrow_function" | "function_expression" => {
             node.child_by_field_name("async").is_some()
                 || node_text(node, source).starts_with("async ")
                 || node_text(node, source).starts_with("async\n")

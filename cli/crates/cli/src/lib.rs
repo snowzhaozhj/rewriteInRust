@@ -26,7 +26,7 @@ use rustmigrate_core::profile::{
 };
 use rustmigrate_core::response::{ErrorData, Response, Status};
 use rustmigrate_core::scaffold::scaffold_project;
-use rustmigrate_core::state::MigrationStateMachine;
+use rustmigrate_core::state::{MigrationStateMachine, SprintAdvanceResult};
 use rustmigrate_core::stats::{compare_structure, count_loc};
 use rustmigrate_core::types::common::{NodeId, Timestamp};
 use rustmigrate_core::types::graph::{EdgeType, NodeType};
@@ -929,6 +929,16 @@ fn cmd_state_transition_project(
         ))
     })?;
 
+    // graduate 须走 `rustmigrate graduate` 命令（含模块终态前置检查 + 报告产出），
+    // 不允许通过 state transition 绕过。
+    if target == ProjectState::Graduate {
+        return Err(MigrateError::Config(
+            "graduate 须通过 `rustmigrate graduate` 命令执行（含模块终态检查 + 毕业报告），\
+             不支持 state transition --to graduate 直接推进"
+                .to_owned(),
+        ));
+    }
+
     let path = state_path();
     let (mut machine, warnings) = load_state_with_warnings(&path)?;
     let from = machine.current_state();
@@ -1136,21 +1146,16 @@ fn detect_tiers_for_modules(
     tiers
 }
 
-/// `state record-subagent-call`：追加一条 SubAgent 调用记录到 `subagent_calls`（诊断 / 重试统计）。
-///
-/// 设计（`09-appendix-schemas.md § subagent_calls 字段说明` + `06 § 10.5`）：顶层 append-only
-/// 数组，每次 SubAgent 调用（含重试）追加一条，用于诊断卡死与统计重试次数。本命令构造
 /// `state advance-sprint`：当前 sprint 所有模块终态时推进到下一 sprint。
 ///
-/// 检查当前 sprint（`sprint.current`）下所有 `modules[*].sprint == current` 的模块是否均
-/// 为终态（done/degrade_*）。若是，推进 `sprint.current` + 1，更新 history，原子落盘。
-/// 无可推进 sprint（尚有非终态模块或已达最后 sprint）时不报错，返回 `advanced:false`。
+/// 检查当前 sprint 下所有模块是否终态。推进成功返回 `advanced:true`；
+/// 全部 sprint 已完成返回 `all_completed:true`；尚有非终态模块返回 `advanced:false`。
 fn cmd_state_advance_sprint() -> CmdResult {
     let path = state_path();
     let (mut machine, warnings) = load_state_with_warnings(&path)?;
 
     match machine.try_advance_sprint() {
-        Some(new_sprint) => {
+        SprintAdvanceResult::Advanced(new_sprint) => {
             machine.save(&path)?;
             Ok((
                 json!({
@@ -1160,7 +1165,17 @@ fn cmd_state_advance_sprint() -> CmdResult {
                 warnings,
             ))
         }
-        None => {
+        SprintAdvanceResult::AllCompleted => {
+            machine.save(&path)?;
+            Ok((
+                json!({
+                    "advanced": false,
+                    "all_completed": true,
+                }),
+                warnings,
+            ))
+        }
+        SprintAdvanceResult::NotReady => {
             let current = machine
                 .state_file()
                 .sprint

@@ -539,13 +539,13 @@ fn smoke_state_transition_project_level() {
     with_cwd(tmp.path(), || {
         let _ = run(&["init"]); // 项目 state=init
 
-        // 无 --module：项目级 init → profile → plan → scaffold → sprint_loop 全链路合法。
+        // 无 --module：项目级 init → profile → plan → scaffold → sprint_loop 合法。
+        // graduate 须走 `rustmigrate graduate` 命令（含前置检查），不允许 state transition。
         for (from, to) in [
             ("init", "profile"),
             ("profile", "plan"),
             ("plan", "scaffold"),
             ("scaffold", "sprint_loop"),
-            ("sprint_loop", "graduate"),
         ] {
             let (code, json) = run(&["state", "transition", "--to", to]);
             assert_eq!(code, 0, "项目级 {from}→{to} 应成功: {json}");
@@ -553,6 +553,9 @@ fn smoke_state_transition_project_level() {
             assert_eq!(json["data"]["from"], from);
             assert_eq!(json["data"]["state"], to);
         }
+        // graduate 通过 state transition 应被拒绝。
+        let (code, json) = run(&["state", "transition", "--to", "graduate"]);
+        assert_eq!(code, 1, "graduate 不应通过 state transition 推进: {json}");
     });
 }
 
