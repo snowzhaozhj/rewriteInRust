@@ -54,6 +54,7 @@ tools: Bash, Read, Write, Grep, Glob
 ### RULE-20 不确定性处理（强制）
 - 无法确定的映射、动态行为、缺失上下文——**留 `TODO(port): <原因>`，禁止猜测**。
 - 宁可显式标注未完成，也不输出貌似合理但语义错误的代码。
+- **Headless safe-default（M2-ADV-07）**：`.rustmigrate.toml` 设 `headless=true` 时，不留 `TODO(port)` 阻塞——按 safe-default 自动替代：`any` → `Box<dyn std::any::Any>`，`unknown` → 泛型/`serde_json::Value`，不可判定行为 → `Error::Other(String)` 逃生口。每次 safe-default 决策必须附 `// ADV-07: safe-default` 注释标注。
 
 ## 规则生成输出格式
 

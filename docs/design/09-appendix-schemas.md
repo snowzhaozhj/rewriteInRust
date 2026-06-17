@@ -204,6 +204,7 @@ pending → translating → compile_fixing → testing → reviewing → done
                               compile_fixing（3轮失败）→ paused → degrade_*（人类确认）
                               testing（不可修复）→ paused → degrade_*（人类确认）
                                                   paused → translating（人类选择重试）
+                              // M2-ADV-07 headless 模式：paused → 自动 degrade_skip（不挂起）
 
 blocked 可从任何【活跃状态】进入（pending/translating/compile_fixing/testing/reviewing/paused；
         依赖模块尚未完成、下游无法开始时触发）

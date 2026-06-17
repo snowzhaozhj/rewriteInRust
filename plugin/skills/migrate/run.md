@@ -15,6 +15,22 @@
 ## 流程
 开始时取全局锁，结束或异常退出时释放（见 SKILL.md「全局锁」）。
 
+### 0. 复杂度分档路由（M2-TIER-01c）
+
+读 `modules[target].tier` 决定翻译循环路径（`tier` 由 `populate-modules` 的 AST 检测自动填充，见 03 §4.3.2）：
+
+| tier | 循环路径 | 跳过步骤 |
+|------|---------|---------|
+| `trivial` | 直翻 + 编译 + 导出可见性核对 + 签批 | 跳步骤 4-5（意图摘要/确认）、步骤 7-9（对抗审查/Phase B）、维度 9 退化为符号一致性 |
+| `standard` | 保留意图摘要 + Phase A + 审查 + 测试 | 跳步骤 9 中的 loom/shuttle 插桩 |
+| `full` | 完整 11 步（同 M1） | 无 |
+| `null`（未检测） | 等同 `full`（保守兜底） | 无 |
+
+**降档/升档机制（M2-TIER-01d）**：
+- **失败自动升档**：trivial/standard 模块在步骤 6（编译）或步骤 10（测试）失败时，自动升档到 full 并从步骤 2 重跑。升档记入 `attempts`（`reason: "tier升档 standard→full: 编译失败"`）。
+- **分档结果可观测**：tier 记录在 `modules[target].tier`（state get 可查），升档事件记入 `attempts` 审计序列。
+- **维度 9 永不跳过**：trivial 无运行时行为，维度 9 退化为「导出符号+类型签名集合一致性」核对（非完整 7 字段）。
+
 ### 1. 断点续传路由
 读 `modules[target].status` / `substatus`，按下表跳转，让中断的 run 从正确入口恢复：
 
@@ -62,6 +78,24 @@
 
 ### 11. 最终签批
 `state transition --module <M> --to done`（原子写）。更新 `PARITY.md`；如有架构决策写 MDR。若前置未满足（TODO(port)>0 / bug_replica 未确认 / coverage 不足），停在 `reviewing`、标 incomplete（同步骤 10：`--substatus "incomplete" --reason "<原因>"`、**不带 `--to`**，避免同态 `reviewing→reviewing` 被矩阵拒），不进 done。
+
+## Headless 模式（M2-ADV-07）
+
+`.rustmigrate.toml` 设 `headless=true` 时启用无人值守模式。核心变化：
+
+### 默认 TODO 决策策略
+headless 下 translator 遇到无法判定的 `any`/`unknown`/动态行为时，不留 `TODO(port)` 阻塞——而是按 safe-default 策略自动决策：
+- `any` → `Box<dyn std::any::Any>` + 注释标注来源
+- `unknown` → 泛型 `T` 或 `serde_json::Value`（按上下文选最安全的）
+- 不可判定的动态行为 → `Error::Other(String)` 逃生口 + 标注 `// ADV-07: safe-default`
+- 自动决策记入 `attempts`（`reason: "headless-safe-default: any→Box<dyn Any>"`）
+
+### 自动 degrade（paused → degrade_skip）
+headless 下模块进入 `paused`（3 轮失败）时，**不等人工确认**，自动执行：
+1. `state transition --module <M> --to degrade_skip --substatus "headless_auto_degrade" --reason "headless: 3轮失败自动降级"`
+2. 继续处理同 sprint 其余模块
+
+自动 degrade 选择 `degrade_skip` 而非 `degrade_ffi`（FFI 生成需人工决策 binding 接口），保证 headless 不挂起。
 
 ## 失败处理
 任一 SubAgent 步骤失败按 SKILL.md「失败恢复」三步处理。`intermediate/attempts/*` 始终保留。回滚清理范围按各步骤标注执行（部分写入删除、中间产物保留、状态复位）。

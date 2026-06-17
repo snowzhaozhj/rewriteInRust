@@ -33,6 +33,11 @@ tools: Bash, Read, Grep, Glob
 ### R3 项目画像维度
 画像摘要须覆盖：源语言、框架识别、代码行数（来自 `rustmigrate stats loc`）、模块数、依赖数、复杂度分布、建议迁移顺序（来自 `rustmigrate graph topo-sort`）。
 
+### R5 per-module 复杂度分档语义信号（M2-TIER-01b）
+- `rustmigrate state populate-modules --root <src>` 已自动为每个模块填充 `tier`（`trivial`/`standard`/`full`），基于 AST 语义特征检测（async/try-catch/I·O/全局状态等）。
+- 画像摘要须增加 `tier_distribution` 字段（trivial/standard/full 各几个），供编排器确定翻译策略。
+- 如对 CLI 自动分档结果有异议（例如：某模块虽无 async 但调用了复杂第三方库），在 `tier_overrides` 中标注建议升档的模块及理由，供人工复核。不直接修改 state。
+
 ### R4 不确定性诚实标注
 - 检测不到的框架、无法静态判定的动态行为，明确标 `unknown`，**禁止猜测**。
 - 不要把"语法错误/空文件/纯类型文件"误判为可迁移模块——如实归类。
@@ -51,6 +56,8 @@ tools: Bash, Read, Grep, Glob
     "module_count": 0,
     "dependency_count": 0,
     "complexity": { "low": 0, "medium": 0, "high": 0 },
+    "tier_distribution": { "trivial": 0, "standard": 0, "full": 0 },
+    "tier_overrides": [],
     "calls_edge_count": 0,
     "gaps": { "missing_calls": ["..."], "missing_uses_type": ["..."] },
     "suggested_order": ["..."]
