@@ -15,6 +15,7 @@ use clap::Parser;
 use serde::Serialize;
 use serde_json::json;
 
+use rustmigrate_core::detect::detect_tier;
 use rustmigrate_core::error::MigrateError;
 use rustmigrate_core::graph::build::build_graph_ts;
 use rustmigrate_core::graph::persist::{load_from_db, save_to_db};
@@ -27,7 +28,6 @@ use rustmigrate_core::response::{ErrorData, Response, Status};
 use rustmigrate_core::scaffold::scaffold_project;
 use rustmigrate_core::state::MigrationStateMachine;
 use rustmigrate_core::stats::{compare_structure, count_loc};
-use rustmigrate_core::detect::detect_tier;
 use rustmigrate_core::types::common::{NodeId, Timestamp};
 use rustmigrate_core::types::graph::{EdgeType, NodeType};
 use rustmigrate_core::types::state::{
@@ -1441,7 +1441,10 @@ fn cmd_graduate() -> CmdResult {
 
     // 统计毕业报告数据。
     let total = modules.len();
-    let done_count = modules.values().filter(|m| m.status == ModuleStatus::Done).count();
+    let done_count = modules
+        .values()
+        .filter(|m| m.status == ModuleStatus::Done)
+        .count();
     let degraded_count = modules.values().filter(|m| m.status.is_degraded()).count();
     let degraded_modules: Vec<serde_json::Value> = modules
         .iter()

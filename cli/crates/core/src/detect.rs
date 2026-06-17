@@ -302,7 +302,10 @@ export enum Role {
     Guest,
 }
 "#;
-        assert_eq!(detect_tier_from_source(source).unwrap(), ModuleTier::Trivial);
+        assert_eq!(
+            detect_tier_from_source(source).unwrap(),
+            ModuleTier::Trivial
+        );
     }
 
     #[test]
@@ -311,7 +314,10 @@ export enum Role {
 export { User, UserId } from './types';
 export * from './constants';
 "#;
-        assert_eq!(detect_tier_from_source(source).unwrap(), ModuleTier::Trivial);
+        assert_eq!(
+            detect_tier_from_source(source).unwrap(),
+            ModuleTier::Trivial
+        );
     }
 
     #[test]
@@ -321,7 +327,10 @@ export const MAX_RETRIES = 3;
 export const API_URL = "https://api.example.com";
 export const ENABLED = true;
 "#;
-        assert_eq!(detect_tier_from_source(source).unwrap(), ModuleTier::Trivial);
+        assert_eq!(
+            detect_tier_from_source(source).unwrap(),
+            ModuleTier::Trivial
+        );
     }
 
     #[test]
@@ -445,7 +454,10 @@ interface Internal {
 
 type Id = string;
 "#;
-        assert_eq!(detect_tier_from_source(source).unwrap(), ModuleTier::Trivial);
+        assert_eq!(
+            detect_tier_from_source(source).unwrap(),
+            ModuleTier::Trivial
+        );
     }
 
     #[test]
