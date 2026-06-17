@@ -99,6 +99,8 @@ pub enum Commands {
         #[command(subcommand)]
         action: ScaffoldCommands,
     },
+    /// 项目级毕业评估：所有模块 done/degrade_* 时，推进 ProjectState 到 Graduate 并产出报告。
+    Graduate,
 }
 
 /// Graph 子命令。
@@ -388,6 +390,7 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
                 emit(writer, cmd_scaffold_workspace(name, target))
             }
         },
+        Commands::Graduate => emit(writer, cmd_graduate()),
     }
 }
 
@@ -1390,6 +1393,91 @@ fn cmd_scaffold_workspace(name: &str, target: &Path) -> CmdResult {
         }),
         Vec::new(),
     ))
+}
+
+/// `graduate`：项目级毕业评估。
+///
+/// 前置条件：ProjectState == SprintLoop 且所有模块为终态（done/degrade_*）。
+/// 成功时推进 ProjectState 到 Graduate，产出 graduation-report.json
+/// 到 `.rust-migration/reports/`。不新增 `graduated` 模块状态（设计文档 09 附录 A
+/// 将 GRADUATE 映射为项目级概念）。
+fn cmd_graduate() -> CmdResult {
+    let path = state_path();
+    let (mut machine, mut warnings) = load_state_with_warnings(&path)?;
+
+    // 前置检查：必须处于 SprintLoop 状态。
+    if machine.current_state() != ProjectState::SprintLoop {
+        return Err(MigrateError::Config(format!(
+            "graduate 需在 sprint_loop 状态执行，当前状态: {}",
+            machine.current_state()
+        )));
+    }
+
+    // 前置检查：所有模块必须为终态。
+    let modules = &machine.state_file().modules;
+    if modules.is_empty() {
+        return Err(MigrateError::Config(
+            "无模块记录，请先运行 populate-modules".to_owned(),
+        ));
+    }
+    let non_terminal: Vec<(&String, String)> = modules
+        .iter()
+        .filter(|(_, m)| !m.status.is_terminal())
+        .map(|(k, m)| (k, m.status.to_string()))
+        .collect();
+    if !non_terminal.is_empty() {
+        let summary: Vec<String> = non_terminal
+            .iter()
+            .take(5)
+            .map(|(k, s)| format!("{k}={s}"))
+            .collect();
+        return Err(MigrateError::Config(format!(
+            "{} 个模块尚未终态，无法毕业: {}{}",
+            non_terminal.len(),
+            summary.join(", "),
+            if non_terminal.len() > 5 { " ..." } else { "" }
+        )));
+    }
+
+    // 统计毕业报告数据。
+    let total = modules.len();
+    let done_count = modules.values().filter(|m| m.status == ModuleStatus::Done).count();
+    let degraded_count = modules.values().filter(|m| m.status.is_degraded()).count();
+    let degraded_modules: Vec<serde_json::Value> = modules
+        .iter()
+        .filter(|(_, m)| m.status.is_degraded())
+        .map(|(k, m)| json!({"module": k, "status": m.status.to_string()}))
+        .collect();
+
+    // 推进项目状态到 Graduate。
+    machine.transition(ProjectState::Graduate)?;
+    machine.save(&path)?;
+
+    // 产出 graduation-report.json。
+    let report = json!({
+        "project": machine.state_file().project.as_ref().map(|p| &p.name),
+        "total_modules": total,
+        "done": done_count,
+        "degraded": degraded_count,
+        "degraded_modules": degraded_modules,
+        "graduated_at": Timestamp::now().as_str(),
+    });
+    let reports_dir = work_dir().join("reports");
+    if let Err(e) = std::fs::create_dir_all(&reports_dir) {
+        warnings.push(format!("创建 reports 目录失败: {e}"));
+    } else {
+        let report_path = reports_dir.join("graduation-report.json");
+        match serde_json::to_string_pretty(&report) {
+            Ok(content) => {
+                if let Err(e) = std::fs::write(&report_path, content) {
+                    warnings.push(format!("写入 graduation-report.json 失败: {e}"));
+                }
+            }
+            Err(e) => warnings.push(format!("序列化毕业报告失败: {e}")),
+        }
+    }
+
+    Ok((report, warnings))
 }
 
 // === 图加载辅助 ===

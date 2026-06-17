@@ -165,6 +165,11 @@ impl Timestamp {
         Self(ts.into())
     }
 
+    /// 取当前 UTC 时间的 RFC 3339 时间戳。
+    pub fn now() -> Self {
+        Self(chrono::Utc::now().to_rfc3339())
+    }
+
     /// 返回内部字符串引用。
     pub fn as_str(&self) -> &str {
         &self.0
