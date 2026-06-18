@@ -52,9 +52,10 @@
   - 质量门：`just ci` 全过（261 测试 / clippy -D / deny / fmt / shellcheck）
   - **待用户审阅合并**
 - **下一步**（**新会话从这里开始**）: Sprint C PR 合并后转 **Sprint D（并行编排 + 高级功能）** ∥ **Sprint E（验证+CLI扩展）**
-  - Sprint D/E 可并行
+  - ✅ **Sprint E / M2-CLI-01**（分支 `feat/m2-cli-01-rdeps`，PR 待提）——实现 `rustmigrate graph rdeps <module>` 反向依赖查询：`GraphCommands::Rdeps` 接入 CLI 路由，复用 `resolve_file_node` + `imports` 边传递闭包 BFS；core 新增 `SourceGraph::incoming_edges` 支撑反向边遍历；输出 `{module, dependents}` 且 module/dependents 使用 NodeId 原值，未破坏 `graph deps` / `state populate` key 契约。测试覆盖直接+传递反向依赖、叶子为空、环依赖中排除起点。`just ci` 全绿（268 tests / clippy -D / fmt / deny / shellcheck）。审查：code-reviewer Important 无；design-checker 必修问题无，通过
+  - Sprint D/E 可并行；下一批推荐：Sprint E 继续 CLI-02/03 或 Sprint D 关键路径 SCALE-02
   - Sprint D 关键路径：SCALE-02（worktree 写隔离）→ SCALE-01（Workflow 批量）→ SCALE-LOCK → PETGRAPH-01
-  - Sprint E 独立：VER-01/02、COV-01、CLI-01~06、ERR-01、PARITY-01、CICD-01
+  - Sprint E 独立：VER-01/02、COV-01、CLI-02~06、ERR-01、PARITY-01、CICD-01
 - **复审结论**：草稿方向正确，已修正 3 处自相矛盾 + 1 处悬空引用 + 撤销 tier_signals 过度设计 + 补 6 项缺口；新增 D5（SQLite 集中 writer）+ 3 任务（DESIGN-03/PERF-BASE/CLI-06 auto-unblock）；任务总数 52→55。3 个战略决策经用户批准（SQLite 门禁降级 / 60min 单模块 / 状态机程序化推迟+抽 auto-unblock）
 - **D3 写隔离方案已定稿（重点，见 [MDR-003](decisions/003-m2-parallel-write-isolation.md)）**：经 codex 四轮对抗审查 + 用户多次质疑收敛为 **git worktree + 约束包**（否决「隔离 crate 副本/轻量 staging/多 crate workspace 作并行单元」）。核心：
   - worktree 内完整 crate 真自检（保留 M1 per-module 编译反馈环）；**两层 done**：`agent_done`(自检) vs `done`(整组 check)

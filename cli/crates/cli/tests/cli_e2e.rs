@@ -286,6 +286,68 @@ fn smoke_graph_deps() {
 }
 
 #[test]
+fn smoke_graph_rdeps() {
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        let _ = run(&["graph", "build", "--root", "src"]);
+        // utils.ts 被 service.ts 直接依赖，也被 index.ts 传递依赖。
+        let (code, json) = run(&["graph", "rdeps", "utils.ts"]);
+        assert_eq!(code, 0, "graph rdeps 应成功: {json}");
+        assert_eq!(json["status"], "ok");
+        let rdeps = json["data"]["dependents"].as_array().unwrap();
+        assert!(
+            rdeps
+                .iter()
+                .any(|d| d.as_str().unwrap().contains("service.ts")),
+            "utils.ts 的反向依赖应含 service.ts: {rdeps:?}"
+        );
+        assert!(
+            rdeps
+                .iter()
+                .any(|d| d.as_str().unwrap().contains("index.ts")),
+            "utils.ts 的传递反向依赖应含 index.ts: {rdeps:?}"
+        );
+    });
+}
+
+#[test]
+fn smoke_graph_rdeps_leaf_is_empty() {
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        let _ = run(&["graph", "build", "--root", "src"]);
+        let (code, json) = run(&["graph", "rdeps", "index.ts"]);
+        assert_eq!(code, 0, "graph rdeps 应成功: {json}");
+        assert_eq!(json["status"], "ok");
+        assert!(json["data"]["dependents"].as_array().unwrap().is_empty());
+    });
+}
+
+#[test]
+fn smoke_graph_rdeps_cycle_excludes_start() {
+    let project = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("circular-deps"), project.path());
+    with_cwd(project.path(), || {
+        let _ = run(&["graph", "build", "--root", "src"]);
+        let (code, json) = run(&["graph", "rdeps", "handler.ts"]);
+        assert_eq!(code, 0, "graph rdeps 应成功: {json}");
+        assert_eq!(json["status"], "ok");
+        let rdeps = json["data"]["dependents"].as_array().unwrap();
+        assert!(
+            rdeps
+                .iter()
+                .any(|d| d.as_str().unwrap().contains("event-bus.ts")),
+            "handler.ts 的反向依赖应含 event-bus.ts: {rdeps:?}"
+        );
+        assert!(
+            rdeps
+                .iter()
+                .all(|d| !d.as_str().unwrap().contains("handler.ts")),
+            "环依赖中 rdeps 不应把起点自身纳入 dependents: {rdeps:?}"
+        );
+    });
+}
+
+#[test]
 fn smoke_graph_interfaces() {
     let project = temp_linear_project();
     with_cwd(project.path(), || {

@@ -58,6 +58,21 @@ impl SourceGraph {
             .collect()
     }
 
+    /// 获取指定节点的入边（含边类型信息）。
+    pub fn incoming_edges(&self, id: &NodeId) -> Vec<(&SourceNode, EdgeType)> {
+        let idx = match self.node_index(id) {
+            Some(i) => i,
+            None => return Vec::new(),
+        };
+        self.graph
+            .edges_directed(idx, Direction::Incoming)
+            .filter_map(|e| {
+                let source = self.graph.node_weight(e.source())?;
+                Some((source, e.weight().edge_type))
+            })
+            .collect()
+    }
+
     /// 按节点类型过滤所有节点。
     pub fn nodes_by_type(&self, node_type: NodeType) -> Vec<&SourceNode> {
         self.nodes().filter(|n| n.node_type == node_type).collect()
