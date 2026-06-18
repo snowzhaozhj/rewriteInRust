@@ -4,4 +4,4 @@
 
 pub mod machine;
 
-pub use machine::{MigrationStateMachine, STATE_SCHEMA_VERSION};
+pub use machine::{MigrationStateMachine, SprintAdvanceResult, STATE_SCHEMA_VERSION};

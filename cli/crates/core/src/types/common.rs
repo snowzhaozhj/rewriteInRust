@@ -148,18 +148,6 @@ pub enum Complexity {
     Complex,
 }
 
-/// 模块风险等级。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RiskLevel {
-    /// 低风险。
-    Low,
-    /// 中风险。
-    Medium,
-    /// 高风险。
-    High,
-}
-
 /// 迁移优先级（1 = 最高优先，无依赖的叶节点先迁移）。
 pub type MigrationPriority = u32;
 
@@ -175,6 +163,11 @@ impl Timestamp {
     /// 创建新的时间戳。
     pub fn new(ts: impl Into<String>) -> Self {
         Self(ts.into())
+    }
+
+    /// 取当前 UTC 时间的 RFC 3339 时间戳。
+    pub fn now() -> Self {
+        Self(chrono::Utc::now().to_rfc3339())
     }
 
     /// 返回内部字符串引用。

@@ -34,7 +34,7 @@
 无环则落盘迁移序列并推进状态机（**写状态统一走 CLI**）：
 1. `rustmigrate state transition --to profile`
 2. `rustmigrate state transition --to plan`
-3. `rustmigrate state populate-modules`——把拓扑序每个文件模块写成 `modules[<NodeId>] = {status:pending, sprint:1, risk:low}`，并设 `sprint.current=1`。**module key 用 NodeId 原值**（如 `file:src/utils.ts`），与 `graph deps` 输出一致，run 阶段依赖门禁据此查 `modules[dep].status`，不可改写。
+3. `rustmigrate state populate-modules [--root <源码根>]`——把拓扑序每个文件模块写成 `modules[<NodeId>] = {status:pending, sprint:1, tier:auto}`，并设 `sprint.current=1`。`tier` 由 AST 语义特征自动评估（`trivial`/`standard`/`full`），传 `--root` 与 `graph build` 一致以启用分档检测。**module key 用 NodeId 原值**（如 `file:src/utils.ts`），与 `graph deps` 输出一致，run 阶段依赖门禁据此查 `modules[dep].status`，不可改写。
 
 **检查点**：state == `plan`、`data.module_count > 0`。
 

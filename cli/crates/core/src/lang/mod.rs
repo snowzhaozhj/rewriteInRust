@@ -109,4 +109,11 @@ pub trait LanguageAdapter: Send {
     ///
     /// `source` 为文件内容，`rel_path` 为相对于项目根的路径。
     fn analyze_file(&mut self, source: &str, rel_path: &str) -> Result<FileAnalysis>;
+
+    /// 评估源码的翻译复杂度分档。
+    ///
+    /// 什么算"危险信号"是语言特定的判断（TS: async/conditional_type；
+    /// Python: metaclass/dynamic_attr），由各 adapter 内部决定。
+    /// 解析失败时返回 Full（保守不降档）。
+    fn detect_tier(&mut self, source: &str) -> crate::types::state::ModuleTier;
 }

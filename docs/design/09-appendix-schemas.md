@@ -77,7 +77,7 @@
       "test_pass_rate": "24/24",
       "coverage": 91,
       "known_differences": 0,
-      "risk": "low"
+      "tier": "trivial"
     },
     "core/parser": {
       "status": "testing",
@@ -94,7 +94,7 @@
       "test_pass_rate": "18/22",
       "coverage": 76,
       "known_differences": 1,
-      "risk": "medium",
+      "tier": "full",
       "phase_a_version": "sha256:a1b2c3d4",
       "phase_a_audit_passed": true
     },
@@ -108,7 +108,7 @@
       "test_pass_rate": null,
       "coverage": null,
       "known_differences": 0,
-      "risk": "high"
+      "tier": "standard"
     }
   },
   "config_ref": ".rustmigrate.toml",
@@ -124,7 +124,7 @@
 }
 ```
 
-> **module `risk` 字段分期（M2-DESIGN-03 / D4）**：上方示例中的 `risk`（`low`/`medium`/`high`）是 **M1 起恒为 `low` 的死字段**（零读取点）。**M2-TIER-01a 删除 `risk`，改填复杂度自适应分档 `tier`**（`Trivial`/`Standard`/`Full`，`Option<ModuleTier>`，由 AST 语义特征驱动、决定翻译循环路径，见 [03 § 4.3.2](./03-execution-model.md#432-复杂度自适应分档tier-01m2)）。分档理由（危险信号）记入 run 日志 + `AttemptRecord`，**不**新增持久化 `tier_signals` 字段。
+> **module `tier` 字段（M2-TIER-01a 已实现）**：`tier`（`trivial`/`standard`/`full`，`Option<ModuleTier>`）由 AST 语义特征驱动（`detect.rs`），决定翻译循环路径（见 [03 § 4.3.2](./03-execution-model.md#432-复杂度自适应分档tier-01m2)）。M1 的死字段 `risk` 已删除。分档理由（危险信号）记入 run 日志 + `AttemptRecord`，**不**新增持久化 `tier_signals` 字段。
 
 **`metadata` 字段说明**：
 
@@ -204,6 +204,7 @@ pending → translating → compile_fixing → testing → reviewing → done
                               compile_fixing（3轮失败）→ paused → degrade_*（人类确认）
                               testing（不可修复）→ paused → degrade_*（人类确认）
                                                   paused → translating（人类选择重试）
+                              // M2-ADV-07 headless 模式：paused → 自动 degrade_skip（不挂起）
 
 blocked 可从任何【活跃状态】进入（pending/translating/compile_fixing/testing/reviewing/paused；
         依赖模块尚未完成、下游无法开始时触发）

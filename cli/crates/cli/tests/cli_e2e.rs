@@ -539,13 +539,13 @@ fn smoke_state_transition_project_level() {
     with_cwd(tmp.path(), || {
         let _ = run(&["init"]); // 项目 state=init
 
-        // 无 --module：项目级 init → profile → plan → scaffold → sprint_loop 全链路合法。
+        // 无 --module：项目级 init → profile → plan → scaffold → sprint_loop 合法。
+        // graduate 须走 `rustmigrate graduate` 命令（含前置检查），不允许 state transition。
         for (from, to) in [
             ("init", "profile"),
             ("profile", "plan"),
             ("plan", "scaffold"),
             ("scaffold", "sprint_loop"),
-            ("sprint_loop", "graduate"),
         ] {
             let (code, json) = run(&["state", "transition", "--to", to]);
             assert_eq!(code, 0, "项目级 {from}→{to} 应成功: {json}");
@@ -553,6 +553,9 @@ fn smoke_state_transition_project_level() {
             assert_eq!(json["data"]["from"], from);
             assert_eq!(json["data"]["state"], to);
         }
+        // graduate 通过 state transition 应被拒绝。
+        let (code, json) = run(&["state", "transition", "--to", "graduate"]);
+        assert_eq!(code, 1, "graduate 不应通过 state transition 推进: {json}");
     });
 }
 
@@ -847,7 +850,10 @@ fn e2e_populate_modules_linear_unblocks_run() {
         let (code, json) = run(&["state", "populate-modules"]);
         assert_eq!(code, 0, "populate 应成功: {json}");
         assert_eq!(json["status"], "ok");
-        assert_eq!(json["data"]["sprint"], 1);
+        assert!(
+            json["data"]["total_sprints"].as_u64().unwrap() >= 1,
+            "应至少有 1 个 sprint: {json}"
+        );
         let count = json["data"]["module_count"].as_u64().unwrap();
         assert_eq!(count, 3, "linear-deps 应有 3 个文件模块: {json}");
 
@@ -855,8 +861,8 @@ fn e2e_populate_modules_linear_unblocks_run() {
         let modules = json["data"]["modules"].as_array().unwrap();
         let utils = modules
             .iter()
-            .find(|m| m.as_str().unwrap().contains("utils"))
-            .expect("应含 utils 模块")
+            .find(|m| m["id"].as_str().unwrap_or_default().contains("utils"))
+            .expect("应含 utils 模块")["id"]
             .as_str()
             .unwrap()
             .to_owned();
@@ -890,9 +896,14 @@ fn e2e_populate_modules_linear_unblocks_run() {
         // 衔接验证：run 阶段依赖门禁用 graph deps 的 key 查 modules，必须一致。
         let (code, json) = run(&["graph", "deps", &utils]);
         assert_eq!(code, 0, "graph deps 应成功: {json}");
+        let module_ids: Vec<&str> = modules
+            .iter()
+            .map(|m| m["id"].as_str().unwrap_or_default())
+            .collect();
         for dep in json["data"]["dependencies"].as_array().unwrap() {
+            let dep_str = dep.as_str().unwrap_or_default();
             assert!(
-                modules.contains(dep),
+                module_ids.contains(&dep_str),
                 "graph deps 输出的依赖 key {dep} 应在 modules 中（否则 run 依赖门禁失配）"
             );
         }
@@ -940,7 +951,7 @@ fn e2e_populate_cleans_orphan_pending() {
         assert!(
             !modules
                 .iter()
-                .any(|m| m.as_str().unwrap().contains("index")),
+                .any(|m| m["id"].as_str().unwrap_or_default().contains("index")),
             "重填后不应再含 index 模块: {json}"
         );
         let (code, json) = run(&["validate", "state"]);

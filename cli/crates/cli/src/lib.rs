@@ -15,6 +15,7 @@ use clap::Parser;
 use serde::Serialize;
 use serde_json::json;
 
+use rustmigrate_core::detect::detect_tier;
 use rustmigrate_core::error::MigrateError;
 use rustmigrate_core::graph::build::build_graph_ts;
 use rustmigrate_core::graph::persist::{load_from_db, save_to_db};
@@ -25,12 +26,12 @@ use rustmigrate_core::profile::{
 };
 use rustmigrate_core::response::{ErrorData, Response, Status};
 use rustmigrate_core::scaffold::scaffold_project;
-use rustmigrate_core::state::MigrationStateMachine;
+use rustmigrate_core::state::{MigrationStateMachine, SprintAdvanceResult};
 use rustmigrate_core::stats::{compare_structure, count_loc};
-use rustmigrate_core::types::common::{NodeId, RiskLevel, Timestamp};
+use rustmigrate_core::types::common::{NodeId, Timestamp};
 use rustmigrate_core::types::graph::{EdgeType, NodeType};
 use rustmigrate_core::types::state::{
-    humanize_module_key, ModuleState, ModuleStatus, ProjectState, SprintState,
+    humanize_module_key, ModuleState, ModuleStatus, ModuleTier, ProjectState, SprintState,
 };
 use rustmigrate_core::validate::validate_state;
 
@@ -98,6 +99,8 @@ pub enum Commands {
         #[command(subcommand)]
         action: ScaffoldCommands,
     },
+    /// 项目级毕业评估：所有模块 done/degrade_* 时，推进 ProjectState 到 Graduate 并产出报告。
+    Graduate,
 }
 
 /// Graph 子命令。
@@ -175,11 +178,20 @@ pub enum StateCommands {
     /// 用源码图的迁移序列填充 `migration-state.json` 的 `modules`/`sprint`（PLAN 操作）。
     ///
     /// 读取 `source-graph.db` → `migration_sequence()` 拓扑序 → 为每个文件模块写入
-    /// `ModuleState{status:pending, sprint:1, risk:low}` 并设 `sprint{current:1}`，原子落盘。
+    /// `ModuleState{status:pending, sprint:<按parallel_groups>, tier:auto}` 并设 `sprint{current:1}`，原子落盘。
     /// module key 用 NodeId 原值（与 `graph deps` 输出一致，保证 run 阶段依赖门禁匹配）。
     /// 环图（`migration_sequence().has_cycles()`）拒绝填充，须先打破环（对齐 topo-sort 门禁）。
     /// 是 `/migrate analyze`→`/migrate run` 衔接的缺失 PLAN 步骤（见 PLAN.md §9.5 M1-PLAN-01）。
-    PopulateModules,
+    PopulateModules {
+        /// 源码根目录，用于 per-module 复杂度分档（M2-TIER-01a）。
+        /// 省略则尝试从当前目录解析源文件。
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// 所有模块统一分配 sprint=1（兼容 M1 单 sprint 模式）。
+        /// 省略时按 parallel_groups 拓扑层级分配 sprint 号（组 0→sprint 1，组 1→sprint 2...）。
+        #[arg(long)]
+        single_sprint: bool,
+    },
     /// 追加一条 SubAgent 调用记录到顶层 `subagent_calls`（诊断卡死 / 统计重试，append-only）。
     ///
     /// 对齐 `09-appendix-schemas.md § subagent_calls 字段说明`：每次 SubAgent 调用（含重试）
@@ -206,6 +218,11 @@ pub enum StateCommands {
         #[arg(long)]
         error_message: Option<String>,
     },
+    /// 推进 sprint：当前 sprint 所有模块终态时，自动推进到下一 sprint。
+    ///
+    /// sprint N 全模块 done/degrade_* → current=N+1 + history 回填。
+    /// 无可推进 sprint 或尚有非终态模块时返回 status:ok + advanced:false。
+    AdvanceSprint,
 }
 
 /// Stats 子命令。
@@ -332,7 +349,13 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
                     *force,
                 ),
             ),
-            StateCommands::PopulateModules => emit(writer, cmd_state_populate_modules()),
+            StateCommands::PopulateModules {
+                root,
+                single_sprint,
+            } => emit(
+                writer,
+                cmd_state_populate_modules(root.as_deref(), *single_sprint),
+            ),
             StateCommands::RecordSubagentCall {
                 step_index,
                 subagent_name,
@@ -351,6 +374,7 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
                     error_message.as_deref(),
                 ),
             ),
+            StateCommands::AdvanceSprint => emit(writer, cmd_state_advance_sprint()),
         },
         Commands::Stats { action } => match action {
             StatsCommands::Loc { source, rust } => {
@@ -366,6 +390,7 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
                 emit(writer, cmd_scaffold_workspace(name, target))
             }
         },
+        Commands::Graduate => emit(writer, cmd_graduate()),
     }
 }
 
@@ -904,6 +929,16 @@ fn cmd_state_transition_project(
         ))
     })?;
 
+    // graduate 须走 `rustmigrate graduate` 命令（含模块终态前置检查 + 报告产出），
+    // 不允许通过 state transition 绕过。
+    if target == ProjectState::Graduate {
+        return Err(MigrateError::Config(
+            "graduate 须通过 `rustmigrate graduate` 命令执行（含模块终态检查 + 毕业报告），\
+             不支持 state transition --to graduate 直接推进"
+                .to_owned(),
+        ));
+    }
+
     let path = state_path();
     let (mut machine, warnings) = load_state_with_warnings(&path)?;
     let from = machine.current_state();
@@ -927,7 +962,7 @@ fn cmd_state_transition_project(
 ///
 /// 流程：`load_graph` → `migration_sequence()` →（有环则拒绝，对齐 topo-sort 门禁）→
 /// 清理孤儿 pending（见下）→ 为每个文件模块写
-/// `ModuleState{status:pending, sprint:1, risk:low}`（module key = NodeId 原值，
+/// `ModuleState{status:pending, sprint:<parallel_groups层级>, tier:auto}`（module key = NodeId 原值，
 /// 与 `graph deps` 输出一致）→ `set_sprint(current:1)` → 原子落盘。
 ///
 /// **幂等保护**：已有模块处于非 `pending` 活跃态（迁移进行中）时拒绝覆盖，避免把进度重置回
@@ -937,7 +972,7 @@ fn cmd_state_transition_project(
 /// "孤儿"（状态中存在但源码图已无对应节点）。重填只新增/覆盖序列内节点，故先用
 /// [`MigrationStateMachine::retain_modules`] 剔除孤儿，保持 `modules` 与当前迁移序列一致，
 /// 避免不存在的模块被 `state report` / 依赖门禁误计入进度；被清理的 key 经 warning 告知用户。
-fn cmd_state_populate_modules() -> CmdResult {
+fn cmd_state_populate_modules(root: Option<&Path>, single_sprint: bool) -> CmdResult {
     let graph = load_graph()?;
     let sequence = migration_sequence(&graph);
 
@@ -990,18 +1025,49 @@ fn cmd_state_populate_modules() -> CmdResult {
         }
     }
 
+    // 复杂度分档（M2-TIER-01a）：按 AST 语义特征自动评估每个模块的 tier。
+    let tier_map = detect_tiers_for_modules(&sequence.order, root, &mut warnings);
+
+    // Sprint 分配（M2-SCALE-P）：按 parallel_groups 拓扑层级分配 sprint 号。
+    // 组 0（叶节点）→ sprint 1，组 1 → sprint 2，...
+    // --single-sprint 模式下所有模块统一 sprint=1（M1 兼容）。
+    let sprint_map: std::collections::HashMap<String, u32> = if single_sprint {
+        sequence
+            .order
+            .iter()
+            .map(|id| (id.to_string(), 1))
+            .collect()
+    } else {
+        let mut map = std::collections::HashMap::new();
+        for (group_idx, group) in sequence.parallel_groups.iter().enumerate() {
+            let sprint = (group_idx as u32) + 1;
+            for node_id in group {
+                map.insert(node_id.to_string(), sprint);
+            }
+        }
+        map
+    };
+
+    let total_sprints = if single_sprint {
+        1
+    } else {
+        sequence.parallel_groups.len().max(1) as u32
+    };
+
     for node_id in &sequence.order {
+        let tier = tier_map.get(node_id.as_str()).copied().flatten();
+        let sprint = sprint_map.get(node_id.as_str()).copied().unwrap_or(1);
         machine.update_module(
             node_id.as_str(),
             ModuleState {
                 status: ModuleStatus::Pending,
                 substatus: None,
-                sprint: Some(1),
+                sprint: Some(sprint),
                 attempts: Vec::new(),
                 test_pass_rate: None,
                 coverage: None,
                 known_differences: 0,
-                risk: RiskLevel::Low,
+                tier,
                 phase_a_version: None,
                 phase_a_audit_passed: None,
                 blocked_by: None,
@@ -1016,21 +1082,117 @@ fn cmd_state_populate_modules() -> CmdResult {
     });
     machine.save(&path)?;
 
-    let modules: Vec<String> = sequence.order.iter().map(|id| id.to_string()).collect();
+    let modules: Vec<serde_json::Value> = sequence
+        .order
+        .iter()
+        .map(|id| {
+            let tier = tier_map
+                .get(id.as_str())
+                .and_then(|t| t.map(|t| t.to_string()));
+            let sprint = sprint_map.get(id.as_str()).copied().unwrap_or(1);
+            json!({ "id": id.to_string(), "tier": tier, "sprint": sprint })
+        })
+        .collect();
     Ok((
         json!({
             "module_count": modules.len(),
             "modules": modules,
-            "sprint": 1,
+            "total_sprints": total_sprints,
         }),
         warnings,
     ))
 }
 
-/// `state record-subagent-call`：追加一条 SubAgent 调用记录到 `subagent_calls`（诊断 / 重试统计）。
+/// 对迁移序列中的所有模块运行复杂度分档检测（M2-TIER-01a）。
 ///
-/// 设计（`09-appendix-schemas.md § subagent_calls 字段说明` + `06 § 10.5`）：顶层 append-only
-/// 数组，每次 SubAgent 调用（含重试）追加一条，用于诊断卡死与统计重试次数。本命令构造
+/// 从 NodeId 解析文件路径 → 在 `root`（或 CWD）下查找源文件 → `detect_tier` 评估。
+/// 文件不存在时静默跳过（tier 为 best-effort，不阻塞 populate）；
+/// 仅在检测逻辑本身失败时记 warning。
+fn detect_tiers_for_modules(
+    order: &[NodeId],
+    root: Option<&Path>,
+    warnings: &mut Vec<String>,
+) -> std::collections::HashMap<String, Option<ModuleTier>> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let base = root.unwrap_or(&cwd);
+
+    let mut tiers = std::collections::HashMap::new();
+    for node_id in order {
+        let file_path = match node_id.file_path() {
+            Some(p) => p,
+            None => {
+                tiers.insert(node_id.to_string(), None);
+                continue;
+            }
+        };
+
+        let full_path = base.join(file_path);
+        if full_path.exists() {
+            match detect_tier(&full_path) {
+                Ok(tier) => {
+                    tiers.insert(node_id.to_string(), Some(tier));
+                }
+                Err(e) => {
+                    warnings.push(format!(
+                        "模块 `{node_id}` 复杂度检测失败（默认不分档）: {e}"
+                    ));
+                    tiers.insert(node_id.to_string(), None);
+                }
+            }
+        } else {
+            tiers.insert(node_id.to_string(), None);
+        }
+    }
+    tiers
+}
+
+/// `state advance-sprint`：当前 sprint 所有模块终态时推进到下一 sprint。
+///
+/// 检查当前 sprint 下所有模块是否终态。推进成功返回 `advanced:true`；
+/// 全部 sprint 已完成返回 `all_completed:true`；尚有非终态模块返回 `advanced:false`。
+fn cmd_state_advance_sprint() -> CmdResult {
+    let path = state_path();
+    let (mut machine, warnings) = load_state_with_warnings(&path)?;
+
+    match machine.try_advance_sprint() {
+        SprintAdvanceResult::Advanced(new_sprint) => {
+            machine.save(&path)?;
+            Ok((
+                json!({
+                    "advanced": true,
+                    "new_sprint": new_sprint,
+                }),
+                warnings,
+            ))
+        }
+        SprintAdvanceResult::AllCompleted => {
+            machine.save(&path)?;
+            Ok((
+                json!({
+                    "advanced": false,
+                    "all_completed": true,
+                }),
+                warnings,
+            ))
+        }
+        SprintAdvanceResult::NotReady => {
+            let current = machine
+                .state_file()
+                .sprint
+                .as_ref()
+                .map(|s| s.current)
+                .unwrap_or(0);
+            Ok((
+                json!({
+                    "advanced": false,
+                    "current_sprint": current,
+                }),
+                warnings,
+            ))
+        }
+    }
+}
+
 /// [`SubAgentCall`] 后经 core [`MigrationStateMachine::push_subagent_call`] 入库，落盘走 tmp-fsync-rename
 /// 原子写。`started_at` schema 必填——省略时取当前 UTC 时间（编排器在调用开始即可记录、结束再补登一条）。
 fn cmd_state_record_subagent_call(
@@ -1246,6 +1408,94 @@ fn cmd_scaffold_workspace(name: &str, target: &Path) -> CmdResult {
         }),
         Vec::new(),
     ))
+}
+
+/// `graduate`：项目级毕业评估。
+///
+/// 前置条件：ProjectState == SprintLoop 且所有模块为终态（done/degrade_*）。
+/// 成功时推进 ProjectState 到 Graduate，产出 graduation-report.json
+/// 到 `.rust-migration/reports/`。不新增 `graduated` 模块状态（设计文档 09 附录 A
+/// 将 GRADUATE 映射为项目级概念）。
+fn cmd_graduate() -> CmdResult {
+    let path = state_path();
+    let (mut machine, mut warnings) = load_state_with_warnings(&path)?;
+
+    // 前置检查：必须处于 SprintLoop 状态。
+    if machine.current_state() != ProjectState::SprintLoop {
+        return Err(MigrateError::Config(format!(
+            "graduate 需在 sprint_loop 状态执行，当前状态: {}",
+            machine.current_state()
+        )));
+    }
+
+    // 前置检查：所有模块必须为终态。
+    let modules = &machine.state_file().modules;
+    if modules.is_empty() {
+        return Err(MigrateError::Config(
+            "无模块记录，请先运行 populate-modules".to_owned(),
+        ));
+    }
+    let non_terminal: Vec<(&String, String)> = modules
+        .iter()
+        .filter(|(_, m)| !m.status.is_terminal())
+        .map(|(k, m)| (k, m.status.to_string()))
+        .collect();
+    if !non_terminal.is_empty() {
+        let summary: Vec<String> = non_terminal
+            .iter()
+            .take(5)
+            .map(|(k, s)| format!("{k}={s}"))
+            .collect();
+        return Err(MigrateError::Config(format!(
+            "{} 个模块尚未终态，无法毕业: {}{}",
+            non_terminal.len(),
+            summary.join(", "),
+            if non_terminal.len() > 5 { " ..." } else { "" }
+        )));
+    }
+
+    // 统计毕业报告数据。
+    let total = modules.len();
+    let done_count = modules
+        .values()
+        .filter(|m| m.status == ModuleStatus::Done)
+        .count();
+    let degraded_count = modules.values().filter(|m| m.status.is_degraded()).count();
+    let degraded_modules: Vec<serde_json::Value> = modules
+        .iter()
+        .filter(|(_, m)| m.status.is_degraded())
+        .map(|(k, m)| json!({"module": k, "status": m.status.to_string()}))
+        .collect();
+
+    // 推进项目状态到 Graduate。
+    machine.transition(ProjectState::Graduate)?;
+    machine.save(&path)?;
+
+    // 产出 graduation-report.json。
+    let report = json!({
+        "project": machine.state_file().project.as_ref().map(|p| &p.name),
+        "total_modules": total,
+        "done": done_count,
+        "degraded": degraded_count,
+        "degraded_modules": degraded_modules,
+        "graduated_at": Timestamp::now().as_str(),
+    });
+    let reports_dir = work_dir().join("reports");
+    if let Err(e) = std::fs::create_dir_all(&reports_dir) {
+        warnings.push(format!("创建 reports 目录失败: {e}"));
+    } else {
+        let report_path = reports_dir.join("graduation-report.json");
+        match serde_json::to_string_pretty(&report) {
+            Ok(content) => {
+                if let Err(e) = std::fs::write(&report_path, content) {
+                    warnings.push(format!("写入 graduation-report.json 失败: {e}"));
+                }
+            }
+            Err(e) => warnings.push(format!("序列化毕业报告失败: {e}")),
+        }
+    }
+
+    Ok((report, warnings))
 }
 
 // === 图加载辅助 ===

@@ -38,9 +38,23 @@
   - ✅ **REFAC-09**: 确认已在先前会话完成（`extract_var_functions` 已覆盖 arrow function，含测试 `exported_arrow_const_produces_function_node`），本次跳过
   - ✅ **REFAC-10**(`7132742`，档1): 跨文件方法调用解析——constructor_bindings（`const x = new Foo()` → `x → Foo`） + add_cross_file_edges 三级方法调用策略（本地绑定/import_map/全图唯一）。diamond-deps 新增 `index.ts→AuthService.authenticate` 边（3→4 Calls 边）。含 `await new Foo()` 穿透。3 个专项测试
   - 质量门：全量 `just ci` 通过（237 测试 / clippy -D / deny / fmt / shellcheck）
-- **下一步**（**新会话从这里开始**）: Sprint B PR 审查闭环后转 **Sprint C（核心功能双线）**
-  - 注：M2-TIER-01a 删 risk 时需同步 plugin 提示词 analyze.md:37 的 `risk:low` 表述
-  - **Sprint B 完成标志检查**：✅ Option<String> 类型化 / ✅ 构造器强制 / ✅ ImportInfo 非法组合消除 / ✅ Arrow function → Function 节点 / ✅ 跨文件方法调用档1 / ✅ `just ci` 全绿
+- ✅ **Sprint C 完成（分支 `feat/m2-sprint-c`，PR [#19](https://github.com/snowzhaozhj/rewriteInRust/pull/19)）**：核心功能双线——自适应分档 + 并行 sprint + graduate
+  - **线 1 自适应循环**：
+    - ✅ **TIER-01a**(`6fcc85f`): ModuleTier 枚举(Trivial/Standard/Full) + tree-sitter AST 语义检测(`detect.rs`) + 删除 risk 死字段 + populate-modules `--root` 集成
+    - ✅ **TIER-01b/c/d**(`4311288`): analyzer.md tier_distribution 输出 + run.md §0 分档路由 + 失败自动升档
+    - ✅ **ADV-07**(`4311288`): headless TODO safe-default 策略 + paused→自动 degrade_skip + 02/09 设计文档同步
+  - **线 2 并行 sprint 基础**：
+    - ✅ **SCALE-P**(`f31c89e`): populate 按 parallel_groups 拓扑层级分配 sprint 号 + `--single-sprint` M1 兼容
+    - ✅ **SCALE-SPRINT**(`f482489`): sprint 推进逻辑 try_advance_sprint(Advanced/AllCompleted/NotReady) + `state advance-sprint` CLI
+    - ✅ **ADV-03**(`74aee6d`): graduate 毕业评估命令 + graduation-report.json + 前置检查(SprintLoop+全模块终态)
+  - **审查修复**(`3f32980`): 4 视角（主审+设计契约+专项+异构交叉）8 项 important 全部修复：
+    数值计算/动态类型/any 危险信号补充、const 初始化含调用检测、async function_expression、SprintAdvanceResult 三态、completed_modules is_terminal()、doc comment 截断修复、graduate 绕过阻止、report fsync
+  - 质量门：`just ci` 全过（261 测试 / clippy -D / deny / fmt / shellcheck）
+  - **待用户审阅合并**
+- **下一步**（**新会话从这里开始**）: Sprint C PR 合并后转 **Sprint D（并行编排 + 高级功能）** ∥ **Sprint E（验证+CLI扩展）**
+  - Sprint D/E 可并行
+  - Sprint D 关键路径：SCALE-02（worktree 写隔离）→ SCALE-01（Workflow 批量）→ SCALE-LOCK → PETGRAPH-01
+  - Sprint E 独立：VER-01/02、COV-01、CLI-01~06、ERR-01、PARITY-01、CICD-01
 - **复审结论**：草稿方向正确，已修正 3 处自相矛盾 + 1 处悬空引用 + 撤销 tier_signals 过度设计 + 补 6 项缺口；新增 D5（SQLite 集中 writer）+ 3 任务（DESIGN-03/PERF-BASE/CLI-06 auto-unblock）；任务总数 52→55。3 个战略决策经用户批准（SQLite 门禁降级 / 60min 单模块 / 状态机程序化推迟+抽 auto-unblock）
 - **D3 写隔离方案已定稿（重点，见 [MDR-003](decisions/003-m2-parallel-write-isolation.md)）**：经 codex 四轮对抗审查 + 用户多次质疑收敛为 **git worktree + 约束包**（否决「隔离 crate 副本/轻量 staging/多 crate workspace 作并行单元」）。核心：
   - worktree 内完整 crate 真自检（保留 M1 per-module 编译反馈环）；**两层 done**：`agent_done`(自检) vs `done`(整组 check)

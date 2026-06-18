@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use strum::{Display, EnumString};
 
-use super::common::{RiskLevel, SourceLang, Timestamp};
+use super::common::{SourceLang, Timestamp};
 
 /// 项目级状态机节点（编排器状态）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Display, EnumString)]
@@ -131,6 +131,21 @@ pub enum TranslationPhase {
     B,
 }
 
+/// 模块复杂度分档（决定翻译循环路径）。
+///
+/// 基于 AST 语义特征评估，非 LOC。详见 `docs/design/03-execution-model.md § 4.3.2`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Display, EnumString)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum ModuleTier {
+    /// 纯类型 / 常量 / barrel（仅 re-export）——批量直翻，跳 Phase B。
+    Trivial,
+    /// 无危险信号的普通模块——保留意图摘要 + Phase A + 审查 + 测试。
+    Standard,
+    /// 含危险信号（async/try-catch/I·O/数值/全局状态等）——完整 11 步。
+    Full,
+}
+
 /// 状态历史条目。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StateHistoryEntry {
@@ -205,8 +220,8 @@ pub struct ModuleState {
     pub coverage: Option<u32>,
     #[serde(default)]
     pub known_differences: u32,
-    #[serde(default = "default_risk")]
-    pub risk: RiskLevel,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tier: Option<ModuleTier>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase_a_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -215,10 +230,6 @@ pub struct ModuleState {
     pub blocked_by: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pre_blocked_status: Option<ModuleStatus>,
-}
-
-fn default_risk() -> RiskLevel {
-    RiskLevel::Low
 }
 
 /// 从内部 module key 派生「人类友好显示名」（纯函数，不改变内部 key）。
