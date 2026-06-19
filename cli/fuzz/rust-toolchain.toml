@@ -1,0 +1,4 @@
+# 仅对 fuzz crate 生效：cargo-fuzz 需要 nightly Rust。
+# 不影响主 workspace（cli/crates/*）的 stable 工具链。
+[toolchain]
+channel = "nightly"

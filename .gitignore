@@ -21,6 +21,11 @@ Thumbs.db
 lcov.info
 *.profraw
 
+# Fuzz（cargo-fuzz 产物）
+cli/fuzz/target/
+cli/fuzz/corpus/
+cli/fuzz/artifacts/
+
 # Node (fixtures)
 fixtures/*/node_modules/
 fixtures/*/dist/

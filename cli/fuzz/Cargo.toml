@@ -1,0 +1,33 @@
+[package]
+name = "rustmigrate-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# 独立 workspace，不被父 cli/ workspace 拾取
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+rustmigrate-core = { path = "../crates/core" }
+rusqlite = { version = "0.31", features = ["bundled", "modern_sqlite"] }
+tempfile = "3"
+
+# 防止调试信息膨胀，但保留足够的 sanitizer 符号
+[profile.release]
+debug = 1
+opt-level = 3
+
+[[bin]]
+name = "build_graph_fuzz"
+path = "fuzz_targets/build_graph_fuzz.rs"
+doc = false
+
+[[bin]]
+name = "parse_node_extra_fuzz"
+path = "fuzz_targets/parse_node_extra_fuzz.rs"
+doc = false
