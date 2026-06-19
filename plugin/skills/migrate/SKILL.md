@@ -27,7 +27,8 @@ argument-hint: "[analyze|run|review] [module]"
 - 通过 Bash 调用 `rustmigrate <子命令>`，工作目录为源项目根。所有 CLI 输出是统一 JSON：`{status, data, warnings}`。
 - **定位 CLI**：裸调 `rustmigrate` 假设其在 `$PATH`。若不确定是否安装，先运行 `BIN=$(hooks/scripts/ensure-cli.sh)` 取二进制绝对路径（解析优先级 PATH > `$RUSTMIGRATE_BIN` > 本地构建产物），后续用 `"$BIN" <子命令>` 调用；脚本未找到二进制时退出非 0 并打印安装指引，应如实转达用户。
 - **只解析 `data` 字段**取结构化结果；`status` 为 `error` 时按 `data` 中的错误码处理，不要从自然语言里猜成败。`warnings` 非空时如实转达用户，不要静默吞掉。
-- 命令清单（M1 共 14 个）：`init`、`profile --root`、`graph build --root [--full]`、`graph topo-sort`、`graph deps <m>`、`graph interfaces <m> [--deps-of <t>]`、`graph stats`、`validate state`、`state get <m>`、`state transition [--module] --to [--substatus] [--reason] [--force]`、`state populate-modules`、`stats loc`、`stats compare`、`scaffold workspace [--target] [--name]`。
+- 命令清单（M1 共 14 个）：`init`、`profile --root [--adapter-tools]`、`graph build --root [--full]`、`graph topo-sort`、`graph deps <m>`、`graph interfaces <m> [--deps-of <t>]`、`graph stats`、`validate state`、`state get <m>`、`state transition [--module] --to [--substatus] [--reason] [--force]`、`state populate-modules`、`stats loc`、`stats compare`、`scaffold workspace [--target] [--name]`。
+- **`profile --adapter-tools` 路径自动解析**：analyze 流程步骤 3 按优先级定位 `analysis-tools.json`——①`.rustmigrate.toml` 的 `adapter_path` ② `$CLAUDE_PLUGIN_ROOT/skills/migrate/adapters/<lang>/` ③ `plugin/skills/migrate/adapters/<lang>/`（同仓相对路径）④ 全部未命中则省略参数（降级 warning）。详见 [analyze.md](./analyze.md) 步骤 3。
 
 ### 全局锁（所有子命令开始时取，结束或异常退出时释放）
 同一项目同一时刻只允许一个 `/migrate` 命令运行。锁文件 `.rust-migration/.migration-lock`，内容为单行 JSON `{session_pid, started_at, hostname}`，`session_pid` 取 `$PPID`（Claude Code 宿主进程，生命周期覆盖整个会话）。
