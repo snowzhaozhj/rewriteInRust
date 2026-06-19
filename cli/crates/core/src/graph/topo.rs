@@ -29,6 +29,26 @@ pub struct MigrationSequence {
     pub parallel_groups: Vec<Vec<NodeId>>,
     /// 所有检测到的环。
     pub cycles: Vec<Vec<NodeId>>,
+    /// 缩点后的 SCC 翻译单元（破环：每个 SCC 折叠为一个迁移单位）。
+    ///
+    /// 覆盖图中**全部** File 节点（单文件 = 单成员组），按缩点 DAG 拓扑层级排序。
+    /// populate 以此为迁移单位：单成员组 → 单文件模块；多成员组 → composite 模块组。
+    pub scc_groups: Vec<SccGroup>,
+}
+
+/// 一个 SCC 翻译单元（缩点后的迁移单位）。
+///
+/// 破环核心：源码中的循环依赖（互引文件）不再拒绝迁移，而是整组折叠为一个
+/// 翻译单元——translator 一次性翻译为一组 Rust `mod`（同 crate 内 mod 间允许循环
+/// `use`，无需破环），仅当组大到超上下文预算时才退化为 FFI 切分（TODO，兜底路径）。
+#[derive(Debug, Clone, Serialize)]
+pub struct SccGroup {
+    /// 组内成员文件节点（按 NodeId 字典序排序；第一个作 module key 代表）。
+    pub members: Vec<NodeId>,
+    /// 迁移 sprint 号（缩点 DAG 拓扑层级 + 1；叶组 = sprint 1）。
+    pub sprint: u32,
+    /// 是否为真环（多节点 SCC 或自环）；单文件无环组为 `false`。
+    pub is_cycle: bool,
 }
 
 impl MigrationSequence {
@@ -101,6 +121,9 @@ pub fn migration_sequence(graph: &SourceGraph) -> MigrationSequence {
         .collect();
     let has_cycles = !cycles.is_empty();
 
+    // 缩点为 SCC 翻译单元（破环：覆盖全部 File 节点，含单文件单成员组）
+    let scc_groups = build_scc_groups(&sccs, &file_graph, &index_to_id);
+
     // 计算迁移顺序
     let order = if !has_cycles {
         // 无环：标准拓扑排序
@@ -129,6 +152,118 @@ pub fn migration_sequence(graph: &SourceGraph) -> MigrationSequence {
         order,
         parallel_groups,
         cycles,
+        scc_groups,
+    }
+}
+
+/// 把 Tarjan SCC 结果缩点为迁移单元，并在缩点 DAG 上计算每组 sprint 层级。
+///
+/// 输入 `sccs` 为 `tarjan_scc` 输出（每个 SCC 是 NodeIndex 列表）。输出覆盖全部
+/// File 节点：单节点 SCC → 单文件组，多节点（或自环）SCC → 循环依赖模块组。
+/// 输出按 `(sprint, 首成员 NodeId)` 稳定排序，保证确定性。
+fn build_scc_groups(
+    sccs: &[Vec<NodeIndex>],
+    file_graph: &StableGraph<NodeId, ()>,
+    index_to_id: &HashMap<NodeIndex, NodeId>,
+) -> Vec<SccGroup> {
+    let n = sccs.len();
+    if n == 0 {
+        return Vec::new();
+    }
+
+    // node_idx -> scc_id
+    let mut scc_of: HashMap<NodeIndex, usize> = HashMap::new();
+    for (sid, scc) in sccs.iter().enumerate() {
+        for &idx in scc {
+            scc_of.insert(idx, sid);
+        }
+    }
+
+    // 缩点 DAG 出边邻接（scc -> scc，去自环、去重）
+    let mut succ: Vec<HashSet<usize>> = vec![HashSet::new(); n];
+    for (&idx, &sid) in &scc_of {
+        for edge in file_graph.edges_directed(idx, Direction::Outgoing) {
+            if let Some(&tgt_sid) = scc_of.get(&edge.target()) {
+                if tgt_sid != sid {
+                    succ[sid].insert(tgt_sid);
+                }
+            }
+        }
+    }
+
+    // 缩点 DAG 层级（叶组 = 0），迭代式避免深链栈溢出
+    let mut levels: Vec<Option<usize>> = vec![None; n];
+    for start in 0..n {
+        if levels[start].is_none() {
+            compute_scc_level(start, &succ, &mut levels);
+        }
+    }
+
+    let mut groups: Vec<SccGroup> = sccs
+        .iter()
+        .enumerate()
+        .map(|(sid, scc)| {
+            let mut members: Vec<NodeId> = scc
+                .iter()
+                .filter_map(|idx| index_to_id.get(idx).cloned())
+                .collect();
+            members.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+            SccGroup {
+                members,
+                sprint: (levels[sid].unwrap_or(0) as u32) + 1,
+                is_cycle: scc_is_cycle(scc, file_graph),
+            }
+        })
+        .collect();
+
+    // 稳定排序：sprint 升序，同 sprint 按首成员字典序
+    groups.sort_by(|a, b| {
+        a.sprint.cmp(&b.sprint).then_with(|| {
+            let ka = a.members.first().map(|x| x.as_str()).unwrap_or("");
+            let kb = b.members.first().map(|x| x.as_str()).unwrap_or("");
+            ka.cmp(kb)
+        })
+    });
+    groups
+}
+
+/// 计算缩点 DAG 中单个 SCC 节点的层级（迭代式 DFS + 记忆化）。
+///
+/// 层级 0 = 叶组（无出边），层级 n = 依赖链最长为 n 的组。缩点图本身无环，
+/// `on_path` 仅作防御。复用与 [`compute_level`] 相同的「Enter/Exit 显式栈」骨架。
+fn compute_scc_level(start: usize, succ: &[HashSet<usize>], levels: &mut [Option<usize>]) {
+    enum Work {
+        Enter(usize),
+        Exit(usize),
+    }
+    let mut stack = vec![Work::Enter(start)];
+    let mut on_path: HashSet<usize> = HashSet::new();
+
+    while let Some(work) = stack.pop() {
+        match work {
+            Work::Enter(i) => {
+                if levels[i].is_some() || on_path.contains(&i) {
+                    continue;
+                }
+                on_path.insert(i);
+                stack.push(Work::Exit(i));
+                for &j in &succ[i] {
+                    if levels[j].is_none() && !on_path.contains(&j) {
+                        stack.push(Work::Enter(j));
+                    }
+                }
+            }
+            Work::Exit(i) => {
+                let level = succ[i]
+                    .iter()
+                    .map(|&j| levels[j].unwrap_or(0))
+                    .max()
+                    .map(|l| l + 1)
+                    .unwrap_or(0);
+                on_path.remove(&i);
+                levels[i] = Some(level);
+            }
+        }
     }
 }
 
@@ -525,6 +660,72 @@ mod tests {
         assert!(!seq.cycles.is_empty(), "应包含环信息");
         // 即使有环也应生成排序
         assert!(!seq.order.is_empty(), "有环时仍应生成尽力排序");
+    }
+
+    // === SCC 模块组（破环 M2-SCALE-SCC）测试 ===
+
+    #[test]
+    fn scc_groups_circular_deps_folds_cycle_into_one_group() {
+        // 破环核心：event-bus ↔ handler ↔ emitter 的环应折叠为单个多成员 SCC 组，
+        // 而非拒绝或拆成多个单文件组。
+        let root = fixtures_dir().join("circular-deps/src");
+        let graph = build_graph_ts(&root).unwrap();
+        let seq = migration_sequence(&graph);
+
+        // scc_groups 覆盖全部文件
+        let total_members: usize = seq.scc_groups.iter().map(|g| g.members.len()).sum();
+        assert_eq!(
+            total_members,
+            seq.order.len(),
+            "scc_groups 成员总数应覆盖全部文件节点"
+        );
+
+        // 应存在一个多成员环组，含 event-bus/handler/emitter
+        let cycle_group = seq
+            .scc_groups
+            .iter()
+            .find(|g| g.is_cycle && g.members.len() > 1)
+            .expect("应有一个多成员环组");
+        let ids: Vec<&str> = cycle_group.members.iter().map(|id| id.as_str()).collect();
+        assert!(
+            ids.iter().any(|s| s.contains("event-bus"))
+                && ids.iter().any(|s| s.contains("handler"))
+                && ids.iter().any(|s| s.contains("emitter")),
+            "环组应含 event-bus/handler/emitter，实际: {ids:?}"
+        );
+        // 成员有序（字典序），首成员作 key 代表
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        assert_eq!(ids, sorted, "组成员应按字典序排列");
+    }
+
+    #[test]
+    fn scc_groups_linear_deps_all_single_member() {
+        // 无环图：每个文件自成一组，无环标记，sprint 按层级递增。
+        let root = fixtures_dir().join("linear-deps/src");
+        let graph = build_graph_ts(&root).unwrap();
+        let seq = migration_sequence(&graph);
+
+        assert!(!seq.scc_groups.is_empty());
+        assert!(
+            seq.scc_groups
+                .iter()
+                .all(|g| g.members.len() == 1 && !g.is_cycle),
+            "无环图每组应为单成员且非环"
+        );
+        // 叶组 sprint=1；存在更高 sprint（链式依赖）
+        assert!(seq.scc_groups.iter().any(|g| g.sprint == 1));
+        assert!(
+            seq.scc_groups.iter().map(|g| g.sprint).max().unwrap() > 1,
+            "线性依赖应产生多个 sprint 层级"
+        );
+    }
+
+    #[test]
+    fn scc_groups_empty_graph() {
+        let graph = SourceGraph::new();
+        let seq = migration_sequence(&graph);
+        assert!(seq.scc_groups.is_empty());
     }
 
     // === 边界情况测试 ===

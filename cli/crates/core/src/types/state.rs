@@ -230,6 +230,13 @@ pub struct ModuleState {
     pub blocked_by: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pre_blocked_status: Option<ModuleStatus>,
+    /// SCC 模块组成员文件（破环：循环依赖折叠为一个翻译单元）。
+    ///
+    /// `None` = 单文件模块（module key 即唯一源文件）。
+    /// `Some([..])` = 该模块由一组互引文件组成（module key 为组内字典序最小者），
+    /// translator 一次性把整组翻译为一组 Rust `mod`（同 crate 内允许 mod 间循环 `use`，无需破环）。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub member_files: Option<Vec<String>>,
 }
 
 /// 从内部 module key 派生「人类友好显示名」（纯函数，不改变内部 key）。

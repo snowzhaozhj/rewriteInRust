@@ -1065,24 +1065,46 @@ fn e2e_populate_cleans_orphan_pending() {
 }
 
 #[test]
-fn smoke_populate_rejects_cycles() {
+fn smoke_populate_folds_cycles() {
     let tmp = tempfile::tempdir().unwrap();
     copy_dir(&fixtures_dir().join("circular-deps"), tmp.path());
     with_cwd(tmp.path(), || {
         let _ = run(&["init"]);
         let (code, _) = run(&["graph", "build", "--root", "src"]);
         assert_eq!(code, 0);
-        // 有环：拒绝填充（对齐 topo-sort 门禁）。
+        // 破环（M2-SCALE-SCC）：循环依赖不再拒绝，整组折叠为 composite 模块组。
         let (code, json) = run(&["state", "populate-modules"]);
-        assert_eq!(code, 1, "有环应拒绝填充: {json}");
-        assert_eq!(json["status"], "error");
+        assert_eq!(code, 0, "有环应折叠而非拒绝: {json}");
+        assert_eq!(json["status"], "warning");
         assert!(
-            json["data"]["message"]
-                .as_str()
+            json["warnings"]
+                .as_array()
                 .unwrap()
-                .contains("循环依赖"),
-            "错误信息应提示循环依赖: {json}"
+                .iter()
+                .any(|w| w.as_str().unwrap().contains("折叠")),
+            "应有折叠 warning: {json}"
         );
+        // 应存在一个 composite 模块组，member_files 含 event-bus/handler/emitter。
+        let modules = json["data"]["modules"].as_array().unwrap();
+        let composite = modules
+            .iter()
+            .find(|m| m.get("member_files").is_some())
+            .expect("应有一个 composite 模块组");
+        let members: Vec<&str> = composite["member_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(
+            members.iter().any(|s| s.contains("event-bus"))
+                && members.iter().any(|s| s.contains("handler"))
+                && members.iter().any(|s| s.contains("emitter")),
+            "composite 组应含环成员: {members:?}"
+        );
+        // 折叠后 state 应合法。
+        let (code, json) = run(&["validate", "state"]);
+        assert_eq!(code, 0, "折叠后 state 应合法: {json}");
     });
 }
 

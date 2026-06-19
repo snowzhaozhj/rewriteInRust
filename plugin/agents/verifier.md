@@ -21,16 +21,16 @@ tools: Bash, Read, Write, Grep, Glob
 
 逐维度比对 Phase A 译码与源码语义，找出**行为差异**。按模块实际涉及的数据类型/操作选适用维度（1-2 参数函数 ≥3 维，3+ 参数 ≥5 维）；**维度 9 对所有模块强制**。每个适用维度至少给一个具体探测点（能写成 proptest case 的优先写）。
 
-| # | 维度 | 探测点 | 常见差异来源 |
+| # | 维度 | 探测点（含具体探测案例） | 常见差异来源 |
 |---|------|--------|------------|
-| 1 | 边界值 | 空输入、0、负数、最小/最大值 | 语言默认处理不同 |
-| 2 | 类型边界 | null/undefined/NaN、整数溢出（i32::MAX+1）、强制转换 | JS number 是 f64，Rust 严格整型 |
-| 3 | 集合操作 | 空/单元素/大集合(>10K)、迭代顺序依赖 | HashMap 迭代顺序随机化 |
-| 4 | 时间/日期 | 时区边界(UTC±12)、DST、闰秒、epoch 前 | 时区库实现差异 |
-| 5 | 字符串 | 空串、多字节/emoji、超长(>1MB)、`\0`/`\r\n` | UTF-16↔UTF-8 长度语义 |
-| 6 | 并发 | 竞态、取消/超时、死锁、共享态一致性 | GC vs 所有权模型 |
-| 7 | 错误路径 | 每个 catch/except 分支、错误链传播、panic vs Result | 异常模型 vs Result |
-| 8 | 浮点精度 | 累积误差、epsilon 比较、NaN 传播、±Inf、-0.0 | IEEE 754 优化差异 |
+| 1 | 边界值 | 空输入、0、负数、最小/最大值。**案例**：TS `Math.max(...[])` → `-Infinity`，Rust `iter().max()` 对空集合返回 `None`——验译码是否处理空集合而非 panic/默认 0 | 语言默认处理不同 |
+| 2 | 类型边界 | null/undefined/NaN、整数溢出、强制转换。**案例**：TS `2**31`（i32::MAX+1）静默升 f64，Rust `i32` debug 下 panic、release 下 wrapping——验是否按源语义改用 `i64`/`checked_add` | JS number 是 f64，Rust 严格整型 |
+| 3 | 集合操作 | 空/单元素/大集合(>10K)、迭代顺序依赖。**案例**：TS `Object.keys()` 保插入序，Rust `HashMap` 迭代序随机——若源码依赖顺序，验是否改用 `IndexMap`/`BTreeMap` | HashMap 迭代顺序随机化 |
+| 4 | 时间/日期 | 时区边界(UTC±12)、DST、闰秒、epoch 前。**案例**：TS `Date` 含夏令时跳变（如 03:00 不存在的本地时刻），验 Rust `chrono` 是否同样产生 `None`/`Ambiguous` 而非静默取值 | 时区库实现差异 |
+| 5 | 字符串 | 空串、多字节/emoji、超长(>1MB)、`\0`/`\r\n`。**案例**：TS `"😀".length` === 2（UTF-16 码元），Rust `.len()` === 4（字节）、`.chars().count()` === 1——验长度语义按源意图选对 | UTF-16↔UTF-8 长度语义 |
+| 6 | 并发 | 竞态、取消/超时、死锁、共享态一致性。**案例**：JS 单线程事件循环下"读后写"无锁即原子，Rust 多线程下同模式需 `Mutex`/原子——验共享态是否补了同步 | GC vs 所有权模型 |
+| 7 | 错误路径 | 每个 catch/except 分支、错误链传播、panic vs Result。**案例**：TS `JSON.parse` 抛异常被 catch 后返回默认值，验 Rust 是否用 `Result` + `?` 还原同一降级路径（而非 `unwrap()` panic） | 异常模型 vs Result |
+| 8 | 浮点精度 | 累积误差、epsilon 比较、NaN 传播、±Inf、-0.0。**案例**：TS `0.1 + 0.2 === 0.3` 为 false，验 Rust 译码是否同样不做精确相等、保留 epsilon 比较；`NaN === NaN` 两侧均 false 须一致 | IEEE 754 优化差异 |
 | 9 | 意图一致性（强制） | 对照 `{module}-intent.md` 逐字段核对 Phase A 是否仍符合 7 维语义契约 | 翻译偏离契约（意图漂移） |
 
 维度 9 是契约核对而非属性测试：接口签名、前后置条件、错误模型、并发模型、边界处理、副作用逐项比对意图摘要。

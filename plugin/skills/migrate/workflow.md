@@ -104,7 +104,9 @@ git merge wt/{module_2}
   ```
 - 冲突文件列表用 `git diff --name-only --diff-filter=U` 获取。
 
-#### 2d. 整组验证（真门，run.md §6）
+#### 2d. 整组验证（真门）
+
+> 这是**唯一 done 真门**：agent 级 worktree 自检通过只升 `agent_done`（substatus），orphan rule / E0119 coherence / feature 冲突 / 宏展开 / 命名空间撞名等**跨并发兄弟冲突只能整组编译才暴露**，故必须整组验证后才升最终 `done`。
 
 全部分支合并后，在主 worktree 上执行整组 cargo check/test：
 
@@ -121,11 +123,17 @@ cargo test 2>&1
   rustmigrate state transition --module <M> --to done
   ```
 
-- **存在失败** → 进入 compile_fixing 子流程（run.md §7）：
-  - 解析 rustc 错误，按错误分类（单模块本地 / 跨模块冲突 / 图缺陷）分别处理
-  - 失败模块回 `compile_fixing`，重启 SubAgent 修复
-  - 最多 3 轮（`max_compile_retries`）
-  - 3 轮仍失败 → `paused`，继续其他模块
+- **存在失败** → 进入 compile_fixing 子流程：编排器解析 rustc 错误，按下表归因后修复。
+
+  | 错误类型 | 判定标准 | 处理 |
+  |---------|---------|------|
+  | **单模块本地错误** | 错误源文件可归因到某一模块的 own 文件 | 该模块回 `compile_fixing` |
+  | **跨模块冲突** | E0119 coherence / feature 冲突 / 类型签名不一致，涉及多个模块 | 相关模块整组回 `compile_fixing` |
+  | **图缺陷** | 同层模块间出现不应存在的依赖引用（同 sprint 兄弟本不该互相依赖） | 相关模块回退串行 + 记 `metadata.last_error` |
+
+  - 失败模块 `state transition --module <M> --to compile_fixing --substatus "<错误摘要>"`，在其 worktree 内重启 SubAgent 修复 → 重新标 `agent_done` → 编排器重新 merge + 整组 check。
+  - 最多 3 轮（`max_compile_retries`，复用 M1 的 `max_retry_rounds`）；3 轮仍失败 → 丢弃该 worktree、`paused`、继续其他模块。
+  - **headless 下**：进入 `paused` 后自动 `degrade_skip`（同下「Headless 模式」），不挂起。
 
 #### 2e. 清理 worktree
 
@@ -186,7 +194,7 @@ workflow 支持中断后重入：
 - `/migrate run <module>` 是**单模块**入口，串行执行完整翻译循环。
 - `/migrate workflow` 是**sprint 级批量**入口，按拓扑层并行编排多模块翻译。
 - workflow 内部对每个模块的翻译逻辑复用 run.md 的步骤 2-11。
-- run.md 中的「并行编排（M2-SCALE-02）」和「§6-§7」是 workflow 的底层基础设施。
+- run.md「并行编排（M2-SCALE-02）」节定义单模块 worktree 隔离的 7 步通信协议，是 workflow 的底层基础设施；真门整组验证与 compile_fixing 子流程定义在本文件（步骤 2d）。
 
 ## 错误汇总
 

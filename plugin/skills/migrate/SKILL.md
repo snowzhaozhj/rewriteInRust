@@ -31,19 +31,19 @@ argument-hint: "[analyze|run|workflow|review] [module]"
 - 命令清单（M1 共 14 个）：`init`、`profile --root [--adapter-tools]`、`graph build --root [--full]`、`graph topo-sort`、`graph deps <m>`、`graph interfaces <m> [--deps-of <t>]`、`graph stats`、`validate state`、`state get <m>`、`state transition [--module] --to [--substatus] [--reason] [--force]`、`state populate-modules`、`stats loc`、`stats compare`、`scaffold workspace [--target] [--name]`。
 - **`profile --adapter-tools` 路径自动解析**：analyze 流程步骤 3 按优先级定位 `analysis-tools.json`——①`.rustmigrate.toml` 的 `adapter_path` ② `$CLAUDE_PLUGIN_ROOT/skills/migrate/adapters/<lang>/` ③ `plugin/skills/migrate/adapters/<lang>/`（同仓相对路径）④ 全部未命中则省略参数（降级 warning）。详见 [analyze.md](./analyze.md) 步骤 3。
 
-### 全局锁（所有子命令开始时取，结束或异常退出时释放）
-同一项目同一时刻只允许一个 `/migrate` 命令运行。锁文件 `.rust-migration/.migration-lock`，内容为单行 JSON `{session_pid, started_at, hostname}`，`session_pid` 取 `$PPID`（Claude Code 宿主进程，生命周期覆盖整个会话）。
+### 全局锁（跑 `/migrate` 命令的进程开始时取，结束或异常退出时释放）
+同一项目同一时刻只允许一个 `/migrate` 命令运行。**持锁的始终是跑该子命令的进程**（串行 run 中它就是翻译执行者；并行 run/workflow 中它是编排器）；它**派发的 SubAgent 从不取锁**（理由见下「并行模式下的锁策略」）。锁文件 `.rust-migration/.migration-lock`，内容为单行 JSON `{session_pid, started_at, hostname}`，`session_pid` 取 `$PPID`（Claude Code 宿主进程，生命周期覆盖整个会话）。
 - **取锁**：写临时文件后 `link` 到锁文件（原子，等效 `O_EXCL` 且保证有内容），link 成功即获锁。
 - **link 失败 → 判陈旧**：同机且 `session_pid` 进程已死、或 `session_pid == 当前 $PPID`（同会话串行残留）→ 删锁后重试一次；不同会话的活进程 → 真实并发，报错退出；跨机或 PID 不可判定且 `now - started_at > lock_timeout_secs`（默认 300）→ 视为陈旧。
 - **释放**：命令结束或异常退出时删除锁文件。
 - **逃生口**：卡死时用户可手动删除 `.rust-migration/.migration-lock`；报错信息须包含这一提示。
 
 #### 并行模式下的锁策略（M2-SCALE-LOCK）
-并行翻译模式（`/migrate workflow` 或 `/migrate run` 并行派发）下，**仅编排器持锁，SubAgent 不取锁**：
-- **编排器**在 workflow 全程持有主 tree 的 `.rust-migration/.migration-lock`，直到 workflow 结束或异常退出才释放。
-- **SubAgent** 在独立 worktree（`.wt/{module}/`）中工作，worktree 不共享主 tree 的 `.rust-migration/` 路径，因此天然不碰锁文件，无需取锁、无互相阻塞。
+并行翻译模式（`/migrate workflow` 或 `/migrate run` 并行派发）下，编排器持锁、SubAgent 不取锁的理由：
+- **编排器**全程持有主 tree 的 `.rust-migration/.migration-lock`，直到结束或异常退出才释放（即上文「持锁的始终是跑命令的进程」在并行下的具体形态）。
+- **SubAgent** 在独立 worktree（`.wt/{module}/`）中工作，worktree 不共享主 tree 的 `.rust-migration/` 路径，天然不碰锁文件——所以不取锁不是特例放行，而是它根本不触达锁与共享状态。
 - **状态写入集中化**：只有编排器可写主 tree 的 `migration-state.json`（集中 writer）。SubAgent 完成后回传 `TranslationResult`（含 touched-list），编排器负责合并代码（git merge）并更新状态。
-- **串行模式不变**：单模块 `/migrate run <module>` 仍按上述锁机制取锁/释放，行为与 M1 一致。
+- **串行模式**：单模块 `/migrate run <module>` 不派发 SubAgent 翻译时，持锁者即翻译执行者本身，取锁/释放与 M1 一致。
 
 ### SubAgent 编排
 - 用 **Agent tool** 调用 SubAgent，参数 `subagent_type` 取带插件命名空间前缀的 agent 名：`rust-migrate:analyzer` / `rust-migrate:translator` / `rust-migrate:scaffolder` / `rust-migrate:verifier`。MVP 阶段 SubAgent **串行执行**，通过 `.rust-migration/` 下的文件通信，不直接对话。
