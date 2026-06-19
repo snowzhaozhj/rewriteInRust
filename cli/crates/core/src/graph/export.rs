@@ -44,6 +44,11 @@ pub fn export_json(graph: &SourceGraph) -> Value {
     })
 }
 
+/// 转义 DOT 格式双引号字符串中的 `\` 和 `"`。
+fn escape_dot_string(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 /// 导出图为 Graphviz DOT 格式。
 ///
 /// 格式：`digraph { "file:a.ts" -> "file:b.ts" [label="imports"]; }`
@@ -53,16 +58,16 @@ pub fn export_dot(graph: &SourceGraph) -> String {
 
     // 输出所有节点（带标签）
     for node in graph.nodes() {
-        let id = node.id.as_str();
-        let label = &node.name;
+        let id = escape_dot_string(node.id.as_str());
+        let label = escape_dot_string(&node.name);
         lines.push(format!("  \"{id}\" [label=\"{label}\"];"));
     }
 
     // 输出所有边（带 label）
     for edge in graph.edges() {
-        let src = edge.source.as_str();
-        let tgt = edge.target.as_str();
-        let label = edge.edge_type.to_string();
+        let src = escape_dot_string(edge.source.as_str());
+        let tgt = escape_dot_string(edge.target.as_str());
+        let label = escape_dot_string(&edge.edge_type.to_string());
         lines.push(format!("  \"{src}\" -> \"{tgt}\" [label=\"{label}\"];"));
     }
 
@@ -72,12 +77,15 @@ pub fn export_dot(graph: &SourceGraph) -> String {
 
 /// 将字符串转换为 Mermaid 安全的节点 ID。
 ///
-/// Mermaid 的 ID 不能含冒号、点、斜杠等特殊字符，需替换为下划线。
+/// 仅放行 `[a-zA-Z0-9_]`，其余全部替换为 `_`。
 fn mermaid_id(s: &str) -> String {
     s.chars()
-        .map(|c| match c {
-            ':' | '.' | '/' | ' ' | '-' => '_',
-            _ => c,
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
         })
         .collect()
 }

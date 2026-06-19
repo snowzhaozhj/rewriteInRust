@@ -60,13 +60,15 @@ impl<T: Serialize> Response<T> {
 pub struct ErrorData {
     /// 错误分类标识（如 `"graph"`, `"parse"`, `"config"`）。
     pub kind: String,
-    /// 错误编号（如 `"E001"`）。
+    /// 错误编号（如 `"E001"`）。空时省略。
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub error_code: String,
     /// 错误描述信息。
     pub message: String,
     /// CI 是否可重试。
     pub retryable: bool,
-    /// 用户可操作的建议。
+    /// 用户可操作的建议。空时省略。
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub suggestion: String,
     /// 可选的上下文信息。
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -34,11 +34,11 @@ pub fn merge_cargo_toml(base: &str, overlay: &str) -> Result<MergeResult> {
 
     // 合并 [dependencies] 和 [dev-dependencies]
     for section in &["dependencies", "dev-dependencies"] {
-        merge_dep_table(&mut base_doc, &overlay_doc, section, &mut warnings);
+        merge_dep_table(&mut base_doc, &overlay_doc, section, &mut warnings)?;
     }
 
     // 合并 [features]
-    merge_features(&mut base_doc, &overlay_doc, &mut warnings);
+    merge_features(&mut base_doc, &overlay_doc, &mut warnings)?;
 
     Ok(MergeResult {
         content: base_doc.to_string(),
@@ -55,10 +55,10 @@ fn merge_dep_table(
     overlay_doc: &toml_edit::DocumentMut,
     section: &str,
     warnings: &mut Vec<String>,
-) {
+) -> Result<()> {
     let overlay_table = match overlay_doc.get(section).and_then(|i| i.as_table()) {
         Some(t) => t,
-        None => return,
+        None => return Ok(()),
     };
 
     // 确保 base 中存在该 section
@@ -67,7 +67,9 @@ fn merge_dep_table(
     }
 
     for (key, overlay_item) in overlay_table.iter() {
-        let base_table = base_doc[section].as_table_mut().unwrap();
+        let base_table = base_doc[section]
+            .as_table_mut()
+            .ok_or_else(|| MigrateError::Merge(format!("[{section}] section 不是 table")))?;
         if base_table.contains_key(key) {
             // 同名依赖已存在——检查版本是否不同
             let base_item = &base_table[key];
@@ -89,6 +91,7 @@ fn merge_dep_table(
             base_table.insert(key, overlay_item.clone());
         }
     }
+    Ok(())
 }
 
 /// 从依赖 Item 中提取版本字符串。
@@ -122,10 +125,10 @@ fn merge_features(
     base_doc: &mut toml_edit::DocumentMut,
     overlay_doc: &toml_edit::DocumentMut,
     warnings: &mut Vec<String>,
-) {
+) -> Result<()> {
     let overlay_features = match overlay_doc.get("features").and_then(|i| i.as_table()) {
         Some(t) => t,
-        None => return,
+        None => return Ok(()),
     };
 
     if base_doc.get("features").is_none() {
@@ -133,7 +136,9 @@ fn merge_features(
     }
 
     for (key, overlay_item) in overlay_features.iter() {
-        let base_features = base_doc["features"].as_table_mut().unwrap();
+        let base_features = base_doc["features"]
+            .as_table_mut()
+            .ok_or_else(|| MigrateError::Merge("[features] section 不是 table".into()))?;
         if base_features.contains_key(key) {
             // 同名 feature：做数组 union
             let base_arr = match base_features.get_mut(key).and_then(|i| i.as_array_mut()) {
@@ -172,6 +177,7 @@ fn merge_features(
             base_features.insert(key, overlay_item.clone());
         }
     }
+    Ok(())
 }
 
 /// lib.rs mod 声明追加合并。

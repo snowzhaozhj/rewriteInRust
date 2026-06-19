@@ -267,18 +267,20 @@ pub fn check_blocked_modules(state_file: &MigrationStateFile) -> Vec<BlockedChec
 
 /// 自动解除就绪的 blocked 模块：恢复到 `pre_blocked_status`。
 ///
-/// 对 `check_blocked_modules` 返回的 `ready == true` 的模块，调用
+/// 对 `checks` 中 `ready == true` 的模块，调用
 /// `MigrationStateMachine::transition_module` 恢复到其 `pre_blocked_status`
 /// （无 `pre_blocked_status` 时默认恢复为 `pending`）。
+///
+/// `checks` 参数由调用方预先调用 `check_blocked_modules` 获得，避免重复计算。
 ///
 /// 返回成功解除的模块 key 列表。恢复失败的模块通过 `warnings` 报告。
 pub fn auto_unblock_modules(
     machine: &mut MigrationStateMachine,
+    checks: &[BlockedCheckResult],
     warnings: &mut Vec<String>,
 ) -> Vec<String> {
-    let checks = check_blocked_modules(machine.state_file());
     let ready_modules: Vec<(String, ModuleStatus)> = checks
-        .into_iter()
+        .iter()
         .filter(|r| r.ready)
         .map(|r| {
             let target = machine
@@ -287,7 +289,7 @@ pub fn auto_unblock_modules(
                 .get(&r.module)
                 .and_then(|m| m.pre_blocked_status)
                 .unwrap_or(ModuleStatus::Pending);
-            (r.module, target)
+            (r.module.clone(), target)
         })
         .collect();
 
@@ -893,7 +895,8 @@ mod tests {
         machine.update_module("target", blocked);
 
         let mut warnings = Vec::new();
-        let unblocked = auto_unblock_modules(&mut machine, &mut warnings);
+        let checks = check_blocked_modules(machine.state_file());
+        let unblocked = auto_unblock_modules(&mut machine, &checks, &mut warnings);
 
         assert_eq!(unblocked, vec!["target".to_owned()]);
         assert!(warnings.is_empty());
@@ -918,7 +921,8 @@ mod tests {
         machine.update_module("target", blocked);
 
         let mut warnings = Vec::new();
-        let unblocked = auto_unblock_modules(&mut machine, &mut warnings);
+        let checks = check_blocked_modules(machine.state_file());
+        let unblocked = auto_unblock_modules(&mut machine, &checks, &mut warnings);
 
         assert_eq!(unblocked, vec!["target".to_owned()]);
         assert_eq!(
@@ -937,7 +941,8 @@ mod tests {
         machine.update_module("target", blocked);
 
         let mut warnings = Vec::new();
-        let unblocked = auto_unblock_modules(&mut machine, &mut warnings);
+        let checks = check_blocked_modules(machine.state_file());
+        let unblocked = auto_unblock_modules(&mut machine, &checks, &mut warnings);
 
         assert!(unblocked.is_empty());
         assert_eq!(

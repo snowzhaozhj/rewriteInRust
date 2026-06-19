@@ -19,6 +19,9 @@ use crate::types::state::{
 /// 同主版本视为可读，跨主版本视为不兼容、拒绝加载。变更 schema 破坏性结构时递增主版本号。
 pub const STATE_SCHEMA_VERSION: &str = "1.0.0";
 
+/// 模块 substatus 值：agent 级自检完成（两层 done 协议）。
+pub const SUBSTATUS_AGENT_DONE: &str = "agent_done";
+
 /// 迁移状态机，持有并管理 `MigrationStateFile`。
 #[derive(Debug, Clone)]
 pub struct MigrationStateMachine {
@@ -483,7 +486,7 @@ impl MigrationStateMachine {
         self.state_file
             .modules
             .get(name)
-            .is_some_and(|m| m.substatus.as_deref() == Some("agent_done"))
+            .is_some_and(|m| m.substatus.as_deref() == Some(SUBSTATUS_AGENT_DONE))
     }
 
     /// 批量将 `agent_done` 模块转为 `done`（整组 check 通过后调用）。
@@ -1583,7 +1586,7 @@ mod tests {
         // substatus 为 agent_done 时返回 true。
         let mut m = new_machine();
         let mut module = module_with_status(ModuleStatus::Reviewing);
-        module.substatus = Some("agent_done".to_owned());
+        module.substatus = Some(SUBSTATUS_AGENT_DONE.to_owned());
         m.update_module("a", module);
         assert!(m.is_agent_done("a"));
     }
@@ -1619,7 +1622,7 @@ mod tests {
         let mut m = new_machine();
         for name in ["a", "b", "c"] {
             let mut module = module_with_status(ModuleStatus::Reviewing);
-            module.substatus = Some("agent_done".to_owned());
+            module.substatus = Some(SUBSTATUS_AGENT_DONE.to_owned());
             m.update_module(name, module);
         }
         let modules: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
@@ -1640,15 +1643,15 @@ mod tests {
         let mut m = new_machine();
 
         let mut ma = module_with_status(ModuleStatus::Reviewing);
-        ma.substatus = Some("agent_done".to_owned());
+        ma.substatus = Some(SUBSTATUS_AGENT_DONE.to_owned());
         m.update_module("a", ma);
 
         let mut mb = module_with_status(ModuleStatus::Translating);
-        mb.substatus = Some("agent_done".to_owned());
+        mb.substatus = Some(SUBSTATUS_AGENT_DONE.to_owned());
         m.update_module("b", mb);
 
         let mut mc = module_with_status(ModuleStatus::Reviewing);
-        mc.substatus = Some("agent_done".to_owned());
+        mc.substatus = Some(SUBSTATUS_AGENT_DONE.to_owned());
         m.update_module("c", mc);
 
         let modules: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
@@ -1671,7 +1674,7 @@ mod tests {
         let mut m = new_machine();
 
         let mut ma = module_with_status(ModuleStatus::Reviewing);
-        ma.substatus = Some("agent_done".to_owned());
+        ma.substatus = Some(SUBSTATUS_AGENT_DONE.to_owned());
         m.update_module("a", ma);
 
         let mb = module_with_status(ModuleStatus::Reviewing); // substatus=None
@@ -1702,7 +1705,7 @@ mod tests {
         // 通过 transition_module 的 substatus-only 路径设置 agent_done。
         let mut m = new_machine();
         m.update_module("a", module_with_status(ModuleStatus::Reviewing));
-        m.transition_module("a", None, Some("agent_done"), None, false)
+        m.transition_module("a", None, Some(SUBSTATUS_AGENT_DONE), None, false)
             .unwrap();
         assert!(m.is_agent_done("a"));
         // status 不变。

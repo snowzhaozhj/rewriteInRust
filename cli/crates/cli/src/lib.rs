@@ -1130,7 +1130,7 @@ fn cmd_validate_state(check_blocked: bool, auto_unblock: bool) -> CmdResult {
             )));
         }
 
-        let unblocked = auto_unblock_modules(&mut machine, &mut warnings);
+        let unblocked = auto_unblock_modules(&mut machine, &checks, &mut warnings);
         if !unblocked.is_empty() {
             machine.save(&path)?;
         }

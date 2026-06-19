@@ -93,10 +93,14 @@ pub fn create_worktree(
         )));
     }
 
-    // 可选：设置独立 target 目录
+    // 可选：设置独立 target 目录（失败时清理已创建的 worktree，避免资源泄漏）
     let cargo_target_dir = if config.isolated_target_dir {
         let target_dir = wt_path.join("target");
-        write_cargo_config(&wt_path, &target_dir)?;
+        if let Err(e) = write_cargo_config(&wt_path, &target_dir) {
+            // write_cargo_config 失败，清理已创建的 worktree 和分支
+            let _ = remove_worktree(project_root, &wt_path);
+            return Err(e);
+        }
         Some(target_dir)
     } else {
         None
@@ -233,9 +237,34 @@ pub fn list_worktrees(project_root: &Path) -> Result<Vec<WorktreeInfo>> {
 
 // ── 内部辅助 ────────────────────────────────────────────────────
 
-/// 将模块名中的 `/` 替换为 `_`，避免目录嵌套。
+/// 将模块名清洗为安全的目录/分支名：仅保留 `[a-zA-Z0-9_-]`，其余替换为 `_`，
+/// 并去除连续 `_`（如 `file:src/utils.ts` → `file_src_utils_ts`）。
 fn sanitize_module_name(name: &str) -> String {
-    name.replace('/', "_")
+    let raw: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    // 去除连续 `_`
+    let mut result = String::with_capacity(raw.len());
+    let mut prev_underscore = false;
+    for c in raw.chars() {
+        if c == '_' {
+            if !prev_underscore {
+                result.push(c);
+            }
+            prev_underscore = true;
+        } else {
+            result.push(c);
+            prev_underscore = false;
+        }
+    }
+    result
 }
 
 /// 解析基础目录为绝对路径。
@@ -350,6 +379,17 @@ mod tests {
         assert_eq!(sanitize_module_name("src/utils"), "src_utils");
         assert_eq!(sanitize_module_name("simple"), "simple");
         assert_eq!(sanitize_module_name("a/b/c"), "a_b_c");
+        // 冒号、点号等不安全字符应被替换
+        assert_eq!(
+            sanitize_module_name("file:src/utils.ts"),
+            "file_src_utils_ts"
+        );
+        assert_eq!(
+            sanitize_module_name("function:a.ts:foo"),
+            "function_a_ts_foo"
+        );
+        // 连续不安全字符只产生一个 `_`
+        assert_eq!(sanitize_module_name("a::b"), "a_b");
     }
 
     #[test]
