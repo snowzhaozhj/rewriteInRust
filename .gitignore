@@ -33,3 +33,6 @@ fixtures/*/dist/
 # Lock (review loop)
 docs/review/.loop-lock
 .rust-migration/
+
+# Worktree（M2 并行翻译隔离目录）
+.wt/

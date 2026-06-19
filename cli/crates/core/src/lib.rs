@@ -10,3 +10,4 @@ pub mod state;
 pub mod stats;
 pub mod types;
 pub mod validate;
+pub mod worktree;
