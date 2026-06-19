@@ -30,84 +30,15 @@ pub struct BuildProfile {
     pub total_ms: u64,
 }
 
-/// 从项目根目录构建源码图。
+/// 从项目根目录构建源码图（内部实现，可选计时插桩）。
 ///
-/// `adapters` 是语言适配器列表，每个文件会尝试匹配第一个能处理它的适配器。
-pub fn build_graph(root: &Path, adapters: &mut [Box<dyn LanguageAdapter>]) -> Result<SourceGraph> {
-    let root = root
-        .canonicalize()
-        .map_err(|_| MigrateError::FileNotFound(root.to_path_buf()))?;
-
-    let files = collect_source_files(&root, adapters)?;
-    if files.is_empty() {
-        return Ok(SourceGraph::new());
-    }
-
-    let mut graph = SourceGraph::new();
-    let mut file_analyses: HashMap<String, FileAnalysis> = HashMap::new();
-    let mut all_edges: Vec<Dependency> = Vec::new();
-
-    // 第一遍：添加所有节点，收集所有边
-    for (file_path, adapter_idx) in &files {
-        let rel = make_relative(file_path, &root);
-        let source = std::fs::read_to_string(file_path).map_err(MigrateError::Io)?;
-
-        let analysis = match adapters[*adapter_idx].analyze_file(&source, &rel) {
-            Ok(a) => a,
-            Err(MigrateError::Parse { .. }) => {
-                graph
-                    .warnings
-                    .push(format!("解析跳过 {rel}: tree-sitter 解析失败"));
-                continue;
-            }
-            Err(e) => return Err(e),
-        };
-
-        for node in &analysis.nodes {
-            graph.add_node(node.clone());
-        }
-        all_edges.extend(analysis.edges.iter().cloned());
-
-        file_analyses.insert(rel, analysis);
-    }
-
-    // 修正 extends 边的目标 ID（跨文件查找），然后添加所有边
-    let fixed_edges = fixup_extends_in_edges(&graph, all_edges);
-    for edge in &fixed_edges {
-        graph.add_edge(edge.clone());
-    }
-
-    // 收集所有 adapter 的解析扩展名（去重 + 排序保证确定性）
-    let mut resolve_exts: Vec<&str> = adapters
-        .iter()
-        .flat_map(|a| a.resolve_extensions().iter().copied())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    resolve_exts.sort();
-
-    // 构建跨文件边（Imports + Calls）
-    let file_set: HashSet<String> = files.iter().map(|(p, _)| make_relative(p, &root)).collect();
-    add_cross_file_edges(&mut graph, &file_analyses, &file_set, &resolve_exts);
-
-    Ok(graph)
-}
-
-/// 便捷函数：用默认 TypeScript adapter 构建图。
-pub fn build_graph_ts(root: &Path) -> Result<SourceGraph> {
-    let mut adapters: Vec<Box<dyn LanguageAdapter>> =
-        vec![Box::new(crate::lang::typescript::TypeScriptAdapter::new()?)];
-    build_graph(root, &mut adapters)
-}
-
-/// 带性能画像的图构建：返回 `(SourceGraph, BuildProfile)`。
-///
-/// 内部逻辑与 [`build_graph`] 相同，额外在各阶段插桩 `Instant` 计时。
-pub fn build_graph_profiled(
+/// `profile` 为 `true` 时在各阶段记录耗时，填充返回的 `BuildProfile`。
+fn build_graph_inner(
     root: &Path,
     adapters: &mut [Box<dyn LanguageAdapter>],
+    profile: bool,
 ) -> Result<(SourceGraph, BuildProfile)> {
-    let t_start = Instant::now();
+    let t_start = if profile { Some(Instant::now()) } else { None };
 
     let root = root
         .canonicalize()
@@ -115,13 +46,13 @@ pub fn build_graph_profiled(
 
     let files = collect_source_files(&root, adapters)?;
     if files.is_empty() {
-        let elapsed = t_start.elapsed().as_millis() as u64;
+        let total_ms = t_start.map_or(0, |t| t.elapsed().as_millis() as u64);
         return Ok((
             SourceGraph::new(),
             BuildProfile {
-                parse_ms: elapsed,
+                parse_ms: total_ms,
                 edge_build_ms: 0,
-                total_ms: elapsed,
+                total_ms,
             },
         ));
     }
@@ -153,10 +84,10 @@ pub fn build_graph_profiled(
 
         file_analyses.insert(rel, analysis);
     }
-    let parse_ms = t_start.elapsed().as_millis() as u64;
+    let parse_ms = t_start.map_or(0, |t| t.elapsed().as_millis() as u64);
 
     // 边构建阶段
-    let t_edge = Instant::now();
+    let t_edge = if profile { Some(Instant::now()) } else { None };
 
     // 修正 extends 边的目标 ID（跨文件查找），然后添加所有边
     let fixed_edges = fixup_extends_in_edges(&graph, all_edges);
@@ -177,8 +108,8 @@ pub fn build_graph_profiled(
     let file_set: HashSet<String> = files.iter().map(|(p, _)| make_relative(p, &root)).collect();
     add_cross_file_edges(&mut graph, &file_analyses, &file_set, &resolve_exts);
 
-    let edge_build_ms = t_edge.elapsed().as_millis() as u64;
-    let total_ms = t_start.elapsed().as_millis() as u64;
+    let edge_build_ms = t_edge.map_or(0, |t| t.elapsed().as_millis() as u64);
+    let total_ms = t_start.map_or(0, |t| t.elapsed().as_millis() as u64);
 
     Ok((
         graph,
@@ -188,6 +119,30 @@ pub fn build_graph_profiled(
             total_ms,
         },
     ))
+}
+
+/// 从项目根目录构建源码图。
+///
+/// `adapters` 是语言适配器列表，每个文件会尝试匹配第一个能处理它的适配器。
+pub fn build_graph(root: &Path, adapters: &mut [Box<dyn LanguageAdapter>]) -> Result<SourceGraph> {
+    build_graph_inner(root, adapters, false).map(|(graph, _)| graph)
+}
+
+/// 便捷函数：用默认 TypeScript adapter 构建图。
+pub fn build_graph_ts(root: &Path) -> Result<SourceGraph> {
+    let mut adapters: Vec<Box<dyn LanguageAdapter>> =
+        vec![Box::new(crate::lang::typescript::TypeScriptAdapter::new()?)];
+    build_graph(root, &mut adapters)
+}
+
+/// 带性能画像的图构建：返回 `(SourceGraph, BuildProfile)`。
+///
+/// 逻辑与 [`build_graph`] 共享 [`build_graph_inner`]，仅额外开启各阶段 `Instant` 计时。
+pub fn build_graph_profiled(
+    root: &Path,
+    adapters: &mut [Box<dyn LanguageAdapter>],
+) -> Result<(SourceGraph, BuildProfile)> {
+    build_graph_inner(root, adapters, true)
 }
 
 /// 便捷函数：用默认 TypeScript adapter 构建图（带性能画像）。

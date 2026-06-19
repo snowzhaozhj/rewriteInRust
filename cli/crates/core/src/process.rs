@@ -40,6 +40,10 @@ pub fn run_with_timeout(cmd: &mut Command, timeout: Duration, label: &str) -> Re
             MigrateError::Io(e)
         })?;
 
+    // 注意：wait_timeout 在读 stdout/stderr 之前调用。如果子进程输出超过 OS pipe buffer
+    // （通常 64KB），子进程可能因写满 pipe 而阻塞，导致 wait_timeout 等到超时后 kill。
+    // 当前使用场景（cargo check/init、工具 --version）输出远小于 64KB，实际无影响。
+    // 若未来对接大输出命令，需改为先 spawn + 异步读 pipe + 再 wait_timeout。
     match child.wait_timeout(timeout) {
         Ok(Some(status)) => {
             // 子进程已退出，收集 stdout/stderr

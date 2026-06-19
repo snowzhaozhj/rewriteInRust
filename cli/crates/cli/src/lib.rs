@@ -839,7 +839,13 @@ fn cmd_graph_interfaces_deps_of(
     target: &str,
 ) -> CmdResult {
     let target_node = resolve_file_node(graph, target)?;
-    let target_path = resolve_module_file_path(graph, target)?;
+    let target_path = target_node
+        .file_path()
+        .map(|p| p.to_owned())
+        .ok_or_else(|| MigrateError::Graph {
+            message: format!("无法解析模块文件路径: {target}"),
+            file: target.to_owned(),
+        })?;
 
     // 取 imports 边的 1-hop 出边邻居（仅 File 节点）。
     let dep_nodes: Vec<&SourceNode> = graph
@@ -850,14 +856,13 @@ fn cmd_graph_interfaces_deps_of(
         .filter(|node| node.node_type == NodeType::File)
         .collect();
 
-    // 去重并排序（确定性输出）。
-    let mut dep_paths: Vec<String> = dep_nodes
+    // 去重并排序（BTreeSet 保证有序迭代，确定性输出）。
+    let dep_paths: Vec<String> = dep_nodes
         .iter()
         .map(|n| n.file_path.clone())
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect();
-    dep_paths.sort();
 
     // 对每个依赖模块收集导出接口。
     let dependencies: Vec<serde_json::Value> = dep_paths
