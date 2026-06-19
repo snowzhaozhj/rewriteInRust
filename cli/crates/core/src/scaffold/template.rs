@@ -6,6 +6,7 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::error::{MigrateError, Result};
+use crate::process::{run_with_timeout, CARGO_TIMEOUT};
 
 /// 生成 Rust lib 项目骨架。
 ///
@@ -22,11 +23,17 @@ pub fn scaffold_project(name: &str, target_dir: &Path) -> Result<()> {
 
     std::fs::create_dir_all(target_dir)?;
 
-    let output = Command::new("cargo")
-        .args(["init", "--lib", "--name", name, "--vcs", "none"])
-        .arg(target_dir)
-        .output()
-        .map_err(|e| MigrateError::Config(format!("cargo init 执行失败: {e}")))?;
+    let output = run_with_timeout(
+        Command::new("cargo")
+            .args(["init", "--lib", "--name", name, "--vcs", "none"])
+            .arg(target_dir),
+        CARGO_TIMEOUT,
+        "cargo init --lib",
+    )
+    .map_err(|e| match e {
+        MigrateError::Io(io_err) => MigrateError::Config(format!("cargo init 执行失败: {io_err}")),
+        other => other,
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -51,11 +58,17 @@ pub fn scaffold_project_with_bin(name: &str, target_dir: &Path) -> Result<()> {
 
     std::fs::create_dir_all(target_dir)?;
 
-    let output = Command::new("cargo")
-        .args(["init", "--name", name, "--vcs", "none"])
-        .arg(target_dir)
-        .output()
-        .map_err(|e| MigrateError::Config(format!("cargo init 执行失败: {e}")))?;
+    let output = run_with_timeout(
+        Command::new("cargo")
+            .args(["init", "--name", name, "--vcs", "none"])
+            .arg(target_dir),
+        CARGO_TIMEOUT,
+        "cargo init",
+    )
+    .map_err(|e| match e {
+        MigrateError::Io(io_err) => MigrateError::Config(format!("cargo init 执行失败: {io_err}")),
+        other => other,
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

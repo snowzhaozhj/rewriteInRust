@@ -1176,3 +1176,109 @@ fn smoke_populate_without_db_errors() {
         assert_eq!(json["status"], "error");
     });
 }
+
+// === graph interfaces --deps-of 批量模式 ===
+
+#[test]
+fn smoke_graph_interfaces_deps_of() {
+    // linear-deps: index.ts -> service.ts -> utils.ts
+    // index.ts 的 imports 1-hop 邻居应包含 service.ts 和 utils.ts。
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        build_graph_for_query();
+        let (code, json) = run(&["graph", "interfaces", "dummy", "--deps-of", "index.ts"]);
+        assert_eq!(code, 0, "graph interfaces --deps-of 应成功: {json}");
+        assert_eq!(json["status"], "ok");
+
+        // data.target 应为 index.ts 的完整路径。
+        let target = json["data"]["target"].as_str().unwrap();
+        assert!(
+            target.contains("index.ts"),
+            "target 应包含 index.ts: {target}"
+        );
+
+        // data.dependencies 应为数组且非空。
+        let deps = json["data"]["dependencies"].as_array().unwrap();
+        assert!(!deps.is_empty(), "dependencies 应非空: {json}");
+
+        // 每个依赖应有 module 和 exports 字段。
+        for dep in deps {
+            assert!(dep["module"].is_string(), "每个依赖应有 module 字段");
+            assert!(dep["exports"].is_array(), "每个依赖应有 exports 数组");
+        }
+
+        // 依赖模块名应包含 service.ts 和 utils.ts。
+        let dep_modules: Vec<&str> = deps.iter().map(|d| d["module"].as_str().unwrap()).collect();
+        assert!(
+            dep_modules.iter().any(|m| m.contains("service.ts")),
+            "依赖应包含 service.ts: {dep_modules:?}"
+        );
+        assert!(
+            dep_modules.iter().any(|m| m.contains("utils.ts")),
+            "依赖应包含 utils.ts: {dep_modules:?}"
+        );
+    });
+}
+
+#[test]
+fn smoke_graph_interfaces_deps_of_exports_content() {
+    // service.ts 的 1-hop 依赖只有 utils.ts，其导出应含 clamp / fetchData / Range / Predicate。
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        build_graph_for_query();
+        let (code, json) = run(&["graph", "interfaces", "dummy", "--deps-of", "service.ts"]);
+        assert_eq!(
+            code, 0,
+            "graph interfaces --deps-of service.ts 应成功: {json}"
+        );
+        assert_eq!(json["status"], "ok");
+
+        let deps = json["data"]["dependencies"].as_array().unwrap();
+        // service.ts 只依赖 utils.ts。
+        assert_eq!(deps.len(), 1, "service.ts 应只有 1 个依赖: {deps:?}");
+
+        let utils_dep = &deps[0];
+        assert!(
+            utils_dep["module"].as_str().unwrap().contains("utils.ts"),
+            "依赖应为 utils.ts"
+        );
+
+        // utils.ts 的导出接口应含 clamp 函数。
+        let exports = utils_dep["exports"].as_array().unwrap();
+        assert!(!exports.is_empty(), "utils.ts 应有导出接口");
+        let export_names: Vec<&str> = exports
+            .iter()
+            .map(|e| e["name"].as_str().unwrap())
+            .collect();
+        assert!(
+            export_names.contains(&"clamp"),
+            "utils.ts 导出应包含 clamp: {export_names:?}"
+        );
+
+        // 每条导出接口应含 token_estimate。
+        for exp in exports {
+            assert!(
+                exp["token_estimate"].is_number(),
+                "导出接口应含 token_estimate"
+            );
+        }
+    });
+}
+
+#[test]
+fn smoke_graph_interfaces_deps_of_nonexistent_target_errors() {
+    // --deps-of 的 target 不存在时应报错。
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        build_graph_for_query();
+        let (code, json) = run(&[
+            "graph",
+            "interfaces",
+            "dummy",
+            "--deps-of",
+            "does-not-exist.ts",
+        ]);
+        assert_eq!(code, 1, "不存在的 target 应报错");
+        assert_eq!(json["status"], "error");
+    });
+}

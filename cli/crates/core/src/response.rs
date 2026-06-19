@@ -141,6 +141,7 @@ impl From<MigrateError> for Response<ErrorData> {
             MigrateError::SchemaValidation(_) => "schema_validation",
             MigrateError::LockConflict(_) => "lock_conflict",
             MigrateError::NotImplemented(_) => "not_implemented",
+            MigrateError::Timeout { .. } => "timeout",
         };
         Self {
             status: Status::Error,

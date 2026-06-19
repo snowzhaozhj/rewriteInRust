@@ -17,7 +17,7 @@ use serde_json::json;
 
 use rustmigrate_core::detect::detect_tier;
 use rustmigrate_core::error::MigrateError;
-use rustmigrate_core::graph::build::build_graph_ts;
+use rustmigrate_core::graph::build::{build_graph_ts, build_graph_ts_profiled};
 use rustmigrate_core::graph::persist::{load_from_db, save_to_db};
 use rustmigrate_core::graph::topo::{detect_cycles, migration_sequence, topological_sort};
 use rustmigrate_core::graph::SourceGraph;
@@ -29,7 +29,7 @@ use rustmigrate_core::scaffold::scaffold_project;
 use rustmigrate_core::state::{MigrationStateMachine, SprintAdvanceResult};
 use rustmigrate_core::stats::{compare_structure, count_loc};
 use rustmigrate_core::types::common::{NodeId, Timestamp};
-use rustmigrate_core::types::graph::{EdgeType, NodeType};
+use rustmigrate_core::types::graph::{EdgeType, NodeType, SourceNode};
 use rustmigrate_core::types::state::{
     humanize_module_key, ModuleState, ModuleStatus, ModuleTier, ProjectState, SprintState,
 };
@@ -457,7 +457,7 @@ fn state_path() -> PathBuf {
 fn load_state_with_warnings(
     path: &Path,
 ) -> Result<(MigrationStateMachine, Vec<String>), MigrateError> {
-    let machine = MigrationStateMachine::load(path)?;
+    let mut machine = MigrationStateMachine::load(path)?;
     let mut warnings = Vec::new();
     if machine.recovered_from_backup() {
         warnings.push(
@@ -466,6 +466,9 @@ fn load_state_with_warnings(
                 .to_owned(),
         );
     }
+    // 注入持久化配置：从 .rustmigrate.toml 读取 [persistence] 段。
+    let cfg = load_config_or_default(&mut warnings);
+    machine.set_persistence_config(cfg.persistence);
     Ok((machine, warnings))
 }
 
@@ -615,39 +618,57 @@ fn format_tool_missing(code: &str, status: &ToolStatus) -> String {
 
 /// `graph build --root <path> [--full] [--profile]`：构建图并写入 db。
 ///
-/// 当前以 TypeScript adapter 全量构建。`--full` 在 M1 等价默认（增量推 M2），
-/// `--profile` 性能画像推 M2。
+/// 当前以 TypeScript adapter 全量构建。`--full` 在 M1 等价默认（增量推 M2）。
+/// `--profile` 开启时输出 per-phase 耗时的性能画像 JSON（见 04-toolchain.md § 5.7.4.1）。
 fn cmd_graph_build(root: &Path, _full: bool, profile: bool) -> CmdResult {
     let mut warnings: Vec<String> = Vec::new();
 
     // TODO(M2): 增量构建（file_fingerprints 跳过未变更文件）；当前 --full 无差异。
-    // TODO(M2): --profile 性能画像 JSON（见 04-toolchain.md § 5.7.4.1）。
-    if profile {
-        warnings.push("--profile 性能画像尚未实现（推迟 M2），本次按普通构建处理".to_owned());
-    }
-    // M1 暂无增量构建：无论 --full 与否都是全量。下方 `full` 字段恒 true 反映真实构建模式
-    // （原 `full: full` 默认 false 会让上层误判为增量结果）。增量推 M2。
+    // M1 暂无增量构建：无论 --full 与否都是全量。下方 `full` 字段恒 true 反映真实构建模式。
 
-    let graph = build_graph_ts(root)?;
+    let (graph, build_profile) = if profile {
+        let (g, p) = build_graph_ts_profiled(root)?;
+        (g, Some(p))
+    } else {
+        (build_graph_ts(root)?, None)
+    };
     warnings.extend(graph.warnings().iter().cloned());
 
     // 确保 `.rust-migration/` 存在后再写 db。
     std::fs::create_dir_all(work_dir())?;
     let db = db_path();
-    save_to_db(&graph, &db)?;
+
+    // 持久化计时（仅 --profile 开启时插桩）
+    let persist_ms = if profile {
+        let t = std::time::Instant::now();
+        save_to_db(&graph, &db)?;
+        Some(t.elapsed().as_millis() as u64)
+    } else {
+        save_to_db(&graph, &db)?;
+        None
+    };
 
     // 标记 graph 构建完成（若状态文件存在）。
     mark_graph_built(&mut warnings);
 
-    Ok((
-        json!({
-            "db_path": db.to_string_lossy(),
-            "node_count": graph.node_count(),
-            "edge_count": graph.edge_count(),
-            "full": true,
-        }),
-        warnings,
-    ))
+    let mut data = json!({
+        "db_path": db.to_string_lossy(),
+        "node_count": graph.node_count(),
+        "edge_count": graph.edge_count(),
+        "full": true,
+    });
+
+    // --profile：将性能画像嵌入 data.profile
+    if let (Some(bp), Some(pm)) = (build_profile, persist_ms) {
+        data["profile"] = json!({
+            "parse_ms": bp.parse_ms,
+            "edge_build_ms": bp.edge_build_ms,
+            "persist_ms": pm,
+            "total_ms": bp.total_ms + pm,
+        });
+    }
+
+    Ok((data, warnings))
 }
 
 /// 若状态文件存在，标记 `metadata.graph_build_completed = true`。
@@ -788,29 +809,104 @@ fn collect_imports_closure(
 
 /// `graph interfaces <module> [--deps-of <target>]`：模块导出接口签名。
 ///
-/// 输出该模块内 `is_exported=true` 的符号节点（名称 + 类型 + 行号 + token 估算）。
-/// `--deps-of` 批量模式推迟 M2。
+/// 无 `--deps-of`：输出 `<module>` 内 `is_exported=true` 的符号节点。
+/// 有 `--deps-of`：以 `<target>` 为中心，取其 imports 边的 1-hop 出边邻居（直接依赖模块），
+/// 批量输出每个依赖模块的导出接口签名（区别于 `graph deps` 的 BFS 传递闭包）。
 fn cmd_graph_interfaces(module: &str, deps_of: Option<&str>) -> CmdResult {
-    let mut warnings: Vec<String> = Vec::new();
-    if deps_of.is_some() {
-        // TODO(M2): --deps-of 批量输出 target 的直接依赖模块接口（imports 1-hop 邻居）。
-        warnings
-            .push("--deps-of 批量接口输出尚未实现（推迟 M2），本次仅输出指定模块接口".to_owned());
+    let graph = load_graph()?;
+
+    // --deps-of 批量模式：输出 target 直接依赖模块的导出接口。
+    if let Some(target) = deps_of {
+        return cmd_graph_interfaces_deps_of(&graph, target);
     }
 
-    let graph = load_graph()?;
-    let file_node = resolve_file_node(&graph, module)?;
-    let file_path = file_node
+    // 单模块模式：输出指定模块自身的导出接口。
+    let file_path = resolve_module_file_path(&graph, module)?;
+    let interfaces = collect_exported_interfaces(&graph, &file_path);
+
+    Ok((
+        json!({
+            "module": file_path,
+            "interfaces": interfaces,
+        }),
+        Vec::new(),
+    ))
+}
+
+/// `--deps-of` 批量模式：获取 target 的 1-hop imports 出边邻居，收集每个邻居的导出接口。
+fn cmd_graph_interfaces_deps_of(
+    graph: &rustmigrate_core::graph::SourceGraph,
+    target: &str,
+) -> CmdResult {
+    let target_node = resolve_file_node(graph, target)?;
+    let target_path = target_node
         .file_path()
+        .map(|p| p.to_owned())
+        .ok_or_else(|| MigrateError::Graph {
+            message: format!("无法解析模块文件路径: {target}"),
+            file: target.to_owned(),
+        })?;
+
+    // 取 imports 边的 1-hop 出边邻居（仅 File 节点）。
+    let dep_nodes: Vec<&SourceNode> = graph
+        .outgoing_edges(&target_node)
+        .into_iter()
+        .filter(|(_, edge_type)| *edge_type == EdgeType::Imports)
+        .map(|(node, _)| node)
+        .filter(|node| node.node_type == NodeType::File)
+        .collect();
+
+    // 去重并排序（BTreeSet 保证有序迭代，确定性输出）。
+    let dep_paths: Vec<String> = dep_nodes
+        .iter()
+        .map(|n| n.file_path.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
+    // 对每个依赖模块收集导出接口。
+    let dependencies: Vec<serde_json::Value> = dep_paths
+        .iter()
+        .map(|path| {
+            let exports = collect_exported_interfaces(graph, path);
+            json!({
+                "module": path,
+                "exports": exports,
+            })
+        })
+        .collect();
+
+    Ok((
+        json!({
+            "target": target_path,
+            "dependencies": dependencies,
+        }),
+        Vec::new(),
+    ))
+}
+
+/// 解析模块名为文件路径字符串。
+fn resolve_module_file_path(
+    graph: &rustmigrate_core::graph::SourceGraph,
+    module: &str,
+) -> Result<String, MigrateError> {
+    let file_node = resolve_file_node(graph, module)?;
+    file_node
+        .file_path()
+        .map(|p| p.to_owned())
         .ok_or_else(|| MigrateError::Graph {
             message: format!("无法解析模块文件路径: {module}"),
             file: module.to_owned(),
-        })?
-        .to_owned();
+        })
+}
 
-    // 收集该文件下导出的符号（File 节点本身不算接口）。
+/// 收集指定文件下的导出接口（`is_exported=true` 的符号），按名称排序。
+fn collect_exported_interfaces(
+    graph: &rustmigrate_core::graph::SourceGraph,
+    file_path: &str,
+) -> Vec<serde_json::Value> {
     let mut interfaces: Vec<serde_json::Value> = graph
-        .symbols_in_file(&file_path)
+        .symbols_in_file(file_path)
         .into_iter()
         .filter(|n| n.is_exported)
         .map(|n| {
@@ -824,21 +920,14 @@ fn cmd_graph_interfaces(module: &str, deps_of: Option<&str>) -> CmdResult {
             })
         })
         .collect();
-    // 确定性排序（symbols_in_file 顺序依赖图遍历）。
+    // 确定性排序（symbols_in_file 顺序依赖图遍历，需显式排序）。
     interfaces.sort_by(|a, b| {
         a["name"]
             .as_str()
             .unwrap_or_default()
             .cmp(b["name"].as_str().unwrap_or_default())
     });
-
-    Ok((
-        json!({
-            "module": file_path,
-            "interfaces": interfaces,
-        }),
-        warnings,
-    ))
+    interfaces
 }
 
 /// `graph stats`：图统计信息。

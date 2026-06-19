@@ -31,9 +31,13 @@ fmt:
 fmt-check:
     cd cli && cargo fmt --all -- --check
 
-# 覆盖率
+# 覆盖率（nextest 驱动，输出终端 summary + lcov 文件）
 cov:
-    cd cli && cargo llvm-cov --workspace --lcov --output-path lcov.info
+    cd cli && cargo llvm-cov nextest --workspace --lcov --output-path lcov.info
+
+# 覆盖率 summary（仅终端输出，CI 门禁用）
+cov-summary:
+    cd cli && cargo llvm-cov nextest --workspace
 
 # 依赖审计
 deny:

@@ -1,5 +1,6 @@
 [workspace]
 members = ["crates/core", "crates/cli"]
+exclude = ["fuzz"]
 resolver = "2"
 
 [workspace.package]
@@ -34,9 +35,13 @@ jsonschema = "0.18"
 toml = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 
+# 子进程超时
+wait-timeout = "0.2"
+
 # 测试
 insta = { version = "1", features = ["json"] }
 tempfile = "3"
+proptest = "1"
 
 [profile.release]
 lto = "thin"
