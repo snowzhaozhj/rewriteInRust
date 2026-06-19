@@ -38,6 +38,13 @@ argument-hint: "[analyze|run|workflow|review] [module]"
 - **释放**：命令结束或异常退出时删除锁文件。
 - **逃生口**：卡死时用户可手动删除 `.rust-migration/.migration-lock`；报错信息须包含这一提示。
 
+#### 并行模式下的锁策略（M2-SCALE-LOCK）
+并行翻译模式（`/migrate workflow` 或 `/migrate run` 并行派发）下，**仅编排器持锁，SubAgent 不取锁**：
+- **编排器**在 workflow 全程持有主 tree 的 `.rust-migration/.migration-lock`，直到 workflow 结束或异常退出才释放。
+- **SubAgent** 在独立 worktree（`.wt/{module}/`）中工作，worktree 不共享主 tree 的 `.rust-migration/` 路径，因此天然不碰锁文件，无需取锁、无互相阻塞。
+- **状态写入集中化**：只有编排器可写主 tree 的 `migration-state.json`（集中 writer）。SubAgent 完成后回传 `TranslationResult`（含 touched-list），编排器负责合并代码（git merge）并更新状态。
+- **串行模式不变**：单模块 `/migrate run <module>` 仍按上述锁机制取锁/释放，行为与 M1 一致。
+
 ### SubAgent 编排
 - 用 **Agent tool** 调用 SubAgent，参数 `subagent_type` 取带插件命名空间前缀的 agent 名：`rust-migrate:analyzer` / `rust-migrate:translator` / `rust-migrate:scaffolder` / `rust-migrate:verifier`。MVP 阶段 SubAgent **串行执行**，通过 `.rust-migration/` 下的文件通信，不直接对话。
 - **调用前后记台账**（每次 Agent 调用都做，含重试；否则 `subagent_calls` 恒空、卡死/重试无法诊断）：
