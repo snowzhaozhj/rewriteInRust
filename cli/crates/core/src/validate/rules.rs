@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::Command;
 use strum::Display;
 
-use crate::error::Result;
+use crate::error::{MigrateError, Result};
 use crate::process::{run_with_timeout, CARGO_TIMEOUT};
 
 /// 验证规则检查函数类型别名。
@@ -102,11 +102,18 @@ pub fn default_rules() -> Vec<ValidationRule> {
             "cargo_check",
             ValidationTier::Tier0,
             |project_root: &Path| {
-                let output = run_with_timeout(
+                let output = match run_with_timeout(
                     Command::new("cargo").arg("check").current_dir(project_root),
                     CARGO_TIMEOUT,
                     "cargo check",
-                )?;
+                ) {
+                    Ok(o) => o,
+                    // 超时降级为规则失败（非框架错误），让上层知道是哪条规则超时。
+                    Err(MigrateError::Timeout { timeout_secs, .. }) => {
+                        return Ok((false, Some(format!("cargo check 超时 ({timeout_secs}s)"))));
+                    }
+                    Err(e) => return Err(e),
+                };
                 if output.status.success() {
                     Ok((true, None))
                 } else {
@@ -126,13 +133,19 @@ pub fn default_rules() -> Vec<ValidationRule> {
             "cargo_clippy",
             ValidationTier::Tier0,
             |project_root: &Path| {
-                let output = run_with_timeout(
+                let output = match run_with_timeout(
                     Command::new("cargo")
                         .args(["clippy", "--", "-D", "warnings"])
                         .current_dir(project_root),
                     CARGO_TIMEOUT,
                     "cargo clippy",
-                )?;
+                ) {
+                    Ok(o) => o,
+                    Err(MigrateError::Timeout { timeout_secs, .. }) => {
+                        return Ok((false, Some(format!("cargo clippy 超时 ({timeout_secs}s)"))));
+                    }
+                    Err(e) => return Err(e),
+                };
                 if output.status.success() {
                     Ok((true, None))
                 } else {
