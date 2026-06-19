@@ -335,7 +335,10 @@ where
                 status: Status::Error,
                 data: ErrorData {
                     kind: "cli_parse".to_owned(),
+                    error_code: String::new(),
                     message: e.to_string(),
+                    retryable: false,
+                    suggestion: String::new(),
                     context: None,
                     details: None,
                 },
