@@ -1,12 +1,16 @@
 //! 配置/状态校验模块。
 //!
-//! 提供状态文件完整性检查和前置条件验证。
+//! 提供状态文件完整性检查、前置条件验证、blocked 模块检查与自动解除。
 
 pub mod rules;
 
+use std::collections::{HashMap, HashSet};
+
+use serde::Serialize;
+
 use crate::error::{MigrateError, Result};
-use crate::state::STATE_SCHEMA_VERSION;
-use crate::types::state::{MigrationStateFile, ProjectState};
+use crate::state::{MigrationStateMachine, STATE_SCHEMA_VERSION};
+use crate::types::state::{MigrationStateFile, ModuleStatus, ProjectState};
 
 /// 校验状态文件完整性。
 ///
@@ -191,6 +195,201 @@ fn require_graph(state_file: &MigrationStateFile, phase: &str) -> Result<()> {
         });
     }
     Ok(())
+}
+
+// === blocked 模块检查与自动解除 ===
+
+/// 单个 blocked 模块的检查结果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BlockedCheckResult {
+    /// 模块 key。
+    pub module: String,
+    /// 该模块的 `blocked_by` 列表。
+    pub blocked_by: Vec<String>,
+    /// `blocked_by` 中已进入终态（done/degrade_*）的模块。
+    pub resolved: Vec<String>,
+    /// `blocked_by` 中尚未终态的模块。
+    pub unresolved: Vec<String>,
+    /// 是否就绪可解除（`unresolved` 为空）。
+    pub ready: bool,
+}
+
+/// 检查所有 blocked 模块的依赖就绪状态。
+///
+/// 遍历 `modules` 中 `status == Blocked` 的模块，逐个检查其 `blocked_by`
+/// 引用的模块是否已进入终态（done/degrade_ffi/degrade_manual/degrade_skip）。
+///
+/// 返回每个 blocked 模块的检查结果（含已解决/未解决依赖列表）。
+pub fn check_blocked_modules(state_file: &MigrationStateFile) -> Vec<BlockedCheckResult> {
+    let mut results = Vec::new();
+
+    // 收集所有 blocked 模块（排序保证确定性输出）。
+    let mut blocked_keys: Vec<&String> = state_file
+        .modules
+        .iter()
+        .filter(|(_, m)| m.status == ModuleStatus::Blocked)
+        .map(|(k, _)| k)
+        .collect();
+    blocked_keys.sort();
+
+    for key in blocked_keys {
+        let module = &state_file.modules[key];
+        let blocked_by = module.blocked_by.as_ref().cloned().unwrap_or_default();
+
+        let mut resolved = Vec::new();
+        let mut unresolved = Vec::new();
+
+        for dep in &blocked_by {
+            let is_terminal = state_file
+                .modules
+                .get(dep)
+                .map(|m| m.status.is_terminal())
+                .unwrap_or(false);
+            if is_terminal {
+                resolved.push(dep.clone());
+            } else {
+                unresolved.push(dep.clone());
+            }
+        }
+
+        let ready = unresolved.is_empty();
+        results.push(BlockedCheckResult {
+            module: key.clone(),
+            blocked_by,
+            resolved,
+            unresolved,
+            ready,
+        });
+    }
+
+    results
+}
+
+/// 自动解除就绪的 blocked 模块：恢复到 `pre_blocked_status`。
+///
+/// 对 `check_blocked_modules` 返回的 `ready == true` 的模块，调用
+/// `MigrationStateMachine::transition_module` 恢复到其 `pre_blocked_status`
+/// （无 `pre_blocked_status` 时默认恢复为 `pending`）。
+///
+/// 返回成功解除的模块 key 列表。恢复失败的模块通过 `warnings` 报告。
+pub fn auto_unblock_modules(
+    machine: &mut MigrationStateMachine,
+    warnings: &mut Vec<String>,
+) -> Vec<String> {
+    let checks = check_blocked_modules(machine.state_file());
+    let ready_modules: Vec<(String, ModuleStatus)> = checks
+        .into_iter()
+        .filter(|r| r.ready)
+        .map(|r| {
+            let target = machine
+                .state_file()
+                .modules
+                .get(&r.module)
+                .and_then(|m| m.pre_blocked_status)
+                .unwrap_or(ModuleStatus::Pending);
+            (r.module, target)
+        })
+        .collect();
+
+    let mut unblocked = Vec::new();
+    for (module, target) in ready_modules {
+        match machine.transition_module(
+            &module,
+            Some(target),
+            None,
+            Some("blocked_by resolved"),
+            false,
+        ) {
+            Ok(()) => unblocked.push(module),
+            Err(e) => warnings.push(format!("自动解除 blocked 模块 `{module}` 失败: {e}")),
+        }
+    }
+    unblocked
+}
+
+/// 检测 blocked_by 关系图中的环路（DFS 着色法）。
+///
+/// 在 blocked 模块之间构建子图：节点为所有 `status == Blocked` 的模块，
+/// 边为 `blocked_by` 关系（M blocked_by N 且 N 也是 blocked → 边 M→N）。
+/// 用三色 DFS 检测环：白色（未访问）→ 灰色（栈上）→ 黑色（已完成）。
+/// 遇到灰色节点即发现环，回溯栈提取环路径。
+///
+/// 返回所有检测到的环路径（每条环路径为 Vec<String>）。空 Vec 表示无环。
+pub fn detect_blocked_cycles(state_file: &MigrationStateFile) -> Vec<Vec<String>> {
+    // 收集所有 blocked 模块的 key 集合。
+    let blocked_set: HashSet<&String> = state_file
+        .modules
+        .iter()
+        .filter(|(_, m)| m.status == ModuleStatus::Blocked)
+        .map(|(k, _)| k)
+        .collect();
+
+    if blocked_set.is_empty() {
+        return Vec::new();
+    }
+
+    // 构建 blocked 子图的邻接表：M → [N...]（M blocked_by N，N 也是 blocked）。
+    let mut adj: HashMap<&String, Vec<&String>> = HashMap::new();
+    for key in &blocked_set {
+        let deps: Vec<&String> = state_file.modules[*key]
+            .blocked_by
+            .as_ref()
+            .map(|bs| bs.iter().filter(|b| blocked_set.contains(b)).collect())
+            .unwrap_or_default();
+        adj.insert(key, deps);
+    }
+
+    // DFS 着色：0=白, 1=灰（栈上）, 2=黑（已完成）。
+    let mut color: HashMap<&String, u8> = blocked_set.iter().map(|k| (*k, 0u8)).collect();
+    let mut cycles: Vec<Vec<String>> = Vec::new();
+
+    // 排序保证确定性环检测顺序。
+    let mut sorted_keys: Vec<&&String> = blocked_set.iter().collect();
+    sorted_keys.sort();
+
+    for start in sorted_keys {
+        if color[*start] == 0 {
+            let mut stack: Vec<&String> = Vec::new();
+            dfs_detect_cycle(start, &adj, &mut color, &mut stack, &mut cycles);
+        }
+    }
+
+    cycles
+}
+
+/// DFS 递归检测环（内部函数）。
+fn dfs_detect_cycle<'a>(
+    node: &'a String,
+    adj: &HashMap<&'a String, Vec<&'a String>>,
+    color: &mut HashMap<&'a String, u8>,
+    stack: &mut Vec<&'a String>,
+    cycles: &mut Vec<Vec<String>>,
+) {
+    color.insert(node, 1); // 灰色：进入栈。
+    stack.push(node);
+
+    if let Some(neighbors) = adj.get(node) {
+        for neighbor in neighbors {
+            match color.get(*neighbor) {
+                Some(1) => {
+                    // 灰色：发现环，从栈中提取环路径。
+                    let cycle_start = stack.iter().position(|n| *n == *neighbor).unwrap();
+                    let mut cycle: Vec<String> =
+                        stack[cycle_start..].iter().map(|n| (*n).clone()).collect();
+                    cycle.push((*neighbor).clone()); // 闭合环。
+                    cycles.push(cycle);
+                }
+                // 白色：继续探索。
+                Some(0) => {
+                    dfs_detect_cycle(neighbor, adj, color, stack, cycles);
+                }
+                _ => {} // 黑色或不在 blocked 子图中：跳过。
+            }
+        }
+    }
+
+    stack.pop();
+    color.insert(node, 2); // 黑色：完成。
 }
 
 #[cfg(test)]
@@ -562,5 +761,264 @@ mod tests {
             MigrateError::SchemaValidation(msg) => assert!(msg.contains("exited_at")),
             other => panic!("期望 SchemaValidation(exited_at)，实际: {:?}", other),
         }
+    }
+
+    // === check_blocked_modules / auto_unblock_modules / detect_blocked_cycles 测试 ===
+
+    use crate::types::state::ModuleState;
+
+    /// 辅助：构造指定状态的最小模块记录。
+    fn module_with_status(status: ModuleStatus) -> ModuleState {
+        ModuleState {
+            status,
+            substatus: None,
+            sprint: None,
+            attempts: Vec::new(),
+            test_pass_rate: None,
+            coverage: None,
+            known_differences: 0,
+            tier: None,
+            phase_a_version: None,
+            phase_a_audit_passed: None,
+            blocked_by: None,
+            pre_blocked_status: None,
+        }
+    }
+
+    #[test]
+    fn test_check_blocked_no_blocked_modules() {
+        // 无 blocked 模块：返回空列表。
+        let mut state = minimal_init_state();
+        state
+            .modules
+            .insert("a".to_owned(), module_with_status(ModuleStatus::Pending));
+        state
+            .modules
+            .insert("b".to_owned(), module_with_status(ModuleStatus::Done));
+        let results = check_blocked_modules(&state);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_check_blocked_ready_to_unblock() {
+        // blocked_by 全部终态 → ready=true。
+        let mut state = minimal_init_state();
+        state
+            .modules
+            .insert("dep".to_owned(), module_with_status(ModuleStatus::Done));
+        let mut blocked = module_with_status(ModuleStatus::Blocked);
+        blocked.blocked_by = Some(vec!["dep".to_owned()]);
+        blocked.pre_blocked_status = Some(ModuleStatus::Pending);
+        state.modules.insert("target".to_owned(), blocked);
+
+        let results = check_blocked_modules(&state);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].ready);
+        assert_eq!(results[0].resolved, vec!["dep".to_owned()]);
+        assert!(results[0].unresolved.is_empty());
+    }
+
+    #[test]
+    fn test_check_blocked_still_blocked() {
+        // blocked_by 含非终态 → ready=false。
+        let mut state = minimal_init_state();
+        state.modules.insert(
+            "dep".to_owned(),
+            module_with_status(ModuleStatus::Translating),
+        );
+        let mut blocked = module_with_status(ModuleStatus::Blocked);
+        blocked.blocked_by = Some(vec!["dep".to_owned()]);
+        state.modules.insert("target".to_owned(), blocked);
+
+        let results = check_blocked_modules(&state);
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].ready);
+        assert_eq!(results[0].unresolved, vec!["dep".to_owned()]);
+    }
+
+    #[test]
+    fn test_check_blocked_degrade_counts_as_terminal() {
+        // blocked_by 指向 degrade_ffi → 视为终态，ready=true。
+        let mut state = minimal_init_state();
+        state.modules.insert(
+            "dep".to_owned(),
+            module_with_status(ModuleStatus::DegradeFfi),
+        );
+        let mut blocked = module_with_status(ModuleStatus::Blocked);
+        blocked.blocked_by = Some(vec!["dep".to_owned()]);
+        blocked.pre_blocked_status = Some(ModuleStatus::Pending);
+        state.modules.insert("target".to_owned(), blocked);
+
+        let results = check_blocked_modules(&state);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].ready);
+    }
+
+    #[test]
+    fn test_check_blocked_missing_dep_not_terminal() {
+        // blocked_by 引用不存在的模块 → 视为非终态（安全侧）。
+        let mut state = minimal_init_state();
+        let mut blocked = module_with_status(ModuleStatus::Blocked);
+        blocked.blocked_by = Some(vec!["nonexistent".to_owned()]);
+        state.modules.insert("target".to_owned(), blocked);
+
+        let results = check_blocked_modules(&state);
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].ready);
+        assert_eq!(results[0].unresolved, vec!["nonexistent".to_owned()]);
+    }
+
+    #[test]
+    fn test_check_blocked_empty_blocked_by() {
+        // blocked_by 为空列表 → 无依赖，ready=true。
+        let mut state = minimal_init_state();
+        let mut blocked = module_with_status(ModuleStatus::Blocked);
+        blocked.blocked_by = Some(Vec::new());
+        blocked.pre_blocked_status = Some(ModuleStatus::Pending);
+        state.modules.insert("target".to_owned(), blocked);
+
+        let results = check_blocked_modules(&state);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].ready);
+    }
+
+    #[test]
+    fn test_auto_unblock_restores_pre_blocked_status() {
+        // 自动解除：恢复到 pre_blocked_status。
+        let mut machine = MigrationStateMachine::init_new("test", SourceLang::TypeScript);
+        machine.update_module("dep", module_with_status(ModuleStatus::Done));
+        let mut blocked = module_with_status(ModuleStatus::Blocked);
+        blocked.blocked_by = Some(vec!["dep".to_owned()]);
+        blocked.pre_blocked_status = Some(ModuleStatus::Translating);
+        machine.update_module("target", blocked);
+
+        let mut warnings = Vec::new();
+        let unblocked = auto_unblock_modules(&mut machine, &mut warnings);
+
+        assert_eq!(unblocked, vec!["target".to_owned()]);
+        assert!(warnings.is_empty());
+        assert_eq!(
+            machine.state_file().modules["target"].status,
+            ModuleStatus::Translating
+        );
+        assert!(machine.state_file().modules["target"].blocked_by.is_none());
+        assert!(machine.state_file().modules["target"]
+            .pre_blocked_status
+            .is_none());
+    }
+
+    #[test]
+    fn test_auto_unblock_defaults_to_pending() {
+        // pre_blocked_status 缺失时默认恢复为 pending。
+        let mut machine = MigrationStateMachine::init_new("test", SourceLang::TypeScript);
+        machine.update_module("dep", module_with_status(ModuleStatus::Done));
+        let mut blocked = module_with_status(ModuleStatus::Blocked);
+        blocked.blocked_by = Some(vec!["dep".to_owned()]);
+        // 无 pre_blocked_status。
+        machine.update_module("target", blocked);
+
+        let mut warnings = Vec::new();
+        let unblocked = auto_unblock_modules(&mut machine, &mut warnings);
+
+        assert_eq!(unblocked, vec!["target".to_owned()]);
+        assert_eq!(
+            machine.state_file().modules["target"].status,
+            ModuleStatus::Pending
+        );
+    }
+
+    #[test]
+    fn test_auto_unblock_skips_not_ready() {
+        // 依赖未终态的 blocked 模块不被解除。
+        let mut machine = MigrationStateMachine::init_new("test", SourceLang::TypeScript);
+        machine.update_module("dep", module_with_status(ModuleStatus::Translating));
+        let mut blocked = module_with_status(ModuleStatus::Blocked);
+        blocked.blocked_by = Some(vec!["dep".to_owned()]);
+        machine.update_module("target", blocked);
+
+        let mut warnings = Vec::new();
+        let unblocked = auto_unblock_modules(&mut machine, &mut warnings);
+
+        assert!(unblocked.is_empty());
+        assert_eq!(
+            machine.state_file().modules["target"].status,
+            ModuleStatus::Blocked
+        );
+    }
+
+    #[test]
+    fn test_detect_blocked_cycles_no_cycle() {
+        // A blocked_by B, B 是 done → 无环。
+        let mut state = minimal_init_state();
+        state
+            .modules
+            .insert("b".to_owned(), module_with_status(ModuleStatus::Done));
+        let mut a = module_with_status(ModuleStatus::Blocked);
+        a.blocked_by = Some(vec!["b".to_owned()]);
+        state.modules.insert("a".to_owned(), a);
+
+        let cycles = detect_blocked_cycles(&state);
+        assert!(cycles.is_empty());
+    }
+
+    #[test]
+    fn test_detect_blocked_cycles_mutual() {
+        // A blocked_by B, B blocked_by A → 互相阻塞环。
+        let mut state = minimal_init_state();
+        let mut a = module_with_status(ModuleStatus::Blocked);
+        a.blocked_by = Some(vec!["b".to_owned()]);
+        let mut b = module_with_status(ModuleStatus::Blocked);
+        b.blocked_by = Some(vec!["a".to_owned()]);
+        state.modules.insert("a".to_owned(), a);
+        state.modules.insert("b".to_owned(), b);
+
+        let cycles = detect_blocked_cycles(&state);
+        assert!(!cycles.is_empty(), "应检测到互相阻塞环");
+    }
+
+    #[test]
+    fn test_detect_blocked_cycles_self() {
+        // A blocked_by A → 自依赖环。
+        let mut state = minimal_init_state();
+        let mut a = module_with_status(ModuleStatus::Blocked);
+        a.blocked_by = Some(vec!["a".to_owned()]);
+        state.modules.insert("a".to_owned(), a);
+
+        let cycles = detect_blocked_cycles(&state);
+        assert!(!cycles.is_empty(), "应检测到自依赖环");
+    }
+
+    #[test]
+    fn test_detect_blocked_cycles_chain() {
+        // A→B→C→A 三元环。
+        let mut state = minimal_init_state();
+        let mut a = module_with_status(ModuleStatus::Blocked);
+        a.blocked_by = Some(vec!["b".to_owned()]);
+        let mut b = module_with_status(ModuleStatus::Blocked);
+        b.blocked_by = Some(vec!["c".to_owned()]);
+        let mut c = module_with_status(ModuleStatus::Blocked);
+        c.blocked_by = Some(vec!["a".to_owned()]);
+        state.modules.insert("a".to_owned(), a);
+        state.modules.insert("b".to_owned(), b);
+        state.modules.insert("c".to_owned(), c);
+
+        let cycles = detect_blocked_cycles(&state);
+        assert!(!cycles.is_empty(), "应检测到三元环");
+    }
+
+    #[test]
+    fn test_detect_blocked_cycles_ignores_non_blocked() {
+        // A blocked_by B，但 B 不是 blocked（是 translating）→ 不形成环。
+        let mut state = minimal_init_state();
+        let mut a = module_with_status(ModuleStatus::Blocked);
+        a.blocked_by = Some(vec!["b".to_owned()]);
+        state.modules.insert("a".to_owned(), a);
+        state.modules.insert(
+            "b".to_owned(),
+            module_with_status(ModuleStatus::Translating),
+        );
+
+        let cycles = detect_blocked_cycles(&state);
+        assert!(cycles.is_empty());
     }
 }

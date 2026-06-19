@@ -34,7 +34,9 @@ use rustmigrate_core::types::graph::{EdgeType, NodeType, SourceNode};
 use rustmigrate_core::types::state::{
     humanize_module_key, ModuleState, ModuleStatus, ModuleTier, ProjectState, SprintState,
 };
-use rustmigrate_core::validate::validate_state;
+use rustmigrate_core::validate::{
+    auto_unblock_modules, check_blocked_modules, detect_blocked_cycles, validate_state,
+};
 
 /// `.rust-migration/` 工作目录名（见 `docs/design/04-toolchain.md § 5.7.3`）。
 const WORK_DIR: &str = ".rust-migration";
@@ -148,7 +150,14 @@ pub enum GraphCommands {
 #[derive(clap::Subcommand)]
 pub enum ValidateCommands {
     /// 校验 `migration-state.json` 合法性。
-    State,
+    State {
+        /// 检查 blocked 模块的依赖是否已就绪（blocked_by 全部终态则 ready）。
+        #[arg(long)]
+        check_blocked: bool,
+        /// 自动恢复就绪的 blocked 模块到 pre_blocked_status（需配合 --check-blocked）。
+        #[arg(long)]
+        auto_unblock: bool,
+    },
     /// 校验 `.rustmigrate.toml` 配置文件合法性。
     Config,
 }
@@ -366,7 +375,10 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
             GraphCommands::Export { format } => emit(writer, cmd_graph_export(format)),
         },
         Commands::Validate { action } => match action {
-            ValidateCommands::State => emit(writer, cmd_validate_state()),
+            ValidateCommands::State {
+                check_blocked,
+                auto_unblock,
+            } => emit(writer, cmd_validate_state(*check_blocked, *auto_unblock)),
             ValidateCommands::Config => emit(writer, cmd_validate_config()),
         },
         Commands::State { action } => match action {
@@ -1054,11 +1066,75 @@ fn cmd_graph_export(format: &str) -> CmdResult {
     }
 }
 
-/// `validate state`：校验 `migration-state.json`。
-fn cmd_validate_state() -> CmdResult {
-    let (machine, mut warnings) = load_state_with_warnings(&state_path())?;
+/// `validate state [--check-blocked] [--auto-unblock]`：校验 `migration-state.json`。
+///
+/// 基础模式（无 flag）：执行 schema 版本、历史链、前置条件等完整性检查。
+///
+/// `--check-blocked`：额外检查所有 blocked 模块的 `blocked_by` 依赖是否已进入终态，
+/// 并执行 DFS 环检测（blocked_by 关系图中的环路会导致死锁）。
+///
+/// `--auto-unblock`（需配合 `--check-blocked`）：对就绪的 blocked 模块自动恢复到
+/// `pre_blocked_status`（无则默认 `pending`），通过 `transition_module` 落盘。
+fn cmd_validate_state(check_blocked: bool, auto_unblock: bool) -> CmdResult {
+    // --auto-unblock 须配合 --check-blocked。
+    if auto_unblock && !check_blocked {
+        return Err(MigrateError::Config(
+            "--auto-unblock 须配合 --check-blocked 使用".to_owned(),
+        ));
+    }
+
+    let path = state_path();
+    let (mut machine, mut warnings) = load_state_with_warnings(&path)?;
+
+    // 基础 validate。
     warnings.extend(validate_state(machine.state_file())?);
-    Ok((json!({ "valid": true }), warnings))
+
+    if !check_blocked {
+        return Ok((json!({ "valid": true }), warnings));
+    }
+
+    // --check-blocked：检查 blocked 模块依赖就绪状态 + DFS 环检测。
+    let checks = check_blocked_modules(machine.state_file());
+    let cycles = detect_blocked_cycles(machine.state_file());
+
+    let blocked_count = checks.len();
+    let ready_modules: Vec<String> = checks
+        .iter()
+        .filter(|r| r.ready)
+        .map(|r| r.module.clone())
+        .collect();
+    let still_blocked: Vec<String> = checks
+        .iter()
+        .filter(|r| !r.ready)
+        .map(|r| r.module.clone())
+        .collect();
+    let cycle_paths: Vec<Vec<String>> = cycles;
+
+    let mut data = json!({
+        "valid": true,
+        "blocked_count": blocked_count,
+        "ready_to_unblock": ready_modules,
+        "still_blocked": still_blocked,
+        "cycles": cycle_paths,
+    });
+
+    // --auto-unblock：自动恢复就绪的 blocked 模块。
+    if auto_unblock {
+        // 有环时拒绝自动解除（设计 09-appendix：环检测 → 报错中止）。
+        if !cycle_paths.is_empty() {
+            return Err(MigrateError::Config(format!(
+                "blocked_by 关系图存在环路，无法自动解除；请先打破环后重试。环路径: {cycle_paths:?}"
+            )));
+        }
+
+        let unblocked = auto_unblock_modules(&mut machine, &mut warnings);
+        if !unblocked.is_empty() {
+            machine.save(&path)?;
+        }
+        data["unblocked"] = json!(unblocked);
+    }
+
+    Ok((data, warnings))
 }
 
 /// `validate config`：校验 `.rustmigrate.toml` 配置文件合法性。
