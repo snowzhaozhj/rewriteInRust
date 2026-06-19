@@ -951,7 +951,6 @@ fn cmd_graph_stats() -> CmdResult {
     Ok((serde_json::to_value(&stats)?, Vec::new()))
 }
 
-<<<<<<< HEAD
 /// `graph cycles`：循环依赖检测，输出完整 SCC 环路径。
 ///
 /// 使用 Tarjan SCC 算法检测所有强连通分量（大小 > 1 或自环），
@@ -1016,7 +1015,6 @@ fn cmd_graph_export(format: &str) -> CmdResult {
             "不支持的导出格式: {format}（合法值: json/dot/mermaid）"
         ))),
     }
-}
 }
 
 /// `validate state`：校验 `migration-state.json`。

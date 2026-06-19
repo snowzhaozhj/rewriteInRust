@@ -1449,6 +1449,9 @@ fn smoke_graph_export_invalid_format() {
         let (code, json) = run(&["graph", "export", "--format", "xml"]);
         assert_eq!(code, 1, "不支持的格式应报错: {json}");
         assert_eq!(json["status"], "error");
+    });
+}
+
 // === validate config 测试 ===
 
 #[test]
