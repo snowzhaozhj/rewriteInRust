@@ -1351,3 +1351,103 @@ fn smoke_graph_interfaces_deps_of_nonexistent_target_errors() {
         assert_eq!(json["status"], "error");
     });
 }
+
+// === graph export 测试 ===
+
+#[test]
+fn smoke_graph_export_json() {
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        build_graph_for_query();
+        let (code, json) = run(&["graph", "export", "--format", "json"]);
+        assert_eq!(code, 0, "graph export --format json 应成功: {json}");
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["data"]["format"], "json");
+
+        // json 格式时 content 是对象（含 nodes 和 edges），不是字符串
+        let content = &json["data"]["content"];
+        assert!(
+            content.is_object(),
+            "json 格式的 content 应为对象: {content}"
+        );
+        assert!(content["nodes"].is_array(), "content 应含 nodes 数组");
+        assert!(content["edges"].is_array(), "content 应含 edges 数组");
+        assert!(
+            content["nodes"].as_array().unwrap().len() >= 3,
+            "linear-deps 至少 3 个节点"
+        );
+    });
+}
+
+#[test]
+fn smoke_graph_export_json_default_format() {
+    // 不指定 --format 时默认 json
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        build_graph_for_query();
+        let (code, json) = run(&["graph", "export"]);
+        assert_eq!(code, 0, "graph export（默认格式）应成功: {json}");
+        assert_eq!(json["data"]["format"], "json");
+        assert!(json["data"]["content"].is_object());
+    });
+}
+
+#[test]
+fn smoke_graph_export_dot() {
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        build_graph_for_query();
+        let (code, json) = run(&["graph", "export", "--format", "dot"]);
+        assert_eq!(code, 0, "graph export --format dot 应成功: {json}");
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["data"]["format"], "dot");
+
+        let content = json["data"]["content"].as_str().unwrap();
+        assert!(
+            content.starts_with("digraph {"),
+            "DOT 应以 digraph {{ 开头: {content}"
+        );
+        assert!(content.contains("->"), "DOT 应含 -> 边声明");
+        assert!(content.contains("[label="), "DOT 应含 label 属性");
+    });
+}
+
+#[test]
+fn smoke_graph_export_mermaid() {
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        build_graph_for_query();
+        let (code, json) = run(&["graph", "export", "--format", "mermaid"]);
+        assert_eq!(code, 0, "graph export --format mermaid 应成功: {json}");
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["data"]["format"], "mermaid");
+
+        let content = json["data"]["content"].as_str().unwrap();
+        assert!(
+            content.starts_with("flowchart TD"),
+            "Mermaid 应以 flowchart TD 开头: {content}"
+        );
+        assert!(content.contains("-->|"), "Mermaid 应含 -->| 边声明");
+        // Mermaid ID 不应含冒号
+        let lines: Vec<&str> = content.lines().collect();
+        for line in &lines[1..] {
+            // 节点声明行和边行的 ID 部分不应含冒号（标签引号内可以）
+            if let Some(id_part) = line.trim().split('[').next() {
+                if !id_part.contains("-->") {
+                    assert!(!id_part.contains(':'), "Mermaid 节点 ID 不应含冒号: {line}");
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn smoke_graph_export_invalid_format() {
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        build_graph_for_query();
+        let (code, json) = run(&["graph", "export", "--format", "xml"]);
+        assert_eq!(code, 1, "不支持的格式应报错: {json}");
+        assert_eq!(json["status"], "error");
+    });
+}

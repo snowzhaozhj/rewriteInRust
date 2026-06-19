@@ -18,6 +18,7 @@ use serde_json::json;
 use rustmigrate_core::detect::detect_tier;
 use rustmigrate_core::error::MigrateError;
 use rustmigrate_core::graph::build::{build_graph_ts, build_graph_ts_profiled};
+use rustmigrate_core::graph::export::{export_dot, export_json, export_mermaid};
 use rustmigrate_core::graph::persist::{load_from_db, save_to_db};
 use rustmigrate_core::graph::topo::{detect_cycles, migration_sequence, topological_sort};
 use rustmigrate_core::graph::SourceGraph;
@@ -135,6 +136,12 @@ pub enum GraphCommands {
     Stats,
     /// 循环依赖检测：完整 SCC 环路径输出。
     Cycles,
+    /// 导出依赖图为 JSON/DOT/Mermaid 格式。
+    Export {
+        /// 导出格式（json/dot/mermaid，默认 json）。
+        #[arg(long, default_value = "json")]
+        format: String,
+    },
 }
 
 /// Validate 子命令。
@@ -333,6 +340,7 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
             }
             GraphCommands::Stats => emit(writer, cmd_graph_stats()),
             GraphCommands::Cycles => emit(writer, cmd_graph_cycles()),
+            GraphCommands::Export { format } => emit(writer, cmd_graph_export(format)),
         },
         Commands::Validate { action } => match action {
             ValidateCommands::State => emit(writer, cmd_validate_state()),
@@ -940,6 +948,7 @@ fn cmd_graph_stats() -> CmdResult {
     Ok((serde_json::to_value(&stats)?, Vec::new()))
 }
 
+<<<<<<< HEAD
 /// `graph cycles`：循环依赖检测，输出完整 SCC 环路径。
 ///
 /// 使用 Tarjan SCC 算法检测所有强连通分量（大小 > 1 或自环），
@@ -959,6 +968,52 @@ fn cmd_graph_cycles() -> CmdResult {
         }),
         Vec::new(),
     ))
+}
+
+/// `graph export --format <json|dot|mermaid>`：导出依赖图。
+///
+/// 设计（`06-plugin-structure.md`）：导出依赖图为 JSON/DOT/Mermaid 格式。
+/// json 格式时 `data.content` 为对象（nodes + edges）；
+/// dot/mermaid 格式时 `data.content` 为字符串。
+fn cmd_graph_export(format: &str) -> CmdResult {
+    let graph = load_graph()?;
+
+    match format {
+        "json" => {
+            let content = export_json(&graph);
+            Ok((
+                json!({
+                    "format": "json",
+                    "content": content,
+                }),
+                Vec::new(),
+            ))
+        }
+        "dot" => {
+            let content = export_dot(&graph);
+            Ok((
+                json!({
+                    "format": "dot",
+                    "content": content,
+                }),
+                Vec::new(),
+            ))
+        }
+        "mermaid" => {
+            let content = export_mermaid(&graph);
+            Ok((
+                json!({
+                    "format": "mermaid",
+                    "content": content,
+                }),
+                Vec::new(),
+            ))
+        }
+        _ => Err(MigrateError::Config(format!(
+            "不支持的导出格式: {format}（合法值: json/dot/mermaid）"
+        ))),
+    }
+}
 }
 
 /// `validate state`：校验 `migration-state.json`。

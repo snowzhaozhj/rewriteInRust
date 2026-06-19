@@ -4,6 +4,7 @@
 //! 提供从 NodeId 到 NodeIndex 的快速映射。
 
 pub mod build;
+pub mod export;
 pub mod persist;
 pub mod query;
 pub mod topo;
