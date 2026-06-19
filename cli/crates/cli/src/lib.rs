@@ -149,6 +149,8 @@ pub enum GraphCommands {
 pub enum ValidateCommands {
     /// 校验 `migration-state.json` 合法性。
     State,
+    /// 校验 `.rustmigrate.toml` 配置文件合法性。
+    Config,
 }
 
 /// State 子命令。
@@ -344,6 +346,7 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
         },
         Commands::Validate { action } => match action {
             ValidateCommands::State => emit(writer, cmd_validate_state()),
+            ValidateCommands::Config => emit(writer, cmd_validate_config()),
         },
         Commands::State { action } => match action {
             StateCommands::Get { module, human } => emit(writer, cmd_state_get(module, *human)),
@@ -1021,6 +1024,96 @@ fn cmd_validate_state() -> CmdResult {
     let (machine, mut warnings) = load_state_with_warnings(&state_path())?;
     warnings.extend(validate_state(machine.state_file())?);
     Ok((json!({ "valid": true }), warnings))
+}
+
+/// `validate config`：校验 `.rustmigrate.toml` 配置文件合法性。
+///
+/// 三种场景：
+/// - 文件不存在：status=ok，warning 提示"未找到配置文件，使用默认值"
+/// - 文件存在且合法：status=ok，输出各字段检查数
+/// - 文件存在但有不合理字段：status=warning，附带具体问题
+fn cmd_validate_config() -> CmdResult {
+    use rustmigrate_core::types::config::MigrateConfig;
+
+    let path = config_path();
+    let mut warnings: Vec<String> = Vec::new();
+
+    // 配置文件不存在：正常场景，使用默认值。
+    if !path.exists() {
+        warnings.push("未找到配置文件，使用默认值".to_owned());
+        return Ok((
+            json!({
+                "config_path": CONFIG_FILE,
+                "valid": true,
+                "fields_checked": 0,
+            }),
+            warnings,
+        ));
+    }
+
+    // 读取并解析配置文件。
+    let content = std::fs::read_to_string(&path)?;
+    let config: MigrateConfig = match toml::from_str(&content) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            return Err(MigrateError::Config(format!("{CONFIG_FILE} 解析失败: {e}")));
+        }
+    };
+
+    // 逐字段合理性校验。
+    let mut fields_checked: u32 = 0;
+
+    // 1. project.source_root 路径检查
+    fields_checked += 1;
+    let source_root = Path::new(&config.project.source_root);
+    if !source_root.exists() {
+        warnings.push(format!(
+            "project.source_root 目录不存在: {}",
+            config.project.source_root
+        ));
+    }
+
+    // 2. project.rust_root 路径检查
+    fields_checked += 1;
+    let rust_root = Path::new(&config.project.rust_root);
+    if !rust_root.exists() {
+        warnings.push(format!(
+            "project.rust_root 目录不存在: {}（迁移早期属正常）",
+            config.project.rust_root
+        ));
+    }
+
+    // 3. strategy.max_retry_rounds 合理性
+    fields_checked += 1;
+    if config.strategy.max_retry_rounds == 0 {
+        warnings.push("strategy.max_retry_rounds 为 0，翻译失败后不会重试".to_owned());
+    }
+
+    // 4. testing.coverage_threshold 范围检查（0-100）
+    fields_checked += 1;
+    if config.testing.coverage_threshold > 100 {
+        warnings.push(format!(
+            "testing.coverage_threshold 超出合理范围（0-100）: {}",
+            config.testing.coverage_threshold
+        ));
+    }
+
+    // 5. orchestration.subagent_timeout_secs 合理性
+    fields_checked += 1;
+    if config.orchestration.subagent_timeout_secs == 0 {
+        warnings.push("orchestration.subagent_timeout_secs 为 0，SubAgent 将立即超时".to_owned());
+    }
+
+    let valid = warnings.is_empty();
+
+    Ok((
+        json!({
+            "config_path": CONFIG_FILE,
+            "valid": valid,
+            "fields_checked": fields_checked,
+        }),
+        warnings,
+    ))
 }
 
 /// `state get <module> [--human]`：查询指定模块迁移状态。

@@ -1449,5 +1449,97 @@ fn smoke_graph_export_invalid_format() {
         let (code, json) = run(&["graph", "export", "--format", "xml"]);
         assert_eq!(code, 1, "不支持的格式应报错: {json}");
         assert_eq!(json["status"], "error");
+// === validate config 测试 ===
+
+#[test]
+fn smoke_validate_config_no_file() {
+    // 无配置文件时：status=warning（有 warning 降级），valid=true。
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let (code, json) = run(&["validate", "config"]);
+        assert_eq!(code, 0, "无配置文件应成功: {json}");
+        // 有 warning 时 Response::ok_with_warnings 会降级 status 为 warning。
+        assert_eq!(json["status"], "warning");
+        assert_eq!(json["data"]["valid"], true);
+        assert_eq!(json["data"]["fields_checked"], 0);
+        // 应有 warning 提示未找到配置文件。
+        let warnings = json["warnings"].as_array().expect("应有 warnings 字段");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.as_str().unwrap().contains("未找到配置文件")),
+            "应有'未找到配置文件'警告: {json}"
+        );
+    });
+}
+
+#[test]
+fn smoke_validate_config_valid() {
+    // 合法配置文件、所有路径存在：status=ok，valid=true。
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        // 先 init 生成合法配置文件，再创建 source_root 和 rust_root 目录。
+        let _ = run(&["init"]);
+        std::fs::create_dir_all("src").unwrap();
+        std::fs::create_dir_all("rust-src").unwrap();
+        let (code, json) = run(&["validate", "config"]);
+        assert_eq!(code, 0, "合法配置应成功: {json}");
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["data"]["valid"], true);
+        assert_eq!(json["data"]["fields_checked"], 5);
+        assert_eq!(json["data"]["config_path"], ".rustmigrate.toml");
+    });
+}
+
+#[test]
+fn smoke_validate_config_invalid_toml() {
+    // 非法 TOML 语法：应报错。
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        std::fs::write(".rustmigrate.toml", "这不是合法的 [[[toml").unwrap();
+        let (code, json) = run(&["validate", "config"]);
+        assert_eq!(code, 1, "非法 TOML 应报错: {json}");
+        assert_eq!(json["status"], "error");
+        assert_eq!(json["data"]["kind"], "config");
+    });
+}
+
+#[test]
+fn smoke_validate_config_warnings() {
+    // 字段值不合理时产出 warnings。
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let config = r#"
+[project]
+name = "test"
+source_root = "nonexistent_src"
+rust_root = "nonexistent_rust"
+
+[strategy]
+max_retry_rounds = 0
+
+[testing]
+coverage_threshold = 200
+
+[orchestration]
+subagent_timeout_secs = 0
+"#;
+        std::fs::write(".rustmigrate.toml", config).unwrap();
+        let (code, json) = run(&["validate", "config"]);
+        assert_eq!(
+            code, 0,
+            "配置校验应成功（问题走 warnings 不走 error）: {json}"
+        );
+        // 有不合理字段时 valid=false。
+        assert_eq!(json["data"]["valid"], false);
+        // status 应降级为 warning。
+        assert_eq!(
+            json["status"], "warning",
+            "有 warnings 时 status 应降级: {json}"
+        );
+        let warnings = json["warnings"].as_array().expect("应有 warnings 字段");
+        // 至少应有：source_root 不存在、rust_root 不存在、max_retry_rounds=0、
+        // coverage_threshold>100、subagent_timeout_secs=0
+        assert!(warnings.len() >= 4, "应有至少 4 条 warnings: {json}");
     });
 }
