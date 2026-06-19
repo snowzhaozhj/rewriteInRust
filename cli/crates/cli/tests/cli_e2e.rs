@@ -66,6 +66,15 @@ fn run(args: &[&str]) -> (i32, Value) {
     (code, json)
 }
 
+fn build_graph_for_query() {
+    let (code, json) = run(&["graph", "build", "--root", "src"]);
+    assert_eq!(code, 0, "graph build 应成功，不能继续查询图: {json}");
+    assert!(
+        Path::new(".rust-migration/source-graph.db").exists(),
+        "graph build 成功后应生成 source-graph.db: {json}"
+    );
+}
+
 /// 准备一个 linear-deps fixture 的临时副本目录。
 fn temp_linear_project() -> tempfile::TempDir {
     let tmp = tempfile::tempdir().unwrap();
@@ -259,7 +268,7 @@ fn smoke_graph_build_full_flag() {
 fn smoke_graph_stats() {
     let project = temp_linear_project();
     with_cwd(project.path(), || {
-        let _ = run(&["graph", "build", "--root", "src"]);
+        build_graph_for_query();
         let (code, json) = run(&["graph", "stats"]);
         assert_eq!(code, 0, "graph stats 应成功: {json}");
         assert_eq!(json["status"], "ok");
@@ -271,7 +280,7 @@ fn smoke_graph_stats() {
 fn smoke_graph_deps() {
     let project = temp_linear_project();
     with_cwd(project.path(), || {
-        let _ = run(&["graph", "build", "--root", "src"]);
+        build_graph_for_query();
         // index.ts 依赖 service.ts，service.ts 依赖 utils.ts（传递闭包应含两者）。
         let (code, json) = run(&["graph", "deps", "index.ts"]);
         assert_eq!(code, 0, "graph deps 应成功: {json}");
@@ -289,7 +298,7 @@ fn smoke_graph_deps() {
 fn smoke_graph_rdeps() {
     let project = temp_linear_project();
     with_cwd(project.path(), || {
-        let _ = run(&["graph", "build", "--root", "src"]);
+        build_graph_for_query();
         // utils.ts 被 service.ts 直接依赖，也被 index.ts 传递依赖。
         let (code, json) = run(&["graph", "rdeps", "utils.ts"]);
         assert_eq!(code, 0, "graph rdeps 应成功: {json}");
@@ -314,7 +323,7 @@ fn smoke_graph_rdeps() {
 fn smoke_graph_rdeps_leaf_is_empty() {
     let project = temp_linear_project();
     with_cwd(project.path(), || {
-        let _ = run(&["graph", "build", "--root", "src"]);
+        build_graph_for_query();
         let (code, json) = run(&["graph", "rdeps", "index.ts"]);
         assert_eq!(code, 0, "graph rdeps 应成功: {json}");
         assert_eq!(json["status"], "ok");
@@ -323,11 +332,45 @@ fn smoke_graph_rdeps_leaf_is_empty() {
 }
 
 #[test]
+fn smoke_graph_rdeps_true_transitive_closure() {
+    let project = tempfile::tempdir().unwrap();
+    let src = project.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("a.ts"),
+        "import { b } from './b';\nexport const a = b + 1;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        src.join("b.ts"),
+        "import { c } from './c';\nexport const b = c + 1;\n",
+    )
+    .unwrap();
+    std::fs::write(src.join("c.ts"), "export const c = 1;\n").unwrap();
+
+    with_cwd(project.path(), || {
+        build_graph_for_query();
+        let (code, json) = run(&["graph", "rdeps", "c.ts"]);
+        assert_eq!(code, 0, "graph rdeps 应成功: {json}");
+        assert_eq!(json["status"], "ok");
+        let rdeps = json["data"]["dependents"].as_array().unwrap();
+        assert!(
+            rdeps.iter().any(|d| d.as_str().unwrap().contains("b.ts")),
+            "c.ts 的直接反向依赖应含 b.ts: {rdeps:?}"
+        );
+        assert!(
+            rdeps.iter().any(|d| d.as_str().unwrap().contains("a.ts")),
+            "c.ts 的传递反向依赖应含 a.ts: {rdeps:?}"
+        );
+    });
+}
+
+#[test]
 fn smoke_graph_rdeps_cycle_excludes_start() {
     let project = tempfile::tempdir().unwrap();
     copy_dir(&fixtures_dir().join("circular-deps"), project.path());
     with_cwd(project.path(), || {
-        let _ = run(&["graph", "build", "--root", "src"]);
+        build_graph_for_query();
         let (code, json) = run(&["graph", "rdeps", "handler.ts"]);
         assert_eq!(code, 0, "graph rdeps 应成功: {json}");
         assert_eq!(json["status"], "ok");
@@ -351,7 +394,7 @@ fn smoke_graph_rdeps_cycle_excludes_start() {
 fn smoke_graph_interfaces() {
     let project = temp_linear_project();
     with_cwd(project.path(), || {
-        let _ = run(&["graph", "build", "--root", "src"]);
+        build_graph_for_query();
         let (code, json) = run(&["graph", "interfaces", "utils.ts"]);
         assert_eq!(code, 0, "graph interfaces 应成功: {json}");
         assert_eq!(json["status"], "ok");
@@ -363,7 +406,7 @@ fn smoke_graph_interfaces() {
 fn smoke_graph_deps_missing_module_errors() {
     let project = temp_linear_project();
     with_cwd(project.path(), || {
-        let _ = run(&["graph", "build", "--root", "src"]);
+        build_graph_for_query();
         let (code, json) = run(&["graph", "deps", "does-not-exist.ts"]);
         assert_eq!(code, 1, "不存在的模块应报错");
         assert_eq!(json["status"], "error");
