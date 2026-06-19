@@ -1,7 +1,10 @@
 //! FFI binding 桩代码生成。
 //!
-//! 为降级 FFI 的模块生成 napi-rs 风格的 FFI 绑定桩代码，
-//! 使无法翻译的模块通过 FFI 桥接保持可用。
+//! TODO(M3-FFI): 当前生成 napi-rs `#[napi]` 桩，但 napi-rs 方向是 Node.js→Rust，
+//! 而降级 FFI 的需求是 Rust→TS（Rust 端调用未翻译的 TS 模块）。方向不匹配。
+//! 可选方案：rquickjs（轻量 QuickJS 嵌入）/ deno_core（V8 嵌入）/ 子进程桥接。
+//! M2 阶段 degrade_ffi 实际无触发路径（headless 走 degrade_skip），Sprint F 实测时再定。
+//! `DegradeReport` 和 `select_cycle_break_point` 独立有价值，不受此影响。
 
 use std::fmt::Write as _;
 use std::path::Path;
