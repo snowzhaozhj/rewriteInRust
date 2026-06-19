@@ -5,6 +5,7 @@ pub mod lang;
 pub mod merge;
 pub mod process;
 pub mod profile;
+pub mod reconcile;
 pub mod response;
 pub mod scaffold;
 pub mod state;
