@@ -5,7 +5,7 @@
 //!
 //! 数据流约定（见 `docs/design/04-toolchain.md § 5.7.3`）：
 //! - `graph build` 解析源码写入 `.rust-migration/source-graph.db`（SQLite）；
-//! - `graph topo-sort` / `deps` / `interfaces` / `stats` 从该 db 读取；
+//! - `graph topo-sort` / `deps` / `rdeps` / `interfaces` / `stats` 从该 db 读取；
 //! - 迁移状态文件位于 `.rust-migration/migration-state.json`。
 
 use std::io::Write;
@@ -122,6 +122,8 @@ pub enum GraphCommands {
     TopoSort,
     /// 查询模块的正向依赖（imports 边的传递闭包）。
     Deps { module: String },
+    /// 查询模块的反向依赖（imports 入边的传递闭包）。
+    Rdeps { module: String },
     /// 输出模块的导出接口签名。
     Interfaces {
         module: String,
@@ -323,6 +325,7 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
             // topo-sort 有环时需非零退出，单独处理退出码。
             GraphCommands::TopoSort => cmd_graph_topo_sort(writer),
             GraphCommands::Deps { module } => emit(writer, cmd_graph_deps(module)),
+            GraphCommands::Rdeps { module } => emit(writer, cmd_graph_rdeps(module)),
             GraphCommands::Interfaces { module, deps_of } => {
                 emit(writer, cmd_graph_interfaces(module, deps_of.as_deref()))
             }
@@ -719,8 +722,43 @@ fn cmd_graph_topo_sort<W: Write>(writer: &mut W) -> i32 {
 fn cmd_graph_deps(module: &str) -> CmdResult {
     let graph = load_graph()?;
     let start = resolve_file_node(&graph, module)?;
+    let dependencies = collect_imports_closure(&graph, &start, DependencyDirection::Forward);
 
-    // BFS 遍历 imports 出边，收集传递依赖（不含自身）。
+    Ok((
+        json!({
+            "module": start.to_string(),
+            "dependencies": dependencies,
+        }),
+        Vec::new(),
+    ))
+}
+
+/// `graph rdeps <module>`：模块反向依赖（imports 入边的传递闭包，BFS）。
+fn cmd_graph_rdeps(module: &str) -> CmdResult {
+    let graph = load_graph()?;
+    let start = resolve_file_node(&graph, module)?;
+    let dependents = collect_imports_closure(&graph, &start, DependencyDirection::Reverse);
+
+    Ok((
+        json!({
+            "module": start.to_string(),
+            "dependents": dependents,
+        }),
+        Vec::new(),
+    ))
+}
+
+#[derive(Clone, Copy)]
+enum DependencyDirection {
+    Forward,
+    Reverse,
+}
+
+fn collect_imports_closure(
+    graph: &SourceGraph,
+    start: &NodeId,
+    direction: DependencyDirection,
+) -> Vec<String> {
     let mut visited: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut queue: std::collections::VecDeque<NodeId> = std::collections::VecDeque::new();
     queue.push_back(start.clone());
@@ -728,26 +766,23 @@ fn cmd_graph_deps(module: &str) -> CmdResult {
     seen.insert(start.as_str().to_owned());
 
     while let Some(cur) = queue.pop_front() {
-        for (target, edge_type) in graph.outgoing_edges(&cur) {
+        let edges = match direction {
+            DependencyDirection::Forward => graph.outgoing_edges(&cur),
+            DependencyDirection::Reverse => graph.incoming_edges(&cur),
+        };
+        for (node, edge_type) in edges {
             if edge_type != EdgeType::Imports {
                 continue;
             }
-            let tid = target.id.as_str().to_owned();
-            if seen.insert(tid.clone()) {
-                visited.insert(tid);
-                queue.push_back(target.id.clone());
+            let id = node.id.as_str().to_owned();
+            if seen.insert(id.clone()) {
+                visited.insert(id);
+                queue.push_back(node.id.clone());
             }
         }
     }
 
-    let deps: Vec<String> = visited.into_iter().collect();
-    Ok((
-        json!({
-            "module": start.to_string(),
-            "dependencies": deps,
-        }),
-        Vec::new(),
-    ))
+    visited.into_iter().collect()
 }
 
 /// `graph interfaces <module> [--deps-of <target>]`：模块导出接口签名。
