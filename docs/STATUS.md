@@ -5,64 +5,76 @@
 ## 当前位置
 
 - **Milestone**: M1 MVP ✅ → **M2 质量提升**
-- **Phase**: M2 质量提升 **Sprint A 进行中**（计划见 `docs/PLAN-M2.md`，复审台账 `docs/review/M2-plan-review-2026-06-15.md`）
-- **已完成（文档系列，分支 `docs/m2-design-03`，整体一个 PR）**:
-  - ✅ **M2-DESIGN-03**（commit `eb8aeb0`）——D3/D4/D5 同步：04 §5.7.3 + 08 §M2 + 06 §10.5 集中 writer(D5)；06 §10.5 新增 D3 约束包小节；03 新增 §4.3.2 TIER-01 分档(D4)。design-checker A-E 通过、2 处连带 MISMATCH 已修
-  - ✅ **M2-DESIGN-01/02**（commit `13ca06a`）——done 硬终态(D1) + blocked 仅活跃状态进入(D2)，02 §3.4 对齐 09 附录 A（09 已正确，仅 02 需改）
-- **文档 PR**: [#14](https://github.com/snowzhaozhj/rewriteInRust/pull/14)（DESIGN-01/02/03）审查已闭环——design-checker 4 轮 + codex 对抗审查 1 轮，查出并修复 6 处 D5/D4 同步遗漏 + 1 处 09 risk 标注缺口，最终零 MISMATCH。pr-review-toolkit/code-review skill 因纯文档 PR（代码导向）跳过
-  - **追加修正（用户追问触发）**：① D5 写模型精确化——原「翻译期 db 只读 / 唯一写入口 graph build」遗漏 run 期编排器对 `migration_status` 的回写（与 PLAN-M2 D3 line 129/381 矛盾），统一为「SubAgent 只读 + 编排器集中 writer：图结构 + 终态 migration_status 回写」（04/06/08 + PLAN-M2 §2 D5）；② 04 §5.7.1 新增「迁移映射机制接线状态」blockquote——`maps_to`/`RustTarget` 为前瞻预留（当前 build.rs 不产生）、依赖链翻译不依赖此机制（靠源码依赖边+state.json+直读 rust_root/.rs+cargo check），`migration_status` M2 D3 计划回写。design-checker 复检零 MISMATCH + 代码事实佐证
-  - **待用户审阅合并**
-- ✅ **M2-VER-05 + REFAC-05 + REFAC-07**（commit `64b8b67`，A 档「加载健壮性」批）——REFAC-05: parse_node_extra 暴露 serde 错误细节到 warning；VER-05: timestamp 格式校验**下沉到 `Timestamp` 自定义 `Deserialize`**（反序列化即校验，类型层保证全字段覆盖、不可能漏）——经审查后重构，删除了手写 `validate_loaded`(~90 行) + `InvalidTimestamp` 变体 + kind 映射（REFAC-07 后置校验钩子随之移除）；非法 timestamp 现归 Json 错误（kind=json）并触发 backup 回退（视为文件损坏，语义更一致）。净减 ~75 行。205 测试全过、clippy 零
-- ✅ **M2-PERF-BASE**（commit `a7851d1` + v2 增强）——M1 性能基线快照落盘。`tools/perf-baseline/`：`measure.py`(python3 无依赖, schema v2) + `baseline.json` + README。**双维度**：① **真实项目（F6 硬门）**——复用 graph-validation/repos.txt 钉死仓库，fp-ts ~314ms(2365N/5828E)、rxjs ~99ms(807N/2168E)、zod ~99ms(538N/1207E)，±10%=±31ms@fp-ts 区分度好；② **fixture（仅冒烟参考，不判）**——~22ms 由进程启动主导、区分度低。`just perf-baseline`(刷新) / `just perf-baseline-check`(F6 回归门，仅真实项目超容差 FAIL)。仓库 clone 到共享 `.work/`(gitignore)，measure 仅本地 checkout 不联网。单模块翻译时长 LLM 驱动不可脚本化、M1 无记录 → `not_measured` + Sprint F 人工协议
-- **M2 B 档「封装类」批**（分支 `feat/m2-refac-06`）——经封装价值复审，仅保留有不变量依据的部分：
-  - ✅ **REFAC-14**(`d09109b`): ErrorData 加 `details: Option<Value>` + `#[serde(flatten)]`，`data.cycle_path` 保持顶层（对齐 09 § Step 2.8 + analyze.md），cmd_graph_topo 环分支走统一 ErrorData
-  - ✅ **REFAC-13 仅 ToolStatus 保留**(`501b446`): 三态收敛为私有枚举 `ToolProbe{Missing|ProbeFailed|Available}`——**真价值=让非法字段组合不可表示**；自定义 Serialize 保 tool_checks 扁平契约。PLAN 标 types/state.rs 系笔误，实际 profile/tools.rs
-  - ⏪ **REFAC-06 已回退**: MigrationSequence 私有化+getter 是**过度封装**——Rust 纯数据 struct 惯例即 pub 字段（无字段间不变量、不跨 crate、外部仅 `&` 只读，私有化零收益、纯增代码）。回退为 pub 字段删 getter，SCALE-P 直接读 `sequence.parallel_groups`
-  - ⏪ **REFAC-13 的 LocReport totals 私有化已回退**: 同 REFAC-06 病因，字段改回 pub、删 4 个 getter；**保留 `from_languages`**（把累加收成单一入口，有整洁价值）
-  - **教训**：Rust 不套 Java「全字段私有+getter」；私有化仅当 ①字段间有不变量 或 ②跨 crate API 稳定性。M1 review 按惯例提的封装债须按此甄别。211 测试全过、clippy 零
-- **执行模式（2026-06-15 定，详见 PLAN-M2 §14「并行执行模式」）**：sprint 内独立任务用 **worktree 隔离 subAgent 每波 3-4 路并行**，主会话当瘦编排器（派发→收摘要→review→集中 merge 解冲突→整体 `just ci`→**同 sprint 合批 PR**）。碰同一热点文件（lib.rs/graph.rs/build.rs/machine.rs）的任务合成一个工作单元串行做
-- ✅ **Sprint A C 档收尾（波次1，2 路 worktree 并行，分支 `feat/m2-sprint-a-finish`）**——首次走「并行执行模式」：
-  - ✅ **VER-04**(`70d3a07`): populate 孤儿 pending 清理——新增 `MigrationStateMachine::retain_modules(live_keys)`，重填前剔除源码图已无对应节点的 pending 模块（key 用 `id.to_string()` vs `as_str()` 已核一致），被清理 key 经 warning 降级告知；docstring 补孤儿清理流程；record-subagent-call 无 init 返回 `FileNotFound`（非 panic）e2e
-  - ✅ **COMPAT-01**(`9c7e62e`): version 写入已就位（`STATE_SCHEMA_VERSION="1.0.0"` 改 pub）；validate 新增 `check_version_compat`——语义化**主版本号**判兼容（空/格式非法/跨主版本 → SchemaValidation 并提示当前支持版本，同主版本放行）
-  - ✅ **ADV-06**(`85b6ed4`): stats compare 非占位——`stats/compare.rs` 三维度（LOC/函数数/控制流嵌套）比值 `rust/source`，分母 0→`ratio:null`。源码侧复用 tree-sitter（`build_graph_ts` 同口径），**Rust 侧词法扫描**（无 tree-sitter-rust 依赖，`method` 字段标注手段；偏差经 review 认可——设计评分卡 Rust 侧本标注 tokei/scc）；目录缺→warning 跳过不报错
-  - **质量门 + 审查闭环**：PR [#17](https://github.com/snowzhaozhj/rewriteInRust/pull/17)。design-checker（零必修 MISMATCH）+ code-reviewer（1 important + 2 nit）已闭环修复：char 字面量误吞后续代码（important，含引号 `'"'`）、method→`CountMethod` enum、空源码图跳过孤儿清理（防整表清空）、`version` JSON 键加 serde rename 对齐设计 `schema_version`（06 §10.0.2/§10.7）、错误码 TODO 指向 ERR-01、09 示例同步。整体 `just ci` 全过（clippy/deny/fmt/shellcheck；新增 char/转义/生命周期 3 测试）。strsim/toml duplicate 系 tokei 既有传递依赖非本次引入
-  - **用户复审追加（设计层，commit `3160a55`）**：用户质疑 stats compare ① **强绑 TS**（measure_source 写死 + 非 TS 源静默收集 0 文件给半残比值）② **两侧控制流/函数计数口径不一致**（源 AST 精确 vs Rust 词法启发式，关键字集/算法均不同）。处理——问题1：`cmd_stats_compare` 加 `source_language` gate，非 TS 显式报错 + e2e；问题2 按「文档化 + nesting 降为参考」（**不改算法**，接受为粗粒度信号）——决策写入**设计文档 03 §4.3 Step 4.5**（函数/嵌套比仅作粗粒度告警、行数比为门禁主依据），compare.rs 注释精简指向 03、不二次文档化。**教训**：自动审查链（实现 agent + design-checker + code-reviewer + 主会话）全部只查「局部正确性」，漏了「度量学有效性/功能目的」层——design-checker 还把控制流维度标 MATCH。审查需上升到功能目的层。**待用户审阅合并**
-  - CTX-01 需真实项目实测 → 推迟 Sprint F
-- ✅ **Sprint B 完成（分支 `feat/m2-sprint-b`，PR 待提）**：执行模式按热点文件分组——隔离文件走 worktree subAgent 并行，热点簇由主会话串行做
-  - ✅ **REFAC-12**(merge `8229851`，worktree agent): extract_class 递归改走完整 `walk_ast`，删死代码 `walk_ast_calls_only`
-  - ✅ **REFAC-15**(merge `1890e95`，worktree agent): `humanize_module_key` + `state get --human`（**触 CLI JSON 契约**）
-  - ✅ **REFAC-03+04**(`8825e61`): `sub_kind`→`EdgeSubKind`、`migration_status`→`ModuleStatus`、`rust_kind`→`RustKind`
-  - ✅ **REFAC-11**(`ae76ca3`): fixup_extends 名称索引 O(N·E)→O(1)
-  - ✅ **REFAC-02**(`8abcd45`): ImportInfo/ImportedSymbol 布尔→ImportKind/SymbolKind 枚举
-  - ✅ **REFAC-01**(`698f17a`): `SourceNode::new()` 构造器收敛 18 个冗长字面量，字段保持 pub（B 档教训：cli 跨 crate 读，不套 getter）
-  - ✅ **REFAC-09**: 确认已在先前会话完成（`extract_var_functions` 已覆盖 arrow function，含测试 `exported_arrow_const_produces_function_node`），本次跳过
-  - ✅ **REFAC-10**(`7132742`，档1): 跨文件方法调用解析——constructor_bindings（`const x = new Foo()` → `x → Foo`） + add_cross_file_edges 三级方法调用策略（本地绑定/import_map/全图唯一）。diamond-deps 新增 `index.ts→AuthService.authenticate` 边（3→4 Calls 边）。含 `await new Foo()` 穿透。3 个专项测试
-  - 质量门：全量 `just ci` 通过（237 测试 / clippy -D / deny / fmt / shellcheck）
-- ✅ **Sprint C 完成（分支 `feat/m2-sprint-c`，PR [#19](https://github.com/snowzhaozhj/rewriteInRust/pull/19)）**：核心功能双线——自适应分档 + 并行 sprint + graduate
-  - **线 1 自适应循环**：
-    - ✅ **TIER-01a**(`6fcc85f`): ModuleTier 枚举(Trivial/Standard/Full) + tree-sitter AST 语义检测(`detect.rs`) + 删除 risk 死字段 + populate-modules `--root` 集成
-    - ✅ **TIER-01b/c/d**(`4311288`): analyzer.md tier_distribution 输出 + run.md §0 分档路由 + 失败自动升档
-    - ✅ **ADV-07**(`4311288`): headless TODO safe-default 策略 + paused→自动 degrade_skip + 02/09 设计文档同步
-  - **线 2 并行 sprint 基础**：
-    - ✅ **SCALE-P**(`f31c89e`): populate 按 parallel_groups 拓扑层级分配 sprint 号 + `--single-sprint` M1 兼容
-    - ✅ **SCALE-SPRINT**(`f482489`): sprint 推进逻辑 try_advance_sprint(Advanced/AllCompleted/NotReady) + `state advance-sprint` CLI
-    - ✅ **ADV-03**(`74aee6d`): graduate 毕业评估命令 + graduation-report.json + 前置检查(SprintLoop+全模块终态)
-  - **审查修复**(`3f32980`): 4 视角（主审+设计契约+专项+异构交叉）8 项 important 全部修复：
-    数值计算/动态类型/any 危险信号补充、const 初始化含调用检测、async function_expression、SprintAdvanceResult 三态、completed_modules is_terminal()、doc comment 截断修复、graduate 绕过阻止、report fsync
-  - 质量门：`just ci` 全过（261 测试 / clippy -D / deny / fmt / shellcheck）
-  - **待用户审阅合并**
-- **下一步**（**新会话从这里开始**）: Sprint C PR 合并后转 **Sprint D（并行编排 + 高级功能）** ∥ **Sprint E（验证+CLI扩展）**
-  - ✅ **Sprint E / M2-CLI-01**（分支 `feat/m2-cli-01-rdeps`，PR 待提）——实现 `rustmigrate graph rdeps <module>` 反向依赖查询：`GraphCommands::Rdeps` 接入 CLI 路由，复用 `resolve_file_node` + `imports` 边传递闭包 BFS；core 新增 `SourceGraph::incoming_edges` 支撑反向边遍历；输出 `{module, dependents}` 且 module/dependents 使用 NodeId 原值，未破坏 `graph deps` / `state populate` key 契约。测试覆盖直接+传递反向依赖、叶子为空、环依赖中排除起点。`just ci` 全绿（269 tests / clippy -D / fmt / deny / shellcheck）。审查：code-reviewer Important 无；design-checker 必修问题无，通过
-  - Sprint D/E 可并行；下一批推荐：Sprint E 继续 CLI-02/03 或 Sprint D 关键路径 SCALE-02
-  - Sprint D 关键路径：SCALE-02（worktree 写隔离）→ SCALE-01（Workflow 批量）→ SCALE-LOCK → PETGRAPH-01
-  - Sprint E 独立：VER-01/02、COV-01、CLI-02~06、ERR-01、PARITY-01、CICD-01
-- **复审结论**：草稿方向正确，已修正 3 处自相矛盾 + 1 处悬空引用 + 撤销 tier_signals 过度设计 + 补 6 项缺口；新增 D5（SQLite 集中 writer）+ 3 任务（DESIGN-03/PERF-BASE/CLI-06 auto-unblock）；任务总数 52→55。3 个战略决策经用户批准（SQLite 门禁降级 / 60min 单模块 / 状态机程序化推迟+抽 auto-unblock）
-- **D3 写隔离方案已定稿（重点，见 [MDR-003](decisions/003-m2-parallel-write-isolation.md)）**：经 codex 四轮对抗审查 + 用户多次质疑收敛为 **git worktree + 约束包**（否决「隔离 crate 副本/轻量 staging/多 crate workspace 作并行单元」）。核心：
-  - worktree 内完整 crate 真自检（保留 M1 per-module 编译反馈环）；**两层 done**：`agent_done`(自检) vs `done`(整组 check)
-  - 共享编辑策略 **D+A**：porting 规则最小化共享写面（用既有 API/`Error::Other`/`anyhow` 逃生口）+ worktree 自由改+回传 touched-list + 禁删/改签名既有共享 API；**不用声明式 schema**
-  - 共享 .rs 冲突 → 串行 rebase 重译（**非 LLM 手解**）+ **reconcile 轮次上限防活锁**；整组 check 为唯一 done 真门
-  - **进度保证**：结构无死锁，最坏退化全串行=M1 速度、不卡死；headless 靠 ADV-07 自动 degrade（**须改状态机**）+ auto-unblock 推进
-  - **Sprint F 必实测**（判断有不确定性，已留逃生口）：首轮编译通过率 / worktree target 成本 / reconcile 频率；数据 favor 则降级轻量 staging
+- **Phase**: M2 Sprint D/E **全部完成**，待进入 **Sprint F 验收**
+- **测试基线**: 399 测试 / clippy -D / deny / fmt / shellcheck 全绿
+
+### Sprint D/E 完成总结（3 个 PR，3 波并行执行）
+
+| 波次 | PR | 测试 | 任务 |
+|------|-----|------|------|
+| 波次 1 | [#22](https://github.com/snowzhaozhj/rewriteInRust/pull/22) ✅ | 269→291 | VER-01/02, CICD-01+COV-01, PARITY-01, ADV-04/05/09/10 |
+| 波次 2 | [#23](https://github.com/snowzhaozhj/rewriteInRust/pull/23) ✅ | 291→353 | CLI-01~06, ERR-01, SCALE-02(全部子任务) |
+| 波次 3 | [#24](https://github.com/snowzhaozhj/rewriteInRust/pull/24) 待合并 | 353→399 | SCALE-03, SCALE-01, SCALE-LOCK, PETGRAPH-01, ADV-01/02/08 + 审查修复 |
+
+### Sprint D 任务清单
+
+| 任务 ID | 状态 | 内容 |
+|---------|------|------|
+| M2-SCALE-02 | ✅ 波次2 | 写隔离：types/parallel.rs + run.md 通信协议（删 1460 行过度设计） |
+| M2-SCALE-01 | ✅ 波次3 | Workflow 批量翻译：新建 workflow.md（sprint 级并行编排） |
+| M2-SCALE-LOCK | ✅ 波次3 | 全局锁改造：编排器持锁，SubAgent 不取锁 |
+| M2-PETGRAPH-01 | ✅ 波次3 | petgraph 副本隔离验证 + WAL 回归（7 测试） |
+| M2-ADV-01 | ✅ 波次3 | 多候选生成：translator 多策略 + verifier 选优 |
+| M2-ADV-02 | ✅ 波次3 | 降级 FFI：binding 桩 + 降级报告 + 环断点选择（**TODO(M3-FFI): napi-rs 方向不匹配，Sprint F 再定**） |
+| M2-ADV-04 | ✅ 波次1 | graph build --profile 性能画像 |
+| M2-ADV-05 | ✅ 波次1 | graph interfaces --deps-of 批量输出 |
+| M2-ADV-08 | ✅ 波次3 | profile 自动定位 analysis-tools.json |
+| M2-ADV-09 | ✅ 波次1 | 子进程超时（wait-timeout） |
+| M2-ADV-10 | ✅ 波次1 | persistence 配置段（backup_on_write/retention_days） |
+
+### Sprint E 任务清单
+
+| 任务 ID | 状态 | 内容 |
+|---------|------|------|
+| M2-VER-01 | ✅ 波次1 | proptest 图操作不变量（7 个属性测试） |
+| M2-VER-02 | ✅ 波次1 | cargo-fuzz 解析器健壮性（2 fuzz target） |
+| M2-COV-01 | ✅ 波次1 | 覆盖率门禁（cargo-llvm-cov CI 集成） |
+| M2-CICD-01 | ✅ 波次1 | GitHub Actions CI（5 并行 job） |
+| M2-PARITY-01 | ✅ 波次1 | PARITY.md 等价深度扩展 |
+| M2-SCALE-03 | ✅ 波次3 | 增量图更新：三级变更检测 + 反向 BFS + 熔断 |
+| M2-CLI-01 | ✅ 波次2 | graph rdeps 反向依赖 |
+| M2-CLI-02 | ✅ 波次2 | graph cycles SCC 环检测 |
+| M2-CLI-03 | ✅ 波次2 | graph export JSON/DOT/Mermaid |
+| M2-CLI-04 | ✅ 波次2 | validate config |
+| M2-CLI-05 | ✅ 波次2 | state update --cas-version CAS 乐观锁 |
+| M2-CLI-06 | ✅ 波次2 | validate state --check-blocked --auto-unblock |
+| M2-ERR-01 | ✅ 波次2 | 错误码枚举化（E001-E015） |
+
+### 审查修复要点（波次 3）
+
+- profile 参数透传（增量模式下 --profile 全零 → 修复）
+- remove_stale_fingerprints 事务保护
+- structure_hash 纳入 calls 摘要（防 Calls 边过期）
+- FFI 桩参数名 sanitize + Rust 关键字 r# 转义
+- cmd_graph_build 全量路径指纹代码消重（-26 行）
+- skip.effort 按 downstream_count 分档
+- 全量构建一次遍历同时产出图和指纹（消除双遍历）
+
+### 已知问题 / TODO
+
+- **TODO(M3-FFI)**: `scaffold/ffi.rs` 生成 napi-rs `#[napi]` 桩方向不匹配（napi-rs 是 Node.js→Rust，降级需 Rust→TS）。M2 无触发路径（headless 走 degrade_skip）。Sprint F 实测时选定方案（rquickjs/deno_core/子进程桥接）
+- 设计文档 DEVIATION 4 项待 MDR：fingerprint 提取范围、事务类型 DEFERRED、WAL pragma 未设置、exported_names 额外维度
+
+### 下一步
+
+**新会话从这里开始** → **Sprint F 验收**（PLAN-M2 §9，7-10 天）：
+- 合并 PR #24 后开始
+- F1: 真实项目端到端（3 个 5K-20K 行 TS 项目）
+- F2: 降级验收（circular-deps FFI）
+- F3: 并行吞吐（≥1.5 模块/小时）
+- F4: 性能无退化（±10%）
+- F5: 测试质量（proptest 1000 次 + fuzz 24h）
+- F6: 覆盖率 ≥70%
 
 ## M1 完成总结
 
