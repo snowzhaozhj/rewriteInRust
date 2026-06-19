@@ -33,6 +33,7 @@ thiserror = "1"
 # Schema 校验
 jsonschema = "0.18"
 toml = "0.8"
+toml_edit = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 
 # 子进程超时

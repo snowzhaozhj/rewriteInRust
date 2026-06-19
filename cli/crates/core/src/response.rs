@@ -142,6 +142,8 @@ impl From<MigrateError> for Response<ErrorData> {
             MigrateError::LockConflict(_) => "lock_conflict",
             MigrateError::NotImplemented(_) => "not_implemented",
             MigrateError::Timeout { .. } => "timeout",
+            MigrateError::TomlEdit(_) => "toml",
+            MigrateError::Merge(_) => "merge",
         };
         Self {
             status: Status::Error,
