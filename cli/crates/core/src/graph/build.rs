@@ -5,6 +5,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use serde::Serialize;
 
 use crate::error::{MigrateError, Result};
 use crate::lang::{FileAnalysis, LanguageAdapter, SymbolKind};
@@ -12,6 +15,20 @@ use crate::types::common::{NodeId, EXCLUDED_DIRS};
 use crate::types::graph::{Dependency, EdgeSubKind, EdgeType, NodeType};
 
 use super::SourceGraph;
+
+/// `graph build --profile` 输出的性能画像。
+///
+/// 字段对齐设计文档 04-toolchain.md § 5.7.4.1（当前阶段仅含已实现的计时项；
+/// 社区检测 batch_count/batch_sizes 和 memory_peak_mb 待 M2 补充）。
+#[derive(Debug, Clone, Serialize)]
+pub struct BuildProfile {
+    /// 文件扫描 + AST 解析耗时（毫秒）。
+    pub parse_ms: u64,
+    /// 边构建耗时（extends 修正 + 跨文件 imports/calls 解析，毫秒）。
+    pub edge_build_ms: u64,
+    /// 总耗时（解析 + 边构建，不含持久化，毫秒）。
+    pub total_ms: u64,
+}
 
 /// 从项目根目录构建源码图。
 ///
@@ -81,6 +98,103 @@ pub fn build_graph_ts(root: &Path) -> Result<SourceGraph> {
     let mut adapters: Vec<Box<dyn LanguageAdapter>> =
         vec![Box::new(crate::lang::typescript::TypeScriptAdapter::new()?)];
     build_graph(root, &mut adapters)
+}
+
+/// 带性能画像的图构建：返回 `(SourceGraph, BuildProfile)`。
+///
+/// 内部逻辑与 [`build_graph`] 相同，额外在各阶段插桩 `Instant` 计时。
+pub fn build_graph_profiled(
+    root: &Path,
+    adapters: &mut [Box<dyn LanguageAdapter>],
+) -> Result<(SourceGraph, BuildProfile)> {
+    let t_start = Instant::now();
+
+    let root = root
+        .canonicalize()
+        .map_err(|_| MigrateError::FileNotFound(root.to_path_buf()))?;
+
+    let files = collect_source_files(&root, adapters)?;
+    if files.is_empty() {
+        let elapsed = t_start.elapsed().as_millis() as u64;
+        return Ok((
+            SourceGraph::new(),
+            BuildProfile {
+                parse_ms: elapsed,
+                edge_build_ms: 0,
+                total_ms: elapsed,
+            },
+        ));
+    }
+
+    let mut graph = SourceGraph::new();
+    let mut file_analyses: HashMap<String, FileAnalysis> = HashMap::new();
+    let mut all_edges: Vec<Dependency> = Vec::new();
+
+    // 第一遍：添加所有节点，收集所有边（解析阶段）
+    for (file_path, adapter_idx) in &files {
+        let rel = make_relative(file_path, &root);
+        let source = std::fs::read_to_string(file_path).map_err(MigrateError::Io)?;
+
+        let analysis = match adapters[*adapter_idx].analyze_file(&source, &rel) {
+            Ok(a) => a,
+            Err(MigrateError::Parse { .. }) => {
+                graph
+                    .warnings
+                    .push(format!("解析跳过 {rel}: tree-sitter 解析失败"));
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+
+        for node in &analysis.nodes {
+            graph.add_node(node.clone());
+        }
+        all_edges.extend(analysis.edges.iter().cloned());
+
+        file_analyses.insert(rel, analysis);
+    }
+    let parse_ms = t_start.elapsed().as_millis() as u64;
+
+    // 边构建阶段
+    let t_edge = Instant::now();
+
+    // 修正 extends 边的目标 ID（跨文件查找），然后添加所有边
+    let fixed_edges = fixup_extends_in_edges(&graph, all_edges);
+    for edge in &fixed_edges {
+        graph.add_edge(edge.clone());
+    }
+
+    // 收集所有 adapter 的解析扩展名（去重 + 排序保证确定性）
+    let mut resolve_exts: Vec<&str> = adapters
+        .iter()
+        .flat_map(|a| a.resolve_extensions().iter().copied())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    resolve_exts.sort();
+
+    // 构建跨文件边（Imports + Calls）
+    let file_set: HashSet<String> = files.iter().map(|(p, _)| make_relative(p, &root)).collect();
+    add_cross_file_edges(&mut graph, &file_analyses, &file_set, &resolve_exts);
+
+    let edge_build_ms = t_edge.elapsed().as_millis() as u64;
+    let total_ms = t_start.elapsed().as_millis() as u64;
+
+    Ok((
+        graph,
+        BuildProfile {
+            parse_ms,
+            edge_build_ms,
+            total_ms,
+        },
+    ))
+}
+
+/// 便捷函数：用默认 TypeScript adapter 构建图（带性能画像）。
+pub fn build_graph_ts_profiled(root: &Path) -> Result<(SourceGraph, BuildProfile)> {
+    let mut adapters: Vec<Box<dyn LanguageAdapter>> =
+        vec![Box::new(crate::lang::typescript::TypeScriptAdapter::new()?)];
+    build_graph_profiled(root, &mut adapters)
 }
 
 /// 收集所有可被适配器处理的源文件，返回 (路径, 适配器索引)。

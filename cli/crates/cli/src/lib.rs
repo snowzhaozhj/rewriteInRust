@@ -17,7 +17,7 @@ use serde_json::json;
 
 use rustmigrate_core::detect::detect_tier;
 use rustmigrate_core::error::MigrateError;
-use rustmigrate_core::graph::build::build_graph_ts;
+use rustmigrate_core::graph::build::{build_graph_ts, build_graph_ts_profiled};
 use rustmigrate_core::graph::persist::{load_from_db, save_to_db};
 use rustmigrate_core::graph::topo::{detect_cycles, migration_sequence, topological_sort};
 use rustmigrate_core::graph::SourceGraph;
@@ -615,39 +615,57 @@ fn format_tool_missing(code: &str, status: &ToolStatus) -> String {
 
 /// `graph build --root <path> [--full] [--profile]`：构建图并写入 db。
 ///
-/// 当前以 TypeScript adapter 全量构建。`--full` 在 M1 等价默认（增量推 M2），
-/// `--profile` 性能画像推 M2。
+/// 当前以 TypeScript adapter 全量构建。`--full` 在 M1 等价默认（增量推 M2）。
+/// `--profile` 开启时输出 per-phase 耗时的性能画像 JSON（见 04-toolchain.md § 5.7.4.1）。
 fn cmd_graph_build(root: &Path, _full: bool, profile: bool) -> CmdResult {
     let mut warnings: Vec<String> = Vec::new();
 
     // TODO(M2): 增量构建（file_fingerprints 跳过未变更文件）；当前 --full 无差异。
-    // TODO(M2): --profile 性能画像 JSON（见 04-toolchain.md § 5.7.4.1）。
-    if profile {
-        warnings.push("--profile 性能画像尚未实现（推迟 M2），本次按普通构建处理".to_owned());
-    }
-    // M1 暂无增量构建：无论 --full 与否都是全量。下方 `full` 字段恒 true 反映真实构建模式
-    // （原 `full: full` 默认 false 会让上层误判为增量结果）。增量推 M2。
+    // M1 暂无增量构建：无论 --full 与否都是全量。下方 `full` 字段恒 true 反映真实构建模式。
 
-    let graph = build_graph_ts(root)?;
+    let (graph, build_profile) = if profile {
+        let (g, p) = build_graph_ts_profiled(root)?;
+        (g, Some(p))
+    } else {
+        (build_graph_ts(root)?, None)
+    };
     warnings.extend(graph.warnings().iter().cloned());
 
     // 确保 `.rust-migration/` 存在后再写 db。
     std::fs::create_dir_all(work_dir())?;
     let db = db_path();
-    save_to_db(&graph, &db)?;
+
+    // 持久化计时（仅 --profile 开启时插桩）
+    let persist_ms = if profile {
+        let t = std::time::Instant::now();
+        save_to_db(&graph, &db)?;
+        Some(t.elapsed().as_millis() as u64)
+    } else {
+        save_to_db(&graph, &db)?;
+        None
+    };
 
     // 标记 graph 构建完成（若状态文件存在）。
     mark_graph_built(&mut warnings);
 
-    Ok((
-        json!({
-            "db_path": db.to_string_lossy(),
-            "node_count": graph.node_count(),
-            "edge_count": graph.edge_count(),
-            "full": true,
-        }),
-        warnings,
-    ))
+    let mut data = json!({
+        "db_path": db.to_string_lossy(),
+        "node_count": graph.node_count(),
+        "edge_count": graph.edge_count(),
+        "full": true,
+    });
+
+    // --profile：将性能画像嵌入 data.profile
+    if let (Some(bp), Some(pm)) = (build_profile, persist_ms) {
+        data["profile"] = json!({
+            "parse_ms": bp.parse_ms,
+            "edge_build_ms": bp.edge_build_ms,
+            "persist_ms": pm,
+            "total_ms": bp.total_ms + pm,
+        });
+    }
+
+    Ok((data, warnings))
 }
 
 /// 若状态文件存在，标记 `metadata.graph_build_completed = true`。
