@@ -104,8 +104,6 @@ impl From<&MigrateError> for ErrorCode {
             MigrateError::Json(_) | MigrateError::Toml(_) | MigrateError::TomlSer(_) => {
                 Self::ParseFailed
             }
-            MigrateError::TomlEdit(_) => Self::ParseFailed,
-            MigrateError::Merge(_) => Self::ConfigError,
             MigrateError::Io(_) => Self::IoError,
             MigrateError::FileNotFound(_) => Self::FileNotFound,
             MigrateError::SchemaValidation(_) => Self::SchemaValidation,
@@ -186,14 +184,6 @@ pub enum MigrateError {
     /// 子进程执行超时。
     #[error("子进程超时: {command} (超时 {timeout_secs}s)")]
     Timeout { command: String, timeout_secs: u64 },
-
-    /// TOML 编辑解析失败。
-    #[error("TOML 编辑解析错误: {0}")]
-    TomlEdit(#[from] toml_edit::TomlError),
-
-    /// 合并错误。
-    #[error("合并错误: {0}")]
-    Merge(String),
 }
 
 /// 便捷 Result 别名。

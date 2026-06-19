@@ -18,7 +18,6 @@ anyhow.workspace = true
 thiserror.workspace = true
 jsonschema.workspace = true
 toml.workspace = true
-toml_edit.workspace = true
 chrono.workspace = true
 wait-timeout.workspace = true
 
