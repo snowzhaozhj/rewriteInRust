@@ -118,6 +118,10 @@ pub struct ProjectConfig {
     pub source_commit: Option<String>,
     #[serde(default)]
     pub exclude: Vec<String>,
+    /// 语言适配器目录（含 `analysis-tools.json` 和 `porting-template.md`）。
+    /// 省略时由 SKILL.md analyze 流程按优先级自动定位。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adapter_path: Option<String>,
 }
 
 impl Default for ProjectConfig {
@@ -133,6 +137,7 @@ impl Default for ProjectConfig {
                 "dist".to_string(),
                 ".git".to_string(),
             ],
+            adapter_path: None,
         }
     }
 }

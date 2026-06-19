@@ -5,6 +5,7 @@
 
 pub mod build;
 pub mod export;
+pub mod fingerprint;
 pub mod persist;
 pub mod query;
 pub mod topo;
@@ -84,6 +85,30 @@ impl SourceGraph {
     /// 遍历所有边。
     pub fn edges(&self) -> impl Iterator<Item = &Dependency> {
         self.graph.edge_weights()
+    }
+
+    /// 删除指定文件路径关联的所有节点及其边。
+    ///
+    /// 增量更新时用于清理 STRUCTURAL 变更文件的旧数据——
+    /// 先删除旧节点+边，再重新解析写入新节点+边。
+    pub fn remove_nodes_by_file(&mut self, file_path: &str) {
+        let to_remove: Vec<(NodeId, NodeIndex)> = self
+            .index
+            .iter()
+            .filter_map(|(id, &idx)| {
+                let node = self.graph.node_weight(idx)?;
+                if node.file_path == file_path {
+                    Some((id.clone(), idx))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for (id, idx) in to_remove {
+            self.graph.remove_node(idx);
+            self.index.remove(&id);
+        }
     }
 }
 

@@ -12,7 +12,8 @@ tools: Bash, Read, Write, Grep, Glob
 
 ## 输入 / 输出契约
 
-- **对抗审查**（Phase A 后）：输入 `.rust-migration/intermediate/attempts/{module}-phase-a.rs` + 原始源码（`source-ref/`）+ 迁移规则；输出 `{module}-review.md`（含**差异列表**标题 + 修正建议 + **等价深度判定**）。L1：存在、非空、含差异列表、含等价深度标签。
+- **候选选优**（M2-ADV-01，Phase A 后、对抗审查前，仅 standard/full 档）：输入 `.rust-migration/intermediate/attempts/{module}-phase-a-candidate-{1,2}.rs` + `{module}-candidate-{1,2}-manifest.json` + `{module}-intent.md` + 源码；输出 `{module}-selection.md`（含选中候选编号 + 评分 + 对比）。L1：存在、非空、含「候选选优结果」标题。
+- **对抗审查**（Phase A 后）：输入 `.rust-migration/intermediate/attempts/{module}-phase-a.rs`（多候选模式下为选优后的版本）+ 原始源码（`source-ref/`）+ 迁移规则；输出 `{module}-review.md`（含**差异列表**标题 + 修正建议 + **等价深度判定**）。L1：存在、非空、含差异列表、含等价深度标签。
 - **测试验证**（Phase B 后）：输入 Phase B Rust 产出 + 黄金文件；输出测试结果 JSON（stdout）+ 追加 `KNOWN_DIFFERENCES.md` 条目。L2：JSON 格式合法、通过率字段在 [0,1]。
 - **差异登记**：对抗审查或测试验证中发现 moderate 级别差异时，**立即追加** `KNOWN_DIFFERENCES.md` 条目（不等到 Sprint Review）。
 
@@ -108,6 +109,76 @@ tools: Bash, Read, Write, Grep, Glob
 - verifier **无权判定差异是否可接受**，只负责发现和记录，决策权归人类审批者
 - 每条差异须关联到具体的源文件和目标文件（不能只写模块名）
 - 影响评估须具体可量化（如"影响 3 个下游模块"而非"影响较大"）
+
+## 一·四、候选选优（M2-ADV-01）
+
+当 translator 产出多候选（`standard`/`full` 档）时，verifier 在对抗审查**之前**先做候选选优，选出最佳候选后再对其执行 9 维度对抗审查。`trivial` 档跳过本节（无多候选）。
+
+### 输入
+
+- 2 个候选文件：`.rust-migration/intermediate/attempts/{module}-phase-a-candidate-{1,2}.rs`
+- 对应的 `{module}-candidate-{1,2}-manifest.json`（各候选的策略、trade_offs、confidence）
+- `{module}-intent.md`（语义契约基准）
+- 原始源码（`source-ref/`）
+
+### 选优流程
+
+1. **独立审读**：逐个候选阅读代码，对照意图摘要和源码，评估以下 4 个维度（按权重降序）：
+
+   | 优先级 | 维度 | 评估要点 |
+   |--------|------|---------|
+   | 1（最高） | 语义等价性 | 与源码行为是否一致，有无遗漏的边界/错误路径 |
+   | 2 | 类型安全 | 类型映射是否精确、有无 `any`/`TODO(port)` 残留、是否利用了 Rust 类型系统 |
+   | 3 | 惯用性 | 是否符合 Rust 惯例（错误处理、所有权、迭代器风格），Phase B 改造成本 |
+   | 4 | 代码简洁度 | 在语义等价前提下，代码是否简洁清晰，无冗余 |
+
+2. **逐维度打分**：每个维度对每个候选打 1-5 分，汇总加权得分（权重：语义等价 40%、类型安全 25%、惯用性 20%、简洁度 15%）。
+3. **选定**：取加权得分最高者。同分时选 translator 自评 confidence 更高者。
+
+### 输出
+
+选优结果写入 `.rust-migration/intermediate/{module}-selection.md`，格式：
+
+```markdown
+## 候选选优结果
+
+- **模块**: <module>
+- **选中候选**: 候选 <N>
+- **选择理由**: <一段话总结为什么选此候选>
+
+### 各候选评分
+
+| 维度 | 候选 1 | 候选 2 | 说明 |
+|------|--------|--------|------|
+| 语义等价性（40%） | 4 | 3 | <差异说明> |
+| 类型安全（25%） | 3 | 4 | <差异说明> |
+| 惯用性（20%） | 3 | 4 | <差异说明> |
+| 简洁度（15%） | 4 | 4 | <差异说明> |
+| **加权得分** | 3.55 | 3.60 | — |
+
+### 各候选优劣对比
+
+#### 候选 1（保守忠实）
+- **优势**: <列举>
+- **劣势**: <列举>
+
+#### 候选 2（积极映射）
+- **优势**: <列举>
+- **劣势**: <列举>
+```
+
+### 后续动作
+
+选优完成后：
+1. 将选中候选复制为 `intermediate/attempts/{module}-phase-a.rs`（覆盖，供后续对抗审查和 Phase B 使用）。
+2. 将选中候选写入 `rust_root/` 对应路径（正式代码区）。
+3. 从选中候选的 PORT NOTE 注释生成 `_porting_manifest.json`。
+4. 选优结果（选中候选编号、加权得分）记入 `_porting_manifest.json` 的 `candidate_selection` 字段。
+5. 进入正常的 9 维度对抗审查（对选中候选执行，流程同「一、对抗审查」）。
+
+### 校验（L1）
+
+`{module}-selection.md` 存在、非空、含「## 候选选优结果」标题、含「选中候选」字段。
 
 ## 二、Phase A 结构门禁（结构等价校验）
 

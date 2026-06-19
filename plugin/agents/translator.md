@@ -98,12 +98,58 @@ tools: Bash, Read, Write, Grep, Glob
 - 类型/错误/字符串映射严格按 RULE-2/3/7；任何不确定一律 `TODO(port): <原因>`，**禁止猜测**。
 - 每处依据某条规则的翻译，在代码里留 `// PORT NOTE: RULE-N <说明>` 注释——这些注释是 `_porting_manifest.json` 的来源。
 
+#### 多候选模式（M2-ADV-01）
+
+当模块 tier 为 `standard` 或 `full` 时，Phase A 产出 **2 个翻译候选**而非单一版本，由 verifier 做选优（见 verifier.md「候选选优」）。`trivial` 档不启用多候选——直翻即可，沿用单候选流程。
+
+**候选策略差异**：
+
+| tier | 候选 1（保守忠实） | 候选 2（积极映射） | 差异程度 |
+|------|-------------------|-------------------|---------|
+| `full` | 严格 1:1 结构对应，类型映射取最保守选项（如 `number` → `f64`），错误处理保留源码控制流形态 | 积极惯用化映射——类型取精确选项（如 `number` 按用途选 `i32`/`u64`），错误处理用 `thiserror` 枚举重组，集合类型按语义选 `BTreeMap`/`HashSet` | 较大：类型选择、错误模型、集合语义可能不同 |
+| `standard` | 同 full 候选 1 | 在候选 1 基础上做局部积极映射——仅在类型明确可精确化的地方取精确类型，其余保持保守 | 较小：仅类型精确度有差异 |
+
+**两个候选都必须**遵守核心翻译规则（RULE-2/3/7/8/20），区别在于规则允许的选择空间内取不同偏好。每个候选独立产出完整可编译的 Rust 代码。
+
+**候选文件命名与产出**：
+- 候选文件写入 `.rust-migration/intermediate/attempts/`：`{module}-phase-a-candidate-1.rs`、`{module}-phase-a-candidate-2.rs`
+- 每个候选附 manifest，写入同目录，命名 `{module}-candidate-{1,2}-manifest.json`：
+
+```json
+{
+  "module": "<module>",
+  "candidate_id": 1,
+  "strategy": "保守忠实：严格 1:1 结构，类型取最保守映射",
+  "trade_offs": "安全但可能丢失精确性，后续 Phase B 惯用化工作量较大",
+  "confidence": 0.85,
+  "rule_references": ["RULE-2", "RULE-3"]
+}
+```
+
+- `strategy`：一句话描述本候选的翻译策略偏好
+- `trade_offs`：该策略的利弊权衡
+- `confidence`：translator 对本候选语义等价性的自评置信度（0-1）
+- `rule_references`：本候选中策略差异主要涉及的规则编号
+
+**单候选兼容**：`trivial` 档或调用方显式指定 `--no-multi-candidate` 时，跳过多候选，产出物与原流程一致（单个 `{module}-phase-a.rs`）。
+
 产出物：
+
+**单候选模式**（trivial 档）：
 1. Rust 源文件，写入 `.rustmigrate.toml` 配置的 `rust_root/` 对应路径；按 `dependency-mapping.md` 更新 `Cargo.toml [dependencies]`。
 2. `_porting_manifest.json`（**固定文件名**，非 `{module}_...` 前缀；从 PORT NOTE 注释提取规则引用，至少一条），写入 `.rust-migration/context/module-learnings/{module}/`。**绝不写入 `rust_root/`**——rust_root 是交付的纯净 Rust 代码区，只放 `.rs` 与 `Cargo.toml`；manifest / intent / attempts 等工作台元数据一律在 `.rust-migration/` 下。
 3. 同步把本次 Phase A 代码持久化到 `.rust-migration/intermediate/attempts/{module}-phase-a.rs`——供 verifier 对抗审查按固定路径读取（不依赖"中间态"模糊概念）。
 
-校验（L1）：Rust 文件存在且通过编译（F1）；manifest 非空。完成后由 SKILL.md 落盘 `state transition --module <M> --substatus phase_a_complete_awaiting_review`（status 保持 translating，供断点续传路由）。
+**多候选模式**（standard/full 档）：
+1. **不立即写 `rust_root/`**——两个候选都是待选方案，先写 `intermediate/attempts/`（命名见上），等 verifier 选优后再将选中候选写入 `rust_root/`。
+2. 每个候选各自产出 `_candidate_manifest.json`（写入 `intermediate/attempts/`，命名 `{module}-candidate-{1,2}-manifest.json`）。
+3. `_porting_manifest.json` 在选优完成后由 SKILL.md 从选中候选的 PORT NOTE 注释生成（而非此步产出）。
+
+校验（L1）：
+- 单候选：Rust 文件存在且通过编译（F1）；manifest 非空。
+- 多候选：两个候选文件均存在且各自通过编译（F1）；两个 `_candidate_manifest.json` 均存在且 JSON 合法。
+
+完成后由 SKILL.md 落盘 `state transition --module <M> --substatus phase_a_complete_awaiting_review`（status 保持 translating，供断点续传路由）。
 
 ### 步骤三：Phase B 惯用化优化 + 编译修正
 

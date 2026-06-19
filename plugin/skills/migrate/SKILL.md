@@ -1,7 +1,7 @@
 ---
 name: migrate
-description: 把 TypeScript / Python / C 项目迁移到 Rust 的验证工作台。当用户想要分析待迁移项目、生成迁移规则、逐模块翻译为 Rust、或查看迁移进度时使用——只要用户提到"迁移到 Rust""rewrite in Rust""把这个项目改写成 Rust""迁移进度"或对一个 TS/Python/C 仓库表达改写为 Rust 的意图，即使没有显式输入命令也应考虑此 skill。子命令：analyze（分析+建规则+搭测试）、run（模块翻译）、review（验证+仪表板）。
-argument-hint: "[analyze|run|review] [module]"
+description: 把 TypeScript / Python / C 项目迁移到 Rust 的验证工作台。当用户想要分析待迁移项目、生成迁移规则、逐模块翻译为 Rust、批量翻译整个 sprint、或查看迁移进度时使用——只要用户提到"迁移到 Rust""rewrite in Rust""把这个项目改写成 Rust""迁移进度""批量翻译""并行迁移"或对一个 TS/Python/C 仓库表达改写为 Rust 的意图，即使没有显式输入命令也应考虑此 skill。子命令：analyze（分析+建规则+搭测试）、run（模块翻译）、workflow（sprint 级批量并行翻译）、review（验证+仪表板）。
+argument-hint: "[analyze|run|workflow|review] [module]"
 ---
 
 # /migrate — Rust 迁移验证工作台
@@ -17,6 +17,7 @@ argument-hint: "[analyze|run|review] [module]"
 | `analyze`（默认） | [analyze.md](./analyze.md) | 分析源码、生成迁移规则、搭建测试基础设施（init+plan+test 合并） |
 | `run` | [run.md](./run.md) | 翻译指定模块（Phase A 忠实翻译 / Phase B 惯用化） |
 | `review` | [review.md](./review.md) | 完整验证管线 + 迁移进度仪表板 |
+| `workflow` | [workflow.md](./workflow.md) | Sprint 级批量翻译——按拓扑层并行编排多模块（M2-SCALE-01） |
 | `graduate` | — | 毕业评估 + unsafe 审计（M2，非 MVP） |
 
 无参数时默认 `analyze`（迁移的起点）。参数为未知词时，提示用户可用子命令而非猜测。
@@ -27,7 +28,8 @@ argument-hint: "[analyze|run|review] [module]"
 - 通过 Bash 调用 `rustmigrate <子命令>`，工作目录为源项目根。所有 CLI 输出是统一 JSON：`{status, data, warnings}`。
 - **定位 CLI**：裸调 `rustmigrate` 假设其在 `$PATH`。若不确定是否安装，先运行 `BIN=$(hooks/scripts/ensure-cli.sh)` 取二进制绝对路径（解析优先级 PATH > `$RUSTMIGRATE_BIN` > 本地构建产物），后续用 `"$BIN" <子命令>` 调用；脚本未找到二进制时退出非 0 并打印安装指引，应如实转达用户。
 - **只解析 `data` 字段**取结构化结果；`status` 为 `error` 时按 `data` 中的错误码处理，不要从自然语言里猜成败。`warnings` 非空时如实转达用户，不要静默吞掉。
-- 命令清单（M1 共 14 个）：`init`、`profile --root`、`graph build --root [--full]`、`graph topo-sort`、`graph deps <m>`、`graph interfaces <m> [--deps-of <t>]`、`graph stats`、`validate state`、`state get <m>`、`state transition [--module] --to [--substatus] [--reason] [--force]`、`state populate-modules`、`stats loc`、`stats compare`、`scaffold workspace [--target] [--name]`。
+- 命令清单（M1 共 14 个）：`init`、`profile --root [--adapter-tools]`、`graph build --root [--full]`、`graph topo-sort`、`graph deps <m>`、`graph interfaces <m> [--deps-of <t>]`、`graph stats`、`validate state`、`state get <m>`、`state transition [--module] --to [--substatus] [--reason] [--force]`、`state populate-modules`、`stats loc`、`stats compare`、`scaffold workspace [--target] [--name]`。
+- **`profile --adapter-tools` 路径自动解析**：analyze 流程步骤 3 按优先级定位 `analysis-tools.json`——①`.rustmigrate.toml` 的 `adapter_path` ② `$CLAUDE_PLUGIN_ROOT/skills/migrate/adapters/<lang>/` ③ `plugin/skills/migrate/adapters/<lang>/`（同仓相对路径）④ 全部未命中则省略参数（降级 warning）。详见 [analyze.md](./analyze.md) 步骤 3。
 
 ### 全局锁（所有子命令开始时取，结束或异常退出时释放）
 同一项目同一时刻只允许一个 `/migrate` 命令运行。锁文件 `.rust-migration/.migration-lock`，内容为单行 JSON `{session_pid, started_at, hostname}`，`session_pid` 取 `$PPID`（Claude Code 宿主进程，生命周期覆盖整个会话）。
@@ -35,6 +37,13 @@ argument-hint: "[analyze|run|review] [module]"
 - **link 失败 → 判陈旧**：同机且 `session_pid` 进程已死、或 `session_pid == 当前 $PPID`（同会话串行残留）→ 删锁后重试一次；不同会话的活进程 → 真实并发，报错退出；跨机或 PID 不可判定且 `now - started_at > lock_timeout_secs`（默认 300）→ 视为陈旧。
 - **释放**：命令结束或异常退出时删除锁文件。
 - **逃生口**：卡死时用户可手动删除 `.rust-migration/.migration-lock`；报错信息须包含这一提示。
+
+#### 并行模式下的锁策略（M2-SCALE-LOCK）
+并行翻译模式（`/migrate workflow` 或 `/migrate run` 并行派发）下，**仅编排器持锁，SubAgent 不取锁**：
+- **编排器**在 workflow 全程持有主 tree 的 `.rust-migration/.migration-lock`，直到 workflow 结束或异常退出才释放。
+- **SubAgent** 在独立 worktree（`.wt/{module}/`）中工作，worktree 不共享主 tree 的 `.rust-migration/` 路径，因此天然不碰锁文件，无需取锁、无互相阻塞。
+- **状态写入集中化**：只有编排器可写主 tree 的 `migration-state.json`（集中 writer）。SubAgent 完成后回传 `TranslationResult`（含 touched-list），编排器负责合并代码（git merge）并更新状态。
+- **串行模式不变**：单模块 `/migrate run <module>` 仍按上述锁机制取锁/释放，行为与 M1 一致。
 
 ### SubAgent 编排
 - 用 **Agent tool** 调用 SubAgent，参数 `subagent_type` 取带插件命名空间前缀的 agent 名：`rust-migrate:analyzer` / `rust-migrate:translator` / `rust-migrate:scaffolder` / `rust-migrate:verifier`。MVP 阶段 SubAgent **串行执行**，通过 `.rust-migration/` 下的文件通信，不直接对话。
