@@ -1,7 +1,7 @@
 ---
 name: migrate
-description: 把 TypeScript / Python / C 项目迁移到 Rust 的验证工作台。当用户想要分析待迁移项目、生成迁移规则、逐模块翻译为 Rust、或查看迁移进度时使用——只要用户提到"迁移到 Rust""rewrite in Rust""把这个项目改写成 Rust""迁移进度"或对一个 TS/Python/C 仓库表达改写为 Rust 的意图，即使没有显式输入命令也应考虑此 skill。子命令：analyze（分析+建规则+搭测试）、run（模块翻译）、review（验证+仪表板）。
-argument-hint: "[analyze|run|review] [module]"
+description: 把 TypeScript / Python / C 项目迁移到 Rust 的验证工作台。当用户想要分析待迁移项目、生成迁移规则、逐模块翻译为 Rust、批量翻译整个 sprint、或查看迁移进度时使用——只要用户提到"迁移到 Rust""rewrite in Rust""把这个项目改写成 Rust""迁移进度""批量翻译""并行迁移"或对一个 TS/Python/C 仓库表达改写为 Rust 的意图，即使没有显式输入命令也应考虑此 skill。子命令：analyze（分析+建规则+搭测试）、run（模块翻译）、workflow（sprint 级批量并行翻译）、review（验证+仪表板）。
+argument-hint: "[analyze|run|workflow|review] [module]"
 ---
 
 # /migrate — Rust 迁移验证工作台
@@ -17,6 +17,7 @@ argument-hint: "[analyze|run|review] [module]"
 | `analyze`（默认） | [analyze.md](./analyze.md) | 分析源码、生成迁移规则、搭建测试基础设施（init+plan+test 合并） |
 | `run` | [run.md](./run.md) | 翻译指定模块（Phase A 忠实翻译 / Phase B 惯用化） |
 | `review` | [review.md](./review.md) | 完整验证管线 + 迁移进度仪表板 |
+| `workflow` | [workflow.md](./workflow.md) | Sprint 级批量翻译——按拓扑层并行编排多模块（M2-SCALE-01） |
 | `graduate` | — | 毕业评估 + unsafe 审计（M2，非 MVP） |
 
 无参数时默认 `analyze`（迁移的起点）。参数为未知词时，提示用户可用子命令而非猜测。
