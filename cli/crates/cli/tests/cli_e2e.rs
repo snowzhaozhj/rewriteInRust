@@ -1177,6 +1177,75 @@ fn smoke_populate_without_db_errors() {
     });
 }
 
+// === graph cycles（M2-CLI-02：完整 SCC 环检测）===
+
+#[test]
+fn smoke_graph_cycles_no_cycles() {
+    // linear-deps 无环：has_cycles=false, cycles=[]。
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        let _ = run(&["init"]);
+        build_graph_for_query();
+        let (code, json) = run(&["graph", "cycles"]);
+        assert_eq!(code, 0, "graph cycles 应成功: {json}");
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["data"]["has_cycles"], false);
+        assert_eq!(json["data"]["cycle_count"], 0);
+        assert!(
+            json["data"]["cycles"].as_array().unwrap().is_empty(),
+            "无环时 cycles 应为空数组: {json}"
+        );
+    });
+}
+
+#[test]
+fn smoke_graph_cycles_with_cycles() {
+    // circular-deps 有环：has_cycles=true, cycles 非空，含 event-bus/handler/emitter。
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("circular-deps"), tmp.path());
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        build_graph_for_query();
+        let (code, json) = run(&["graph", "cycles"]);
+        assert_eq!(code, 0, "graph cycles 应成功: {json}");
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["data"]["has_cycles"], true);
+        let cycle_count = json["data"]["cycle_count"].as_u64().unwrap();
+        assert!(cycle_count >= 1, "应至少检测到 1 个环: {json}");
+        let cycles = json["data"]["cycles"].as_array().unwrap();
+        assert!(!cycles.is_empty(), "cycles 应非空: {json}");
+
+        // 至少有一个环包含 event-bus、handler、emitter。
+        let has_expected = cycles.iter().any(|cycle| {
+            let members: Vec<&str> = cycle
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap_or_default())
+                .collect();
+            let has_eb = members.iter().any(|s| s.contains("event-bus"));
+            let has_h = members.iter().any(|s| s.contains("handler"));
+            let has_e = members.iter().any(|s| s.contains("emitter"));
+            has_eb && has_h && has_e
+        });
+        assert!(
+            has_expected,
+            "应包含 event-bus/handler/emitter 的环: {cycles:?}"
+        );
+    });
+}
+
+#[test]
+fn smoke_graph_cycles_without_db_errors() {
+    // 无 db 时应报错（非 panic）。
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let (code, json) = run(&["graph", "cycles"]);
+        assert_eq!(code, 1, "无 db 时应返回错误");
+        assert_eq!(json["status"], "error");
+    });
+}
+
 // === graph interfaces --deps-of 批量模式 ===
 
 #[test]
@@ -1280,5 +1349,200 @@ fn smoke_graph_interfaces_deps_of_nonexistent_target_errors() {
         ]);
         assert_eq!(code, 1, "不存在的 target 应报错");
         assert_eq!(json["status"], "error");
+    });
+}
+
+// === graph export 测试 ===
+
+#[test]
+fn smoke_graph_export_json() {
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        build_graph_for_query();
+        let (code, json) = run(&["graph", "export", "--format", "json"]);
+        assert_eq!(code, 0, "graph export --format json 应成功: {json}");
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["data"]["format"], "json");
+
+        // json 格式时 content 是对象（含 nodes 和 edges），不是字符串
+        let content = &json["data"]["content"];
+        assert!(
+            content.is_object(),
+            "json 格式的 content 应为对象: {content}"
+        );
+        assert!(content["nodes"].is_array(), "content 应含 nodes 数组");
+        assert!(content["edges"].is_array(), "content 应含 edges 数组");
+        assert!(
+            content["nodes"].as_array().unwrap().len() >= 3,
+            "linear-deps 至少 3 个节点"
+        );
+    });
+}
+
+#[test]
+fn smoke_graph_export_json_default_format() {
+    // 不指定 --format 时默认 json
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        build_graph_for_query();
+        let (code, json) = run(&["graph", "export"]);
+        assert_eq!(code, 0, "graph export（默认格式）应成功: {json}");
+        assert_eq!(json["data"]["format"], "json");
+        assert!(json["data"]["content"].is_object());
+    });
+}
+
+#[test]
+fn smoke_graph_export_dot() {
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        build_graph_for_query();
+        let (code, json) = run(&["graph", "export", "--format", "dot"]);
+        assert_eq!(code, 0, "graph export --format dot 应成功: {json}");
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["data"]["format"], "dot");
+
+        let content = json["data"]["content"].as_str().unwrap();
+        assert!(
+            content.starts_with("digraph {"),
+            "DOT 应以 digraph {{ 开头: {content}"
+        );
+        assert!(content.contains("->"), "DOT 应含 -> 边声明");
+        assert!(content.contains("[label="), "DOT 应含 label 属性");
+    });
+}
+
+#[test]
+fn smoke_graph_export_mermaid() {
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        build_graph_for_query();
+        let (code, json) = run(&["graph", "export", "--format", "mermaid"]);
+        assert_eq!(code, 0, "graph export --format mermaid 应成功: {json}");
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["data"]["format"], "mermaid");
+
+        let content = json["data"]["content"].as_str().unwrap();
+        assert!(
+            content.starts_with("flowchart TD"),
+            "Mermaid 应以 flowchart TD 开头: {content}"
+        );
+        assert!(content.contains("-->|"), "Mermaid 应含 -->| 边声明");
+        // Mermaid ID 不应含冒号
+        let lines: Vec<&str> = content.lines().collect();
+        for line in &lines[1..] {
+            // 节点声明行和边行的 ID 部分不应含冒号（标签引号内可以）
+            if let Some(id_part) = line.trim().split('[').next() {
+                if !id_part.contains("-->") {
+                    assert!(!id_part.contains(':'), "Mermaid 节点 ID 不应含冒号: {line}");
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn smoke_graph_export_invalid_format() {
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        build_graph_for_query();
+        let (code, json) = run(&["graph", "export", "--format", "xml"]);
+        assert_eq!(code, 1, "不支持的格式应报错: {json}");
+        assert_eq!(json["status"], "error");
+    });
+}
+
+// === validate config 测试 ===
+
+#[test]
+fn smoke_validate_config_no_file() {
+    // 无配置文件时：status=warning（有 warning 降级），valid=true。
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let (code, json) = run(&["validate", "config"]);
+        assert_eq!(code, 0, "无配置文件应成功: {json}");
+        // 有 warning 时 Response::ok_with_warnings 会降级 status 为 warning。
+        assert_eq!(json["status"], "warning");
+        assert_eq!(json["data"]["valid"], true);
+        assert_eq!(json["data"]["fields_checked"], 0);
+        // 应有 warning 提示未找到配置文件。
+        let warnings = json["warnings"].as_array().expect("应有 warnings 字段");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.as_str().unwrap().contains("未找到配置文件")),
+            "应有'未找到配置文件'警告: {json}"
+        );
+    });
+}
+
+#[test]
+fn smoke_validate_config_valid() {
+    // 合法配置文件、所有路径存在：status=ok，valid=true。
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        // 先 init 生成合法配置文件，再创建 source_root 和 rust_root 目录。
+        let _ = run(&["init"]);
+        std::fs::create_dir_all("src").unwrap();
+        std::fs::create_dir_all("rust-src").unwrap();
+        let (code, json) = run(&["validate", "config"]);
+        assert_eq!(code, 0, "合法配置应成功: {json}");
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["data"]["valid"], true);
+        assert_eq!(json["data"]["fields_checked"], 5);
+        assert_eq!(json["data"]["config_path"], ".rustmigrate.toml");
+    });
+}
+
+#[test]
+fn smoke_validate_config_invalid_toml() {
+    // 非法 TOML 语法：应报错。
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        std::fs::write(".rustmigrate.toml", "这不是合法的 [[[toml").unwrap();
+        let (code, json) = run(&["validate", "config"]);
+        assert_eq!(code, 1, "非法 TOML 应报错: {json}");
+        assert_eq!(json["status"], "error");
+        assert_eq!(json["data"]["kind"], "config");
+    });
+}
+
+#[test]
+fn smoke_validate_config_warnings() {
+    // 字段值不合理时产出 warnings。
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let config = r#"
+[project]
+name = "test"
+source_root = "nonexistent_src"
+rust_root = "nonexistent_rust"
+
+[strategy]
+max_retry_rounds = 0
+
+[testing]
+coverage_threshold = 200
+
+[orchestration]
+subagent_timeout_secs = 0
+"#;
+        std::fs::write(".rustmigrate.toml", config).unwrap();
+        let (code, json) = run(&["validate", "config"]);
+        assert_eq!(
+            code, 0,
+            "配置校验应成功（问题走 warnings 不走 error）: {json}"
+        );
+        // 有不合理字段时 valid=false。
+        assert_eq!(json["data"]["valid"], false);
+        // status 应降级为 warning。
+        assert_eq!(
+            json["status"], "warning",
+            "有 warnings 时 status 应降级: {json}"
+        );
+        let warnings = json["warnings"].as_array().expect("应有 warnings 字段");
+        // 至少应有：source_root 不存在、rust_root 不存在、max_retry_rounds=0、
+        // coverage_threshold>100、subagent_timeout_secs=0
+        assert!(warnings.len() >= 4, "应有至少 4 条 warnings: {json}");
     });
 }

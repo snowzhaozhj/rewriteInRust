@@ -4,7 +4,7 @@
 
 use serde::Serialize;
 
-use crate::error::MigrateError;
+use crate::error::{ErrorCode, MigrateError};
 
 /// 响应状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -60,8 +60,16 @@ impl<T: Serialize> Response<T> {
 pub struct ErrorData {
     /// 错误分类标识（如 `"graph"`, `"parse"`, `"config"`）。
     pub kind: String,
+    /// 错误编号（如 `"E001"`）。空时省略。
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub error_code: String,
     /// 错误描述信息。
     pub message: String,
+    /// CI 是否可重试。
+    pub retryable: bool,
+    /// 用户可操作的建议。空时省略。
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub suggestion: String,
     /// 可选的上下文信息。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
@@ -84,7 +92,28 @@ impl ErrorData {
     ) -> Self {
         Self {
             kind: kind.into(),
+            error_code: String::new(),
             message: message.into(),
+            retryable: false,
+            suggestion: String::new(),
+            context: None,
+            details,
+        }
+    }
+
+    /// 构造一条带 `ErrorCode` 的错误 data。
+    pub fn with_error_code(
+        error_code: ErrorCode,
+        kind: impl Into<String>,
+        message: impl Into<String>,
+        details: Option<serde_json::Value>,
+    ) -> Self {
+        Self {
+            kind: kind.into(),
+            error_code: error_code.code().to_owned(),
+            message: message.into(),
+            retryable: error_code.is_retryable(),
+            suggestion: error_code.suggestion().to_owned(),
             context: None,
             details,
         }
@@ -98,7 +127,10 @@ impl Response<ErrorData> {
             status: Status::Error,
             data: ErrorData {
                 kind: "unknown".to_owned(),
+                error_code: String::new(),
                 message: message.into(),
+                retryable: false,
+                suggestion: String::new(),
                 context: None,
                 details: None,
             },
@@ -112,7 +144,10 @@ impl Response<ErrorData> {
             status: Status::Error,
             data: ErrorData {
                 kind: "unknown".to_owned(),
+                error_code: String::new(),
                 message: message.into(),
+                retryable: false,
+                suggestion: String::new(),
                 context: Some(context.into()),
                 details: None,
             },
@@ -124,6 +159,7 @@ impl Response<ErrorData> {
 impl From<MigrateError> for Response<ErrorData> {
     /// 将 [`MigrateError`] 转换为 JSON 错误响应。
     fn from(err: MigrateError) -> Self {
+        let error_code = ErrorCode::from(&err);
         let kind = match &err {
             MigrateError::Graph { .. } => "graph",
             MigrateError::Parse { .. } => "parse",
@@ -147,7 +183,10 @@ impl From<MigrateError> for Response<ErrorData> {
             status: Status::Error,
             data: ErrorData {
                 kind: kind.to_owned(),
+                error_code: error_code.code().to_owned(),
                 message: err.to_string(),
+                retryable: error_code.is_retryable(),
+                suggestion: error_code.suggestion().to_owned(),
                 context: None,
                 details: None,
             },
@@ -209,9 +248,13 @@ mod tests {
         let resp: Response<ErrorData> = MigrateError::NotImplemented("x".into()).into();
         let json = serde_json::to_value(resp).unwrap();
         let obj = json["data"].as_object().unwrap();
-        // 仅 kind/message（context/details 均 None 省略）。
+        // kind/error_code/message/retryable/suggestion 始终存在。
         assert!(obj.contains_key("kind"));
+        assert!(obj.contains_key("error_code"));
         assert!(obj.contains_key("message"));
+        assert!(obj.contains_key("retryable"));
+        assert!(obj.contains_key("suggestion"));
+        // context/details 为 None 时省略。
         assert!(!obj.contains_key("context"));
         assert!(!obj.contains_key("details"));
     }
@@ -223,5 +266,141 @@ mod tests {
         let json = serde_json::to_value(resp).unwrap();
         assert_eq!(json["status"], "warning");
         assert_eq!(json["warnings"], serde_json::json!(["w"]));
+    }
+
+    #[test]
+    fn test_error_code_fields_in_json() {
+        // 验证 MigrateError 转换后的 JSON 包含 error_code、retryable、suggestion 字段。
+        let resp: Response<ErrorData> = MigrateError::CyclicDependency {
+            cycle: "a→b→a".into(),
+        }
+        .into();
+        let json = serde_json::to_value(resp).unwrap();
+        assert_eq!(json["data"]["kind"], "cyclic_dependency");
+        assert_eq!(json["data"]["error_code"], "E002");
+        assert_eq!(json["data"]["retryable"], false);
+        assert!(
+            json["data"]["suggestion"].as_str().unwrap().len() > 0,
+            "应有非空建议"
+        );
+    }
+
+    #[test]
+    fn test_retryable_errors() {
+        // Timeout / IoError / DatabaseError 应标记为 retryable。
+        let timeout_resp: Response<ErrorData> = MigrateError::Timeout {
+            command: "test".into(),
+            timeout_secs: 30,
+        }
+        .into();
+        let json = serde_json::to_value(timeout_resp).unwrap();
+        assert_eq!(json["data"]["retryable"], true);
+        assert_eq!(json["data"]["error_code"], "E013");
+
+        let io_resp: Response<ErrorData> =
+            MigrateError::Io(std::io::Error::new(std::io::ErrorKind::Other, "fail")).into();
+        let json = serde_json::to_value(io_resp).unwrap();
+        assert_eq!(json["data"]["retryable"], true);
+        assert_eq!(json["data"]["error_code"], "E014");
+    }
+
+    #[test]
+    fn test_non_retryable_errors() {
+        // 图、解析、配置等错误不可重试。
+        let cases: Vec<(MigrateError, &str, &str)> = vec![
+            (
+                MigrateError::Graph {
+                    message: "test".into(),
+                    file: "a.ts".into(),
+                },
+                "graph",
+                "E001",
+            ),
+            (MigrateError::Config("bad".into()), "config", "E012"),
+            (
+                MigrateError::NotImplemented("x".into()),
+                "not_implemented",
+                "E015",
+            ),
+        ];
+        for (err, expected_kind, expected_code) in cases {
+            let resp: Response<ErrorData> = err.into();
+            let json = serde_json::to_value(resp).unwrap();
+            assert_eq!(json["data"]["kind"], expected_kind);
+            assert_eq!(json["data"]["error_code"], expected_code);
+            assert_eq!(json["data"]["retryable"], false);
+        }
+    }
+
+    #[test]
+    fn test_all_error_codes_unique() {
+        // 所有 ErrorCode 的编号应唯一。
+        use std::collections::HashSet;
+        let codes = [
+            ErrorCode::GraphBuildFailed,
+            ErrorCode::CyclicDependency,
+            ErrorCode::ModuleNotFound,
+            ErrorCode::InvalidTransition,
+            ErrorCode::PreconditionFailed,
+            ErrorCode::ModuleBlocked,
+            ErrorCode::LockConflict,
+            ErrorCode::SchemaValidation,
+            ErrorCode::FileNotFound,
+            ErrorCode::ParseFailed,
+            ErrorCode::DatabaseError,
+            ErrorCode::ConfigError,
+            ErrorCode::Timeout,
+            ErrorCode::IoError,
+            ErrorCode::NotImplemented,
+        ];
+        let mut seen = HashSet::new();
+        for ec in &codes {
+            assert!(seen.insert(ec.code()), "错误编号 {} 重复", ec.code());
+        }
+        assert_eq!(codes.len(), 15, "应有 15 个错误码");
+    }
+
+    #[test]
+    fn test_error_code_suggestion_non_empty() {
+        // 每个 ErrorCode 的 suggestion 应非空。
+        let codes = [
+            ErrorCode::GraphBuildFailed,
+            ErrorCode::CyclicDependency,
+            ErrorCode::ModuleNotFound,
+            ErrorCode::InvalidTransition,
+            ErrorCode::PreconditionFailed,
+            ErrorCode::ModuleBlocked,
+            ErrorCode::LockConflict,
+            ErrorCode::SchemaValidation,
+            ErrorCode::FileNotFound,
+            ErrorCode::ParseFailed,
+            ErrorCode::DatabaseError,
+            ErrorCode::ConfigError,
+            ErrorCode::Timeout,
+            ErrorCode::IoError,
+            ErrorCode::NotImplemented,
+        ];
+        for ec in &codes {
+            assert!(
+                !ec.suggestion().is_empty(),
+                "{:?} 的 suggestion 不应为空",
+                ec
+            );
+        }
+    }
+
+    #[test]
+    fn test_with_error_code_constructor() {
+        // with_error_code 构造器应正确填充 error_code/retryable/suggestion。
+        let data = ErrorData::with_error_code(
+            ErrorCode::CyclicDependency,
+            "cyclic_dependency",
+            "检测到循环依赖",
+            Some(serde_json::json!({ "cycle_path": [["a", "b", "a"]] })),
+        );
+        assert_eq!(data.error_code, "E002");
+        assert!(!data.retryable);
+        assert!(!data.suggestion.is_empty());
+        assert_eq!(data.kind, "cyclic_dependency");
     }
 }

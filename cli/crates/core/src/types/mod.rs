@@ -5,6 +5,7 @@
 pub mod common;
 pub mod config;
 pub mod graph;
+pub mod parallel;
 pub mod state;
 
 pub use common::*;

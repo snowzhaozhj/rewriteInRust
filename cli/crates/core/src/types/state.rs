@@ -302,6 +302,13 @@ pub struct MigrationMetadata {
     pub last_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lock_token: Option<String>,
+    /// 乐观锁版本号（M2 CAS 支持）。每次 `state update --cas-version` 成功时递增。
+    /// 从 0 开始，`serde(default)` 保证向后兼容旧状态文件（无此字段时默认 0）。
+    #[serde(default)]
+    pub version: u64,
+    /// 最后修改者标识（M2 设计预留，MVP 为 `None`）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_modified_by: Option<String>,
 }
 
 /// 迁移状态文件 (migration-state.json) 的完整结构。

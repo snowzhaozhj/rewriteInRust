@@ -19,6 +19,9 @@ use crate::types::state::{
 /// 同主版本视为可读，跨主版本视为不兼容、拒绝加载。变更 schema 破坏性结构时递增主版本号。
 pub const STATE_SCHEMA_VERSION: &str = "1.0.0";
 
+/// 模块 substatus 值：agent 级自检完成（两层 done 协议）。
+pub const SUBSTATUS_AGENT_DONE: &str = "agent_done";
+
 /// 迁移状态机，持有并管理 `MigrationStateFile`。
 #[derive(Debug, Clone)]
 pub struct MigrationStateMachine {
@@ -180,6 +183,8 @@ impl MigrationStateMachine {
                 graph_build_completed_at: None,
                 last_error: None,
                 lock_token: None,
+                version: 0,
+                last_modified_by: None,
             }),
         };
 
@@ -216,6 +221,8 @@ impl MigrationStateMachine {
             graph_build_completed_at: None,
             last_error: None,
             lock_token: None,
+            version: 0,
+            last_modified_by: None,
         });
         metadata.graph_build_completed = true;
         metadata.graph_build_completed_at = Some(now);
@@ -468,6 +475,61 @@ impl MigrationStateMachine {
         SprintAdvanceResult::Advanced(new_sprint)
     }
 
+    /// 检查模块 substatus 是否为 `agent_done`（并行翻译两层 done 协议）。
+    ///
+    /// 并行翻译中，agent 在 worktree 内自检通过后标 `agent_done`（substatus，非终态）；
+    /// 只有编排器整组 `cargo check`/`cargo test` 通过后才升最终 `done`。
+    /// 本方法供编排器查询哪些模块已完成 agent 级自检、等待整组验证。
+    ///
+    /// 模块不存在返回 `false`。
+    pub fn is_agent_done(&self, name: &str) -> bool {
+        self.state_file
+            .modules
+            .get(name)
+            .is_some_and(|m| m.substatus.as_deref() == Some(SUBSTATUS_AGENT_DONE))
+    }
+
+    /// 批量将 `agent_done` 模块转为 `done`（整组 check 通过后调用）。
+    ///
+    /// 对每个模块独立调用 `transition_module`（`reviewing → done`），一个失败不影响其他。
+    /// 返回实际成功转换的模块名列表；失败的模块保持原状态，错误记入 `attempts`。
+    ///
+    /// 前置约束：调用方应确保传入模块当前 status 为 `reviewing`、substatus 为 `agent_done`。
+    /// 不满足前置的模块会在 `transition_module` 中被矩阵拒绝，计入失败而非 panic。
+    pub fn batch_transition_done(&mut self, modules: &[String]) -> Result<Vec<String>> {
+        let mut succeeded = Vec::new();
+        for name in modules {
+            // 先检查 substatus 是否为 agent_done（防止误操作非 agent_done 模块）。
+            let is_agent = self.is_agent_done(name);
+            if !is_agent {
+                // 非 agent_done 模块：记录失败原因到 attempts，跳过。
+                let _ = self.transition_module(
+                    name,
+                    None,
+                    None,
+                    Some("batch_transition_done: substatus 非 agent_done，跳过"),
+                    false,
+                );
+                continue;
+            }
+            // 尝试 reviewing → done 转换。
+            match self.transition_module(name, Some(ModuleStatus::Done), None, None, false) {
+                Ok(()) => succeeded.push(name.clone()),
+                Err(_) => {
+                    // 转换失败（如 status 不是 reviewing）：记录失败原因，继续其他模块。
+                    let _ = self.transition_module(
+                        name,
+                        None,
+                        None,
+                        Some("batch_transition_done: reviewing→done 转换失败"),
+                        false,
+                    );
+                }
+            }
+        }
+        Ok(succeeded)
+    }
+
     /// 设置最后错误信息。
     pub fn set_last_error(&mut self, error: Option<String>) {
         let metadata = self.state_file.metadata.get_or_insert(MigrationMetadata {
@@ -475,8 +537,71 @@ impl MigrationStateMachine {
             graph_build_completed_at: None,
             last_error: None,
             lock_token: None,
+            version: 0,
+            last_modified_by: None,
         });
         metadata.last_error = error;
+    }
+
+    /// 读取当前 `metadata.version`（乐观锁版本号）。
+    ///
+    /// 无 metadata 时返回 0（向后兼容旧状态文件）。
+    pub fn metadata_version(&self) -> u64 {
+        self.state_file
+            .metadata
+            .as_ref()
+            .map(|m| m.version)
+            .unwrap_or(0)
+    }
+
+    /// 乐观锁状态更新（CAS：Compare-And-Swap）。
+    ///
+    /// 读取当前 `metadata.version`，与 `cas_version` 比较：
+    /// - **不匹配**：返回 `MigrateError::LockConflict`（带当前版本号信息），不修改任何状态。
+    /// - **匹配**：执行模块状态转换（同 [`transition_module`]）并递增 `metadata.version`。
+    ///
+    /// 返回 `(previous_status, new_version)` 供调用方构造输出。
+    pub fn update_with_cas(
+        &mut self,
+        module: &str,
+        status: ModuleStatus,
+        cas_version: u64,
+        substatus: Option<&str>,
+        reason: Option<&str>,
+    ) -> Result<(ModuleStatus, u64)> {
+        // CAS 检查：读取当前版本，不匹配则拒绝。
+        let current_version = self.metadata_version();
+        if cas_version != current_version {
+            return Err(MigrateError::LockConflict(format!(
+                "版本冲突: 期望 {cas_version}, 当前 {current_version}"
+            )));
+        }
+
+        // 模块存在性检查 + 获取旧状态。
+        let previous_status = self
+            .state_file
+            .modules
+            .get(module)
+            .ok_or_else(|| MigrateError::Config(format!("模块不存在: {module}")))?
+            .status;
+
+        // 执行状态转换（复用 transition_module 的合法性校验）。
+        // CAS 更新不支持 --force（降级恢复由 transition 命令走）。
+        self.transition_module(module, Some(status), substatus, reason, false)?;
+
+        // 递增版本号。
+        let metadata = self.state_file.metadata.get_or_insert(MigrationMetadata {
+            graph_build_completed: false,
+            graph_build_completed_at: None,
+            last_error: None,
+            lock_token: None,
+            version: 0,
+            last_modified_by: None,
+        });
+        metadata.version += 1;
+        let new_version = metadata.version;
+
+        Ok((previous_status, new_version))
     }
 }
 
@@ -1452,5 +1577,241 @@ mod tests {
         m.save(&path).unwrap();
         m.save(&path).unwrap();
         assert!(backup.exists(), "默认配置应生成 backup（向后兼容）");
+    }
+
+    // ===== 两层 done 协议（M2-SCALE-02e）=====
+
+    #[test]
+    fn test_is_agent_done_true() {
+        // substatus 为 agent_done 时返回 true。
+        let mut m = new_machine();
+        let mut module = module_with_status(ModuleStatus::Reviewing);
+        module.substatus = Some(SUBSTATUS_AGENT_DONE.to_owned());
+        m.update_module("a", module);
+        assert!(m.is_agent_done("a"));
+    }
+
+    #[test]
+    fn test_is_agent_done_false_different_substatus() {
+        // substatus 非 agent_done 时返回 false。
+        let mut m = new_machine();
+        let mut module = module_with_status(ModuleStatus::Reviewing);
+        module.substatus = Some("phase_a_complete_awaiting_review".to_owned());
+        m.update_module("a", module);
+        assert!(!m.is_agent_done("a"));
+    }
+
+    #[test]
+    fn test_is_agent_done_false_no_substatus() {
+        // substatus 为 None 时返回 false。
+        let mut m = new_machine();
+        m.update_module("a", module_with_status(ModuleStatus::Reviewing));
+        assert!(!m.is_agent_done("a"));
+    }
+
+    #[test]
+    fn test_is_agent_done_nonexistent_module() {
+        // 模块不存在时返回 false。
+        let m = new_machine();
+        assert!(!m.is_agent_done("not_exist"));
+    }
+
+    #[test]
+    fn test_batch_transition_done_all_success() {
+        // 全部模块 reviewing + agent_done → 应全部成功转为 done。
+        let mut m = new_machine();
+        for name in ["a", "b", "c"] {
+            let mut module = module_with_status(ModuleStatus::Reviewing);
+            module.substatus = Some(SUBSTATUS_AGENT_DONE.to_owned());
+            m.update_module(name, module);
+        }
+        let modules: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
+        let succeeded = m.batch_transition_done(&modules).unwrap();
+        assert_eq!(succeeded.len(), 3);
+        for name in ["a", "b", "c"] {
+            assert_eq!(m.state_file().modules[name].status, ModuleStatus::Done);
+            // done 时 substatus 被清空（transition_module 的 Done 清空逻辑）。
+            assert!(m.state_file().modules[name].substatus.is_none());
+        }
+    }
+
+    #[test]
+    fn test_batch_transition_done_partial_failure() {
+        // a: reviewing + agent_done（应成功）
+        // b: translating + agent_done（status 不对，转换矩阵拒绝，应失败但不影响 a、c）
+        // c: reviewing + agent_done（应成功）
+        let mut m = new_machine();
+
+        let mut ma = module_with_status(ModuleStatus::Reviewing);
+        ma.substatus = Some(SUBSTATUS_AGENT_DONE.to_owned());
+        m.update_module("a", ma);
+
+        let mut mb = module_with_status(ModuleStatus::Translating);
+        mb.substatus = Some(SUBSTATUS_AGENT_DONE.to_owned());
+        m.update_module("b", mb);
+
+        let mut mc = module_with_status(ModuleStatus::Reviewing);
+        mc.substatus = Some(SUBSTATUS_AGENT_DONE.to_owned());
+        m.update_module("c", mc);
+
+        let modules: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
+        let succeeded = m.batch_transition_done(&modules).unwrap();
+
+        // a、c 成功，b 失败。
+        assert_eq!(succeeded, vec!["a".to_owned(), "c".to_owned()]);
+        assert_eq!(m.state_file().modules["a"].status, ModuleStatus::Done);
+        assert_eq!(
+            m.state_file().modules["b"].status,
+            ModuleStatus::Translating,
+            "b 应保持 translating（转换失败）"
+        );
+        assert_eq!(m.state_file().modules["c"].status, ModuleStatus::Done);
+    }
+
+    #[test]
+    fn test_batch_transition_done_skips_non_agent_done() {
+        // substatus 非 agent_done 的模块应被跳过。
+        let mut m = new_machine();
+
+        let mut ma = module_with_status(ModuleStatus::Reviewing);
+        ma.substatus = Some(SUBSTATUS_AGENT_DONE.to_owned());
+        m.update_module("a", ma);
+
+        let mb = module_with_status(ModuleStatus::Reviewing); // substatus=None
+        m.update_module("b", mb);
+
+        let modules: Vec<String> = vec!["a".into(), "b".into()];
+        let succeeded = m.batch_transition_done(&modules).unwrap();
+
+        assert_eq!(succeeded, vec!["a".to_owned()]);
+        assert_eq!(m.state_file().modules["a"].status, ModuleStatus::Done);
+        assert_eq!(
+            m.state_file().modules["b"].status,
+            ModuleStatus::Reviewing,
+            "b 应保持 reviewing（非 agent_done 跳过）"
+        );
+    }
+
+    #[test]
+    fn test_batch_transition_done_empty_list() {
+        // 空列表应返回空结果。
+        let mut m = new_machine();
+        let succeeded = m.batch_transition_done(&[]).unwrap();
+        assert!(succeeded.is_empty());
+    }
+
+    #[test]
+    fn test_agent_done_substatus_set_via_transition_module() {
+        // 通过 transition_module 的 substatus-only 路径设置 agent_done。
+        let mut m = new_machine();
+        m.update_module("a", module_with_status(ModuleStatus::Reviewing));
+        m.transition_module("a", None, Some(SUBSTATUS_AGENT_DONE), None, false)
+            .unwrap();
+        assert!(m.is_agent_done("a"));
+        // status 不变。
+        assert_eq!(m.state_file().modules["a"].status, ModuleStatus::Reviewing);
+    }
+
+    #[test]
+    fn test_metadata_version_default_zero() {
+        // 新建状态机的 metadata.version 默认为 0。
+        let m = new_machine();
+        assert_eq!(m.metadata_version(), 0);
+    }
+
+    #[test]
+    fn test_update_with_cas_success() {
+        // CAS 版本匹配：状态转换成功并递增版本号。
+        let mut m = new_machine();
+        m.update_module("a", module_with_status(ModuleStatus::Pending));
+        let (prev, new_ver) = m
+            .update_with_cas("a", ModuleStatus::Translating, 0, None, None)
+            .expect("CAS 版本匹配应成功");
+        assert_eq!(prev, ModuleStatus::Pending);
+        assert_eq!(new_ver, 1);
+        assert_eq!(
+            m.state_file().modules["a"].status,
+            ModuleStatus::Translating
+        );
+        assert_eq!(m.metadata_version(), 1);
+    }
+
+    #[test]
+    fn test_update_with_cas_version_mismatch() {
+        // CAS 版本不匹配：返回 LockConflict，状态不变。
+        let mut m = new_machine();
+        m.update_module("a", module_with_status(ModuleStatus::Pending));
+        let err = m
+            .update_with_cas("a", ModuleStatus::Translating, 42, None, None)
+            .unwrap_err();
+        match err {
+            MigrateError::LockConflict(msg) => {
+                assert!(msg.contains("42"), "应包含期望版本号");
+                assert!(msg.contains("0"), "应包含当前版本号");
+            }
+            other => panic!("期望 LockConflict，实际: {:?}", other),
+        }
+        // 状态未改变。
+        assert_eq!(m.state_file().modules["a"].status, ModuleStatus::Pending);
+        assert_eq!(m.metadata_version(), 0);
+    }
+
+    #[test]
+    fn test_update_with_cas_module_not_found() {
+        // 模块不存在：返回 Config 错误。
+        let mut m = new_machine();
+        let err = m
+            .update_with_cas("ghost", ModuleStatus::Translating, 0, None, None)
+            .unwrap_err();
+        assert!(matches!(err, MigrateError::Config(_)));
+    }
+
+    #[test]
+    fn test_update_with_cas_invalid_transition() {
+        // 转换不合法（done → translating）：CAS 通过但转换失败，版本不递增。
+        let mut m = new_machine();
+        m.update_module("a", module_with_status(ModuleStatus::Done));
+        let err = m
+            .update_with_cas("a", ModuleStatus::Translating, 0, None, None)
+            .unwrap_err();
+        assert!(matches!(err, MigrateError::InvalidTransition { .. }));
+        assert_eq!(m.metadata_version(), 0, "转换失败时版本不应递增");
+    }
+
+    #[test]
+    fn test_update_with_cas_sequential_increments() {
+        // 连续两次 CAS 更新：版本号从 0→1→2。
+        let mut m = new_machine();
+        m.update_module("a", module_with_status(ModuleStatus::Pending));
+        // 第一次：0→1
+        let (_, v1) = m
+            .update_with_cas("a", ModuleStatus::Translating, 0, None, None)
+            .unwrap();
+        assert_eq!(v1, 1);
+        // 第二次：1→2
+        let (_, v2) = m
+            .update_with_cas("a", ModuleStatus::CompileFixing, 1, None, None)
+            .unwrap();
+        assert_eq!(v2, 2);
+        assert_eq!(m.metadata_version(), 2);
+    }
+
+    #[test]
+    fn test_update_with_cas_substatus_and_reason() {
+        // CAS 更新带 substatus 和 reason。
+        let mut m = new_machine();
+        m.update_module("a", module_with_status(ModuleStatus::Pending));
+        m.update_with_cas(
+            "a",
+            ModuleStatus::Translating,
+            0,
+            Some("phase_a_in_progress"),
+            Some("开始翻译"),
+        )
+        .unwrap();
+        let module = &m.state_file().modules["a"];
+        assert_eq!(module.substatus.as_deref(), Some("phase_a_in_progress"));
+        assert_eq!(module.attempts.len(), 1);
+        assert!(module.attempts[0].result.contains("开始翻译"));
     }
 }

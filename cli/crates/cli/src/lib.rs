@@ -18,6 +18,7 @@ use serde_json::json;
 use rustmigrate_core::detect::detect_tier;
 use rustmigrate_core::error::MigrateError;
 use rustmigrate_core::graph::build::{build_graph_ts, build_graph_ts_profiled};
+use rustmigrate_core::graph::export::{export_dot, export_json, export_mermaid};
 use rustmigrate_core::graph::persist::{load_from_db, save_to_db};
 use rustmigrate_core::graph::topo::{detect_cycles, migration_sequence, topological_sort};
 use rustmigrate_core::graph::SourceGraph;
@@ -33,7 +34,9 @@ use rustmigrate_core::types::graph::{EdgeType, NodeType, SourceNode};
 use rustmigrate_core::types::state::{
     humanize_module_key, ModuleState, ModuleStatus, ModuleTier, ProjectState, SprintState,
 };
-use rustmigrate_core::validate::validate_state;
+use rustmigrate_core::validate::{
+    auto_unblock_modules, check_blocked_modules, detect_blocked_cycles, validate_state,
+};
 
 /// `.rust-migration/` 工作目录名（见 `docs/design/04-toolchain.md § 5.7.3`）。
 const WORK_DIR: &str = ".rust-migration";
@@ -133,13 +136,30 @@ pub enum GraphCommands {
     },
     /// 图统计信息（节点/边计数、分类计数）。
     Stats,
+    /// 循环依赖检测：完整 SCC 环路径输出。
+    Cycles,
+    /// 导出依赖图为 JSON/DOT/Mermaid 格式。
+    Export {
+        /// 导出格式（json/dot/mermaid，默认 json）。
+        #[arg(long, default_value = "json")]
+        format: String,
+    },
 }
 
 /// Validate 子命令。
 #[derive(clap::Subcommand)]
 pub enum ValidateCommands {
     /// 校验 `migration-state.json` 合法性。
-    State,
+    State {
+        /// 检查 blocked 模块的依赖是否已就绪（blocked_by 全部终态则 ready）。
+        #[arg(long)]
+        check_blocked: bool,
+        /// 自动恢复就绪的 blocked 模块到 pre_blocked_status（需配合 --check-blocked）。
+        #[arg(long)]
+        auto_unblock: bool,
+    },
+    /// 校验 `.rustmigrate.toml` 配置文件合法性。
+    Config,
 }
 
 /// State 子命令。
@@ -225,6 +245,27 @@ pub enum StateCommands {
     /// sprint N 全模块 done/degrade_* → current=N+1 + history 回填。
     /// 无可推进 sprint 或尚有非终态模块时返回 status:ok + advanced:false。
     AdvanceSprint,
+    /// 乐观锁状态更新（`--cas-version` 比较并写入，版本不匹配返回冲突）。
+    ///
+    /// 读取 `metadata.version` 与 `--cas-version` 比较，匹配时执行模块状态转换并递增 version；
+    /// 不匹配时返回 `lock_conflict` 错误。M2 并发安全设计预留（见 06-plugin-structure.md §10.8）。
+    Update {
+        /// 模块名。
+        #[arg(long)]
+        module: String,
+        /// 目标状态（ModuleStatus）。
+        #[arg(long)]
+        status: String,
+        /// CAS 版本号（从 state file 的 metadata.version 读取）。
+        #[arg(long)]
+        cas_version: u64,
+        /// 子状态（可选）。
+        #[arg(long)]
+        substatus: Option<String>,
+        /// 转换原因（可选，追加到 attempts 审计序列）。
+        #[arg(long)]
+        reason: Option<String>,
+    },
 }
 
 /// Stats 子命令。
@@ -294,7 +335,10 @@ where
                 status: Status::Error,
                 data: ErrorData {
                     kind: "cli_parse".to_owned(),
+                    error_code: String::new(),
                     message: e.to_string(),
+                    retryable: false,
+                    suggestion: String::new(),
                     context: None,
                     details: None,
                 },
@@ -330,9 +374,15 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
                 emit(writer, cmd_graph_interfaces(module, deps_of.as_deref()))
             }
             GraphCommands::Stats => emit(writer, cmd_graph_stats()),
+            GraphCommands::Cycles => emit(writer, cmd_graph_cycles()),
+            GraphCommands::Export { format } => emit(writer, cmd_graph_export(format)),
         },
         Commands::Validate { action } => match action {
-            ValidateCommands::State => emit(writer, cmd_validate_state()),
+            ValidateCommands::State {
+                check_blocked,
+                auto_unblock,
+            } => emit(writer, cmd_validate_state(*check_blocked, *auto_unblock)),
+            ValidateCommands::Config => emit(writer, cmd_validate_config()),
         },
         Commands::State { action } => match action {
             StateCommands::Get { module, human } => emit(writer, cmd_state_get(module, *human)),
@@ -378,6 +428,22 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
                 ),
             ),
             StateCommands::AdvanceSprint => emit(writer, cmd_state_advance_sprint()),
+            StateCommands::Update {
+                module,
+                status,
+                cas_version,
+                substatus,
+                reason,
+            } => emit(
+                writer,
+                cmd_state_update(
+                    module,
+                    status,
+                    *cas_version,
+                    substatus.as_deref(),
+                    reason.as_deref(),
+                ),
+            ),
         },
         Commands::Stats { action } => match action {
             StatsCommands::Loc { source, rust } => {
@@ -937,11 +1003,231 @@ fn cmd_graph_stats() -> CmdResult {
     Ok((serde_json::to_value(&stats)?, Vec::new()))
 }
 
-/// `validate state`：校验 `migration-state.json`。
-fn cmd_validate_state() -> CmdResult {
-    let (machine, mut warnings) = load_state_with_warnings(&state_path())?;
+/// `graph cycles`：循环依赖检测，输出完整 SCC 环路径。
+///
+/// 使用 Tarjan SCC 算法检测所有强连通分量（大小 > 1 或自环），
+/// 将每个 SCC 中的 NodeId 转为字符串输出。无环时 `has_cycles: false`。
+fn cmd_graph_cycles() -> CmdResult {
+    let graph = load_graph()?;
+    let cycles = detect_cycles(&graph);
+    let cycle_paths: Vec<Vec<String>> = cycles
+        .iter()
+        .map(|c| c.iter().map(|id| id.to_string()).collect())
+        .collect();
+    Ok((
+        json!({
+            "has_cycles": !cycle_paths.is_empty(),
+            "cycle_count": cycle_paths.len(),
+            "cycles": cycle_paths,
+        }),
+        Vec::new(),
+    ))
+}
+
+/// `graph export --format <json|dot|mermaid>`：导出依赖图。
+///
+/// 设计（`06-plugin-structure.md`）：导出依赖图为 JSON/DOT/Mermaid 格式。
+/// json 格式时 `data.content` 为对象（nodes + edges）；
+/// dot/mermaid 格式时 `data.content` 为字符串。
+fn cmd_graph_export(format: &str) -> CmdResult {
+    let graph = load_graph()?;
+
+    match format {
+        "json" => {
+            let content = export_json(&graph);
+            Ok((
+                json!({
+                    "format": "json",
+                    "content": content,
+                }),
+                Vec::new(),
+            ))
+        }
+        "dot" => {
+            let content = export_dot(&graph);
+            Ok((
+                json!({
+                    "format": "dot",
+                    "content": content,
+                }),
+                Vec::new(),
+            ))
+        }
+        "mermaid" => {
+            let content = export_mermaid(&graph);
+            Ok((
+                json!({
+                    "format": "mermaid",
+                    "content": content,
+                }),
+                Vec::new(),
+            ))
+        }
+        _ => Err(MigrateError::Config(format!(
+            "不支持的导出格式: {format}（合法值: json/dot/mermaid）"
+        ))),
+    }
+}
+
+/// `validate state [--check-blocked] [--auto-unblock]`：校验 `migration-state.json`。
+///
+/// 基础模式（无 flag）：执行 schema 版本、历史链、前置条件等完整性检查。
+///
+/// `--check-blocked`：额外检查所有 blocked 模块的 `blocked_by` 依赖是否已进入终态，
+/// 并执行 DFS 环检测（blocked_by 关系图中的环路会导致死锁）。
+///
+/// `--auto-unblock`（需配合 `--check-blocked`）：对就绪的 blocked 模块自动恢复到
+/// `pre_blocked_status`（无则默认 `pending`），通过 `transition_module` 落盘。
+fn cmd_validate_state(check_blocked: bool, auto_unblock: bool) -> CmdResult {
+    // --auto-unblock 须配合 --check-blocked。
+    if auto_unblock && !check_blocked {
+        return Err(MigrateError::Config(
+            "--auto-unblock 须配合 --check-blocked 使用".to_owned(),
+        ));
+    }
+
+    let path = state_path();
+    let (mut machine, mut warnings) = load_state_with_warnings(&path)?;
+
+    // 基础 validate。
     warnings.extend(validate_state(machine.state_file())?);
-    Ok((json!({ "valid": true }), warnings))
+
+    if !check_blocked {
+        return Ok((json!({ "valid": true }), warnings));
+    }
+
+    // --check-blocked：检查 blocked 模块依赖就绪状态 + DFS 环检测。
+    let checks = check_blocked_modules(machine.state_file());
+    let cycles = detect_blocked_cycles(machine.state_file());
+
+    let blocked_count = checks.len();
+    let ready_modules: Vec<String> = checks
+        .iter()
+        .filter(|r| r.ready)
+        .map(|r| r.module.clone())
+        .collect();
+    let still_blocked: Vec<String> = checks
+        .iter()
+        .filter(|r| !r.ready)
+        .map(|r| r.module.clone())
+        .collect();
+    let cycle_paths: Vec<Vec<String>> = cycles;
+
+    let mut data = json!({
+        "valid": true,
+        "blocked_count": blocked_count,
+        "ready_to_unblock": ready_modules,
+        "still_blocked": still_blocked,
+        "cycles": cycle_paths,
+    });
+
+    // --auto-unblock：自动恢复就绪的 blocked 模块。
+    if auto_unblock {
+        // 有环时拒绝自动解除（设计 09-appendix：环检测 → 报错中止）。
+        if !cycle_paths.is_empty() {
+            return Err(MigrateError::Config(format!(
+                "blocked_by 关系图存在环路，无法自动解除；请先打破环后重试。环路径: {cycle_paths:?}"
+            )));
+        }
+
+        let unblocked = auto_unblock_modules(&mut machine, &checks, &mut warnings);
+        if !unblocked.is_empty() {
+            machine.save(&path)?;
+        }
+        data["unblocked"] = json!(unblocked);
+    }
+
+    Ok((data, warnings))
+}
+
+/// `validate config`：校验 `.rustmigrate.toml` 配置文件合法性。
+///
+/// 三种场景：
+/// - 文件不存在：status=ok，warning 提示"未找到配置文件，使用默认值"
+/// - 文件存在且合法：status=ok，输出各字段检查数
+/// - 文件存在但有不合理字段：status=warning，附带具体问题
+fn cmd_validate_config() -> CmdResult {
+    use rustmigrate_core::types::config::MigrateConfig;
+
+    let path = config_path();
+    let mut warnings: Vec<String> = Vec::new();
+
+    // 配置文件不存在：正常场景，使用默认值。
+    if !path.exists() {
+        warnings.push("未找到配置文件，使用默认值".to_owned());
+        return Ok((
+            json!({
+                "config_path": CONFIG_FILE,
+                "valid": true,
+                "fields_checked": 0,
+            }),
+            warnings,
+        ));
+    }
+
+    // 读取并解析配置文件。
+    let content = std::fs::read_to_string(&path)?;
+    let config: MigrateConfig = match toml::from_str(&content) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            return Err(MigrateError::Config(format!("{CONFIG_FILE} 解析失败: {e}")));
+        }
+    };
+
+    // 逐字段合理性校验。
+    let mut fields_checked: u32 = 0;
+
+    // 1. project.source_root 路径检查
+    fields_checked += 1;
+    let source_root = Path::new(&config.project.source_root);
+    if !source_root.exists() {
+        warnings.push(format!(
+            "project.source_root 目录不存在: {}",
+            config.project.source_root
+        ));
+    }
+
+    // 2. project.rust_root 路径检查
+    fields_checked += 1;
+    let rust_root = Path::new(&config.project.rust_root);
+    if !rust_root.exists() {
+        warnings.push(format!(
+            "project.rust_root 目录不存在: {}（迁移早期属正常）",
+            config.project.rust_root
+        ));
+    }
+
+    // 3. strategy.max_retry_rounds 合理性
+    fields_checked += 1;
+    if config.strategy.max_retry_rounds == 0 {
+        warnings.push("strategy.max_retry_rounds 为 0，翻译失败后不会重试".to_owned());
+    }
+
+    // 4. testing.coverage_threshold 范围检查（0-100）
+    fields_checked += 1;
+    if config.testing.coverage_threshold > 100 {
+        warnings.push(format!(
+            "testing.coverage_threshold 超出合理范围（0-100）: {}",
+            config.testing.coverage_threshold
+        ));
+    }
+
+    // 5. orchestration.subagent_timeout_secs 合理性
+    fields_checked += 1;
+    if config.orchestration.subagent_timeout_secs == 0 {
+        warnings.push("orchestration.subagent_timeout_secs 为 0，SubAgent 将立即超时".to_owned());
+    }
+
+    let valid = warnings.is_empty();
+
+    Ok((
+        json!({
+            "config_path": CONFIG_FILE,
+            "valid": valid,
+            "fields_checked": fields_checked,
+        }),
+        warnings,
+    ))
 }
 
 /// `state get <module> [--human]`：查询指定模块迁移状态。
@@ -1316,6 +1602,43 @@ fn cmd_state_advance_sprint() -> CmdResult {
             ))
         }
     }
+}
+
+/// `state update --module <m> --status <s> --cas-version <v> [--substatus <s>] [--reason <r>]`：
+/// 乐观锁状态更新（CAS：Compare-And-Swap）。
+///
+/// 设计（`06-plugin-structure.md` M2 扩展 §10.8）：`metadata` 增加 `version` 字段支持乐观锁；
+/// 写入时携带 `--cas-version`，版本不匹配返回冲突错误，防止并发写覆盖。
+fn cmd_state_update(
+    module: &str,
+    status: &str,
+    cas_version: u64,
+    substatus: Option<&str>,
+    reason: Option<&str>,
+) -> CmdResult {
+    // 解析目标状态（ModuleStatus）。
+    let target = status.parse::<ModuleStatus>().map_err(|_| {
+        MigrateError::Config(format!(
+            "非法 ModuleStatus: {status}（合法值: pending/translating/compile_fixing/testing/\
+             reviewing/done/degrade_ffi/degrade_manual/degrade_skip/paused/blocked）"
+        ))
+    })?;
+
+    let path = state_path();
+    let (mut machine, warnings) = load_state_with_warnings(&path)?;
+    let (previous_status, new_version) =
+        machine.update_with_cas(module, target, cas_version, substatus, reason)?;
+    machine.save(&path)?;
+
+    Ok((
+        json!({
+            "module": module,
+            "previous_status": previous_status.to_string(),
+            "new_status": target.to_string(),
+            "new_version": new_version,
+        }),
+        warnings,
+    ))
 }
 
 /// [`SubAgentCall`] 后经 core [`MigrationStateMachine::push_subagent_call`] 入库，落盘走 tmp-fsync-rename
