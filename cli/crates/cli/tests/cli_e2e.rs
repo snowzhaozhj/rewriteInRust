@@ -1177,6 +1177,75 @@ fn smoke_populate_without_db_errors() {
     });
 }
 
+// === graph cycles（M2-CLI-02：完整 SCC 环检测）===
+
+#[test]
+fn smoke_graph_cycles_no_cycles() {
+    // linear-deps 无环：has_cycles=false, cycles=[]。
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        let _ = run(&["init"]);
+        build_graph_for_query();
+        let (code, json) = run(&["graph", "cycles"]);
+        assert_eq!(code, 0, "graph cycles 应成功: {json}");
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["data"]["has_cycles"], false);
+        assert_eq!(json["data"]["cycle_count"], 0);
+        assert!(
+            json["data"]["cycles"].as_array().unwrap().is_empty(),
+            "无环时 cycles 应为空数组: {json}"
+        );
+    });
+}
+
+#[test]
+fn smoke_graph_cycles_with_cycles() {
+    // circular-deps 有环：has_cycles=true, cycles 非空，含 event-bus/handler/emitter。
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("circular-deps"), tmp.path());
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        build_graph_for_query();
+        let (code, json) = run(&["graph", "cycles"]);
+        assert_eq!(code, 0, "graph cycles 应成功: {json}");
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["data"]["has_cycles"], true);
+        let cycle_count = json["data"]["cycle_count"].as_u64().unwrap();
+        assert!(cycle_count >= 1, "应至少检测到 1 个环: {json}");
+        let cycles = json["data"]["cycles"].as_array().unwrap();
+        assert!(!cycles.is_empty(), "cycles 应非空: {json}");
+
+        // 至少有一个环包含 event-bus、handler、emitter。
+        let has_expected = cycles.iter().any(|cycle| {
+            let members: Vec<&str> = cycle
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap_or_default())
+                .collect();
+            let has_eb = members.iter().any(|s| s.contains("event-bus"));
+            let has_h = members.iter().any(|s| s.contains("handler"));
+            let has_e = members.iter().any(|s| s.contains("emitter"));
+            has_eb && has_h && has_e
+        });
+        assert!(
+            has_expected,
+            "应包含 event-bus/handler/emitter 的环: {cycles:?}"
+        );
+    });
+}
+
+#[test]
+fn smoke_graph_cycles_without_db_errors() {
+    // 无 db 时应报错（非 panic）。
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let (code, json) = run(&["graph", "cycles"]);
+        assert_eq!(code, 1, "无 db 时应返回错误");
+        assert_eq!(json["status"], "error");
+    });
+}
+
 // === graph interfaces --deps-of 批量模式 ===
 
 #[test]

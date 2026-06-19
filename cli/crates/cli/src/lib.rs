@@ -133,6 +133,8 @@ pub enum GraphCommands {
     },
     /// 图统计信息（节点/边计数、分类计数）。
     Stats,
+    /// 循环依赖检测：完整 SCC 环路径输出。
+    Cycles,
 }
 
 /// Validate 子命令。
@@ -330,6 +332,7 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
                 emit(writer, cmd_graph_interfaces(module, deps_of.as_deref()))
             }
             GraphCommands::Stats => emit(writer, cmd_graph_stats()),
+            GraphCommands::Cycles => emit(writer, cmd_graph_cycles()),
         },
         Commands::Validate { action } => match action {
             ValidateCommands::State => emit(writer, cmd_validate_state()),
@@ -935,6 +938,27 @@ fn cmd_graph_stats() -> CmdResult {
     let graph = load_graph()?;
     let stats = graph.stats();
     Ok((serde_json::to_value(&stats)?, Vec::new()))
+}
+
+/// `graph cycles`：循环依赖检测，输出完整 SCC 环路径。
+///
+/// 使用 Tarjan SCC 算法检测所有强连通分量（大小 > 1 或自环），
+/// 将每个 SCC 中的 NodeId 转为字符串输出。无环时 `has_cycles: false`。
+fn cmd_graph_cycles() -> CmdResult {
+    let graph = load_graph()?;
+    let cycles = detect_cycles(&graph);
+    let cycle_paths: Vec<Vec<String>> = cycles
+        .iter()
+        .map(|c| c.iter().map(|id| id.to_string()).collect())
+        .collect();
+    Ok((
+        json!({
+            "has_cycles": !cycle_paths.is_empty(),
+            "cycle_count": cycle_paths.len(),
+            "cycles": cycle_paths,
+        }),
+        Vec::new(),
+    ))
 }
 
 /// `validate state`：校验 `migration-state.json`。
