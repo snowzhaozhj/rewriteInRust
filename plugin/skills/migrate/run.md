@@ -21,9 +21,9 @@
 
 | tier | 循环路径 | 跳过步骤 |
 |------|---------|---------|
-| `trivial` | 直翻 + 编译 + 导出可见性核对 + 签批 | 跳步骤 4-5（意图摘要/确认）、步骤 7-9（对抗审查/Phase B）、维度 9 退化为符号一致性 |
-| `standard` | 保留意图摘要 + Phase A + 审查 + 测试 | 跳步骤 9 中的 loom/shuttle 插桩 |
-| `full` | 完整 11 步（同 M1） | 无 |
+| `trivial` | 直翻（单候选）+ 编译 + 导出可见性核对 + 签批 | 跳步骤 4-5（意图摘要/确认）、步骤 7a（候选选优）、步骤 7b-9（对抗审查/Phase B）、维度 9 退化为符号一致性 |
+| `standard` | 保留意图摘要 + Phase A 多候选（2 候选）+ 选优 + 审查 + 测试 | 跳步骤 9 中的 loom/shuttle 插桩 |
+| `full` | 完整 11 步（含 Phase A 多候选 + 选优），同 M1 扩展 | 无 |
 | `null`（未检测） | 等同 `full`（保守兜底） | 无 |
 
 **降档/升档机制（M2-TIER-01d）**：
@@ -60,10 +60,20 @@
 向用户展示 intent.md 全文，请其「确认 / 修订」。修订则 translator 重新生成，最多 2 轮；第 3 轮仍不满意 → 置 `paused` + `requires_manual_review`，停。`.rustmigrate.toml` 设 `auto_confirm_intent=true` 可跳过本门禁（power-user）。
 
 ### 6. Phase A 忠实翻译（translator）
-调 translator（**前/后记 subagent_call**，step_index=6）产出 Rust 源文件（写 `rust_root/`）+ `_porting_manifest.json` + 持久化 `intermediate/attempts/{module}-phase-a.rs`。**L1 校验**：Rust 文件存在且编译通过、manifest 非空。失败 ≤2 次重试；仍失败则回滚（删 `rust_root/{module}.rs` 部分写入，保留 intent.md + attempts/*，状态复位 `translating`/substatus=null）。成功后 `state transition --module <M> --substatus phase_a_complete_awaiting_review`（status 不变）。
+调 translator（**前/后记 subagent_call**，step_index=6）产出 Phase A 翻译。根据模块 tier 分两种模式：
 
-### 7. 对抗审查（verifier）
-调 verifier（**前/后记 subagent_call**，step_index=7）读 `attempts/{module}-phase-a.rs` + 源码 + 规则，产出 `{module}-review.md`。**L1**：存在、非空、含差异列表。失败 ≤2 次重试；仍失败回滚（删 review.md，保留 Phase A 代码，状态保持 `phase_a_complete_awaiting_review`）。
+- **单候选**（`trivial` 档）：产出 Rust 源文件（写 `rust_root/`）+ `_porting_manifest.json` + 持久化 `intermediate/attempts/{module}-phase-a.rs`。**L1 校验**：Rust 文件存在且编译通过、manifest 非空。
+- **多候选**（`standard`/`full` 档，M2-ADV-01）：产出 2 个候选文件到 `intermediate/attempts/{module}-phase-a-candidate-{1,2}.rs` + 各自的 `{module}-candidate-{1,2}-manifest.json`。**不立即写 `rust_root/`**（等选优后写入）。**L1 校验**：两个候选文件均存在且各自编译通过、两个 manifest JSON 合法。
+
+失败 ≤2 次重试；仍失败则回滚（删 `rust_root/{module}.rs` 部分写入，保留 intent.md + attempts/*，状态复位 `translating`/substatus=null）。成功后 `state transition --module <M> --substatus phase_a_complete_awaiting_review`（status 不变）。
+
+### 7. 候选选优 + 对抗审查（verifier）
+
+**7a. 候选选优**（仅 `standard`/`full` 档，M2-ADV-01）：
+调 verifier（**前/后记 subagent_call**，step_index=7a）读取 2 个候选 + `_candidate_manifest.json` + 意图摘要 + 源码，产出 `{module}-selection.md`（选中候选编号 + 评分 + 对比）。**L1**：存在、非空、含「候选选优结果」标题。选优后 verifier 将选中候选复制为 `attempts/{module}-phase-a.rs` 并写入 `rust_root/`、生成 `_porting_manifest.json`。`trivial` 档跳过此步。
+
+**7b. 对抗审查**：
+调 verifier（**前/后记 subagent_call**，step_index=7b）读 `attempts/{module}-phase-a.rs`（多候选模式下为选优后的版本）+ 源码 + 规则，产出 `{module}-review.md`。**L1**：存在、非空、含差异列表。失败 ≤2 次重试；仍失败回滚（删 review.md，保留 Phase A 代码，状态保持 `phase_a_complete_awaiting_review`）。
 
 ### 8. Phase A 结构门禁
 `rustmigrate stats compare` 校验 Phase A 1:1 结构（函数数比、行数比、控制流对应）。越界 → 标"疑似已优化"，要求 translator 以忠实模式重做 Phase A（删旧 review.md，重跑第 7 步）；重做仍越界 → `paused` + `requires_manual_review`。通过则记 `phase_a_audit_passed=true` + `phase_a_version`（content hash），进第 9 步。
