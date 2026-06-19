@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{MigrateError, Result};
 use crate::types::common::{SourceLang, Timestamp};
+use crate::types::config::PersistenceConfig;
 use crate::types::state::{
     AttemptRecord, MigrationMetadata, MigrationStateFile, ModuleState, ModuleStatus, ProjectInfo,
     ProjectState, StateHistoryEntry,
@@ -26,6 +27,8 @@ pub struct MigrationStateMachine {
     /// 运行时标志（不序列化）：本次 [`load`](Self::load) 是否因主文件损坏而回退到 `.backup`。
     /// 为真表示拿到的是上一次成功保存前的旧状态，最近进度可能丢失，调用方应向用户告警。
     recovered_from_backup: bool,
+    /// 持久化配置（运行时注入，不序列化）。控制 save 时是否备份、过期清理策略。
+    persistence_config: PersistenceConfig,
 }
 
 impl MigrationStateMachine {
@@ -83,6 +86,7 @@ impl MigrationStateMachine {
         Ok(Self {
             state_file,
             recovered_from_backup: false,
+            persistence_config: PersistenceConfig::default(),
         })
     }
 
@@ -95,6 +99,9 @@ impl MigrationStateMachine {
     /// **恢复后保存的特例**：若本实例来自 backup 回退（[`recovered_from_backup`](Self::recovered_from_backup)
     /// 为真），磁盘上的主文件仍是损坏内容——此时**跳过备份步骤**，避免用损坏的主文件覆盖唯一可用的
     /// `.backup`（否则 rename 前若再崩溃，主备双损、彻底不可恢复）。保留 backup 为回退前的最后有效快照。
+    ///
+    /// 备份行为受 `persistence_config.backup_on_write` 控制（默认 true，与既有行为一致）。
+    /// `persistence_config.retention_days` 有值时，save 后清理超过 N 天的 `.backup` 文件。
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() && !parent.exists() {
@@ -102,7 +109,14 @@ impl MigrationStateMachine {
             }
         }
         let content = serde_json::to_string_pretty(&self.state_file)?;
-        atomic_write(path, content.as_bytes(), !self.recovered_from_backup)
+        // 仅在 backup_on_write=true 且非恢复模式时备份（恢复模式跳过以防损坏覆盖有效 backup）。
+        let do_backup = self.persistence_config.backup_on_write && !self.recovered_from_backup;
+        atomic_write(path, content.as_bytes(), do_backup)?;
+        // 按 retention_days 清理过期 backup。
+        if let Some(days) = self.persistence_config.retention_days {
+            cleanup_old_backups(path, days);
+        }
+        Ok(())
     }
 
     /// 执行状态转换。
@@ -172,7 +186,16 @@ impl MigrationStateMachine {
         Self {
             state_file,
             recovered_from_backup: false,
+            persistence_config: PersistenceConfig::default(),
         }
+    }
+
+    /// 注入持久化配置（运行时从 `.rustmigrate.toml` 读取后设置）。
+    ///
+    /// 控制 save 时是否生成 `.backup` 以及过期清理策略。
+    /// 未调用此方法时使用默认配置（backup_on_write=true, retention_days=None）。
+    pub fn set_persistence_config(&mut self, config: PersistenceConfig) {
+        self.persistence_config = config;
     }
 
     /// 返回当前项目状态。
@@ -512,6 +535,29 @@ fn sibling_with_suffix(path: &Path, suffix: &str) -> PathBuf {
     name.push(&original);
     name.push(suffix);
     path.with_file_name(name)
+}
+
+/// 清理超过 `retention_days` 天的 `.backup` 文件（best-effort，失败静默忽略）。
+///
+/// 当前每个状态文件只有一个 `.backup`，检查其修改时间是否超过保留期，超期则删除。
+/// save 时顺带执行，不独立定时。
+fn cleanup_old_backups(path: &Path, retention_days: u32) {
+    let backup = sibling_with_suffix(path, ".backup");
+    if !backup.exists() {
+        return;
+    }
+    let Ok(metadata) = std::fs::metadata(&backup) else {
+        return;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return;
+    };
+    let retention = std::time::Duration::from_secs(u64::from(retention_days) * 86400);
+    if let Ok(age) = std::time::SystemTime::now().duration_since(modified) {
+        if age > retention {
+            let _ = std::fs::remove_file(&backup);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1273,5 +1319,138 @@ mod tests {
         });
         // degrade 是终态 → 应推进。
         assert_eq!(m.try_advance_sprint(), SprintAdvanceResult::Advanced(2));
+    }
+
+    #[test]
+    fn test_save_backup_on_write_true_creates_backup() {
+        // 默认 backup_on_write=true：二次保存应生成 .backup。
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
+        let path = dir.path().join("migration-state.json");
+        let backup = sibling_with_suffix(&path, ".backup");
+
+        let m = new_machine();
+        m.save(&path).unwrap(); // 首次保存，无需备份
+        assert!(!backup.exists(), "首次保存不应生成 backup（无原文件）");
+
+        m.save(&path).unwrap(); // 二次保存，应备份旧文件
+        assert!(
+            backup.exists(),
+            "backup_on_write=true 时二次保存应生成 .backup"
+        );
+    }
+
+    #[test]
+    fn test_save_backup_on_write_false_skips_backup() {
+        // backup_on_write=false：保存不应生成 .backup。
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
+        let path = dir.path().join("migration-state.json");
+        let backup = sibling_with_suffix(&path, ".backup");
+
+        let mut m = new_machine();
+        m.set_persistence_config(PersistenceConfig {
+            backup_on_write: false,
+            retention_days: None,
+        });
+        m.save(&path).unwrap();
+        m.save(&path).unwrap(); // 二次保存也不备份
+        assert!(!backup.exists(), "backup_on_write=false 时不应生成 .backup");
+    }
+
+    #[test]
+    fn test_save_retention_days_cleans_old_backup() {
+        // retention_days=0 时，任何已有 backup 都应被清理。
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
+        let path = dir.path().join("migration-state.json");
+        let backup = sibling_with_suffix(&path, ".backup");
+
+        let mut m = new_machine();
+        m.save(&path).unwrap(); // 首次保存
+        m.save(&path).unwrap(); // 二次保存生成 .backup
+        assert!(backup.exists(), "预置：backup 应存在");
+
+        // 设置 retention_days=0，再 save 一次触发清理。
+        m.set_persistence_config(PersistenceConfig {
+            backup_on_write: true,
+            retention_days: Some(0),
+        });
+        m.save(&path).unwrap();
+        // retention_days=0：save 先用 atomic_write 创建新 backup（backup_on_write=true），
+        // 随后 cleanup_old_backups 检查 age > 0 秒。刚创建的 backup age 至少有几微秒，
+        // 所以会被清理掉。
+        assert!(
+            !backup.exists(),
+            "retention_days=0 时 save 后 backup 应被清理"
+        );
+    }
+
+    #[test]
+    fn test_save_retention_days_none_keeps_backup() {
+        // retention_days=None（默认）：不清理 backup。
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
+        let path = dir.path().join("migration-state.json");
+        let backup = sibling_with_suffix(&path, ".backup");
+
+        let m = new_machine(); // 默认 persistence_config
+        m.save(&path).unwrap();
+        m.save(&path).unwrap();
+        assert!(backup.exists(), "backup 应存在");
+
+        m.save(&path).unwrap(); // 再次保存，retention_days=None 不清理
+        assert!(backup.exists(), "retention_days=None 时 backup 不应被清理");
+    }
+
+    #[test]
+    fn test_cleanup_old_backups_removes_expired() {
+        // 直接测试 cleanup_old_backups 函数。
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
+        let path = dir.path().join("state.json");
+        let backup = sibling_with_suffix(&path, ".backup");
+
+        std::fs::write(&backup, b"old backup content").unwrap();
+
+        // retention_days=36500（100年）：刚创建的 backup 不应被清理。
+        cleanup_old_backups(&path, 36500);
+        assert!(backup.exists(), "retention_days=36500 时 backup 不应被清理");
+
+        // retention_days=0：阈值为 0 秒，刚创建的文件 age > 0（至少 1 微秒），应被清理。
+        cleanup_old_backups(&path, 0);
+        assert!(
+            !backup.exists(),
+            "retention_days=0 时 backup 应被清理（age > 0 秒阈值）"
+        );
+    }
+
+    #[test]
+    fn test_set_persistence_config() {
+        // 验证 set_persistence_config 正确注入。
+        let mut m = new_machine();
+        // 默认值。
+        m.set_persistence_config(PersistenceConfig {
+            backup_on_write: false,
+            retention_days: Some(7),
+        });
+        // 通过 save 行为间接验证已注入。
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
+        let path = dir.path().join("state.json");
+        let backup = sibling_with_suffix(&path, ".backup");
+        m.save(&path).unwrap();
+        m.save(&path).unwrap();
+        assert!(
+            !backup.exists(),
+            "set_persistence_config(backup_on_write=false) 应阻止备份"
+        );
+    }
+
+    #[test]
+    fn test_persistence_config_default_backward_compatible() {
+        // 默认 PersistenceConfig 行为与改动前一致：backup_on_write=true, retention_days=None。
+        let m = new_machine();
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
+        let path = dir.path().join("migration-state.json");
+        let backup = sibling_with_suffix(&path, ".backup");
+
+        m.save(&path).unwrap();
+        m.save(&path).unwrap();
+        assert!(backup.exists(), "默认配置应生成 backup（向后兼容）");
     }
 }

@@ -278,10 +278,27 @@ pub struct ReproducibilityConfig {}
 #[serde(default)]
 pub struct WorkspaceConfig {}
 
-/// 持久化配置（M2 预留）。
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+/// 持久化配置（state 持久化与崩溃恢复）。
+///
+/// 对齐 `docs/design/06-plugin-structure.md § [persistence]`。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct PersistenceConfig {}
+pub struct PersistenceConfig {
+    /// 每次写 migration-state.json 前是否创建 .backup（默认 true，与既有行为一致）。
+    pub backup_on_write: bool,
+    /// 备份保留天数（None = 不过期，不清理旧备份）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retention_days: Option<u32>,
+}
+
+impl Default for PersistenceConfig {
+    fn default() -> Self {
+        Self {
+            backup_on_write: true,
+            retention_days: None,
+        }
+    }
+}
 
 /// 校验配置（M2 预留）。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

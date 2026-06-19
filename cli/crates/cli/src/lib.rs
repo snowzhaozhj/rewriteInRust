@@ -457,7 +457,7 @@ fn state_path() -> PathBuf {
 fn load_state_with_warnings(
     path: &Path,
 ) -> Result<(MigrationStateMachine, Vec<String>), MigrateError> {
-    let machine = MigrationStateMachine::load(path)?;
+    let mut machine = MigrationStateMachine::load(path)?;
     let mut warnings = Vec::new();
     if machine.recovered_from_backup() {
         warnings.push(
@@ -466,6 +466,9 @@ fn load_state_with_warnings(
                 .to_owned(),
         );
     }
+    // 注入持久化配置：从 .rustmigrate.toml 读取 [persistence] 段。
+    let cfg = load_config_or_default(&mut warnings);
+    machine.set_persistence_config(cfg.persistence);
     Ok((machine, warnings))
 }
 
