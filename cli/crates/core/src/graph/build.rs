@@ -3,7 +3,7 @@
 //! 遍历项目目录，通过 `LanguageAdapter` trait 分析每个文件，
 //! 组装成完整的 `SourceGraph`。不依赖任何特定语言实现。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -14,6 +14,8 @@ use crate::lang::{FileAnalysis, LanguageAdapter, SymbolKind};
 use crate::types::common::{NodeId, EXCLUDED_DIRS};
 use crate::types::graph::{Dependency, EdgeSubKind, EdgeType, NodeType};
 
+use super::fingerprint::{self, ChangeLevel, FileFingerprint};
+use super::persist;
 use super::SourceGraph;
 
 /// `graph build --profile` 输出的性能画像。
@@ -28,6 +30,27 @@ pub struct BuildProfile {
     pub edge_build_ms: u64,
     /// 总耗时（解析 + 边构建，不含持久化，毫秒）。
     pub total_ms: u64,
+}
+
+/// 增量构建统计。
+#[derive(Debug, Clone, Serialize)]
+pub struct IncrementalStats {
+    /// 跳过的文件数（NONE 级别）。
+    pub skipped: usize,
+    /// 仅更新 hash 的文件数（COSMETIC 级别）。
+    pub cosmetic: usize,
+    /// 需重建的文件数（STRUCTURAL 级别）。
+    pub structural: usize,
+    /// 传递性更新波及的额外文件数。
+    pub transitive: usize,
+    /// 新增的文件数。
+    pub new_files: usize,
+    /// 已删除的文件数（磁盘不再存在）。
+    pub deleted: usize,
+    /// 是否发生了熔断截断。
+    pub truncated: bool,
+    /// 是否实际执行了增量（false 表示退化为全量——如 db 不存在）。
+    pub incremental: bool,
 }
 
 /// 从项目根目录构建源码图（内部实现，可选计时插桩）。
@@ -150,6 +173,434 @@ pub fn build_graph_ts_profiled(root: &Path) -> Result<(SourceGraph, BuildProfile
     let mut adapters: Vec<Box<dyn LanguageAdapter>> =
         vec![Box::new(crate::lang::typescript::TypeScriptAdapter::new()?)];
     build_graph_profiled(root, &mut adapters)
+}
+
+// === 增量构建 ===
+
+/// 反向 BFS 最大深度（设计文档 § 5.7.5）。
+const MAX_REVERSE_BFS_DEPTH: usize = 3;
+/// 反向 BFS 熔断阈值（设计文档 § 5.7.5）。
+const FUSE_THRESHOLD: usize = 50;
+
+/// 增量图构建：利用 file_fingerprints 跳过未变更文件。
+///
+/// 工作流程：
+/// 1. 从 DB 加载已有指纹和图
+/// 2. 扫描磁盘文件，计算当前 content_hash
+/// 3. 三级变更检测（NONE/COSMETIC/STRUCTURAL）
+/// 4. STRUCTURAL 文件触发反向 BFS 传递性更新
+/// 5. 仅重新解析变更文件，合并到已有图
+/// 6. 增量保存到 DB
+///
+/// DB 不存在时退化为全量构建。
+pub fn build_graph_incremental(
+    root: &Path,
+    db_path: &Path,
+    adapters: &mut [Box<dyn LanguageAdapter>],
+    profile: bool,
+) -> Result<(SourceGraph, BuildProfile, IncrementalStats)> {
+    let t_start = if profile { Some(Instant::now()) } else { None };
+
+    let root = root
+        .canonicalize()
+        .map_err(|_| MigrateError::FileNotFound(root.to_path_buf()))?;
+
+    // DB 不存在：退化为全量构建
+    if !db_path.exists() {
+        let (graph, bp) = build_graph_inner(&root, adapters, profile)?;
+        let file_count = graph.file_nodes().len();
+
+        // 计算并保存指纹
+        let fps = compute_all_fingerprints(&root, &graph, adapters)?;
+        std::fs::create_dir_all(db_path.parent().unwrap_or(Path::new(".")))?;
+        persist::save_to_db(&graph, db_path)?;
+        persist::save_fingerprints(db_path, &fps)?;
+
+        return Ok((
+            graph,
+            bp,
+            IncrementalStats {
+                skipped: 0,
+                cosmetic: 0,
+                structural: 0,
+                transitive: 0,
+                new_files: file_count,
+                deleted: 0,
+                truncated: false,
+                incremental: false,
+            },
+        ));
+    }
+
+    // 加载已有指纹
+    let old_fps: HashMap<String, FileFingerprint> = persist::load_fingerprints(db_path)?
+        .into_iter()
+        .map(|fp| (fp.file_path.clone(), fp))
+        .collect();
+
+    // 加载已有图（从 DB）
+    let mut graph = persist::load_from_db(db_path)?;
+
+    // 扫描磁盘文件
+    let files = collect_source_files(&root, adapters)?;
+    let current_rels: HashSet<String> =
+        files.iter().map(|(p, _)| make_relative(p, &root)).collect();
+
+    // 找出已删除文件（指纹中有但磁盘上不存在）
+    let deleted_files: Vec<String> = old_fps
+        .keys()
+        .filter(|fp| !current_rels.contains(fp.as_str()))
+        .cloned()
+        .collect();
+
+    // 删除已删除文件的节点
+    for del in &deleted_files {
+        graph.remove_nodes_by_file(del);
+    }
+
+    // 逐文件三级变更检测
+    let mut none_files: Vec<String> = Vec::new();
+    let mut cosmetic_files: Vec<String> = Vec::new();
+    let mut structural_files: Vec<String> = Vec::new();
+    let mut new_files: Vec<String> = Vec::new();
+    // 记录每个待分析文件的 (rel_path, file_path, adapter_idx, content_hash, source)
+    let mut to_analyze: Vec<(String, PathBuf, usize, String, String)> = Vec::new();
+
+    for (file_path, adapter_idx) in &files {
+        let rel = make_relative(file_path, &root);
+        let source = std::fs::read_to_string(file_path).map_err(MigrateError::Io)?;
+        let ch = fingerprint::content_hash(&source);
+
+        if let Some(old_fp) = old_fps.get(&rel) {
+            if old_fp.content_hash == ch {
+                // NONE：完全跳过
+                none_files.push(rel);
+                continue;
+            }
+            // content_hash 不同——需要解析才能判断 COSMETIC vs STRUCTURAL
+            to_analyze.push((rel, file_path.clone(), *adapter_idx, ch, source));
+        } else {
+            // 新文件
+            new_files.push(rel.clone());
+            to_analyze.push((rel, file_path.clone(), *adapter_idx, ch, source));
+        }
+    }
+
+    // 解析变更文件，判断 COSMETIC vs STRUCTURAL
+    let mut file_analyses: HashMap<String, FileAnalysis> = HashMap::new();
+    let mut new_fingerprints: Vec<FileFingerprint> = Vec::new();
+
+    for (rel, _file_path, adapter_idx, ch, source) in &to_analyze {
+        let analysis = match adapters[*adapter_idx].analyze_file(source, rel) {
+            Ok(a) => a,
+            Err(MigrateError::Parse { .. }) => {
+                graph
+                    .warnings
+                    .push(format!("解析跳过 {rel}: tree-sitter 解析失败"));
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+
+        let sh = fingerprint::structure_hash(&analysis);
+
+        if let Some(old_fp) = old_fps.get(rel.as_str()) {
+            let change = fingerprint::detect_change(old_fp, ch, &sh);
+            match change {
+                ChangeLevel::None => {
+                    // 不应到这里（已在上面过滤了），但保险起见
+                    none_files.push(rel.clone());
+                }
+                ChangeLevel::Cosmetic => {
+                    cosmetic_files.push(rel.clone());
+                }
+                ChangeLevel::Structural => {
+                    structural_files.push(rel.clone());
+                    file_analyses.insert(rel.clone(), analysis);
+                }
+            }
+        } else {
+            // 新文件总是 STRUCTURAL
+            file_analyses.insert(rel.clone(), analysis);
+        }
+
+        new_fingerprints.push(FileFingerprint {
+            file_path: rel.clone(),
+            content_hash: ch.clone(),
+            structure_hash: sh,
+        });
+    }
+
+    // 传递性更新：STRUCTURAL 文件的导入者也需重分析
+    let structural_set: HashSet<String> = structural_files
+        .iter()
+        .chain(new_files.iter())
+        .cloned()
+        .collect();
+    let (transitive_files, truncated) = compute_transitive_updates(&graph, &structural_set);
+
+    if truncated {
+        graph.warnings.push(
+            "传递性更新触发熔断截断（> 50 个文件），仅更新直接导入者。建议运行 `graph build --full` 做一次全量构建。"
+                .to_string(),
+        );
+    }
+
+    // 传递性波及的文件也需重分析（但排除已在变更列表中的）
+    let mut transitive_to_analyze: Vec<String> = Vec::new();
+    for trans_file in &transitive_files {
+        if structural_set.contains(trans_file) || cosmetic_files.contains(trans_file) {
+            continue;
+        }
+        transitive_to_analyze.push(trans_file.clone());
+    }
+
+    // 解析传递性波及文件
+    for rel in &transitive_to_analyze {
+        let file_path = root.join(rel);
+        if !file_path.exists() {
+            continue;
+        }
+        let source = std::fs::read_to_string(&file_path).map_err(MigrateError::Io)?;
+        let adapter_idx = match adapters.iter().position(|a| a.can_handle(&file_path)) {
+            Some(idx) => idx,
+            None => continue,
+        };
+        let analysis = match adapters[adapter_idx].analyze_file(&source, rel) {
+            Ok(a) => a,
+            Err(MigrateError::Parse { .. }) => {
+                graph
+                    .warnings
+                    .push(format!("解析跳过 {rel}: tree-sitter 解析失败"));
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+
+        let ch = fingerprint::content_hash(&source);
+        let sh = fingerprint::structure_hash(&analysis);
+
+        file_analyses.insert(rel.clone(), analysis);
+        new_fingerprints.push(FileFingerprint {
+            file_path: rel.clone(),
+            content_hash: ch,
+            structure_hash: sh,
+        });
+    }
+
+    // 删除需重建文件的旧节点
+    let rebuild_files: HashSet<&str> = structural_files
+        .iter()
+        .chain(new_files.iter())
+        .chain(transitive_to_analyze.iter())
+        .map(String::as_str)
+        .collect();
+    for file in &rebuild_files {
+        graph.remove_nodes_by_file(file);
+    }
+
+    let parse_ms = t_start.map_or(0, |t| t.elapsed().as_millis() as u64);
+
+    // 边构建阶段
+    let t_edge = if profile { Some(Instant::now()) } else { None };
+
+    // 添加重建文件的新节点和内部边
+    let mut all_new_edges: Vec<Dependency> = Vec::new();
+    for (rel, analysis) in &file_analyses {
+        let _ = rel;
+        for node in &analysis.nodes {
+            graph.add_node(node.clone());
+        }
+        all_new_edges.extend(analysis.edges.iter().cloned());
+    }
+
+    // 修正 extends 边并添加
+    let fixed_edges = fixup_extends_in_edges(&graph, all_new_edges);
+    for edge in &fixed_edges {
+        graph.add_edge(edge.clone());
+    }
+
+    // 重建跨文件边——只针对有变更的文件
+    let mut resolve_exts: Vec<&str> = adapters
+        .iter()
+        .flat_map(|a| a.resolve_extensions().iter().copied())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    resolve_exts.sort();
+
+    // 需要为变更文件重建跨文件边。先删除旧的跨文件出边，再重建。
+    // 但由于 graph 已经 remove_nodes_by_file 了，旧的跨文件边已被删除。
+    // 现在用 file_analyses 来重建。
+    let file_set: HashSet<String> = current_rels.clone();
+    add_cross_file_edges(&mut graph, &file_analyses, &file_set, &resolve_exts);
+
+    let edge_build_ms = t_edge.map_or(0, |t| t.elapsed().as_millis() as u64);
+    let total_ms = t_start.map_or(0, |t| t.elapsed().as_millis() as u64);
+
+    // 增量保存到 DB
+    let changed_files: Vec<String> = rebuild_files.iter().map(|s| s.to_string()).collect();
+    persist::save_incremental(
+        &graph,
+        db_path,
+        &new_fingerprints,
+        &changed_files,
+        truncated,
+    )?;
+
+    // 清理已删除文件的指纹
+    if !deleted_files.is_empty() {
+        persist::remove_stale_fingerprints(db_path, &deleted_files)?;
+    }
+
+    // 为 COSMETIC 文件更新 content_hash（structure_hash 不变，不影响图）
+    if !cosmetic_files.is_empty() {
+        let cosmetic_fps: Vec<FileFingerprint> = cosmetic_files
+            .iter()
+            .filter_map(|rel| {
+                new_fingerprints
+                    .iter()
+                    .find(|fp| &fp.file_path == rel)
+                    .cloned()
+            })
+            .collect();
+        if !cosmetic_fps.is_empty() {
+            persist::save_fingerprints_update(db_path, &cosmetic_fps)?;
+        }
+    }
+
+    let stats = IncrementalStats {
+        skipped: none_files.len(),
+        cosmetic: cosmetic_files.len(),
+        structural: structural_files.len(),
+        transitive: transitive_to_analyze.len(),
+        new_files: new_files.len(),
+        deleted: deleted_files.len(),
+        truncated,
+        incremental: true,
+    };
+
+    Ok((
+        graph,
+        BuildProfile {
+            parse_ms,
+            edge_build_ms,
+            total_ms,
+        },
+        stats,
+    ))
+}
+
+/// 便捷函数：增量构建（TypeScript adapter）。
+pub fn build_graph_ts_incremental(
+    root: &Path,
+    db_path: &Path,
+) -> Result<(SourceGraph, BuildProfile, IncrementalStats)> {
+    let mut adapters: Vec<Box<dyn LanguageAdapter>> =
+        vec![Box::new(crate::lang::typescript::TypeScriptAdapter::new()?)];
+    build_graph_incremental(root, db_path, &mut adapters, false)
+}
+
+/// 传递性更新：找出 STRUCTURAL 变更文件的所有（反向 BFS）导入者。
+///
+/// 返回 (需重分析的文件集合, 是否触发了熔断截断)。
+fn compute_transitive_updates(
+    graph: &SourceGraph,
+    structural_files: &HashSet<String>,
+) -> (HashSet<String>, bool) {
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut truncated = false;
+
+    for start_file in structural_files {
+        let file_id = NodeId::file(start_file);
+        if graph.node_index(&file_id).is_none() {
+            continue;
+        }
+
+        // BFS 反向沿 imports 边
+        let mut queue: VecDeque<(NodeId, usize)> = VecDeque::new();
+        queue.push_back((file_id.clone(), 0));
+        let mut local_visited: HashSet<String> = HashSet::new();
+        local_visited.insert(start_file.clone());
+
+        while let Some((current_id, depth)) = queue.pop_front() {
+            if depth >= MAX_REVERSE_BFS_DEPTH {
+                continue;
+            }
+
+            // 找到所有导入 current_id 的文件（反向 imports 边）
+            let importers = graph.incoming_edges(&current_id);
+            for (importer_node, edge_type) in importers {
+                if edge_type != EdgeType::Imports {
+                    continue;
+                }
+                let importer_file = &importer_node.file_path;
+                if local_visited.contains(importer_file) {
+                    continue;
+                }
+                local_visited.insert(importer_file.clone());
+                visited.insert(importer_file.clone());
+
+                // 熔断检查
+                if visited.len() > FUSE_THRESHOLD {
+                    truncated = true;
+                    // 截断为仅直接导入者：清空队列，不再深入
+                    queue.clear();
+                    break;
+                }
+
+                queue.push_back((importer_node.id.clone(), depth + 1));
+            }
+
+            if truncated {
+                break;
+            }
+        }
+
+        if truncated {
+            break;
+        }
+    }
+
+    (visited, truncated)
+}
+
+/// 为全量构建后的图计算所有文件的指纹。
+fn compute_all_fingerprints(
+    root: &Path,
+    _graph: &SourceGraph,
+    adapters: &mut [Box<dyn LanguageAdapter>],
+) -> Result<Vec<FileFingerprint>> {
+    let files = collect_source_files(root, adapters)?;
+    let mut fps = Vec::new();
+
+    for (file_path, adapter_idx) in &files {
+        let rel = make_relative(file_path, root);
+        let source = match std::fs::read_to_string(file_path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let ch = fingerprint::content_hash(&source);
+        let sh = match adapters[*adapter_idx].analyze_file(&source, &rel) {
+            Ok(analysis) => fingerprint::structure_hash(&analysis),
+            Err(_) => ch.clone(), // 解析失败时 structure_hash = content_hash（保守：任何变更都视为 STRUCTURAL）
+        };
+        fps.push(FileFingerprint {
+            file_path: rel,
+            content_hash: ch,
+            structure_hash: sh,
+        });
+    }
+    Ok(fps)
+}
+
+/// 公开版本：CLI 全量构建后调用以生成指纹。
+pub fn compute_all_fingerprints_pub(
+    root: &Path,
+    graph: &SourceGraph,
+    adapters: &mut [Box<dyn LanguageAdapter>],
+) -> Result<Vec<FileFingerprint>> {
+    compute_all_fingerprints(root, graph, adapters)
 }
 
 /// 收集所有可被适配器处理的源文件，返回 (路径, 适配器索引)。
@@ -754,5 +1205,247 @@ mod tests {
             has_call,
             "import 别名场景下方法调用应解析到原类名 Greeter.hello"
         );
+    }
+
+    // === 增量构建测试 ===
+
+    fn temp_db(name: &str) -> PathBuf {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!("rustmigrate_incr_{name}_{ts}.db"))
+    }
+
+    fn make_ts_dir(name: &str) -> PathBuf {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("rustmigrate_incr_{name}_{ts}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn incremental_skips_unchanged_files() {
+        let dir = make_ts_dir("skip_unchanged");
+        std::fs::write(dir.join("a.ts"), "export function foo() { return 1; }\n").unwrap();
+        std::fs::write(
+            dir.join("b.ts"),
+            "import { foo } from './a';\nexport function bar() { return foo(); }\n",
+        )
+        .unwrap();
+
+        let db = temp_db("skip_unchanged");
+
+        // 第一次构建（退化为全量）
+        let (g1, _bp1, stats1) = build_graph_ts_incremental(&dir, &db).unwrap();
+        assert!(!stats1.incremental, "首次构建应退化为全量");
+        assert!(g1.node_count() > 0);
+
+        // 第二次构建（无变更——全部 NONE 跳过）
+        let (_g2, _bp2, stats2) = build_graph_ts_incremental(&dir, &db).unwrap();
+        assert!(stats2.incremental);
+        assert_eq!(stats2.skipped, 2, "两个文件都应被跳过");
+        assert_eq!(stats2.cosmetic, 0);
+        assert_eq!(stats2.structural, 0);
+        assert_eq!(stats2.new_files, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn incremental_cosmetic_change() {
+        let dir = make_ts_dir("cosmetic");
+        std::fs::write(dir.join("a.ts"), "export function foo() { return 1; }\n").unwrap();
+
+        let db = temp_db("cosmetic");
+
+        // 全量构建
+        let _ = build_graph_ts_incremental(&dir, &db).unwrap();
+
+        // 修改函数体（不改签名）= COSMETIC
+        std::fs::write(dir.join("a.ts"), "export function foo() { return 42; }\n").unwrap();
+
+        let (_g, _bp, stats) = build_graph_ts_incremental(&dir, &db).unwrap();
+        assert!(stats.incremental);
+        assert_eq!(stats.cosmetic, 1, "函数体修改应为 COSMETIC");
+        assert_eq!(stats.structural, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn incremental_structural_change() {
+        let dir = make_ts_dir("structural");
+        std::fs::write(dir.join("a.ts"), "export function foo() { return 1; }\n").unwrap();
+
+        let db = temp_db("structural");
+
+        // 全量构建
+        let _ = build_graph_ts_incremental(&dir, &db).unwrap();
+
+        // 新增函数 = STRUCTURAL
+        std::fs::write(
+            dir.join("a.ts"),
+            "export function foo() { return 1; }\nexport function bar() { return 2; }\n",
+        )
+        .unwrap();
+
+        let (g, _bp, stats) = build_graph_ts_incremental(&dir, &db).unwrap();
+        assert!(stats.incremental);
+        assert_eq!(stats.structural, 1, "新增函数应为 STRUCTURAL");
+        // 验证新函数存在
+        let has_bar = g.nodes().any(|n| n.name == "bar");
+        assert!(has_bar, "新增的 bar 函数应出现在图中");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn incremental_new_file() {
+        let dir = make_ts_dir("new_file");
+        std::fs::write(dir.join("a.ts"), "export function foo() { return 1; }\n").unwrap();
+
+        let db = temp_db("new_file");
+
+        // 全量构建
+        let _ = build_graph_ts_incremental(&dir, &db).unwrap();
+
+        // 新增文件
+        std::fs::write(dir.join("b.ts"), "export function bar() { return 2; }\n").unwrap();
+
+        let (g, _bp, stats) = build_graph_ts_incremental(&dir, &db).unwrap();
+        assert!(stats.incremental);
+        assert_eq!(stats.new_files, 1);
+        assert_eq!(stats.skipped, 1, "a.ts 应跳过");
+
+        let has_b = g.node_index(&NodeId::file("b.ts")).is_some();
+        assert!(has_b, "新文件 b.ts 应存在");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn incremental_deleted_file() {
+        let dir = make_ts_dir("deleted");
+        std::fs::write(dir.join("a.ts"), "export function foo() { return 1; }\n").unwrap();
+        std::fs::write(dir.join("b.ts"), "export function bar() { return 2; }\n").unwrap();
+
+        let db = temp_db("deleted");
+
+        // 全量构建
+        let _ = build_graph_ts_incremental(&dir, &db).unwrap();
+
+        // 删除 b.ts
+        std::fs::remove_file(dir.join("b.ts")).unwrap();
+
+        let (g, _bp, stats) = build_graph_ts_incremental(&dir, &db).unwrap();
+        assert!(stats.incremental);
+        assert_eq!(stats.deleted, 1);
+
+        let has_b = g.node_index(&NodeId::file("b.ts")).is_some();
+        assert!(!has_b, "删除的文件节点不应存在");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn incremental_transitive_update() {
+        let dir = make_ts_dir("transitive");
+        // b 依赖 a
+        std::fs::write(dir.join("a.ts"), "export function foo() { return 1; }\n").unwrap();
+        std::fs::write(
+            dir.join("b.ts"),
+            "import { foo } from './a';\nexport function bar() { return foo(); }\n",
+        )
+        .unwrap();
+
+        let db = temp_db("transitive");
+
+        // 全量构建
+        let _ = build_graph_ts_incremental(&dir, &db).unwrap();
+
+        // STRUCTURAL 修改 a.ts（新增导出函数）
+        std::fs::write(
+            dir.join("a.ts"),
+            "export function foo() { return 1; }\nexport function baz() {}\n",
+        )
+        .unwrap();
+
+        let (_g, _bp, stats) = build_graph_ts_incremental(&dir, &db).unwrap();
+        assert!(stats.incremental);
+        assert_eq!(stats.structural, 1, "a.ts 应为 STRUCTURAL");
+        assert!(
+            stats.transitive >= 1,
+            "b.ts 应因传递性更新被重分析，transitive={}",
+            stats.transitive
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn incremental_preserves_graph_correctness() {
+        // 验证增量构建与全量构建结果一致
+        let dir = make_ts_dir("correctness");
+        std::fs::write(
+            dir.join("utils.ts"),
+            "export function clamp(x: number) { return x; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("app.ts"),
+            "import { clamp } from './utils';\nclamp(1);\n",
+        )
+        .unwrap();
+
+        let db_incr = temp_db("correctness_incr");
+        let db_full = temp_db("correctness_full");
+
+        // 增量首次 = 全量
+        let _ = build_graph_ts_incremental(&dir, &db_incr).unwrap();
+
+        // 修改文件
+        std::fs::write(
+            dir.join("utils.ts"),
+            "export function clamp(x: number) { return x; }\nexport function lerp(a: number, b: number, t: number) { return a + (b - a) * t; }\n",
+        )
+        .unwrap();
+
+        // 增量构建
+        let (g_incr, _, _) = build_graph_ts_incremental(&dir, &db_incr).unwrap();
+
+        // 全量构建
+        let g_full = build_graph_ts(&dir).unwrap();
+
+        assert_eq!(
+            g_incr.node_count(),
+            g_full.node_count(),
+            "增量与全量节点数应一致: 增量={}, 全量={}",
+            g_incr.node_count(),
+            g_full.node_count()
+        );
+
+        // 验证所有全量节点在增量图中都存在
+        for node in g_full.nodes() {
+            assert!(
+                g_incr.node_index(&node.id).is_some(),
+                "增量图缺少节点: {}",
+                node.id
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&db_incr);
+        let _ = std::fs::remove_file(&db_full);
     }
 }

@@ -37,53 +37,13 @@ pub fn save_to_db(graph: &SourceGraph, db_path: &Path) -> Result<()> {
     tx.execute("DELETE FROM edges", [])?;
     tx.execute("DELETE FROM nodes", [])?;
 
-    // 插入节点
-    {
-        let mut stmt = tx.prepare(
-            "INSERT OR IGNORE INTO nodes \
-             (id, node_type, name, file_path, start_line, end_line, \
-              is_exported, complexity, migration_status, migration_priority, extra) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-        )?;
+    insert_graph_rows(&tx, graph)?;
 
-        for node in graph.nodes() {
-            let extra = serialize_node_extra(node)?;
-            stmt.execute(params![
-                node.id.as_str(),
-                node.node_type.to_string(),
-                node.name,
-                node.file_path,
-                node.line_range.map(|s| s.start_line),
-                node.line_range.map(|s| s.end_line),
-                node.is_exported,
-                node.complexity.map(|c| c.to_string()),
-                node.migration_status.map(|s| s.to_string()),
-                node.migration_priority,
-                extra,
-            ])?;
-        }
-    }
-
-    // 插入边
-    {
-        let mut stmt = tx.prepare(
-            "INSERT OR IGNORE INTO edges \
-             (source, target, edge_type, provenance, weight, sub_kind, mapping_notes) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        )?;
-
-        for edge in graph.edges() {
-            stmt.execute(params![
-                edge.source.as_str(),
-                edge.target.as_str(),
-                edge.edge_type.to_string(),
-                edge.provenance.to_string(),
-                edge.weight,
-                edge.sub_kind.map(|s| s.to_string()),
-                edge.mapping_notes,
-            ])?;
-        }
-    }
+    // 全量构建完成后重置 graph_integrity 为 "full"
+    tx.execute(
+        "INSERT OR REPLACE INTO metadata (key, value) VALUES ('graph_integrity', 'full')",
+        [],
+    )?;
 
     tx.commit()?;
     Ok(())
@@ -227,6 +187,220 @@ pub fn load_from_db(db_path: &Path) -> Result<SourceGraph> {
     }
 
     Ok(graph)
+}
+
+// === 增量构建持久化支持 ===
+
+use super::fingerprint::FileFingerprint;
+
+/// 将图的节点和边写入已存在的事务（共享逻辑，全量/增量均使用）。
+fn insert_graph_rows(tx: &rusqlite::Transaction, graph: &SourceGraph) -> Result<()> {
+    // 插入节点
+    {
+        let mut stmt = tx.prepare(
+            "INSERT OR IGNORE INTO nodes \
+             (id, node_type, name, file_path, start_line, end_line, \
+              is_exported, complexity, migration_status, migration_priority, extra) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        )?;
+
+        for node in graph.nodes() {
+            let extra = serialize_node_extra(node)?;
+            stmt.execute(params![
+                node.id.as_str(),
+                node.node_type.to_string(),
+                node.name,
+                node.file_path,
+                node.line_range.map(|s| s.start_line),
+                node.line_range.map(|s| s.end_line),
+                node.is_exported,
+                node.complexity.map(|c| c.to_string()),
+                node.migration_status.map(|s| s.to_string()),
+                node.migration_priority,
+                extra,
+            ])?;
+        }
+    }
+
+    // 插入边
+    {
+        let mut stmt = tx.prepare(
+            "INSERT OR IGNORE INTO edges \
+             (source, target, edge_type, provenance, weight, sub_kind, mapping_notes) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )?;
+
+        for edge in graph.edges() {
+            stmt.execute(params![
+                edge.source.as_str(),
+                edge.target.as_str(),
+                edge.edge_type.to_string(),
+                edge.provenance.to_string(),
+                edge.weight,
+                edge.sub_kind.map(|s| s.to_string()),
+                edge.mapping_notes,
+            ])?;
+        }
+    }
+    Ok(())
+}
+
+/// 增量保存：仅更新变更文件的节点和边（保留未变更文件的数据）。
+///
+/// 1. 删除 `changed_files` 中文件的旧节点和边
+/// 2. 写入新图中这些文件的节点和边
+/// 3. 更新 file_fingerprints
+/// 4. 如果发生熔断截断，更新 graph_integrity
+pub fn save_incremental(
+    graph: &SourceGraph,
+    db_path: &Path,
+    fingerprints: &[FileFingerprint],
+    changed_files: &[String],
+    truncated: bool,
+) -> Result<()> {
+    let mut conn = Connection::open(db_path)?;
+    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+    conn.execute_batch(include_str!("../schema.sql"))?;
+
+    let tx = conn.transaction()?;
+
+    // 1. 删除变更文件的旧节点和边
+    for file_path in changed_files {
+        // 先删边（引用约束）
+        tx.execute(
+            "DELETE FROM edges WHERE source IN (SELECT id FROM nodes WHERE file_path = ?1) \
+             OR target IN (SELECT id FROM nodes WHERE file_path = ?1)",
+            params![file_path],
+        )?;
+        tx.execute("DELETE FROM nodes WHERE file_path = ?1", params![file_path])?;
+    }
+
+    // 2. 写入新图的所有节点和边（仅含变更文件的数据）
+    insert_graph_rows(&tx, graph)?;
+
+    // 3. 更新指纹
+    save_fingerprints_tx(&tx, fingerprints)?;
+
+    // 4. 更新 graph_integrity
+    if truncated {
+        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        tx.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES ('graph_integrity', ?1)",
+            params![format!("truncated_at_{now}")],
+        )?;
+    } else {
+        tx.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES ('graph_integrity', 'full')",
+            [],
+        )?;
+    }
+
+    tx.commit()?;
+    Ok(())
+}
+
+/// 从 DB 加载所有文件指纹。
+pub fn load_fingerprints(db_path: &Path) -> Result<Vec<FileFingerprint>> {
+    if !db_path.exists() {
+        return Ok(Vec::new());
+    }
+    let conn = Connection::open(db_path)?;
+    conn.execute_batch(include_str!("../schema.sql"))?;
+
+    let mut stmt =
+        conn.prepare("SELECT file_path, content_hash, structure_hash FROM file_fingerprints")?;
+    let rows = stmt.query_map([], |row| {
+        Ok(FileFingerprint {
+            file_path: row.get(0)?,
+            content_hash: row.get(1)?,
+            structure_hash: row.get(2)?,
+        })
+    })?;
+
+    let mut fps = Vec::new();
+    for row in rows {
+        fps.push(row?);
+    }
+    Ok(fps)
+}
+
+/// 在事务内保存指纹（UPSERT）。
+fn save_fingerprints_tx(
+    tx: &rusqlite::Transaction,
+    fingerprints: &[FileFingerprint],
+) -> Result<()> {
+    let mut stmt = tx.prepare(
+        "INSERT OR REPLACE INTO file_fingerprints (file_path, content_hash, structure_hash, analyzed_at) \
+         VALUES (?1, ?2, ?3, datetime('now'))",
+    )?;
+    for fp in fingerprints {
+        stmt.execute(params![fp.file_path, fp.content_hash, fp.structure_hash])?;
+    }
+    Ok(())
+}
+
+/// 保存指纹（全量构建后调用）。
+pub fn save_fingerprints(db_path: &Path, fingerprints: &[FileFingerprint]) -> Result<()> {
+    let mut conn = Connection::open(db_path)?;
+    conn.execute_batch(include_str!("../schema.sql"))?;
+
+    let tx = conn.transaction()?;
+    // 全量构建：先清空旧指纹
+    tx.execute("DELETE FROM file_fingerprints", [])?;
+    save_fingerprints_tx(&tx, fingerprints)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// 增量更新指纹（COSMETIC 变更：只更新 content_hash，不清空整张表）。
+pub fn save_fingerprints_update(db_path: &Path, fingerprints: &[FileFingerprint]) -> Result<()> {
+    let mut conn = Connection::open(db_path)?;
+    conn.execute_batch(include_str!("../schema.sql"))?;
+
+    let tx = conn.transaction()?;
+    save_fingerprints_tx(&tx, fingerprints)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// 读取 graph_integrity 元数据值。
+pub fn load_graph_integrity(db_path: &Path) -> Result<String> {
+    if !db_path.exists() {
+        return Ok("full".to_string());
+    }
+    let conn = Connection::open(db_path)?;
+    conn.execute_batch(include_str!("../schema.sql"))?;
+
+    let value: String = conn
+        .query_row(
+            "SELECT value FROM metadata WHERE key = 'graph_integrity'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|_| "full".to_string());
+    Ok(value)
+}
+
+/// 删除 DB 中已不存在文件的指纹记录（文件被删除的情况）。
+pub fn remove_stale_fingerprints(db_path: &Path, stale_files: &[String]) -> Result<()> {
+    if stale_files.is_empty() {
+        return Ok(());
+    }
+    let conn = Connection::open(db_path)?;
+    for file in stale_files {
+        conn.execute(
+            "DELETE FROM file_fingerprints WHERE file_path = ?1",
+            params![file],
+        )?;
+        // 同步清理关联的节点和边
+        conn.execute(
+            "DELETE FROM edges WHERE source IN (SELECT id FROM nodes WHERE file_path = ?1) \
+             OR target IN (SELECT id FROM nodes WHERE file_path = ?1)",
+            params![file],
+        )?;
+        conn.execute("DELETE FROM nodes WHERE file_path = ?1", params![file])?;
+    }
+    Ok(())
 }
 
 // === 内部行结构 ===
@@ -708,5 +882,96 @@ mod tests {
             "warning 应含节点 id，实际: {}",
             warnings[0]
         );
+    }
+
+    // === 指纹持久化测试 ===
+
+    #[test]
+    fn fingerprints_save_and_load_round_trip() {
+        let db_path = temp_db_path("fp_roundtrip");
+
+        // 先创建 schema（save_to_db 会做）
+        let graph = SourceGraph::new();
+        save_to_db(&graph, &db_path).unwrap();
+
+        let fps = vec![
+            FileFingerprint {
+                file_path: "a.ts".to_string(),
+                content_hash: "hash_a".to_string(),
+                structure_hash: "struct_a".to_string(),
+            },
+            FileFingerprint {
+                file_path: "b.ts".to_string(),
+                content_hash: "hash_b".to_string(),
+                structure_hash: "struct_b".to_string(),
+            },
+        ];
+
+        save_fingerprints(&db_path, &fps).unwrap();
+        let loaded = load_fingerprints(&db_path).unwrap();
+
+        assert_eq!(loaded.len(), 2);
+        let a = loaded.iter().find(|f| f.file_path == "a.ts").unwrap();
+        assert_eq!(a.content_hash, "hash_a");
+        assert_eq!(a.structure_hash, "struct_a");
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn fingerprints_update_preserves_others() {
+        let db_path = temp_db_path("fp_update");
+
+        let graph = SourceGraph::new();
+        save_to_db(&graph, &db_path).unwrap();
+
+        let fps = vec![
+            FileFingerprint {
+                file_path: "a.ts".to_string(),
+                content_hash: "hash_a".to_string(),
+                structure_hash: "struct_a".to_string(),
+            },
+            FileFingerprint {
+                file_path: "b.ts".to_string(),
+                content_hash: "hash_b".to_string(),
+                structure_hash: "struct_b".to_string(),
+            },
+        ];
+        save_fingerprints(&db_path, &fps).unwrap();
+
+        // 只更新 a.ts 的 content_hash
+        let update = vec![FileFingerprint {
+            file_path: "a.ts".to_string(),
+            content_hash: "new_hash_a".to_string(),
+            structure_hash: "struct_a".to_string(),
+        }];
+        save_fingerprints_update(&db_path, &update).unwrap();
+
+        let loaded = load_fingerprints(&db_path).unwrap();
+        assert_eq!(loaded.len(), 2);
+        let a = loaded.iter().find(|f| f.file_path == "a.ts").unwrap();
+        assert_eq!(a.content_hash, "new_hash_a", "a.ts 应被更新");
+        let b = loaded.iter().find(|f| f.file_path == "b.ts").unwrap();
+        assert_eq!(b.content_hash, "hash_b", "b.ts 应保持不变");
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn graph_integrity_default_full() {
+        let db_path = temp_db_path("integrity_default");
+        let graph = SourceGraph::new();
+        save_to_db(&graph, &db_path).unwrap();
+
+        let integrity = load_graph_integrity(&db_path).unwrap();
+        assert_eq!(integrity, "full");
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn load_fingerprints_no_db_returns_empty() {
+        let result = load_fingerprints(Path::new("/nonexistent/db.db")).unwrap();
+        assert!(result.is_empty());
     }
 }
