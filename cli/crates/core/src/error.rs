@@ -68,6 +68,10 @@ pub enum MigrateError {
     /// 命令尚未实现（占位，待后续阶段接线）。
     #[error("命令尚未实现: {0}")]
     NotImplemented(String),
+
+    /// 子进程执行超时。
+    #[error("子进程超时: {command} (超时 {timeout_secs}s)")]
+    Timeout { command: String, timeout_secs: u64 },
 }
 
 /// 便捷 Result 别名。

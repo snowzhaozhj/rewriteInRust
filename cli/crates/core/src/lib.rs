@@ -2,6 +2,7 @@ pub mod detect;
 pub mod error;
 pub mod graph;
 pub mod lang;
+pub mod process;
 pub mod profile;
 pub mod response;
 pub mod scaffold;

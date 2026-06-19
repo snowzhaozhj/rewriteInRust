@@ -4,9 +4,11 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::process::Command;
 use strum::Display;
 
 use crate::error::Result;
+use crate::process::{run_with_timeout, CARGO_TIMEOUT};
 
 /// 验证规则检查函数类型别名。
 type CheckFn = Box<dyn Fn(&Path) -> Result<(bool, Option<String>)> + Send + Sync>;
@@ -100,10 +102,11 @@ pub fn default_rules() -> Vec<ValidationRule> {
             "cargo_check",
             ValidationTier::Tier0,
             |project_root: &Path| {
-                let output = std::process::Command::new("cargo")
-                    .arg("check")
-                    .current_dir(project_root)
-                    .output()?;
+                let output = run_with_timeout(
+                    Command::new("cargo").arg("check").current_dir(project_root),
+                    CARGO_TIMEOUT,
+                    "cargo check",
+                )?;
                 if output.status.success() {
                     Ok((true, None))
                 } else {
@@ -123,10 +126,13 @@ pub fn default_rules() -> Vec<ValidationRule> {
             "cargo_clippy",
             ValidationTier::Tier0,
             |project_root: &Path| {
-                let output = std::process::Command::new("cargo")
-                    .args(["clippy", "--", "-D", "warnings"])
-                    .current_dir(project_root)
-                    .output()?;
+                let output = run_with_timeout(
+                    Command::new("cargo")
+                        .args(["clippy", "--", "-D", "warnings"])
+                        .current_dir(project_root),
+                    CARGO_TIMEOUT,
+                    "cargo clippy",
+                )?;
                 if output.status.success() {
                     Ok((true, None))
                 } else {

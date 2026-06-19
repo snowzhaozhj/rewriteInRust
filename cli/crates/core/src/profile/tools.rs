@@ -14,6 +14,7 @@ use std::process::Command;
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::error::{MigrateError, Result};
+use crate::process::{run_with_timeout, PROBE_TIMEOUT};
 
 /// `analysis-tools.json` 中的单个工具条目。
 ///
@@ -218,17 +219,21 @@ fn interpret_probe(probe: Probe) -> ToolProbe {
 /// 运行 `<bin> <args...>` 探测版本，区分「未安装」与「探测失败」：
 /// - spawn 失败且为 `NotFound` → [`Probe::NotFound`]（命令不在 PATH）；
 /// - spawn 失败的其他 IO 错误（权限等）或非零退出 → [`Probe::Failed`]（附原因）；
+/// - 超时 → [`Probe::Failed`]（附超时信息）；
 /// - 成功 → [`Probe::Found`]，取 stdout（为空回退 stderr）去空白。
 ///
 /// `stdin` 置 null，避免工具误等交互输入而挂起。
 fn probe_version(bin: &str, args: &[&str]) -> Probe {
-    let output = match Command::new(bin)
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .output()
-    {
+    let label = format!("{bin} {}", args.join(" "));
+    let output = match run_with_timeout(Command::new(bin).args(args), PROBE_TIMEOUT, &label) {
         Ok(o) => o,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Probe::NotFound,
+        Err(MigrateError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Probe::NotFound
+        }
+        Err(MigrateError::Io(e)) => return Probe::Failed(format!("无法执行 {bin}: {e}")),
+        Err(MigrateError::Timeout { timeout_secs, .. }) => {
+            return Probe::Failed(format!("{bin} 探测超时 ({timeout_secs}s)"))
+        }
         Err(e) => return Probe::Failed(format!("无法执行 {bin}: {e}")),
     };
     if !output.status.success() {
