@@ -113,3 +113,28 @@ tools: Bash, Read, Write, Grep, Glob
 3. **局部性能**：消除明显冗余分配/拷贝（不改算法复杂度语义）。
 
 超出这三类的重构留到 M2。流程：先 `cargo fix --allow-dirty` 自动修，剩余编译错误自己改。编译失败最多 **3 轮**（`max_retry_rounds`，与 SubAgent 重试计数器独立）；每轮失败前由 SKILL.md 落盘 `state transition --to compile_fixing --substatus "<当轮错误摘要>"`，并把部分结果写 `intermediate/attempts/{module}-phase-b-partial.rs`、置 substatus `phase_b_failed_at_round_N` 以便 `--retry` 重入。3 轮仍不过 → 进入 pause→degrade（生成降级分析报告，等待人类 `--degrade=ffi` 决策），不要强行输出能编译但语义可疑的代码。
+
+## 并行翻译 porting 规则约束（M2-SCALE-02）
+
+在并行编排模式下，编排器通过 `TranslationDispatch` 派发翻译任务时会注入 `PortingRules` 约束包。你在 worktree 内翻译时**必须遵守以下规则**：
+
+### 共享写面最小化（强制）
+
+1. **优先用既有共享 API**（`prefer_existing_api`）：翻译时遇到共享模块（如 `error.rs`、`types.rs`），优先使用已有的类型/函数/trait，不新造。
+2. **逃生口**（`allow_escape_hatch`）：既有 API 不够用时，用 `Error::Other(String)` 或 `anyhow` 作逃生口，不要为此扩展共享错误枚举。在代码旁标注 `// PORTING: escape hatch, cleanup 后处理`。
+3. **禁止破坏共享 API**（`no_break_shared_api`）：禁止删除或修改既有共享类型/函数的签名（包括改参数、改返回类型、改泛型约束）。
+4. **新增只 append**（`append_only`）：如果确需新增共享内容（新 variant、新 impl），只在文件末尾 append，不修改已有行。
+
+### 回传协议
+
+翻译+自检完成后，回传 `TranslationResult`：
+- `status: agent_done`——**你只能标 `agent_done`（substatus），不得标最终 `done`**。只有编排器整组 check 过才升最终 done（两层 done）。
+- `own_files`：你翻译的模块自身文件路径列表。
+- `shared_touched`：你触碰过的共享文件清单（仅路径，无内容）。即使只 append 了一行也要列出。
+- `self_check` / `test`：worktree 内 `cargo check` 和 `cargo test` 的结果。
+
+### 注意事项
+
+- worktree 内做**完整 crate 真自检**（cargo check 整个 crate，非单模块编译）。
+- 代码留在 worktree 磁盘上，不要在回传中包含代码内容（上下文经济）。
+- 复杂的共享 API 扩展标记 `// PORTING: complex shared, defer to serial cleanup`，留串行 cleanup 阶段处理。
