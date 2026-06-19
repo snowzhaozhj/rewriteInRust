@@ -60,7 +60,7 @@ fn build_graph_inner(
     root: &Path,
     adapters: &mut [Box<dyn LanguageAdapter>],
     profile: bool,
-) -> Result<(SourceGraph, BuildProfile)> {
+) -> Result<(SourceGraph, BuildProfile, Vec<FileFingerprint>)> {
     let t_start = if profile { Some(Instant::now()) } else { None };
 
     let root = root
@@ -77,14 +77,16 @@ fn build_graph_inner(
                 edge_build_ms: 0,
                 total_ms,
             },
+            Vec::new(),
         ));
     }
 
     let mut graph = SourceGraph::new();
     let mut file_analyses: HashMap<String, FileAnalysis> = HashMap::new();
     let mut all_edges: Vec<Dependency> = Vec::new();
+    let mut fingerprints: Vec<FileFingerprint> = Vec::new();
 
-    // 第一遍：添加所有节点，收集所有边（解析阶段）
+    // 第一遍：添加所有节点，收集所有边（解析阶段），同时计算指纹
     for (file_path, adapter_idx) in &files {
         let rel = make_relative(file_path, &root);
         let source = std::fs::read_to_string(file_path).map_err(MigrateError::Io)?;
@@ -95,10 +97,26 @@ fn build_graph_inner(
                 graph
                     .warnings
                     .push(format!("解析跳过 {rel}: tree-sitter 解析失败"));
+                // 解析失败时 structure_hash = content_hash（保守：任何变更都视为 STRUCTURAL）
+                let ch = fingerprint::content_hash(&source);
+                fingerprints.push(FileFingerprint {
+                    file_path: rel,
+                    content_hash: ch.clone(),
+                    structure_hash: ch,
+                });
                 continue;
             }
             Err(e) => return Err(e),
         };
+
+        // 顺带计算指纹（source 和 analysis 已在手上，零额外 I/O）
+        let ch = fingerprint::content_hash(&source);
+        let sh = fingerprint::structure_hash(&analysis);
+        fingerprints.push(FileFingerprint {
+            file_path: rel.clone(),
+            content_hash: ch,
+            structure_hash: sh,
+        });
 
         for node in &analysis.nodes {
             graph.add_node(node.clone());
@@ -141,6 +159,7 @@ fn build_graph_inner(
             edge_build_ms,
             total_ms,
         },
+        fingerprints,
     ))
 }
 
@@ -148,7 +167,7 @@ fn build_graph_inner(
 ///
 /// `adapters` 是语言适配器列表，每个文件会尝试匹配第一个能处理它的适配器。
 pub fn build_graph(root: &Path, adapters: &mut [Box<dyn LanguageAdapter>]) -> Result<SourceGraph> {
-    build_graph_inner(root, adapters, false).map(|(graph, _)| graph)
+    build_graph_inner(root, adapters, false).map(|(graph, _, _)| graph)
 }
 
 /// 便捷函数：用默认 TypeScript adapter 构建图。
@@ -161,11 +180,12 @@ pub fn build_graph_ts(root: &Path) -> Result<SourceGraph> {
 /// 带性能画像的图构建：返回 `(SourceGraph, BuildProfile)`。
 ///
 /// 逻辑与 [`build_graph`] 共享 [`build_graph_inner`]，仅额外开启各阶段 `Instant` 计时。
+/// 指纹由 `build_graph_inner` 内部顺带计算但此处丢弃（调用方不需要）。
 pub fn build_graph_profiled(
     root: &Path,
     adapters: &mut [Box<dyn LanguageAdapter>],
 ) -> Result<(SourceGraph, BuildProfile)> {
-    build_graph_inner(root, adapters, true)
+    build_graph_inner(root, adapters, true).map(|(g, bp, _)| (g, bp))
 }
 
 /// 便捷函数：用默认 TypeScript adapter 构建图（带性能画像）。
@@ -173,6 +193,16 @@ pub fn build_graph_ts_profiled(root: &Path) -> Result<(SourceGraph, BuildProfile
     let mut adapters: Vec<Box<dyn LanguageAdapter>> =
         vec![Box::new(crate::lang::typescript::TypeScriptAdapter::new()?)];
     build_graph_profiled(root, &mut adapters)
+}
+
+/// 便捷函数：全量构建 + 返回指纹（CLI 全量路径用，一次遍历同时产出图和指纹）。
+pub fn build_graph_ts_full(
+    root: &Path,
+    profile: bool,
+) -> Result<(SourceGraph, BuildProfile, Vec<FileFingerprint>)> {
+    let mut adapters: Vec<Box<dyn LanguageAdapter>> =
+        vec![Box::new(crate::lang::typescript::TypeScriptAdapter::new()?)];
+    build_graph_inner(root, &mut adapters, profile)
 }
 
 // === 增量构建 ===
@@ -207,11 +237,10 @@ pub fn build_graph_incremental(
 
     // DB 不存在：退化为全量构建
     if !db_path.exists() {
-        let (graph, bp) = build_graph_inner(&root, adapters, profile)?;
+        let (graph, bp, fps) = build_graph_inner(&root, adapters, profile)?;
         let file_count = graph.file_nodes().len();
 
-        // 计算并保存指纹
-        let fps = compute_all_fingerprints(&root, &graph, adapters)?;
+        // 指纹由 build_graph_inner 一次遍历顺带计算，直接保存
         std::fs::create_dir_all(db_path.parent().unwrap_or(Path::new(".")))?;
         persist::save_to_db(&graph, db_path)?;
         persist::save_fingerprints(db_path, &fps)?;
@@ -564,44 +593,6 @@ fn compute_transitive_updates(
     }
 
     (visited, truncated)
-}
-
-/// 为全量构建后的图计算所有文件的指纹。
-fn compute_all_fingerprints(
-    root: &Path,
-    _graph: &SourceGraph,
-    adapters: &mut [Box<dyn LanguageAdapter>],
-) -> Result<Vec<FileFingerprint>> {
-    let files = collect_source_files(root, adapters)?;
-    let mut fps = Vec::new();
-
-    for (file_path, adapter_idx) in &files {
-        let rel = make_relative(file_path, root);
-        let source = match std::fs::read_to_string(file_path) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        let ch = fingerprint::content_hash(&source);
-        let sh = match adapters[*adapter_idx].analyze_file(&source, &rel) {
-            Ok(analysis) => fingerprint::structure_hash(&analysis),
-            Err(_) => ch.clone(), // 解析失败时 structure_hash = content_hash（保守：任何变更都视为 STRUCTURAL）
-        };
-        fps.push(FileFingerprint {
-            file_path: rel,
-            content_hash: ch,
-            structure_hash: sh,
-        });
-    }
-    Ok(fps)
-}
-
-/// 公开版本：CLI 全量构建后调用以生成指纹。
-pub fn compute_all_fingerprints_pub(
-    root: &Path,
-    graph: &SourceGraph,
-    adapters: &mut [Box<dyn LanguageAdapter>],
-) -> Result<Vec<FileFingerprint>> {
-    compute_all_fingerprints(root, graph, adapters)
 }
 
 /// 收集所有可被适配器处理的源文件，返回 (路径, 适配器索引)。

@@ -17,9 +17,7 @@ use serde_json::json;
 
 use rustmigrate_core::detect::detect_tier;
 use rustmigrate_core::error::MigrateError;
-use rustmigrate_core::graph::build::{
-    build_graph_ts, build_graph_ts_incremental, build_graph_ts_profiled,
-};
+use rustmigrate_core::graph::build::{build_graph_ts_full, build_graph_ts_incremental};
 use rustmigrate_core::graph::export::{export_dot, export_json, export_mermaid};
 use rustmigrate_core::graph::persist::{load_from_db, save_to_db};
 use rustmigrate_core::graph::topo::{detect_cycles, migration_sequence, topological_sort};
@@ -697,32 +695,17 @@ fn cmd_graph_build(root: &Path, full: bool, profile: bool) -> CmdResult {
     let db = db_path();
 
     if full {
-        // 全量构建
-        let (graph, build_profile) = if profile {
-            let (g, p) = build_graph_ts_profiled(root)?;
-            (g, Some(p))
-        } else {
-            (build_graph_ts(root)?, None)
-        };
+        // 全量构建（一次遍历同时产出图和指纹）
+        let (graph, build_profile, fps) = build_graph_ts_full(root, profile)?;
         warnings.extend(graph.warnings().iter().cloned());
 
-        // 持久化 + 指纹保存
+        // 持久化
         let t_persist = if profile {
             Some(std::time::Instant::now())
         } else {
             None
         };
         save_to_db(&graph, &db)?;
-        // 全量构建后保存指纹
-        let mut adapters: Vec<Box<dyn rustmigrate_core::lang::LanguageAdapter>> = vec![Box::new(
-            rustmigrate_core::lang::typescript::TypeScriptAdapter::new()?,
-        )];
-        let root_canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-        let fps = rustmigrate_core::graph::build::compute_all_fingerprints_pub(
-            &root_canon,
-            &graph,
-            &mut adapters,
-        )?;
         rustmigrate_core::graph::persist::save_fingerprints(&db, &fps)?;
         let persist_ms = t_persist.map(|t| t.elapsed().as_millis() as u64);
 
@@ -737,12 +720,12 @@ fn cmd_graph_build(root: &Path, full: bool, profile: bool) -> CmdResult {
         });
 
         // --profile：将性能画像嵌入 data.profile
-        if let (Some(bp), Some(pm)) = (build_profile, persist_ms) {
+        if let Some(pm) = persist_ms {
             data["profile"] = json!({
-                "parse_ms": bp.parse_ms,
-                "edge_build_ms": bp.edge_build_ms,
+                "parse_ms": build_profile.parse_ms,
+                "edge_build_ms": build_profile.edge_build_ms,
                 "persist_ms": pm,
-                "total_ms": bp.total_ms + pm,
+                "total_ms": build_profile.total_ms + pm,
             });
         }
 
