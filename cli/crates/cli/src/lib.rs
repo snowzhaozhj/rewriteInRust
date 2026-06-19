@@ -736,6 +736,7 @@ fn cmd_graph_deps(module: &str) -> CmdResult {
 /// `graph rdeps <module>`：模块反向依赖（imports 入边的传递闭包，BFS）。
 fn cmd_graph_rdeps(module: &str) -> CmdResult {
     let graph = load_graph()?;
+    let warnings = graph.warnings().to_vec();
     let start = resolve_file_node(&graph, module)?;
     let dependents = collect_imports_closure(&graph, &start, DependencyDirection::Reverse);
 
@@ -744,7 +745,7 @@ fn cmd_graph_rdeps(module: &str) -> CmdResult {
             "module": start.to_string(),
             "dependents": dependents,
         }),
-        Vec::new(),
+        warnings,
     ))
 }
 
