@@ -468,6 +468,61 @@ impl MigrationStateMachine {
         SprintAdvanceResult::Advanced(new_sprint)
     }
 
+    /// 检查模块 substatus 是否为 `agent_done`（并行翻译两层 done 协议）。
+    ///
+    /// 并行翻译中，agent 在 worktree 内自检通过后标 `agent_done`（substatus，非终态）；
+    /// 只有编排器整组 `cargo check`/`cargo test` 通过后才升最终 `done`。
+    /// 本方法供编排器查询哪些模块已完成 agent 级自检、等待整组验证。
+    ///
+    /// 模块不存在返回 `false`。
+    pub fn is_agent_done(&self, name: &str) -> bool {
+        self.state_file
+            .modules
+            .get(name)
+            .is_some_and(|m| m.substatus.as_deref() == Some("agent_done"))
+    }
+
+    /// 批量将 `agent_done` 模块转为 `done`（整组 check 通过后调用）。
+    ///
+    /// 对每个模块独立调用 `transition_module`（`reviewing → done`），一个失败不影响其他。
+    /// 返回实际成功转换的模块名列表；失败的模块保持原状态，错误记入 `attempts`。
+    ///
+    /// 前置约束：调用方应确保传入模块当前 status 为 `reviewing`、substatus 为 `agent_done`。
+    /// 不满足前置的模块会在 `transition_module` 中被矩阵拒绝，计入失败而非 panic。
+    pub fn batch_transition_done(&mut self, modules: &[String]) -> Result<Vec<String>> {
+        let mut succeeded = Vec::new();
+        for name in modules {
+            // 先检查 substatus 是否为 agent_done（防止误操作非 agent_done 模块）。
+            let is_agent = self.is_agent_done(name);
+            if !is_agent {
+                // 非 agent_done 模块：记录失败原因到 attempts，跳过。
+                let _ = self.transition_module(
+                    name,
+                    None,
+                    None,
+                    Some("batch_transition_done: substatus 非 agent_done，跳过"),
+                    false,
+                );
+                continue;
+            }
+            // 尝试 reviewing → done 转换。
+            match self.transition_module(name, Some(ModuleStatus::Done), None, None, false) {
+                Ok(()) => succeeded.push(name.clone()),
+                Err(_) => {
+                    // 转换失败（如 status 不是 reviewing）：记录失败原因，继续其他模块。
+                    let _ = self.transition_module(
+                        name,
+                        None,
+                        None,
+                        Some("batch_transition_done: reviewing→done 转换失败"),
+                        false,
+                    );
+                }
+            }
+        }
+        Ok(succeeded)
+    }
+
     /// 设置最后错误信息。
     pub fn set_last_error(&mut self, error: Option<String>) {
         let metadata = self.state_file.metadata.get_or_insert(MigrationMetadata {
@@ -1452,5 +1507,138 @@ mod tests {
         m.save(&path).unwrap();
         m.save(&path).unwrap();
         assert!(backup.exists(), "默认配置应生成 backup（向后兼容）");
+    }
+
+    // ===== 两层 done 协议（M2-SCALE-02e）=====
+
+    #[test]
+    fn test_is_agent_done_true() {
+        // substatus 为 agent_done 时返回 true。
+        let mut m = new_machine();
+        let mut module = module_with_status(ModuleStatus::Reviewing);
+        module.substatus = Some("agent_done".to_owned());
+        m.update_module("a", module);
+        assert!(m.is_agent_done("a"));
+    }
+
+    #[test]
+    fn test_is_agent_done_false_different_substatus() {
+        // substatus 非 agent_done 时返回 false。
+        let mut m = new_machine();
+        let mut module = module_with_status(ModuleStatus::Reviewing);
+        module.substatus = Some("phase_a_complete_awaiting_review".to_owned());
+        m.update_module("a", module);
+        assert!(!m.is_agent_done("a"));
+    }
+
+    #[test]
+    fn test_is_agent_done_false_no_substatus() {
+        // substatus 为 None 时返回 false。
+        let mut m = new_machine();
+        m.update_module("a", module_with_status(ModuleStatus::Reviewing));
+        assert!(!m.is_agent_done("a"));
+    }
+
+    #[test]
+    fn test_is_agent_done_nonexistent_module() {
+        // 模块不存在时返回 false。
+        let m = new_machine();
+        assert!(!m.is_agent_done("not_exist"));
+    }
+
+    #[test]
+    fn test_batch_transition_done_all_success() {
+        // 全部模块 reviewing + agent_done → 应全部成功转为 done。
+        let mut m = new_machine();
+        for name in ["a", "b", "c"] {
+            let mut module = module_with_status(ModuleStatus::Reviewing);
+            module.substatus = Some("agent_done".to_owned());
+            m.update_module(name, module);
+        }
+        let modules: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
+        let succeeded = m.batch_transition_done(&modules).unwrap();
+        assert_eq!(succeeded.len(), 3);
+        for name in ["a", "b", "c"] {
+            assert_eq!(m.state_file().modules[name].status, ModuleStatus::Done);
+            // done 时 substatus 被清空（transition_module 的 Done 清空逻辑）。
+            assert!(m.state_file().modules[name].substatus.is_none());
+        }
+    }
+
+    #[test]
+    fn test_batch_transition_done_partial_failure() {
+        // a: reviewing + agent_done（应成功）
+        // b: translating + agent_done（status 不对，转换矩阵拒绝，应失败但不影响 a、c）
+        // c: reviewing + agent_done（应成功）
+        let mut m = new_machine();
+
+        let mut ma = module_with_status(ModuleStatus::Reviewing);
+        ma.substatus = Some("agent_done".to_owned());
+        m.update_module("a", ma);
+
+        let mut mb = module_with_status(ModuleStatus::Translating);
+        mb.substatus = Some("agent_done".to_owned());
+        m.update_module("b", mb);
+
+        let mut mc = module_with_status(ModuleStatus::Reviewing);
+        mc.substatus = Some("agent_done".to_owned());
+        m.update_module("c", mc);
+
+        let modules: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
+        let succeeded = m.batch_transition_done(&modules).unwrap();
+
+        // a、c 成功，b 失败。
+        assert_eq!(succeeded, vec!["a".to_owned(), "c".to_owned()]);
+        assert_eq!(m.state_file().modules["a"].status, ModuleStatus::Done);
+        assert_eq!(
+            m.state_file().modules["b"].status,
+            ModuleStatus::Translating,
+            "b 应保持 translating（转换失败）"
+        );
+        assert_eq!(m.state_file().modules["c"].status, ModuleStatus::Done);
+    }
+
+    #[test]
+    fn test_batch_transition_done_skips_non_agent_done() {
+        // substatus 非 agent_done 的模块应被跳过。
+        let mut m = new_machine();
+
+        let mut ma = module_with_status(ModuleStatus::Reviewing);
+        ma.substatus = Some("agent_done".to_owned());
+        m.update_module("a", ma);
+
+        let mb = module_with_status(ModuleStatus::Reviewing); // substatus=None
+        m.update_module("b", mb);
+
+        let modules: Vec<String> = vec!["a".into(), "b".into()];
+        let succeeded = m.batch_transition_done(&modules).unwrap();
+
+        assert_eq!(succeeded, vec!["a".to_owned()]);
+        assert_eq!(m.state_file().modules["a"].status, ModuleStatus::Done);
+        assert_eq!(
+            m.state_file().modules["b"].status,
+            ModuleStatus::Reviewing,
+            "b 应保持 reviewing（非 agent_done 跳过）"
+        );
+    }
+
+    #[test]
+    fn test_batch_transition_done_empty_list() {
+        // 空列表应返回空结果。
+        let mut m = new_machine();
+        let succeeded = m.batch_transition_done(&[]).unwrap();
+        assert!(succeeded.is_empty());
+    }
+
+    #[test]
+    fn test_agent_done_substatus_set_via_transition_module() {
+        // 通过 transition_module 的 substatus-only 路径设置 agent_done。
+        let mut m = new_machine();
+        m.update_module("a", module_with_status(ModuleStatus::Reviewing));
+        m.transition_module("a", None, Some("agent_done"), None, false)
+            .unwrap();
+        assert!(m.is_agent_done("a"));
+        // status 不变。
+        assert_eq!(m.state_file().modules["a"].status, ModuleStatus::Reviewing);
     }
 }
