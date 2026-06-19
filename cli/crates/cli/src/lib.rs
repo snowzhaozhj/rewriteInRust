@@ -29,7 +29,7 @@ use rustmigrate_core::scaffold::scaffold_project;
 use rustmigrate_core::state::{MigrationStateMachine, SprintAdvanceResult};
 use rustmigrate_core::stats::{compare_structure, count_loc};
 use rustmigrate_core::types::common::{NodeId, Timestamp};
-use rustmigrate_core::types::graph::{EdgeType, NodeType};
+use rustmigrate_core::types::graph::{EdgeType, NodeType, SourceNode};
 use rustmigrate_core::types::state::{
     humanize_module_key, ModuleState, ModuleStatus, ModuleTier, ProjectState, SprintState,
 };
@@ -806,29 +806,99 @@ fn collect_imports_closure(
 
 /// `graph interfaces <module> [--deps-of <target>]`：模块导出接口签名。
 ///
-/// 输出该模块内 `is_exported=true` 的符号节点（名称 + 类型 + 行号 + token 估算）。
-/// `--deps-of` 批量模式推迟 M2。
+/// 无 `--deps-of`：输出 `<module>` 内 `is_exported=true` 的符号节点。
+/// 有 `--deps-of`：以 `<target>` 为中心，取其 imports 边的 1-hop 出边邻居（直接依赖模块），
+/// 批量输出每个依赖模块的导出接口签名（区别于 `graph deps` 的 BFS 传递闭包）。
 fn cmd_graph_interfaces(module: &str, deps_of: Option<&str>) -> CmdResult {
-    let mut warnings: Vec<String> = Vec::new();
-    if deps_of.is_some() {
-        // TODO(M2): --deps-of 批量输出 target 的直接依赖模块接口（imports 1-hop 邻居）。
-        warnings
-            .push("--deps-of 批量接口输出尚未实现（推迟 M2），本次仅输出指定模块接口".to_owned());
+    let graph = load_graph()?;
+
+    // --deps-of 批量模式：输出 target 直接依赖模块的导出接口。
+    if let Some(target) = deps_of {
+        return cmd_graph_interfaces_deps_of(&graph, target);
     }
 
-    let graph = load_graph()?;
-    let file_node = resolve_file_node(&graph, module)?;
-    let file_path = file_node
+    // 单模块模式：输出指定模块自身的导出接口。
+    let file_path = resolve_module_file_path(&graph, module)?;
+    let interfaces = collect_exported_interfaces(&graph, &file_path);
+
+    Ok((
+        json!({
+            "module": file_path,
+            "interfaces": interfaces,
+        }),
+        Vec::new(),
+    ))
+}
+
+/// `--deps-of` 批量模式：获取 target 的 1-hop imports 出边邻居，收集每个邻居的导出接口。
+fn cmd_graph_interfaces_deps_of(
+    graph: &rustmigrate_core::graph::SourceGraph,
+    target: &str,
+) -> CmdResult {
+    let target_node = resolve_file_node(graph, target)?;
+    let target_path = resolve_module_file_path(graph, target)?;
+
+    // 取 imports 边的 1-hop 出边邻居（仅 File 节点）。
+    let dep_nodes: Vec<&SourceNode> = graph
+        .outgoing_edges(&target_node)
+        .into_iter()
+        .filter(|(_, edge_type)| *edge_type == EdgeType::Imports)
+        .map(|(node, _)| node)
+        .filter(|node| node.node_type == NodeType::File)
+        .collect();
+
+    // 去重并排序（确定性输出）。
+    let mut dep_paths: Vec<String> = dep_nodes
+        .iter()
+        .map(|n| n.file_path.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    dep_paths.sort();
+
+    // 对每个依赖模块收集导出接口。
+    let dependencies: Vec<serde_json::Value> = dep_paths
+        .iter()
+        .map(|path| {
+            let exports = collect_exported_interfaces(graph, path);
+            json!({
+                "module": path,
+                "exports": exports,
+            })
+        })
+        .collect();
+
+    Ok((
+        json!({
+            "target": target_path,
+            "dependencies": dependencies,
+        }),
+        Vec::new(),
+    ))
+}
+
+/// 解析模块名为文件路径字符串。
+fn resolve_module_file_path(
+    graph: &rustmigrate_core::graph::SourceGraph,
+    module: &str,
+) -> Result<String, MigrateError> {
+    let file_node = resolve_file_node(graph, module)?;
+    file_node
         .file_path()
+        .map(|p| p.to_owned())
         .ok_or_else(|| MigrateError::Graph {
             message: format!("无法解析模块文件路径: {module}"),
             file: module.to_owned(),
-        })?
-        .to_owned();
+        })
+}
 
-    // 收集该文件下导出的符号（File 节点本身不算接口）。
+/// 收集指定文件下的导出接口（`is_exported=true` 的符号），按名称排序。
+fn collect_exported_interfaces(
+    graph: &rustmigrate_core::graph::SourceGraph,
+    file_path: &str,
+) -> Vec<serde_json::Value> {
     let mut interfaces: Vec<serde_json::Value> = graph
-        .symbols_in_file(&file_path)
+        .symbols_in_file(file_path)
         .into_iter()
         .filter(|n| n.is_exported)
         .map(|n| {
@@ -842,21 +912,14 @@ fn cmd_graph_interfaces(module: &str, deps_of: Option<&str>) -> CmdResult {
             })
         })
         .collect();
-    // 确定性排序（symbols_in_file 顺序依赖图遍历）。
+    // 确定性排序（symbols_in_file 顺序依赖图遍历，需显式排序）。
     interfaces.sort_by(|a, b| {
         a["name"]
             .as_str()
             .unwrap_or_default()
             .cmp(b["name"].as_str().unwrap_or_default())
     });
-
-    Ok((
-        json!({
-            "module": file_path,
-            "interfaces": interfaces,
-        }),
-        warnings,
-    ))
+    interfaces
 }
 
 /// `graph stats`：图统计信息。
