@@ -104,6 +104,8 @@ impl From<&MigrateError> for ErrorCode {
             MigrateError::Json(_) | MigrateError::Toml(_) | MigrateError::TomlSer(_) => {
                 Self::ParseFailed
             }
+            MigrateError::TomlEdit(_) => Self::ParseFailed,
+            MigrateError::Merge(_) => Self::ConfigError,
             MigrateError::Io(_) => Self::IoError,
             MigrateError::FileNotFound(_) => Self::FileNotFound,
             MigrateError::SchemaValidation(_) => Self::SchemaValidation,

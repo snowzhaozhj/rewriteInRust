@@ -1707,6 +1707,8 @@ mod tests {
         assert!(m.is_agent_done("a"));
         // status 不变。
         assert_eq!(m.state_file().modules["a"].status, ModuleStatus::Reviewing);
+    }
+
     #[test]
     fn test_metadata_version_default_zero() {
         // 新建状态机的 metadata.version 默认为 0。
