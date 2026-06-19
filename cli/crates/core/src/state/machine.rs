@@ -180,6 +180,8 @@ impl MigrationStateMachine {
                 graph_build_completed_at: None,
                 last_error: None,
                 lock_token: None,
+                version: 0,
+                last_modified_by: None,
             }),
         };
 
@@ -216,6 +218,8 @@ impl MigrationStateMachine {
             graph_build_completed_at: None,
             last_error: None,
             lock_token: None,
+            version: 0,
+            last_modified_by: None,
         });
         metadata.graph_build_completed = true;
         metadata.graph_build_completed_at = Some(now);
@@ -530,8 +534,71 @@ impl MigrationStateMachine {
             graph_build_completed_at: None,
             last_error: None,
             lock_token: None,
+            version: 0,
+            last_modified_by: None,
         });
         metadata.last_error = error;
+    }
+
+    /// 读取当前 `metadata.version`（乐观锁版本号）。
+    ///
+    /// 无 metadata 时返回 0（向后兼容旧状态文件）。
+    pub fn metadata_version(&self) -> u64 {
+        self.state_file
+            .metadata
+            .as_ref()
+            .map(|m| m.version)
+            .unwrap_or(0)
+    }
+
+    /// 乐观锁状态更新（CAS：Compare-And-Swap）。
+    ///
+    /// 读取当前 `metadata.version`，与 `cas_version` 比较：
+    /// - **不匹配**：返回 `MigrateError::LockConflict`（带当前版本号信息），不修改任何状态。
+    /// - **匹配**：执行模块状态转换（同 [`transition_module`]）并递增 `metadata.version`。
+    ///
+    /// 返回 `(previous_status, new_version)` 供调用方构造输出。
+    pub fn update_with_cas(
+        &mut self,
+        module: &str,
+        status: ModuleStatus,
+        cas_version: u64,
+        substatus: Option<&str>,
+        reason: Option<&str>,
+    ) -> Result<(ModuleStatus, u64)> {
+        // CAS 检查：读取当前版本，不匹配则拒绝。
+        let current_version = self.metadata_version();
+        if cas_version != current_version {
+            return Err(MigrateError::LockConflict(format!(
+                "版本冲突: 期望 {cas_version}, 当前 {current_version}"
+            )));
+        }
+
+        // 模块存在性检查 + 获取旧状态。
+        let previous_status = self
+            .state_file
+            .modules
+            .get(module)
+            .ok_or_else(|| MigrateError::Config(format!("模块不存在: {module}")))?
+            .status;
+
+        // 执行状态转换（复用 transition_module 的合法性校验）。
+        // CAS 更新不支持 --force（降级恢复由 transition 命令走）。
+        self.transition_module(module, Some(status), substatus, reason, false)?;
+
+        // 递增版本号。
+        let metadata = self.state_file.metadata.get_or_insert(MigrationMetadata {
+            graph_build_completed: false,
+            graph_build_completed_at: None,
+            last_error: None,
+            lock_token: None,
+            version: 0,
+            last_modified_by: None,
+        });
+        metadata.version += 1;
+        let new_version = metadata.version;
+
+        Ok((previous_status, new_version))
     }
 }
 
@@ -1640,5 +1707,106 @@ mod tests {
         assert!(m.is_agent_done("a"));
         // status 不变。
         assert_eq!(m.state_file().modules["a"].status, ModuleStatus::Reviewing);
+    #[test]
+    fn test_metadata_version_default_zero() {
+        // 新建状态机的 metadata.version 默认为 0。
+        let m = new_machine();
+        assert_eq!(m.metadata_version(), 0);
+    }
+
+    #[test]
+    fn test_update_with_cas_success() {
+        // CAS 版本匹配：状态转换成功并递增版本号。
+        let mut m = new_machine();
+        m.update_module("a", module_with_status(ModuleStatus::Pending));
+        let (prev, new_ver) = m
+            .update_with_cas("a", ModuleStatus::Translating, 0, None, None)
+            .expect("CAS 版本匹配应成功");
+        assert_eq!(prev, ModuleStatus::Pending);
+        assert_eq!(new_ver, 1);
+        assert_eq!(
+            m.state_file().modules["a"].status,
+            ModuleStatus::Translating
+        );
+        assert_eq!(m.metadata_version(), 1);
+    }
+
+    #[test]
+    fn test_update_with_cas_version_mismatch() {
+        // CAS 版本不匹配：返回 LockConflict，状态不变。
+        let mut m = new_machine();
+        m.update_module("a", module_with_status(ModuleStatus::Pending));
+        let err = m
+            .update_with_cas("a", ModuleStatus::Translating, 42, None, None)
+            .unwrap_err();
+        match err {
+            MigrateError::LockConflict(msg) => {
+                assert!(msg.contains("42"), "应包含期望版本号");
+                assert!(msg.contains("0"), "应包含当前版本号");
+            }
+            other => panic!("期望 LockConflict，实际: {:?}", other),
+        }
+        // 状态未改变。
+        assert_eq!(m.state_file().modules["a"].status, ModuleStatus::Pending);
+        assert_eq!(m.metadata_version(), 0);
+    }
+
+    #[test]
+    fn test_update_with_cas_module_not_found() {
+        // 模块不存在：返回 Config 错误。
+        let mut m = new_machine();
+        let err = m
+            .update_with_cas("ghost", ModuleStatus::Translating, 0, None, None)
+            .unwrap_err();
+        assert!(matches!(err, MigrateError::Config(_)));
+    }
+
+    #[test]
+    fn test_update_with_cas_invalid_transition() {
+        // 转换不合法（done → translating）：CAS 通过但转换失败，版本不递增。
+        let mut m = new_machine();
+        m.update_module("a", module_with_status(ModuleStatus::Done));
+        let err = m
+            .update_with_cas("a", ModuleStatus::Translating, 0, None, None)
+            .unwrap_err();
+        assert!(matches!(err, MigrateError::InvalidTransition { .. }));
+        assert_eq!(m.metadata_version(), 0, "转换失败时版本不应递增");
+    }
+
+    #[test]
+    fn test_update_with_cas_sequential_increments() {
+        // 连续两次 CAS 更新：版本号从 0→1→2。
+        let mut m = new_machine();
+        m.update_module("a", module_with_status(ModuleStatus::Pending));
+        // 第一次：0→1
+        let (_, v1) = m
+            .update_with_cas("a", ModuleStatus::Translating, 0, None, None)
+            .unwrap();
+        assert_eq!(v1, 1);
+        // 第二次：1→2
+        let (_, v2) = m
+            .update_with_cas("a", ModuleStatus::CompileFixing, 1, None, None)
+            .unwrap();
+        assert_eq!(v2, 2);
+        assert_eq!(m.metadata_version(), 2);
+    }
+
+    #[test]
+    fn test_update_with_cas_substatus_and_reason() {
+        // CAS 更新带 substatus 和 reason。
+        let mut m = new_machine();
+        m.update_module("a", module_with_status(ModuleStatus::Pending));
+        m.update_with_cas(
+            "a",
+            ModuleStatus::Translating,
+            0,
+            Some("phase_a_in_progress"),
+            Some("开始翻译"),
+        )
+        .unwrap();
+        let module = &m.state_file().modules["a"];
+        assert_eq!(module.substatus.as_deref(), Some("phase_a_in_progress"));
+        assert_eq!(module.attempts.len(), 1);
+        assert!(module.attempts[0].result.contains("开始翻译"));
     }
 }

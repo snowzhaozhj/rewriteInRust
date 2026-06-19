@@ -257,6 +257,8 @@ mod tests {
                 graph_build_completed_at: None,
                 last_error: None,
                 lock_token: None,
+                version: 0,
+                last_modified_by: None,
             }),
         }
     }
@@ -390,6 +392,8 @@ mod tests {
                 graph_build_completed_at: None,
                 last_error: None,
                 lock_token: None,
+                version: 0,
+                last_modified_by: None,
             }),
         };
         let result = validate_state(&state);
@@ -472,6 +476,8 @@ mod tests {
                 graph_build_completed_at: None,
                 last_error: None,
                 lock_token: None,
+                version: 0,
+                last_modified_by: None,
             }),
         };
         let result = validate_state(&state);
@@ -523,6 +529,8 @@ mod tests {
             graph_build_completed_at: None,
             last_error: None,
             lock_token: None,
+            version: 0,
+            last_modified_by: None,
         });
         let result = validate_state(&state);
         match result.unwrap_err() {

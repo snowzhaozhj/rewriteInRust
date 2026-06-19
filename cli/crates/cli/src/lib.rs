@@ -236,6 +236,27 @@ pub enum StateCommands {
     /// sprint N 全模块 done/degrade_* → current=N+1 + history 回填。
     /// 无可推进 sprint 或尚有非终态模块时返回 status:ok + advanced:false。
     AdvanceSprint,
+    /// 乐观锁状态更新（`--cas-version` 比较并写入，版本不匹配返回冲突）。
+    ///
+    /// 读取 `metadata.version` 与 `--cas-version` 比较，匹配时执行模块状态转换并递增 version；
+    /// 不匹配时返回 `lock_conflict` 错误。M2 并发安全设计预留（见 06-plugin-structure.md §10.8）。
+    Update {
+        /// 模块名。
+        #[arg(long)]
+        module: String,
+        /// 目标状态（ModuleStatus）。
+        #[arg(long)]
+        status: String,
+        /// CAS 版本号（从 state file 的 metadata.version 读取）。
+        #[arg(long)]
+        cas_version: u64,
+        /// 子状态（可选）。
+        #[arg(long)]
+        substatus: Option<String>,
+        /// 转换原因（可选，追加到 attempts 审计序列）。
+        #[arg(long)]
+        reason: Option<String>,
+    },
 }
 
 /// Stats 子命令。
@@ -392,6 +413,22 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
                 ),
             ),
             StateCommands::AdvanceSprint => emit(writer, cmd_state_advance_sprint()),
+            StateCommands::Update {
+                module,
+                status,
+                cas_version,
+                substatus,
+                reason,
+            } => emit(
+                writer,
+                cmd_state_update(
+                    module,
+                    status,
+                    *cas_version,
+                    substatus.as_deref(),
+                    reason.as_deref(),
+                ),
+            ),
         },
         Commands::Stats { action } => match action {
             StatsCommands::Loc { source, rust } => {
@@ -1486,6 +1523,43 @@ fn cmd_state_advance_sprint() -> CmdResult {
             ))
         }
     }
+}
+
+/// `state update --module <m> --status <s> --cas-version <v> [--substatus <s>] [--reason <r>]`：
+/// 乐观锁状态更新（CAS：Compare-And-Swap）。
+///
+/// 设计（`06-plugin-structure.md` M2 扩展 §10.8）：`metadata` 增加 `version` 字段支持乐观锁；
+/// 写入时携带 `--cas-version`，版本不匹配返回冲突错误，防止并发写覆盖。
+fn cmd_state_update(
+    module: &str,
+    status: &str,
+    cas_version: u64,
+    substatus: Option<&str>,
+    reason: Option<&str>,
+) -> CmdResult {
+    // 解析目标状态（ModuleStatus）。
+    let target = status.parse::<ModuleStatus>().map_err(|_| {
+        MigrateError::Config(format!(
+            "非法 ModuleStatus: {status}（合法值: pending/translating/compile_fixing/testing/\
+             reviewing/done/degrade_ffi/degrade_manual/degrade_skip/paused/blocked）"
+        ))
+    })?;
+
+    let path = state_path();
+    let (mut machine, warnings) = load_state_with_warnings(&path)?;
+    let (previous_status, new_version) =
+        machine.update_with_cas(module, target, cas_version, substatus, reason)?;
+    machine.save(&path)?;
+
+    Ok((
+        json!({
+            "module": module,
+            "previous_status": previous_status.to_string(),
+            "new_status": target.to_string(),
+            "new_version": new_version,
+        }),
+        warnings,
+    ))
 }
 
 /// [`SubAgentCall`] 后经 core [`MigrationStateMachine::push_subagent_call`] 入库，落盘走 tmp-fsync-rename
