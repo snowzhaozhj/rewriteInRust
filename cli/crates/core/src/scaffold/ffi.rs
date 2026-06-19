@@ -74,20 +74,30 @@ fn render_ffi_module(module_name: &str, interfaces: &[FfiInterface]) -> String {
         .unwrap();
         writeln!(out, "#[napi]").unwrap();
 
-        // 函数签名
+        // 函数签名（参数名也做 sanitize + 关键字转义）
         let params_str = iface
             .params
             .iter()
-            .map(|(name, ty)| format!("{name}: {ty}"))
+            .map(|(name, ty)| {
+                let safe_name = sanitize_ident(name);
+                let safe_ty = if ty.is_empty() { "String" } else { ty.as_str() };
+                format!("{safe_name}: {safe_ty}")
+            })
             .collect::<Vec<_>>()
             .join(", ");
+
+        let ret = if iface.return_type.is_empty() {
+            "()"
+        } else {
+            &iface.return_type
+        };
 
         writeln!(
             out,
             "pub fn {name}({params}) -> {ret} {{",
             name = sanitize_ident(&iface.name),
             params = params_str,
-            ret = iface.return_type,
+            ret = ret,
         )
         .unwrap();
         writeln!(out, "    // 来源: {module_name}::{name}", name = iface.name,).unwrap();
@@ -99,7 +109,15 @@ fn render_ffi_module(module_name: &str, interfaces: &[FfiInterface]) -> String {
     out
 }
 
-/// 将名称转换为合法的 Rust 标识符（snake_case）。
+/// Rust 严格关键字列表（需要 `r#` 前缀）。
+const RUST_KEYWORDS: &[&str] = &[
+    "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern",
+    "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub",
+    "ref", "return", "self", "Self", "static", "struct", "super", "trait", "true", "type",
+    "unsafe", "use", "where", "while", "yield",
+];
+
+/// 将名称转换为合法的 Rust 标识符（snake_case），Rust 关键字用 `r#` 转义。
 fn sanitize_ident(name: &str) -> String {
     let result: String = name
         .chars()
@@ -117,6 +135,10 @@ fn sanitize_ident(name: &str) -> String {
     }
     if result.starts_with(|c: char| c.is_ascii_digit()) {
         return format!("_{result}");
+    }
+    // Rust 关键字用 r# 前缀转义
+    if RUST_KEYWORDS.contains(&result.as_str()) {
+        return format!("r#{result}");
     }
     result
 }

@@ -382,24 +382,28 @@ pub fn load_graph_integrity(db_path: &Path) -> Result<String> {
 }
 
 /// 删除 DB 中已不存在文件的指纹记录（文件被删除的情况）。
+///
+/// 所有删除操作在单个事务内完成，保证原子性。
 pub fn remove_stale_fingerprints(db_path: &Path, stale_files: &[String]) -> Result<()> {
     if stale_files.is_empty() {
         return Ok(());
     }
-    let conn = Connection::open(db_path)?;
+    let mut conn = Connection::open(db_path)?;
+    let tx = conn.transaction()?;
     for file in stale_files {
-        conn.execute(
+        tx.execute(
             "DELETE FROM file_fingerprints WHERE file_path = ?1",
             params![file],
         )?;
-        // 同步清理关联的节点和边
-        conn.execute(
+        // 同步清理关联的节点和边（先边后节点）
+        tx.execute(
             "DELETE FROM edges WHERE source IN (SELECT id FROM nodes WHERE file_path = ?1) \
              OR target IN (SELECT id FROM nodes WHERE file_path = ?1)",
             params![file],
         )?;
-        conn.execute("DELETE FROM nodes WHERE file_path = ?1", params![file])?;
+        tx.execute("DELETE FROM nodes WHERE file_path = ?1", params![file])?;
     }
+    tx.commit()?;
     Ok(())
 }
 

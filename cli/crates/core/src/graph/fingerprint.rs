@@ -42,9 +42,10 @@ pub fn content_hash(source: &str) -> String {
 /// 从 `FileAnalysis` 提取结构指纹并计算 SHA256。
 ///
 /// 提取的签名信息包括：
-/// 1. 函数签名：名称 + 导出状态
-/// 2. 类签名：名称 + 导出状态
-/// 3. import 列表：模块路径 + 符号名
+/// 1. 节点签名：类型 + 名称 + 导出状态 + async
+/// 2. import 列表：模块路径 + 符号名 + kind
+/// 3. 导出名称集合
+/// 4. 调用摘要：调用目标名（检测函数体内调用变更，避免 Calls 边过期）
 ///
 /// 排序保证确定性（HashMap 遍历无序）。
 pub fn structure_hash(analysis: &FileAnalysis) -> String {
@@ -102,6 +103,18 @@ pub fn structure_hash(analysis: &FileAnalysis) -> String {
     for name in &exported {
         hasher.update(b"export:");
         hasher.update(name.as_bytes());
+        hasher.update(b"\n");
+    }
+
+    // 4. 调用摘要（函数体内调用目标变更 → STRUCTURAL，避免 Calls 边过期）
+    let mut call_sigs: Vec<String> = analysis
+        .calls
+        .iter()
+        .map(|c| format!("call:{}:{}", c.callee, c.is_constructor))
+        .collect();
+    call_sigs.sort();
+    for sig in &call_sigs {
+        hasher.update(sig.as_bytes());
         hasher.update(b"\n");
     }
 

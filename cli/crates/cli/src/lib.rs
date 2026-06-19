@@ -706,39 +706,25 @@ fn cmd_graph_build(root: &Path, full: bool, profile: bool) -> CmdResult {
         };
         warnings.extend(graph.warnings().iter().cloned());
 
-        // 持久化计时（仅 --profile 开启时插桩）
-        let persist_ms = if profile {
-            let t = std::time::Instant::now();
-            save_to_db(&graph, &db)?;
-            // 全量构建后保存指纹
-            let mut adapters: Vec<Box<dyn rustmigrate_core::lang::LanguageAdapter>> =
-                vec![Box::new(
-                    rustmigrate_core::lang::typescript::TypeScriptAdapter::new()?,
-                )];
-            let root_canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-            let fps = rustmigrate_core::graph::build::compute_all_fingerprints_pub(
-                &root_canon,
-                &graph,
-                &mut adapters,
-            )?;
-            rustmigrate_core::graph::persist::save_fingerprints(&db, &fps)?;
-            Some(t.elapsed().as_millis() as u64)
+        // 持久化 + 指纹保存
+        let t_persist = if profile {
+            Some(std::time::Instant::now())
         } else {
-            save_to_db(&graph, &db)?;
-            // 全量构建后保存指纹
-            let mut adapters: Vec<Box<dyn rustmigrate_core::lang::LanguageAdapter>> =
-                vec![Box::new(
-                    rustmigrate_core::lang::typescript::TypeScriptAdapter::new()?,
-                )];
-            let root_canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-            let fps = rustmigrate_core::graph::build::compute_all_fingerprints_pub(
-                &root_canon,
-                &graph,
-                &mut adapters,
-            )?;
-            rustmigrate_core::graph::persist::save_fingerprints(&db, &fps)?;
             None
         };
+        save_to_db(&graph, &db)?;
+        // 全量构建后保存指纹
+        let mut adapters: Vec<Box<dyn rustmigrate_core::lang::LanguageAdapter>> = vec![Box::new(
+            rustmigrate_core::lang::typescript::TypeScriptAdapter::new()?,
+        )];
+        let root_canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let fps = rustmigrate_core::graph::build::compute_all_fingerprints_pub(
+            &root_canon,
+            &graph,
+            &mut adapters,
+        )?;
+        rustmigrate_core::graph::persist::save_fingerprints(&db, &fps)?;
+        let persist_ms = t_persist.map(|t| t.elapsed().as_millis() as u64);
 
         // 标记 graph 构建完成（若状态文件存在）。
         mark_graph_built(&mut warnings);
@@ -763,7 +749,7 @@ fn cmd_graph_build(root: &Path, full: bool, profile: bool) -> CmdResult {
         Ok((data, warnings))
     } else {
         // 增量构建
-        let (graph, build_profile, incr_stats) = build_graph_ts_incremental(root, &db)?;
+        let (graph, build_profile, incr_stats) = build_graph_ts_incremental(root, &db, profile)?;
         warnings.extend(graph.warnings().iter().cloned());
 
         // 标记 graph 构建完成（若状态文件存在）。

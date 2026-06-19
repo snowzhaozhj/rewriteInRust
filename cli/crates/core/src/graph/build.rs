@@ -495,10 +495,11 @@ pub fn build_graph_incremental(
 pub fn build_graph_ts_incremental(
     root: &Path,
     db_path: &Path,
+    profile: bool,
 ) -> Result<(SourceGraph, BuildProfile, IncrementalStats)> {
     let mut adapters: Vec<Box<dyn LanguageAdapter>> =
         vec![Box::new(crate::lang::typescript::TypeScriptAdapter::new()?)];
-    build_graph_incremental(root, db_path, &mut adapters, false)
+    build_graph_incremental(root, db_path, &mut adapters, profile)
 }
 
 /// 传递性更新：找出 STRUCTURAL 变更文件的所有（反向 BFS）导入者。
@@ -1241,12 +1242,12 @@ mod tests {
         let db = temp_db("skip_unchanged");
 
         // 第一次构建（退化为全量）
-        let (g1, _bp1, stats1) = build_graph_ts_incremental(&dir, &db).unwrap();
+        let (g1, _bp1, stats1) = build_graph_ts_incremental(&dir, &db, false).unwrap();
         assert!(!stats1.incremental, "首次构建应退化为全量");
         assert!(g1.node_count() > 0);
 
         // 第二次构建（无变更——全部 NONE 跳过）
-        let (_g2, _bp2, stats2) = build_graph_ts_incremental(&dir, &db).unwrap();
+        let (_g2, _bp2, stats2) = build_graph_ts_incremental(&dir, &db, false).unwrap();
         assert!(stats2.incremental);
         assert_eq!(stats2.skipped, 2, "两个文件都应被跳过");
         assert_eq!(stats2.cosmetic, 0);
@@ -1265,12 +1266,12 @@ mod tests {
         let db = temp_db("cosmetic");
 
         // 全量构建
-        let _ = build_graph_ts_incremental(&dir, &db).unwrap();
+        let _ = build_graph_ts_incremental(&dir, &db, false).unwrap();
 
         // 修改函数体（不改签名）= COSMETIC
         std::fs::write(dir.join("a.ts"), "export function foo() { return 42; }\n").unwrap();
 
-        let (_g, _bp, stats) = build_graph_ts_incremental(&dir, &db).unwrap();
+        let (_g, _bp, stats) = build_graph_ts_incremental(&dir, &db, false).unwrap();
         assert!(stats.incremental);
         assert_eq!(stats.cosmetic, 1, "函数体修改应为 COSMETIC");
         assert_eq!(stats.structural, 0);
@@ -1287,7 +1288,7 @@ mod tests {
         let db = temp_db("structural");
 
         // 全量构建
-        let _ = build_graph_ts_incremental(&dir, &db).unwrap();
+        let _ = build_graph_ts_incremental(&dir, &db, false).unwrap();
 
         // 新增函数 = STRUCTURAL
         std::fs::write(
@@ -1296,7 +1297,7 @@ mod tests {
         )
         .unwrap();
 
-        let (g, _bp, stats) = build_graph_ts_incremental(&dir, &db).unwrap();
+        let (g, _bp, stats) = build_graph_ts_incremental(&dir, &db, false).unwrap();
         assert!(stats.incremental);
         assert_eq!(stats.structural, 1, "新增函数应为 STRUCTURAL");
         // 验证新函数存在
@@ -1315,12 +1316,12 @@ mod tests {
         let db = temp_db("new_file");
 
         // 全量构建
-        let _ = build_graph_ts_incremental(&dir, &db).unwrap();
+        let _ = build_graph_ts_incremental(&dir, &db, false).unwrap();
 
         // 新增文件
         std::fs::write(dir.join("b.ts"), "export function bar() { return 2; }\n").unwrap();
 
-        let (g, _bp, stats) = build_graph_ts_incremental(&dir, &db).unwrap();
+        let (g, _bp, stats) = build_graph_ts_incremental(&dir, &db, false).unwrap();
         assert!(stats.incremental);
         assert_eq!(stats.new_files, 1);
         assert_eq!(stats.skipped, 1, "a.ts 应跳过");
@@ -1341,12 +1342,12 @@ mod tests {
         let db = temp_db("deleted");
 
         // 全量构建
-        let _ = build_graph_ts_incremental(&dir, &db).unwrap();
+        let _ = build_graph_ts_incremental(&dir, &db, false).unwrap();
 
         // 删除 b.ts
         std::fs::remove_file(dir.join("b.ts")).unwrap();
 
-        let (g, _bp, stats) = build_graph_ts_incremental(&dir, &db).unwrap();
+        let (g, _bp, stats) = build_graph_ts_incremental(&dir, &db, false).unwrap();
         assert!(stats.incremental);
         assert_eq!(stats.deleted, 1);
 
@@ -1371,7 +1372,7 @@ mod tests {
         let db = temp_db("transitive");
 
         // 全量构建
-        let _ = build_graph_ts_incremental(&dir, &db).unwrap();
+        let _ = build_graph_ts_incremental(&dir, &db, false).unwrap();
 
         // STRUCTURAL 修改 a.ts（新增导出函数）
         std::fs::write(
@@ -1380,7 +1381,7 @@ mod tests {
         )
         .unwrap();
 
-        let (_g, _bp, stats) = build_graph_ts_incremental(&dir, &db).unwrap();
+        let (_g, _bp, stats) = build_graph_ts_incremental(&dir, &db, false).unwrap();
         assert!(stats.incremental);
         assert_eq!(stats.structural, 1, "a.ts 应为 STRUCTURAL");
         assert!(
@@ -1412,7 +1413,7 @@ mod tests {
         let db_full = temp_db("correctness_full");
 
         // 增量首次 = 全量
-        let _ = build_graph_ts_incremental(&dir, &db_incr).unwrap();
+        let _ = build_graph_ts_incremental(&dir, &db_incr, false).unwrap();
 
         // 修改文件
         std::fs::write(
@@ -1422,7 +1423,7 @@ mod tests {
         .unwrap();
 
         // 增量构建
-        let (g_incr, _, _) = build_graph_ts_incremental(&dir, &db_incr).unwrap();
+        let (g_incr, _, _) = build_graph_ts_incremental(&dir, &db_incr, false).unwrap();
 
         // 全量构建
         let g_full = build_graph_ts(&dir).unwrap();

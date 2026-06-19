@@ -105,7 +105,12 @@ pub fn generate_degrade_report(
             downstream_impact: "无额外影响，翻译完成后与正常模块一致".to_string(),
         },
         skip: DegradeEstimate {
-            effort: "low".to_string(),
+            effort: match downstream_count {
+                0 => "low",
+                1..=3 => "medium",
+                _ => "high",
+            }
+            .to_string(),
             description: "跳过该模块，从迁移范围中裁剪".to_string(),
             downstream_impact: format!(
                 "{downstream_count} 个下游模块将受影响，需调整依赖或同步裁剪"
@@ -271,7 +276,7 @@ mod tests {
         let r = generate_degrade_report("m", vec![], vec![], 15, 0);
         assert_eq!(r.degrade_options.ffi.effort, "high");
 
-        // downstream_count = 0 → skip impact = low
+        // downstream_count = 0 → skip effort = low
         let r = generate_degrade_report("m", vec![], vec![], 0, 0);
         assert_eq!(r.degrade_options.skip.effort, "low");
 
