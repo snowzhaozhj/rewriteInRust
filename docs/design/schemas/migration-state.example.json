@@ -95,6 +95,21 @@
       "coverage": null,
       "known_differences": 0,
       "risk": "high"
+    },
+    "file:src/events/emitter.ts": {
+      "status": "pending",
+      "substatus": null,
+      "sprint": 2,
+      "attempts": [],
+      "test_pass_rate": null,
+      "coverage": null,
+      "known_differences": 0,
+      "tier": "standard",
+      "member_files": [
+        "file:src/events/emitter.ts",
+        "file:src/events/event-bus.ts",
+        "file:src/events/handler.ts"
+      ]
     }
   },
   "config_ref": ".rustmigrate.toml"

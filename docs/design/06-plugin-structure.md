@@ -109,14 +109,14 @@ Plugin 中的确定性计算由独立的 Rust CLI 工具 `rustmigrate` 承担，
 | `rustmigrate init` | 初始化 `.rust-migration/` 目录 + 项目根目录 `.rustmigrate.toml` 配置文件 |
 | `rustmigrate profile` | 分析源码项目画像（语言检测、框架识别、代码统计、外部工具可用性检测——按 `analysis-tools.json` 逐项验证安装与最低版本，缺失时输出 `ADAPTER_TOOL_MISSING` 警告；同时检测 Tier 0 Rust 外部二进制 `cargo-nextest` 可用性，缺失时输出 `RUST_TOOL_MISSING` 警告） |
 | `rustmigrate graph build` | 使用 tree-sitter 解析源码，构建源码图（存储到 `source-graph.db`）；默认增量（检测 file_fingerprints 跳过未变更文件），`--full` 强制全量重建并重置 graph_integrity 为 full（用于熔断恢复，见 [04 § 5.7.5-5.7.6](./04-toolchain.md#575-图完整性与熔断)）；`--profile` 输出性能画像 JSON（见 [04 § 5.7.4.1](./04-toolchain.md#5741-性能基准与扩展性)） |
-| `rustmigrate graph topo-sort` | 对依赖图执行拓扑排序，输出迁移顺序（MVP 用 Kahn 算法，不支持有环图；检测到环则非零退出并列出环路径，完整 SCC 检测见 M2 `graph cycles`，降级流程见 [04 § 5.7.6](./04-toolchain.md#576-图查询能力清单)） |
+| `rustmigrate graph topo-sort` | 对依赖图执行拓扑排序，输出迁移顺序（纯排序原语，Kahn 算法，不支持有环图；检测到环则返回 E002 非零退出并列出环路径。**破环不在此命令**：源码环由 `state populate-modules` 缩点折叠为 composite 模块组，见 [04 § 5.7.6](./04-toolchain.md#576-图查询能力清单)、[MDR-004](../decisions/004-scc-fold-break-cycle.md)。完整 SCC 检测见 M2 `graph cycles`） |
 | `rustmigrate graph deps <module>` | 查询模块的正向依赖树 |
 | `rustmigrate graph interfaces <module>` | 输出模块的导出接口签名文本（查询 source-graph.db 中 `is_exported=true` 节点，按 `line_range` 从 source-ref/ 提取）；`--deps-of <target>` 批量输出 target 的直接依赖模块（imports 边的 1-hop 邻居）的导出接口签名（区别于 `graph deps` 的 BFS 传递闭包）；含每条签名的 token 估算（bytes/4） |
 | `rustmigrate graph stats` | 图统计信息（节点/边计数、度分布） |
 | `rustmigrate validate state` | 校验 `migration-state.json` 的合法性（JSON Schema + 状态机约束） |
 | `rustmigrate state get` | 查询指定模块的当前迁移状态 |
 | `rustmigrate state transition` | 执行状态转换（带状态机合法性前置条件检查：校验当前状态→目标状态为合法转换路径）。`--module` 为模块级 ModuleStatus 转换；省略则为项目级 ProjectState 转换（`/migrate analyze` 把 state 从 `init` 推进到 `sprint_loop` 的接入点） |
-| `rustmigrate state populate-modules` | 用源码图迁移序列填充 `migration-state.json` 的 `modules`/`sprint`（PLAN 操作）：读 `source-graph.db` → `migration_sequence()` 拓扑序 → 每个文件模块写 `{status:pending, sprint:1}`（module key 用 NodeId 原值，与 `graph deps` 输出一致；**M1 另写恒为 `Low` 的死字段 `risk`，M2-TIER-01a 删除 `risk`、改填复杂度分档 `tier`**，见 [03 § 4.3.2](./03-execution-model.md#432-复杂度自适应分档tier-01m2)）+ `sprint.current=1`；有环拒绝填充。是 `/migrate analyze`→`/migrate run` 衔接的 PLAN 落盘环节（见 PLAN.md §9.5） |
+| `rustmigrate state populate-modules` | 用源码图迁移序列填充 `migration-state.json` 的 `modules`/`sprint`（PLAN 操作）：读 `source-graph.db` → `migration_sequence()` 缩点为 SCC 模块组 → 每组写 `{status:pending, sprint:<缩点 DAG 层级>, member_files:<仅多文件组>}`（module key 用组代表 NodeId 原值；**M1 另写恒为 `Low` 的死字段 `risk`，M2-TIER-01a 删除 `risk`、改填复杂度分档 `tier`**，见 [03 § 4.3.2](./03-execution-model.md#432-复杂度自适应分档tier-01m2)）+ `sprint.current=1`。**破环（MDR-004）：循环依赖不再拒绝，整组折叠为 composite 模块组整体翻译**。是 `/migrate analyze`→`/migrate run` 衔接的 PLAN 落盘环节（见 PLAN.md §9.5） |
 | `rustmigrate stats loc` | 统计源码和 Rust 代码行数（嵌入 tokei） |
 | `rustmigrate stats compare` | 源码与 Rust 结构复杂度对比（函数数量比、代码行数比、控制流嵌套层级）——复用 tokei + tree-sitter 函数计数，作为 Phase A 结构校验门禁（见 03 § 4.3 Step 4.5） |
 | `rustmigrate scaffold workspace` | 生成 Cargo workspace 基础骨架（委托 `cargo init`）；dev-dependencies 与 `deny.toml` 由 scaffolder SubAgent 按项目测试需求注入 |
