@@ -18,8 +18,10 @@
 - **LLM 端到端跑通**（circular-deps fixture，瘦编排 + subagent 翻译）✅：
   - 三向引用环 {emitter,event-bus,handler} 折叠为 composite → translator 整组翻译为三互引 Rust mod，Handler 用 `Weak` 破强引用环，`Rc::strong_count==1` 断言成立。
   - cargo check/test(2 passed)/clippy 全过；状态机推进 2 迁移单位→done + sprint 推进→all_completed；member_files 全程持久化；validate state ok。
-- **FFI 兜底**（SCC 超上下文预算才切分）→ 留 TODO，简单/中型项目不触发（zod composite 8 文件 full-tier 会触发，需 Sprint F 后续）。
-- **下一步**：codex 审查回（吸收）→ push + 提 PR。zod/真实项目全量翻译留作 Sprint F 后续（composite 巨型环需 FFI 兜底实现）。
+- **审查闭环**（CLAUDE.md 4 视角 + 修复后复审）：design-checker（5 项文档）+ pr-review/codex（门禁缺口）+ **主审 /code-review**（absent 死锁 + 注释 rot + cleanup）全部修复；修复后复审逐项验证 6 项修复正确无回归。
+- **PR [#25](https://github.com/snowzhaozhj/rewriteInRust/pull/25)**（7 commit）：**mergeStateStatus=CLEAN**，GitHub CI 5 项全绿（check/deny/shellcheck/test/coverage），本地 `just ci` 全过（404 测试），**可直接验收合并**。
+- **已知 TODO**（代码已标注）：`TODO(perf)` 多源 BFS、`TODO(refactor)` 层级计算抽共用、`TODO(M3-FFI)` 单 SCC 超预算兜底（zod composite 8 文件 full-tier 会触发，留 Sprint F 后续）。
+- **Sprint F 后续**：zod/真实项目全量 LLM 翻译（需 FFI 兜底实现）。
 
 ### Sprint D/E 完成总结（3 个 PR，3 波并行执行）
 
