@@ -280,7 +280,7 @@ mod tests {
         assert_eq!(json["data"]["error_code"], "E002");
         assert_eq!(json["data"]["retryable"], false);
         assert!(
-            json["data"]["suggestion"].as_str().unwrap().len() > 0,
+            !json["data"]["suggestion"].as_str().unwrap().is_empty(),
             "应有非空建议"
         );
     }
@@ -297,8 +297,7 @@ mod tests {
         assert_eq!(json["data"]["retryable"], true);
         assert_eq!(json["data"]["error_code"], "E013");
 
-        let io_resp: Response<ErrorData> =
-            MigrateError::Io(std::io::Error::new(std::io::ErrorKind::Other, "fail")).into();
+        let io_resp: Response<ErrorData> = MigrateError::Io(std::io::Error::other("fail")).into();
         let json = serde_json::to_value(io_resp).unwrap();
         assert_eq!(json["data"]["retryable"], true);
         assert_eq!(json["data"]["error_code"], "E014");

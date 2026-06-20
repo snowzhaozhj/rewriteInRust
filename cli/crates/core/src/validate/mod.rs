@@ -784,6 +784,7 @@ mod tests {
             phase_a_audit_passed: None,
             blocked_by: None,
             pre_blocked_status: None,
+            member_files: None,
         }
     }
 

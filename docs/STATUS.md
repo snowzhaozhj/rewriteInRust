@@ -5,8 +5,23 @@
 ## 当前位置
 
 - **Milestone**: M1 MVP ✅ → **M2 质量提升**
-- **Phase**: M2 Sprint D/E **全部完成**，待进入 **Sprint F 验收**
-- **测试基线**: 399 测试 / clippy -D / deny / fmt / shellcheck 全绿
+- **Phase**: M2 Sprint D/E 全部完成（PR #22/#23/#24 **均已合并**）→ **Sprint F 验收进行中**
+- **测试基线**: 402 测试 / clippy -D / deny / fmt / shellcheck 全绿
+
+### Sprint F 进行中：破环（M2-SCALE-SCC）✅
+
+- **设计变更**：源码循环依赖不再拒绝填充，改为 **SCC 缩点折叠为翻译单元**——每个强连通分量成为一个 composite 模块组（`ModuleState.member_files`），在缩点 DAG 上排 sprint 层级，translator 整组翻译为一组互引 Rust mod（同 crate 内 mod 间循环 `use` 合法，无需破环/shared-types/FFI）。
+- **实现**：`topo.rs` 新增 `scc_groups`/`SccGroup` + 缩点层级；`lib.rs` populate 删拒绝改折叠；`state.rs` ModuleState 加 `member_files`；提示词 translator/run/workflow/verifier/SKILL 同步优化。
+- **真实项目验证**：zod（82 文件）→ 75 模块，8 文件核心环（ZodError/types/errors/index...）折叠为 1 个 full-tier composite 组，4 sprint 层级。分支 `feat/m2-scale-scc-break-cycle`（commit 4c9e4da）。
+- **门禁衔接**（commit 17f81a4）：新增 `state deps` 组感知依赖门禁——composite 组成员依赖映射回组代表，修复 zod 65 处缺口（审查 Important #1）。
+- **设计文档 + MDR**（commit 29b89e3）：MDR-004 + 02/03/04/06/09 修订 + analyze/SKILL 对齐（审查 5 项 important 闭环）。
+- **LLM 端到端跑通**（circular-deps fixture，瘦编排 + subagent 翻译）✅：
+  - 三向引用环 {emitter,event-bus,handler} 折叠为 composite → translator 整组翻译为三互引 Rust mod，Handler 用 `Weak` 破强引用环，`Rc::strong_count==1` 断言成立。
+  - cargo check/test(2 passed)/clippy 全过；状态机推进 2 迁移单位→done + sprint 推进→all_completed；member_files 全程持久化；validate state ok。
+- **审查闭环**（CLAUDE.md 4 视角 + 修复后复审）：design-checker（5 项文档）+ pr-review/codex（门禁缺口）+ **主审 /code-review**（absent 死锁 + 注释 rot + cleanup）全部修复；修复后复审逐项验证 6 项修复正确无回归。
+- **PR [#25](https://github.com/snowzhaozhj/rewriteInRust/pull/25)**（7 commit）：**mergeStateStatus=CLEAN**，GitHub CI 5 项全绿（check/deny/shellcheck/test/coverage），本地 `just ci` 全过（404 测试），**可直接验收合并**。
+- **已知 TODO**（代码已标注）：`TODO(perf)` 多源 BFS、`TODO(refactor)` 层级计算抽共用、`TODO(M3-FFI)` 单 SCC 超预算兜底（zod composite 8 文件 full-tier 会触发，留 Sprint F 后续）。
+- **Sprint F 后续**：zod/真实项目全量 LLM 翻译（需 FFI 兜底实现）。
 
 ### Sprint D/E 完成总结（3 个 PR，3 波并行执行）
 

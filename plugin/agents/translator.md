@@ -68,7 +68,19 @@ tools: Bash, Read, Write, Grep, Glob
 
 ## 翻译循环（`/migrate run`）
 
-> **定位源文件（先做，避免误判"源文件不在磁盘"）**：模块标识是图节点 ID `file:<rel>`，其中 `<rel>` 相对的是 `graph build --root`（即 `.rustmigrate.toml` 的 `project.source_root`，如 `src/`），**不是相对当前工作目录**。你的 CWD 是项目根。读源文件须拼成 `<source_root>/<rel>`：先 Read `.rustmigrate.toml` 取 `project.source_root`，去掉 `file:` 前缀得 `<rel>`，源文件绝对/相对路径 = `<source_root>/<rel>`（若 `<rel>` 已含 source_root 前缀则不重复拼接，按实际存在的文件为准）。直接用 `<rel>` 去 CWD 读会 file-not-found——这是路径基准不一致，不是文件真的缺失；找不到时先校验拼接基准，勿据此判定源已删除。
+> **定位源文件**：模块标识是图节点 ID `file:<rel>`。路径基准是 `.rustmigrate.toml` 的 `project.source_root`（如 `src/`），不是你的 CWD（项目根）。源文件绝对路径 = `<source_root>/<rel>`（去掉 `file:` 前缀得 `<rel>`；若 `<rel>` 已含 source_root 前缀则不重复拼接）。直接用 `<rel>` 去 CWD 读会 file-not-found——是基准不一致，不是源真的缺失。
+
+> **一个模块未必只有一个源文件**：单文件模块 `member_files` 为 None；SCC 模块组的 `member_files` 列出组内全部互引源文件。判断模块形态后再决定翻译单元（见下「SCC 模块组翻译」）。
+
+### SCC 模块组翻译（循环依赖整组翻译）
+
+源码里的循环依赖（强连通分量 SCC）被 populate 折叠成**一个模块**，其 `member_files` 含组内全部互引源文件。Rust **同一 crate 内 mod 之间允许互相 `use`（循环引用合法，只有 crate 间不行）**，所以这组文件无需任何破环处理——直接翻译即可。
+
+- **触发**：模块 `member_files` 非空（含多个文件）。把这组文件作为**一个翻译单元**整体翻译，而非逐模块独立 run。
+- **怎么做**：Phase A 保持源码模块粒度，**逐文件忠实翻译**为一组 Rust `mod`，文件间按源码原有 import 关系正常 `use` 互引。**不预合并成单文件、不提取 `shared-types` 破环、不造跨文件 API 契约**——这些是对 Rust 模块系统的误解，纯属过度设计。
+- **意图摘要**：在组的 intent.md 里简要记录组内**跨文件调用关系**（谁调用谁），帮 verifier 理解互引拓扑即可，不新增 schema。
+- **运行时对象环的所有权**（区别于 mod 间循环 `use`）：源码的循环**对象引用**（A 持有 B、B 持有 A）翻译后会形成 Rust 所有权环——用 `Rc<RefCell<T>>` 表达共享可变引用，并在环的**至少一条回边用 `Weak`** 打破强引用环（防 `Rc` 计数永不归零的内存泄漏，用 `upgrade()` 临时取强引用）。这是 TS 的 GC 环 → Rust 显式所有权的忠实表达，属 Phase A 语义忠实而非优化。`Weak.upgrade()` 的失效分支是破环引入的新边界，按「持有者已 drop 则无操作」标 `TODO(port)`。
+- **环的测试陷阱**：若对象环存在自递归调用链（如 `handle→forward→emit→handle…`），测试须选**不回流的事件/入口验证单跳**让链路自然终止，**不得为通过测试而删改源调用结构**；可用 `Rc::strong_count` 断言破环成立（回边为 `Weak` 时计数不被抬高）。
 
 翻译分三步，每步是 SKILL.md 的一次独立调用。**意图摘要与 Phase A/B 分离**，是为了先冻结语义契约再翻译——避免边译边猜导致语义漂移。
 

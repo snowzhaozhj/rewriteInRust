@@ -1065,23 +1065,162 @@ fn e2e_populate_cleans_orphan_pending() {
 }
 
 #[test]
-fn smoke_populate_rejects_cycles() {
+fn smoke_populate_folds_cycles() {
     let tmp = tempfile::tempdir().unwrap();
     copy_dir(&fixtures_dir().join("circular-deps"), tmp.path());
     with_cwd(tmp.path(), || {
         let _ = run(&["init"]);
         let (code, _) = run(&["graph", "build", "--root", "src"]);
         assert_eq!(code, 0);
-        // 有环：拒绝填充（对齐 topo-sort 门禁）。
+        // 破环（M2-SCALE-SCC）：循环依赖不再拒绝，整组折叠为 composite 模块组。
         let (code, json) = run(&["state", "populate-modules"]);
-        assert_eq!(code, 1, "有环应拒绝填充: {json}");
-        assert_eq!(json["status"], "error");
+        assert_eq!(code, 0, "有环应折叠而非拒绝: {json}");
+        assert_eq!(json["status"], "warning");
         assert!(
-            json["data"]["message"]
-                .as_str()
+            json["warnings"]
+                .as_array()
                 .unwrap()
-                .contains("循环依赖"),
-            "错误信息应提示循环依赖: {json}"
+                .iter()
+                .any(|w| w.as_str().unwrap().contains("折叠")),
+            "应有折叠 warning: {json}"
+        );
+        // 应存在一个 composite 模块组，member_files 含 event-bus/handler/emitter。
+        let modules = json["data"]["modules"].as_array().unwrap();
+        let composite = modules
+            .iter()
+            .find(|m| m.get("member_files").is_some())
+            .expect("应有一个 composite 模块组");
+        let members: Vec<&str> = composite["member_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(
+            members.iter().any(|s| s.contains("event-bus"))
+                && members.iter().any(|s| s.contains("handler"))
+                && members.iter().any(|s| s.contains("emitter")),
+            "composite 组应含环成员: {members:?}"
+        );
+        // 折叠后 state 应合法。
+        let (code, json) = run(&["validate", "state"]);
+        assert_eq!(code, 0, "折叠后 state 应合法: {json}");
+    });
+}
+
+#[test]
+fn smoke_state_deps_group_aware() {
+    // 破环门禁衔接（M2-SCALE-SCC）：composite 组代表的组感知依赖应聚合组所有成员的
+    // 对外依赖、映射回组代表、剔除组内自依赖。
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("circular-deps"), tmp.path());
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        let (code, _) = run(&["graph", "build", "--root", "src"]);
+        assert_eq!(code, 0);
+        let (code, _) = run(&["state", "populate-modules"]);
+        assert_eq!(code, 0);
+
+        // 组 {emitter,event-bus,handler} 折叠，代表 emitter；三者都 import shared。
+        let (code, json) = run(&["state", "deps", "file:emitter.ts"]);
+        assert_eq!(code, 0, "state deps 应成功: {json}");
+        let deps: Vec<String> = json["data"]["dependencies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["module"].as_str().unwrap().to_string())
+            .collect();
+        // 聚合组外依赖 shared
+        assert!(
+            deps.iter().any(|m| m.contains("shared")),
+            "应聚合组外依赖 shared: {deps:?}"
+        );
+        // 组内自依赖剔除（emitter↔event-bus↔handler 互引不算依赖）
+        assert!(
+            !deps
+                .iter()
+                .any(|m| m.contains("event-bus") || m.contains("handler")),
+            "组内自依赖应剔除: {deps:?}"
+        );
+        // shared 仍 pending → 未就绪，列入 blocking
+        assert_eq!(json["data"]["all_ready"], false);
+        assert!(
+            json["data"]["blocking"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b.as_str().unwrap().contains("shared")),
+            "shared(pending) 应在 blocking: {json}"
+        );
+
+        // 非代表成员 key 归一（主审 #1）：传 file:handler.ts（非代表成员）应归一到组代表
+        // emitter 并返回等价结果，而非报「模块不存在」。
+        let (code, json2) = run(&["state", "deps", "file:handler.ts"]);
+        assert_eq!(code, 0, "非代表成员 key 应归一而非报错: {json2}");
+        let deps2: Vec<String> = json2["data"]["dependencies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["module"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            deps2.iter().any(|m| m.contains("shared")),
+            "归一后应聚合组外依赖 shared: {json2}"
+        );
+        assert!(
+            !deps2
+                .iter()
+                .any(|m| m.contains("handler") || m.contains("event-bus")),
+            "归一后组内自依赖应剔除: {deps2:?}"
+        );
+    });
+}
+
+#[test]
+fn smoke_state_deps_unresolved_not_blocking() {
+    // absent 死锁修复（主审）：依赖未登记为模块（state 与 graph 不同步）时进 unresolved + warning，
+    // **不进 blocking**——否则会被填入 blocked_by，而 check-blocked 对缺失 key 永判非终态导致死锁。
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("circular-deps"), tmp.path());
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        let (code, _) = run(&["graph", "build", "--root", "src"]);
+        assert_eq!(code, 0);
+        let (code, _) = run(&["state", "populate-modules"]);
+        assert_eq!(code, 0);
+
+        // 制造 state/graph 不同步：从 state 删除 shared 模块（它仍在 graph、被 emitter 组依赖）。
+        let sp = tmp.path().join(".rust-migration/migration-state.json");
+        let mut sf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+        sf["modules"]
+            .as_object_mut()
+            .unwrap()
+            .remove("file:shared.ts");
+        std::fs::write(&sp, serde_json::to_string_pretty(&sf).unwrap()).unwrap();
+
+        // emitter 组依赖 shared（现已未登记）→ 应进 unresolved + warning，不进 blocking。
+        let (code, json) = run(&["state", "deps", "file:emitter.ts"]);
+        assert_eq!(code, 0, "absent 依赖应降级 warning 而非命令失败: {json}");
+        assert_eq!(json["status"], "warning");
+        let unresolved: Vec<String> = json["data"]["unresolved"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            unresolved.iter().any(|m| m.contains("shared")),
+            "shared 应在 unresolved: {json}"
+        );
+        // 关键：absent 依赖不进 blocking（避免 blocked_by 死锁）。
+        assert!(
+            !json["data"]["blocking"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b.as_str().unwrap().contains("shared")),
+            "absent 依赖不应进 blocking: {json}"
         );
     });
 }

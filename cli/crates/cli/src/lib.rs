@@ -199,10 +199,12 @@ pub enum StateCommands {
     },
     /// 用源码图的迁移序列填充 `migration-state.json` 的 `modules`/`sprint`（PLAN 操作）。
     ///
-    /// 读取 `source-graph.db` → `migration_sequence()` 拓扑序 → 为每个文件模块写入
-    /// `ModuleState{status:pending, sprint:<按parallel_groups>, tier:auto}` 并设 `sprint{current:1}`，原子落盘。
-    /// module key 用 NodeId 原值（与 `graph deps` 输出一致，保证 run 阶段依赖门禁匹配）。
-    /// 环图（`migration_sequence().has_cycles()`）拒绝填充，须先打破环（对齐 topo-sort 门禁）。
+    /// 读取 `source-graph.db` → `migration_sequence()` 缩点为 SCC 模块组 → 为每个组写入
+    /// `ModuleState{status:pending, sprint:<缩点DAG层级>, tier:auto, member_files:<多文件组>}` 并设 `sprint{current:1}`，原子落盘。
+    /// module key 用组代表（首成员）NodeId 原值。破环（M2-SCALE-SCC）：循环依赖**不再拒绝**，
+    /// 整组折叠为一个 composite 模块整体翻译。run 阶段依赖门禁须用 `state deps`（组感知，
+    /// 把组内非代表成员的文件级依赖映射回组代表），**不能**用 `graph deps`（纯图、文件级，
+    /// 折叠后组内成员不在 modules 表会落空）。
     /// 是 `/migrate analyze`→`/migrate run` 衔接的缺失 PLAN 步骤（见 PLAN.md §9.5 M1-PLAN-01）。
     PopulateModules {
         /// 源码根目录，用于 per-module 复杂度分档（M2-TIER-01a）。
@@ -210,9 +212,18 @@ pub enum StateCommands {
         #[arg(long)]
         root: Option<PathBuf>,
         /// 所有模块统一分配 sprint=1（兼容 M1 单 sprint 模式）。
-        /// 省略时按 parallel_groups 拓扑层级分配 sprint 号（组 0→sprint 1，组 1→sprint 2...）。
+        /// 省略时按 SCC 缩点 DAG 拓扑层级分配 sprint 号（叶组→sprint 1，依赖更深的组递增）。
         #[arg(long)]
         single_sprint: bool,
+    },
+    /// 组感知的依赖就绪门禁查询（破环 M2-SCALE-SCC）。
+    ///
+    /// 替代 run 阶段「`graph deps` + 逐个查 `modules[dep]`」的纯图查询：composite 组成员的
+    /// 依赖映射回组代表 key、剔除组内自依赖、按终态判就绪。输出
+    /// `{dependencies:[{module,status,ready}], all_ready, blocking}`，供依赖门禁直接消费。
+    Deps {
+        /// 模块 key（组代表 NodeId，如 `file:emitter.ts`）。
+        module: String,
     },
     /// 追加一条 SubAgent 调用记录到顶层 `subagent_calls`（诊断卡死 / 统计重试，append-only）。
     ///
@@ -409,6 +420,7 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
                 writer,
                 cmd_state_populate_modules(root.as_deref(), *single_sprint),
             ),
+            StateCommands::Deps { module } => emit(writer, cmd_state_deps(module)),
             StateCommands::RecordSubagentCall {
                 step_index,
                 subagent_name,
@@ -1402,10 +1414,10 @@ fn cmd_state_transition_project(
 /// analyze 构建源码图后，需把拓扑序"落"成可执行的模块清单，run 阶段才有 `modules[target]`
 /// 可读、依赖门禁（`graph deps` + `modules[dep].status`）才成立。
 ///
-/// 流程：`load_graph` → `migration_sequence()` →（有环则拒绝，对齐 topo-sort 门禁）→
-/// 清理孤儿 pending（见下）→ 为每个文件模块写
-/// `ModuleState{status:pending, sprint:<parallel_groups层级>, tier:auto}`（module key = NodeId 原值，
-/// 与 `graph deps` 输出一致）→ `set_sprint(current:1)` → 原子落盘。
+/// 流程：`load_graph` → `migration_sequence()` 缩点为 SCC 模块组（破环：循环依赖折叠不拒绝）→
+/// 清理孤儿 pending（见下）→ 为每个组写
+/// `ModuleState{status:pending, sprint:<缩点DAG层级>, tier:auto, member_files:<多文件组>}`
+/// （module key = 组代表 NodeId 原值，与 `graph deps` 输出一致）→ `set_sprint(current:1)` → 原子落盘。
 ///
 /// **幂等保护**：已有模块处于非 `pending` 活跃态（迁移进行中）时拒绝覆盖，避免把进度重置回
 /// `pending`（断点续传安全）；仅当全部模块仍为 pending（或全新）时才整体重填。
@@ -1417,21 +1429,6 @@ fn cmd_state_transition_project(
 fn cmd_state_populate_modules(root: Option<&Path>, single_sprint: bool) -> CmdResult {
     let graph = load_graph()?;
     let sequence = migration_sequence(&graph);
-
-    // 环图拒绝：与 topo-sort 门禁一致——有环无法生成可靠迁移序，须先打破环。
-    if sequence.has_cycles() {
-        let cycle_paths: Vec<Vec<String>> = sequence
-            .cycles
-            .iter()
-            .map(|c| c.iter().map(|id| id.to_string()).collect())
-            .collect();
-        return Err(MigrateError::Graph {
-            message: format!(
-                "源码图存在循环依赖，无法填充迁移序列；请先打破环后重试。环路径: {cycle_paths:?}"
-            ),
-            file: String::new(),
-        });
-    }
 
     let path = state_path();
     let (mut machine, mut warnings) = load_state_with_warnings(&path)?;
@@ -1450,13 +1447,26 @@ fn cmd_state_populate_modules(root: Option<&Path>, single_sprint: bool) -> CmdRe
         )));
     }
 
-    if sequence.order.is_empty() {
+    // 破环（M2-SCALE-SCC）：循环依赖不再拒绝，已在 migration_sequence 折叠为 SCC 模块组。
+    if sequence.has_cycles() {
+        warnings.push(format!(
+            "检测到 {} 个循环依赖，已折叠为 SCC 模块组整体翻译（无需打破环）",
+            sequence.cycles.len()
+        ));
+    }
+
+    let groups = &sequence.scc_groups;
+
+    if groups.is_empty() {
         // 空源码图：跳过孤儿清理，避免误执行一次空 graph build 后把已登记的 pending 模块整表清空。
         warnings.push("源码图无文件模块，填充结果为空（请确认已运行 graph build）".to_owned());
     } else {
-        // 孤儿 pending 清理：剔除 key 不在本轮迁移序列中的残留模块（源码图删文件后重填）。
-        let live_keys: std::collections::HashSet<String> =
-            sequence.order.iter().map(|id| id.to_string()).collect();
+        // 孤儿 pending 清理：live_keys = 各 SCC 组代表（首成员），剔除不在本轮迁移序列的残留模块。
+        let live_keys: std::collections::HashSet<String> = groups
+            .iter()
+            .filter_map(|g| g.members.first())
+            .map(|id| id.to_string())
+            .collect();
         let orphans = machine.retain_modules(&live_keys);
         if !orphans.is_empty() {
             warnings.push(format!(
@@ -1467,40 +1477,62 @@ fn cmd_state_populate_modules(root: Option<&Path>, single_sprint: bool) -> CmdRe
         }
     }
 
-    // 复杂度分档（M2-TIER-01a）：按 AST 语义特征自动评估每个模块的 tier。
-    let tier_map = detect_tiers_for_modules(&sequence.order, root, &mut warnings);
+    // 复杂度分档（M2-TIER-01a）：对全部成员文件检测 tier。
+    let all_files: Vec<NodeId> = groups
+        .iter()
+        .flat_map(|g| g.members.iter().cloned())
+        .collect();
+    let tier_map = detect_tiers_for_modules(&all_files, root, &mut warnings);
 
-    // Sprint 分配（M2-SCALE-P）：按 parallel_groups 拓扑层级分配 sprint 号。
-    // 组 0（叶节点）→ sprint 1，组 1 → sprint 2，...
+    // Sprint 分配（M2-SCALE-P）：按缩点 DAG 拓扑层级（SccGroup.sprint）。
     // --single-sprint 模式下所有模块统一 sprint=1（M1 兼容）。
-    let sprint_map: std::collections::HashMap<String, u32> = if single_sprint {
-        sequence
-            .order
-            .iter()
-            .map(|id| (id.to_string(), 1))
-            .collect()
-    } else {
-        let mut map = std::collections::HashMap::new();
-        for (group_idx, group) in sequence.parallel_groups.iter().enumerate() {
-            let sprint = (group_idx as u32) + 1;
-            for node_id in group {
-                map.insert(node_id.to_string(), sprint);
-            }
-        }
-        map
-    };
-
     let total_sprints = if single_sprint {
         1
     } else {
-        sequence.parallel_groups.len().max(1) as u32
+        groups.iter().map(|g| g.sprint).max().unwrap_or(1)
     };
 
-    for node_id in &sequence.order {
-        let tier = tier_map.get(node_id.as_str()).copied().flatten();
-        let sprint = sprint_map.get(node_id.as_str()).copied().unwrap_or(1);
+    // composite 模块组的 tier 取组内最高档（整组按最复杂策略翻译）。
+    fn tier_rank(t: ModuleTier) -> u8 {
+        match t {
+            ModuleTier::Trivial => 0,
+            ModuleTier::Standard => 1,
+            ModuleTier::Full => 2,
+        }
+    }
+
+    let mut modules: Vec<serde_json::Value> = Vec::with_capacity(groups.len());
+    for g in groups {
+        let key = match g.members.first() {
+            Some(k) => k,
+            None => continue,
+        };
+        let sprint = if single_sprint { 1 } else { g.sprint };
+        let tier = g
+            .members
+            .iter()
+            .filter_map(|m| tier_map.get(m.as_str()).copied().flatten())
+            .max_by_key(|t| tier_rank(*t));
+        // 仅多文件组写 member_files（单文件模块保持 None，向后兼容）。
+        let member_files: Option<Vec<String>> = if g.members.len() > 1 {
+            Some(g.members.iter().map(|m| m.to_string()).collect())
+        } else {
+            None
+        };
+
+        // 先用引用派生 JSON entry，再把 member_files move 进 ModuleState（省一次 clone）。
+        let mut entry = json!({
+            "id": key.to_string(),
+            "tier": tier.map(|t| t.to_string()),
+            "sprint": sprint,
+        });
+        if let Some(mf) = &member_files {
+            entry["member_files"] = json!(mf);
+        }
+        modules.push(entry);
+
         machine.update_module(
-            node_id.as_str(),
+            key.as_str(),
             ModuleState {
                 status: ModuleStatus::Pending,
                 substatus: None,
@@ -1514,6 +1546,7 @@ fn cmd_state_populate_modules(root: Option<&Path>, single_sprint: bool) -> CmdRe
                 phase_a_audit_passed: None,
                 blocked_by: None,
                 pre_blocked_status: None,
+                member_files,
             },
         );
     }
@@ -1524,17 +1557,6 @@ fn cmd_state_populate_modules(root: Option<&Path>, single_sprint: bool) -> CmdRe
     });
     machine.save(&path)?;
 
-    let modules: Vec<serde_json::Value> = sequence
-        .order
-        .iter()
-        .map(|id| {
-            let tier = tier_map
-                .get(id.as_str())
-                .and_then(|t| t.map(|t| t.to_string()));
-            let sprint = sprint_map.get(id.as_str()).copied().unwrap_or(1);
-            json!({ "id": id.to_string(), "tier": tier, "sprint": sprint })
-        })
-        .collect();
     Ok((
         json!({
             "module_count": modules.len(),
@@ -1586,6 +1608,124 @@ fn detect_tiers_for_modules(
         }
     }
     tiers
+}
+
+/// `state deps <module>`：组感知的依赖就绪门禁查询（破环 M2-SCALE-SCC）。
+///
+/// 替代 run 阶段「`graph deps` + 逐个查 `modules[dep].status`」的纯图查询。composite
+/// 模块组折叠后，`graph deps` 返回的是**文件级** NodeId，而 `modules` 仅登记组代表 key，
+/// 组内非代表成员（如被折叠的 `types.ts`）查不到——门禁会静默落空。本命令读 state 的
+/// `member_files` 建立「文件→组代表 key」映射：从模块全部成员出发取依赖闭包，映射回组
+/// 代表、剔除组内自依赖、按终态（`is_terminal`）判就绪。
+///
+/// 输出 `{module, dependencies:[{module,status,ready}], all_ready, blocking, unresolved}`。
+fn cmd_state_deps(module: &str) -> CmdResult {
+    let graph = load_graph()?;
+    let path = state_path();
+    let (machine, mut warnings) = load_state_with_warnings(&path)?;
+    let modules = &machine.state_file().modules;
+
+    // 归一 module key：调用方通常传组代表 key，但也容忍传 composite 组的非代表成员
+    // （如 `file:handler.ts`）——反查其所属组代表后按组解析，避免误用直接报错。
+    let canonical: String = if modules.contains_key(module) {
+        module.to_string()
+    } else if let Some((key, _)) = modules.iter().find(|(_, m)| {
+        m.member_files
+            .as_ref()
+            .is_some_and(|mf| mf.iter().any(|f| f == module))
+    }) {
+        key.clone()
+    } else {
+        return Err(MigrateError::Config(format!(
+            "模块 `{module}` 不在 migration-state.json 中（请先 populate-modules）"
+        )));
+    };
+    let module = canonical.as_str();
+
+    // 当前模块的成员文件（单文件模块 = [自身 key]）。归一后 module 必在 modules 中。
+    let self_members: Vec<String> = match &modules
+        .get(module)
+        .expect("canonical 已校验存在")
+        .member_files
+    {
+        Some(mf) => mf.clone(),
+        None => vec![module.to_string()],
+    };
+
+    // 反向映射：仅为 composite 组建「成员文件 → 组代表 key」表。单文件模块无需登记——
+    // 查表 miss 时回退 dep_file 自身即恒等映射（见下 `unwrap_or`），故表只含多文件组成员，
+    // 规模 O(composite 成员数) 而非 O(全部模块)。
+    let mut file_to_key: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for (key, m) in modules {
+        if let Some(members) = &m.member_files {
+            for f in members {
+                file_to_key.insert(f.clone(), key.clone());
+            }
+        }
+    }
+
+    // 从全部成员出发收集正向依赖闭包，映射回组代表，剔除组内自依赖、去重。
+    // 成员文件已从 graph 删除（state 与 graph 不同步）时跳过该成员并告警，而非整命令硬失败。
+    // TODO(perf): 大 composite 组逐成员独立 BFS 是 O(成员数×图规模)，组内互引使下游节点被
+    // 重复遍历；可改为以全部 self_members 为种子的单次多源 BFS（共享 visited）降到 O(图规模)。
+    let mut dep_keys: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for member in &self_members {
+        let Ok(start) = resolve_file_node(&graph, member) else {
+            warnings.push(format!(
+                "成员文件 `{member}` 不在 source-graph 中（state 与 graph 不同步，建议重新 graph build + populate-modules），已跳过其依赖"
+            ));
+            continue;
+        };
+        for dep_file in collect_imports_closure(&graph, &start, DependencyDirection::Forward) {
+            let dep_key = file_to_key.get(&dep_file).cloned().unwrap_or(dep_file);
+            if dep_key != module {
+                dep_keys.insert(dep_key);
+            }
+        }
+    }
+
+    // 按终态（done/degrade_*）判就绪。未登记为模块的依赖（state 与 graph 不同步）单列
+    // `unresolved` + 告警，**不计入 blocking**——否则会被 run 填进 blocked_by，而
+    // check-blocked 对缺失 key 永判非终态（validate/mod.rs `unwrap_or(false)`），导致模块永久 blocked 死锁。
+    let mut dependencies = Vec::with_capacity(dep_keys.len());
+    let mut blocking = Vec::new();
+    let mut unresolved = Vec::new();
+    for dk in &dep_keys {
+        match modules.get(dk) {
+            Some(m) => {
+                let ready = m.status.is_terminal();
+                if !ready {
+                    blocking.push(dk.clone());
+                }
+                dependencies
+                    .push(json!({ "module": dk, "status": m.status.to_string(), "ready": ready }));
+            }
+            None => {
+                unresolved.push(dk.clone());
+                dependencies.push(json!({ "module": dk, "status": "absent", "ready": false }));
+            }
+        }
+    }
+    if !unresolved.is_empty() {
+        warnings.push(format!(
+            "{} 个依赖未登记为模块（state 与 source-graph 不同步，建议重新 graph build + populate-modules）: {:?}",
+            unresolved.len(),
+            unresolved
+        ));
+    }
+
+    Ok((
+        json!({
+            "module": module,
+            "dependencies": dependencies,
+            // all_ready 只反映真实模块就绪；unresolved（数据不一致）靠 warning 暴露，不阻塞门禁。
+            "all_ready": blocking.is_empty(),
+            "blocking": blocking,
+            "unresolved": unresolved,
+        }),
+        warnings,
+    ))
 }
 
 /// `state advance-sprint`：当前 sprint 所有模块终态时推进到下一 sprint。

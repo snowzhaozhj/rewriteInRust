@@ -161,7 +161,7 @@ mod tests {
 
     fn make_fn_node(name: &str, exported: bool) -> SourceNode {
         let mut n = SourceNode::new(
-            NodeId::new(&format!("function:test.ts:{name}")),
+            NodeId::new(format!("function:test.ts:{name}")),
             NodeType::Function,
             name.to_string(),
             "test.ts".to_string(),

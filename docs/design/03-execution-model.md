@@ -46,7 +46,8 @@ Sprint N:
 
 **行动指南**：每个 Sprint 以 `migration-state.json` 中的 Sprint 元数据为准，包含 Sprint 目标、已完成模块、阻塞项。
 
-**循环依赖处理**：Sprint Planning 第 1 步的拓扑排序依赖 `rustmigrate graph topo-sort`（MVP 用 Kahn 算法，不支持有环图，见 [04 § 5.7.6](./04-toolchain.md#576-图查询能力清单)）。若源码存在循环依赖（含 re-export 间接环），`/migrate analyze` 的 Step 2.8（见 [09 附录 B](./09-appendix-schemas.md#附录-bmvp-skill-的-skillmd-骨架)）会检测到环并暂停，给出两种降级：(a) **源码改动**——在源项目临时打破环上某条 import 后重跑分析；(b) **模块跳过**——将环内模块标记 `requires_manual_review` 降级，人工拆环后再迁移。完整 SCC 环检测推迟到 M2 `graph cycles`。
+**循环依赖处理（破环：SCC 折叠为 composite，M2-SCALE-SCC，见 [MDR-004](../decisions/004-scc-fold-break-cycle.md)）**：源码循环依赖（含 re-export 间接环）**不再**拒绝填充 + 人工破环/降级。`state populate-modules` 用 Tarjan SCC 把每个强连通分量**缩点折叠为一个 composite 模块组**（`ModuleState.member_files` 列出组内全部互引源文件，module key=组内字典序最小成员），在缩点后无环的 DAG 上排 sprint 层级；translator 整组翻译为一组 Rust `mod`。**核心论据**：Rust 同一 crate 内 mod 之间允许互相 `use`（mod 间循环引用合法，只有 crate 间禁环），故源码环不是翻译障碍，无需破环/shared-types/FFI。FFI 切分退化为「单个 SCC 大到超上下文预算」时的兜底（当前 TODO，未实现触发路径）。
+> **语义分叉**：`graph topo-sort` 命令（纯排序原语，Kahn 算法）对有环图**仍**返回 E002 `CyclicDependency`（见 [04 § 5.7.6](./04-toolchain.md#576-图查询能力清单)）——破环收口在 `populate-modules` 的缩点，而非 `topo-sort`，是有意为之。完整 SCC 检测能力（`graph cycles`）为 M2 交付。
 
 ### 4.2.1 执行模式分层
 

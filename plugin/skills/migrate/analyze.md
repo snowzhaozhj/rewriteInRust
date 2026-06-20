@@ -40,14 +40,12 @@
 - `nodes_by_type` 无 `function` 或 `function == 0`（纯类型定义 / 空文件，如 edge-cases fixture）→ `calls == 0` 是正确值而非漏报，**跳过本检查**，直接进下一步。
 
 ### 6. 拓扑排序 + 填充迁移序列
-`rustmigrate graph topo-sort`：
-- 退出码 0 → 继续。
-- 有环（退出码 2、`data.kind == "cyclic_dependency"`）→ 输出 `data.cycle_path` 并**暂停**，请用户拆环后重跑：(a) 临时注释环上某条 import；(b) 人工把环内模块标降级。
+`rustmigrate graph topo-sort`：查看迁移排序与环路径（纯排序原语，有环返回退出码 2 + `data.cycle_path`）。**破环（MDR-004）：有环不再暂停拆环**——源码循环依赖由 populate 自动折叠为 composite 模块组整体翻译，无论有无环都直接继续落盘。
 
-无环则落盘迁移序列并推进状态机（**写状态统一走 CLI**）：
+落盘迁移序列并推进状态机（**写状态统一走 CLI**）：
 1. `rustmigrate state transition --to profile`
 2. `rustmigrate state transition --to plan`
-3. `rustmigrate state populate-modules [--root <源码根>]`——把拓扑序每个文件模块写成 `modules[<NodeId>] = {status:pending, sprint:1, tier:auto}`，并设 `sprint.current=1`。`tier` 由 AST 语义特征自动评估（`trivial`/`standard`/`full`），传 `--root` 与 `graph build` 一致以启用分档检测。**module key 用 NodeId 原值**（如 `file:src/utils.ts`），与 `graph deps` 输出一致，run 阶段依赖门禁据此查 `modules[dep].status`，不可改写。
+3. `rustmigrate state populate-modules [--root <源码根>]`——把 SCC 缩点后每个迁移单位写成 `modules[<组代表 NodeId>] = {status:pending, sprint:<缩点 DAG 层级>, tier:auto, member_files:<仅多文件组>}`，并设 `sprint.current=1`。`tier` 由 AST 语义特征自动评估（`trivial`/`standard`/`full`，composite 组取组内最高档），传 `--root` 与 `graph build` 一致以启用分档检测。单文件模块 key 用 NodeId 原值（如 `file:src/utils.ts`），composite 组 key 用组内字典序最小成员。**run 阶段依赖门禁用 `state deps <module>`（组感知，把组内成员的文件级依赖映射回组代表），不用 `graph deps`**。
 
 **检查点**：state == `plan`、`data.module_count > 0`。
 
