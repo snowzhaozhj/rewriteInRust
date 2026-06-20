@@ -212,7 +212,7 @@ pub enum StateCommands {
         #[arg(long)]
         root: Option<PathBuf>,
         /// 所有模块统一分配 sprint=1（兼容 M1 单 sprint 模式）。
-        /// 省略时按 parallel_groups 拓扑层级分配 sprint 号（组 0→sprint 1，组 1→sprint 2...）。
+        /// 省略时按 SCC 缩点 DAG 拓扑层级分配 sprint 号（叶组→sprint 1，依赖更深的组递增）。
         #[arg(long)]
         single_sprint: bool,
     },
@@ -1520,6 +1520,17 @@ fn cmd_state_populate_modules(root: Option<&Path>, single_sprint: bool) -> CmdRe
             None
         };
 
+        // 先用引用派生 JSON entry，再把 member_files move 进 ModuleState（省一次 clone）。
+        let mut entry = json!({
+            "id": key.to_string(),
+            "tier": tier.map(|t| t.to_string()),
+            "sprint": sprint,
+        });
+        if let Some(mf) = &member_files {
+            entry["member_files"] = json!(mf);
+        }
+        modules.push(entry);
+
         machine.update_module(
             key.as_str(),
             ModuleState {
@@ -1535,19 +1546,9 @@ fn cmd_state_populate_modules(root: Option<&Path>, single_sprint: bool) -> CmdRe
                 phase_a_audit_passed: None,
                 blocked_by: None,
                 pre_blocked_status: None,
-                member_files: member_files.clone(),
+                member_files,
             },
         );
-
-        let mut entry = json!({
-            "id": key.to_string(),
-            "tier": tier.map(|t| t.to_string()),
-            "sprint": sprint,
-        });
-        if let Some(mf) = member_files {
-            entry["member_files"] = json!(mf);
-        }
-        modules.push(entry);
     }
 
     machine.set_sprint(SprintState {
@@ -1617,11 +1618,11 @@ fn detect_tiers_for_modules(
 /// `member_files` 建立「文件→组代表 key」映射：从模块全部成员出发取依赖闭包，映射回组
 /// 代表、剔除组内自依赖、按终态（`is_terminal`）判就绪。
 ///
-/// 输出 `{module, dependencies:[{module,status,ready}], all_ready, blocking:[未就绪 key]}`。
+/// 输出 `{module, dependencies:[{module,status,ready}], all_ready, blocking, unresolved}`。
 fn cmd_state_deps(module: &str) -> CmdResult {
     let graph = load_graph()?;
     let path = state_path();
-    let (machine, warnings) = load_state_with_warnings(&path)?;
+    let (machine, mut warnings) = load_state_with_warnings(&path)?;
     let modules = &machine.state_file().modules;
 
     // 当前模块的成员文件（单文件模块 = [自身 key]）。
@@ -1637,26 +1638,29 @@ fn cmd_state_deps(module: &str) -> CmdResult {
         }
     };
 
-    // 反向映射：member 文件 NodeId → 所属组代表 key（单文件模块映射到自身）。
+    // 反向映射：仅为 composite 组建「成员文件 → 组代表 key」表。单文件模块无需登记——
+    // 查表 miss 时回退 dep_file 自身即恒等映射（见下 `unwrap_or`），故表只含多文件组成员，
+    // 规模 O(composite 成员数) 而非 O(全部模块)。
     let mut file_to_key: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     for (key, m) in modules {
-        match &m.member_files {
-            Some(members) => {
-                for f in members {
-                    file_to_key.insert(f.clone(), key.clone());
-                }
-            }
-            None => {
-                file_to_key.insert(key.clone(), key.clone());
+        if let Some(members) = &m.member_files {
+            for f in members {
+                file_to_key.insert(f.clone(), key.clone());
             }
         }
     }
 
     // 从全部成员出发收集正向依赖闭包，映射回组代表，剔除组内自依赖、去重。
+    // 成员文件已从 graph 删除（state 与 graph 不同步）时跳过该成员并告警，而非整命令硬失败。
     let mut dep_keys: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for member in &self_members {
-        let start = resolve_file_node(&graph, member)?;
+        let Ok(start) = resolve_file_node(&graph, member) else {
+            warnings.push(format!(
+                "成员文件 `{member}` 不在 source-graph 中（state 与 graph 不同步，建议重新 graph build + populate-modules），已跳过其依赖"
+            ));
+            continue;
+        };
         for dep_file in collect_imports_closure(&graph, &start, DependencyDirection::Forward) {
             let dep_key = file_to_key.get(&dep_file).cloned().unwrap_or(dep_file);
             if dep_key != module {
@@ -1665,27 +1669,44 @@ fn cmd_state_deps(module: &str) -> CmdResult {
         }
     }
 
-    // 按终态（done/degrade_*）判就绪。
+    // 按终态（done/degrade_*）判就绪。未登记为模块的依赖（state 与 graph 不同步）单列
+    // `unresolved` + 告警，**不计入 blocking**——否则会被 run 填进 blocked_by，而
+    // check-blocked 对缺失 key 永判非终态（mod.rs `unwrap_or(false)`），导致模块永久 blocked 死锁。
     let mut dependencies = Vec::with_capacity(dep_keys.len());
     let mut blocking = Vec::new();
+    let mut unresolved = Vec::new();
     for dk in &dep_keys {
-        let (status, ready) = match modules.get(dk) {
-            Some(m) => (m.status.to_string(), m.status.is_terminal()),
-            // 依赖文件未登记为任何模块（非 File 节点 / 孤儿清理后残留）：视为未就绪并标注。
-            None => ("absent".to_string(), false),
-        };
-        if !ready {
-            blocking.push(dk.clone());
+        match modules.get(dk) {
+            Some(m) => {
+                let ready = m.status.is_terminal();
+                if !ready {
+                    blocking.push(dk.clone());
+                }
+                dependencies
+                    .push(json!({ "module": dk, "status": m.status.to_string(), "ready": ready }));
+            }
+            None => {
+                unresolved.push(dk.clone());
+                dependencies.push(json!({ "module": dk, "status": "absent", "ready": false }));
+            }
         }
-        dependencies.push(json!({ "module": dk, "status": status, "ready": ready }));
+    }
+    if !unresolved.is_empty() {
+        warnings.push(format!(
+            "{} 个依赖未登记为模块（state 与 source-graph 不同步，建议重新 graph build + populate-modules）: {:?}",
+            unresolved.len(),
+            unresolved
+        ));
     }
 
     Ok((
         json!({
             "module": module,
             "dependencies": dependencies,
+            // all_ready 只反映真实模块就绪；unresolved（数据不一致）靠 warning 暴露，不阻塞门禁。
             "all_ready": blocking.is_empty(),
             "blocking": blocking,
+            "unresolved": unresolved,
         }),
         warnings,
     ))

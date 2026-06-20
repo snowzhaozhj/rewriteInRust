@@ -1156,6 +1156,55 @@ fn smoke_state_deps_group_aware() {
 }
 
 #[test]
+fn smoke_state_deps_unresolved_not_blocking() {
+    // absent 死锁修复（主审）：依赖未登记为模块（state 与 graph 不同步）时进 unresolved + warning，
+    // **不进 blocking**——否则会被填入 blocked_by，而 check-blocked 对缺失 key 永判非终态导致死锁。
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("circular-deps"), tmp.path());
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        let (code, _) = run(&["graph", "build", "--root", "src"]);
+        assert_eq!(code, 0);
+        let (code, _) = run(&["state", "populate-modules"]);
+        assert_eq!(code, 0);
+
+        // 制造 state/graph 不同步：从 state 删除 shared 模块（它仍在 graph、被 emitter 组依赖）。
+        let sp = tmp.path().join(".rust-migration/migration-state.json");
+        let mut sf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+        sf["modules"]
+            .as_object_mut()
+            .unwrap()
+            .remove("file:shared.ts");
+        std::fs::write(&sp, serde_json::to_string_pretty(&sf).unwrap()).unwrap();
+
+        // emitter 组依赖 shared（现已未登记）→ 应进 unresolved + warning，不进 blocking。
+        let (code, json) = run(&["state", "deps", "file:emitter.ts"]);
+        assert_eq!(code, 0, "absent 依赖应降级 warning 而非命令失败: {json}");
+        assert_eq!(json["status"], "warning");
+        let unresolved: Vec<String> = json["data"]["unresolved"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            unresolved.iter().any(|m| m.contains("shared")),
+            "shared 应在 unresolved: {json}"
+        );
+        // 关键：absent 依赖不进 blocking（避免 blocked_by 死锁）。
+        assert!(
+            !json["data"]["blocking"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b.as_str().unwrap().contains("shared")),
+            "absent 依赖不应进 blocking: {json}"
+        );
+    });
+}
+
+#[test]
 fn smoke_populate_rejects_active_progress() {
     let project = temp_linear_project();
     with_cwd(project.path(), || {

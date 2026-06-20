@@ -1,8 +1,8 @@
 //! 对项目源文件做 per-module tier 分档（M2-TIER-01a），输出分布统计。
 //!
-//! populate-modules 在含环项目上会被拒（环挡 sprint 分配），但 tier 是 per-file、
-//! 与环无关。本 example 绕过 populate，直接用 [`build_graph_ts`] 拿 File 节点 +
-//! [`detect_tier`] 评估，用于 Sprint F 验收前查看真实项目的 tier 分布。
+//! tier 是 per-file 的，与模块如何分组（含 SCC 折叠）无关。本 example 直接用
+//! [`build_graph_ts`] 拿 File 节点 + [`detect_tier`] 逐文件评估，绕过 populate 的
+//! 缩点分组，用于 Sprint F 验收前查看真实项目的原始 per-file tier 分布。
 //!
 //! 用法：cargo run -p rustmigrate-core --example dump_tiers -- <项目根目录>
 

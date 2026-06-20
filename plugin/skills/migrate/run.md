@@ -53,7 +53,9 @@
 > 源码 SCC（循环依赖）在 populate 阶段已被折叠成**一个模块组**（`member_files` 含组内全部源文件），由 translator 整组翻译（见 [translator.md](../../agents/translator.md)「SCC 模块组翻译」），不再因循环依赖被标 `blocked`。这里的环检测只针对 `blocked` 子图的等待死锁，与源码 SCC 无关。
 
 ### 3. 目标依赖就绪门禁
-`rustmigrate state deps <module>` 取**组感知**依赖就绪结果（破环 M2-SCALE-SCC）：它把 composite 组成员的文件级依赖映射回组代表 key、剔除组内自依赖、按终态判就绪，直接输出 `{dependencies, all_ready, blocking}`。`all_ready=false` 则中止本次 run，把目标模块标 `blocked`、用 `blocking`（未就绪组代表 key）填 `blocked_by` 和 `pre_blocked_status`。
+`rustmigrate state deps <module>` 取**组感知**依赖就绪结果（破环 M2-SCALE-SCC）：它把 composite 组成员的文件级依赖映射回组代表 key、剔除组内自依赖、按终态判就绪，直接输出 `{dependencies, all_ready, blocking, unresolved}`。`all_ready=false` 则中止本次 run，把目标模块标 `blocked`、用 `blocking`（未就绪组代表 key）填 `blocked_by` 和 `pre_blocked_status`。
+
+> `unresolved` 非空（依赖未登记为模块，state 与 source-graph 不同步）只发 warning、**不计入 blocking**——避免把缺失 key 填进 `blocked_by` 触发 check-blocked 永久非终态死锁。出现时应重新 `graph build` + `populate-modules` 同步状态，而非据此 block。
 
 > 勿用 `graph deps`（纯图、文件级）做此门禁：折叠后组内非代表成员（如 `types.ts`）不在 `modules` 表，逐个查 status 会静默落空。`state deps` 已处理 member→组代表映射。
 

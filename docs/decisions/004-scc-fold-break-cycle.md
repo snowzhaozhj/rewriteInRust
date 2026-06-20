@@ -41,7 +41,7 @@
 
 ## E002 / topo-sort 语义分叉
 
-`graph topo-sort` 是**纯排序原语**（Kahn 算法），对有环图仍返回 `E002 CyclicDependency` 并列出环路径——这是它的契约，不变。破环逻辑收口在 `populate-modules`（Tarjan SCC 缩点）而非 `topo-sort`，因此 `topo-sort` 拒绝、`populate-modules` 折叠的语义差异是**有意为之，不是 bug**。`dump_tiers` example 也据此绕过 populate 直接取 File 节点（环挡 populate 的 sprint 分配，但 tier 是 per-file、与环无关）。
+`graph topo-sort` 是**纯排序原语**（Kahn 算法），对有环图仍返回 `E002 CyclicDependency` 并列出环路径——这是它的契约，不变。破环逻辑收口在 `populate-modules`（Tarjan SCC 缩点）而非 `topo-sort`，因此 `topo-sort` 拒绝、`populate-modules` 折叠的语义差异是**有意为之，不是 bug**。`dump_tiers` example 直接取 File 节点逐文件评估 tier、绕过 populate 的缩点分组——因为 tier 是 per-file 的、与模块如何分组无关，直接取 File 节点比走 populate 更直接。
 
 ## composite 与 token 预算 / Phase A/B 单模块模型的关系
 
