@@ -1687,7 +1687,7 @@ fn cmd_state_deps(module: &str) -> CmdResult {
 
     // 按终态（done/degrade_*）判就绪。未登记为模块的依赖（state 与 graph 不同步）单列
     // `unresolved` + 告警，**不计入 blocking**——否则会被 run 填进 blocked_by，而
-    // check-blocked 对缺失 key 永判非终态（mod.rs `unwrap_or(false)`），导致模块永久 blocked 死锁。
+    // check-blocked 对缺失 key 永判非终态（validate/mod.rs `unwrap_or(false)`），导致模块永久 blocked 死锁。
     let mut dependencies = Vec::with_capacity(dep_keys.len());
     let mut blocking = Vec::new();
     let mut unresolved = Vec::new();
