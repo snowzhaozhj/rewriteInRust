@@ -1152,6 +1152,27 @@ fn smoke_state_deps_group_aware() {
                 .any(|b| b.as_str().unwrap().contains("shared")),
             "shared(pending) 应在 blocking: {json}"
         );
+
+        // 非代表成员 key 归一（主审 #1）：传 file:handler.ts（非代表成员）应归一到组代表
+        // emitter 并返回等价结果，而非报「模块不存在」。
+        let (code, json2) = run(&["state", "deps", "file:handler.ts"]);
+        assert_eq!(code, 0, "非代表成员 key 应归一而非报错: {json2}");
+        let deps2: Vec<String> = json2["data"]["dependencies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["module"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            deps2.iter().any(|m| m.contains("shared")),
+            "归一后应聚合组外依赖 shared: {json2}"
+        );
+        assert!(
+            !deps2
+                .iter()
+                .any(|m| m.contains("handler") || m.contains("event-bus")),
+            "归一后组内自依赖应剔除: {deps2:?}"
+        );
     });
 }
 

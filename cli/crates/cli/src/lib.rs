@@ -1625,17 +1625,31 @@ fn cmd_state_deps(module: &str) -> CmdResult {
     let (machine, mut warnings) = load_state_with_warnings(&path)?;
     let modules = &machine.state_file().modules;
 
-    // 当前模块的成员文件（单文件模块 = [自身 key]）。
-    let self_members: Vec<String> = match modules.get(module) {
-        Some(m) => match &m.member_files {
-            Some(mf) => mf.clone(),
-            None => vec![module.to_string()],
-        },
-        None => {
-            return Err(MigrateError::Config(format!(
-                "模块 `{module}` 不在 migration-state.json 中（请先 populate-modules）"
-            )));
-        }
+    // 归一 module key：调用方通常传组代表 key，但也容忍传 composite 组的非代表成员
+    // （如 `file:handler.ts`）——反查其所属组代表后按组解析，避免误用直接报错。
+    let canonical: String = if modules.contains_key(module) {
+        module.to_string()
+    } else if let Some((key, _)) = modules.iter().find(|(_, m)| {
+        m.member_files
+            .as_ref()
+            .is_some_and(|mf| mf.iter().any(|f| f == module))
+    }) {
+        key.clone()
+    } else {
+        return Err(MigrateError::Config(format!(
+            "模块 `{module}` 不在 migration-state.json 中（请先 populate-modules）"
+        )));
+    };
+    let module = canonical.as_str();
+
+    // 当前模块的成员文件（单文件模块 = [自身 key]）。归一后 module 必在 modules 中。
+    let self_members: Vec<String> = match &modules
+        .get(module)
+        .expect("canonical 已校验存在")
+        .member_files
+    {
+        Some(mf) => mf.clone(),
+        None => vec![module.to_string()],
     };
 
     // 反向映射：仅为 composite 组建「成员文件 → 组代表 key」表。单文件模块无需登记——
@@ -1653,6 +1667,8 @@ fn cmd_state_deps(module: &str) -> CmdResult {
 
     // 从全部成员出发收集正向依赖闭包，映射回组代表，剔除组内自依赖、去重。
     // 成员文件已从 graph 删除（state 与 graph 不同步）时跳过该成员并告警，而非整命令硬失败。
+    // TODO(perf): 大 composite 组逐成员独立 BFS 是 O(成员数×图规模)，组内互引使下游节点被
+    // 重复遍历；可改为以全部 self_members 为种子的单次多源 BFS（共享 visited）降到 O(图规模)。
     let mut dep_keys: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for member in &self_members {
         let Ok(start) = resolve_file_node(&graph, member) else {

@@ -136,12 +136,12 @@ pub fn migration_sequence(graph: &SourceGraph) -> MigrationSequence {
             Err(_) => Vec::new(),
         }
     } else {
-        // 有环：复用 tarjan_scc 结果（逆拓扑序 SCC，叶节点在前）
-        sccs.into_iter()
-            .flat_map(|scc| {
-                scc.into_iter()
-                    .filter_map(|idx| index_to_id.get(&idx).cloned())
-            })
+        // 有环：从已排序的 scc_groups（sprint 升序 + 组内字典序）派生，保证顺序确定；
+        // 否则裸 tarjan_scc 结果的组内顺序仅由节点插入序决定、非确定。
+        // （无环走上面标准 toposort，保持既有顺序契约不变。）
+        scc_groups
+            .iter()
+            .flat_map(|g| g.members.iter().cloned())
             .collect()
     };
 
@@ -231,6 +231,9 @@ fn build_scc_groups(
 ///
 /// 层级 0 = 叶组（无出边），层级 n = 依赖链最长为 n 的组。缩点图本身无环，
 /// `on_path` 仅作防御。复用与 [`compute_level`] 相同的「Enter/Exit 显式栈」骨架。
+///
+/// TODO(refactor): 与 [`compute_level`] 是同构算法（仅键类型 usize vs NodeIndex、
+/// 后继来源 succ slice vs graph.edges_directed 不同），可抽成泛型层级计算共用，消除重复。
 fn compute_scc_level(start: usize, succ: &[HashSet<usize>], levels: &mut [Option<usize>]) {
     enum Work {
         Enter(usize),
