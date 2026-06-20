@@ -1109,6 +1109,53 @@ fn smoke_populate_folds_cycles() {
 }
 
 #[test]
+fn smoke_state_deps_group_aware() {
+    // 破环门禁衔接（M2-SCALE-SCC）：composite 组代表的组感知依赖应聚合组所有成员的
+    // 对外依赖、映射回组代表、剔除组内自依赖。
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("circular-deps"), tmp.path());
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        let (code, _) = run(&["graph", "build", "--root", "src"]);
+        assert_eq!(code, 0);
+        let (code, _) = run(&["state", "populate-modules"]);
+        assert_eq!(code, 0);
+
+        // 组 {emitter,event-bus,handler} 折叠，代表 emitter；三者都 import shared。
+        let (code, json) = run(&["state", "deps", "file:emitter.ts"]);
+        assert_eq!(code, 0, "state deps 应成功: {json}");
+        let deps: Vec<String> = json["data"]["dependencies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["module"].as_str().unwrap().to_string())
+            .collect();
+        // 聚合组外依赖 shared
+        assert!(
+            deps.iter().any(|m| m.contains("shared")),
+            "应聚合组外依赖 shared: {deps:?}"
+        );
+        // 组内自依赖剔除（emitter↔event-bus↔handler 互引不算依赖）
+        assert!(
+            !deps
+                .iter()
+                .any(|m| m.contains("event-bus") || m.contains("handler")),
+            "组内自依赖应剔除: {deps:?}"
+        );
+        // shared 仍 pending → 未就绪，列入 blocking
+        assert_eq!(json["data"]["all_ready"], false);
+        assert!(
+            json["data"]["blocking"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b.as_str().unwrap().contains("shared")),
+            "shared(pending) 应在 blocking: {json}"
+        );
+    });
+}
+
+#[test]
 fn smoke_populate_rejects_active_progress() {
     let project = temp_linear_project();
     with_cwd(project.path(), || {
