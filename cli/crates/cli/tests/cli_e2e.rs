@@ -1544,6 +1544,42 @@ fn smoke_graph_interfaces_members_whole_scc_group() {
             sig <= full,
             "签名 token 应 <= 全文上界: sig={sig} full={full}"
         );
+        // 全部源文件可读：无 missing_source 告警，status 不降级。
+        assert!(json["warnings"].is_null(), "源全可读时不应有告警: {json}");
+    });
+}
+
+#[test]
+fn smoke_graph_interfaces_members_warns_on_unreadable_source() {
+    // 建图后删除一个成员源文件 → signature_text 回退 name 估算，必须显式告警（度量完整性）。
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("circular-deps"), tmp.path());
+    with_cwd(tmp.path(), || {
+        build_graph_for_query();
+        // 图已含 handler.ts 节点；删源文件使其签名读取失败。
+        std::fs::remove_file("src/handler.ts").unwrap();
+
+        let (code, json) = run(&["graph", "interfaces", "emitter.ts", "--members"]);
+        assert_eq!(code, 0, "命令应成功（仅降级 warning）: {json}");
+        // warnings 非空 → status 降级 warning。
+        assert_eq!(json["status"], "warning", "应降级为 warning: {json}");
+        let warnings = json["warnings"].as_array().unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.as_str().unwrap_or_default().contains("handler.ts")),
+            "告警应点名读不到的 handler.ts: {warnings:?}"
+        );
+
+        // 缺源成员的导出 signature_text 应为 null（回退）。
+        let handler = json["data"]["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["module"].as_str().unwrap().contains("handler.ts"))
+            .unwrap();
+        let exp = &handler["exports"].as_array().unwrap()[0];
+        assert!(exp["signature_text"].is_null(), "缺源应回退 null: {exp}");
     });
 }
 

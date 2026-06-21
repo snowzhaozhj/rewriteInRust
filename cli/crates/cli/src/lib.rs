@@ -945,16 +945,31 @@ fn cmd_graph_interfaces(module: &str, deps_of: Option<&str>, members: bool) -> C
 
     // 单模块模式：输出指定模块自身的导出接口。
     let file_path = resolve_module_file_path(&graph, module)?;
-    let collected = collect_exported_interfaces(&graph, &file_path);
+    let collected = collect_exported_interfaces(&graph, &file_path, &resolve_source_root());
 
+    let warnings = if collected.missing_source {
+        vec![missing_source_warning(std::slice::from_ref(&file_path))]
+    } else {
+        Vec::new()
+    };
     Ok((
         json!({
             "module": file_path,
             "interfaces": collected.interfaces,
             "signature_tokens": collected.sig_tokens,
         }),
-        Vec::new(),
+        warnings,
     ))
+}
+
+/// 源文件读不到（签名 token 回退 name 估算、偏低）时的统一 warning 文案。
+fn missing_source_warning(files: &[String]) -> String {
+    format!(
+        "{} 个源文件未读到，对应导出的 signature_text=null、token 回退符号名估算（偏低），\
+         signature_tokens 总计因此被低估——请确认查询 cwd 与 graph build 的 --root/source_root 一致: {:?}",
+        files.len(),
+        files
+    )
 }
 
 /// `--members` 整组模式：定位 module 所在 SCC 组，一次输出全组成员导出签名。
@@ -979,19 +994,24 @@ fn cmd_graph_interfaces_members(
             file: module.to_owned(),
         })?;
 
+    let source_root = resolve_source_root();
     let mut sig_tokens_total = 0usize;
     let mut full_tokens_total = 0usize;
     let mut export_count = 0usize;
+    let mut missing: Vec<String> = Vec::new();
 
     let member_views: Vec<serde_json::Value> = group
         .members
         .iter()
         .filter_map(|id| id.file_path().map(|p| p.to_owned()))
         .map(|path| {
-            let collected = collect_exported_interfaces(graph, &path);
+            let collected = collect_exported_interfaces(graph, &path, &source_root);
             sig_tokens_total += collected.sig_tokens;
             full_tokens_total += collected.full_tokens;
             export_count += collected.interfaces.len();
+            if collected.missing_source {
+                missing.push(path.clone());
+            }
             json!({
                 "module": path,
                 "exports": collected.interfaces,
@@ -1006,6 +1026,12 @@ fn cmd_graph_interfaces_members(
         .map(|id| id.to_string())
         .unwrap_or_default();
 
+    // 任一成员源文件读不到 → total_signature_tokens 被低估，须显式告警（Level 0 度量完整性）。
+    let warnings = if missing.is_empty() {
+        Vec::new()
+    } else {
+        vec![missing_source_warning(&missing)]
+    };
     Ok((
         json!({
             "group_key": group_key,
@@ -1017,7 +1043,7 @@ fn cmd_graph_interfaces_members(
             "total_fullrange_tokens": full_tokens_total,
             "members": member_views,
         }),
-        Vec::new(),
+        warnings,
     ))
 }
 
@@ -1053,10 +1079,15 @@ fn cmd_graph_interfaces_deps_of(
         .collect();
 
     // 对每个依赖模块收集导出接口。
+    let source_root = resolve_source_root();
+    let mut missing: Vec<String> = Vec::new();
     let dependencies: Vec<serde_json::Value> = dep_paths
         .iter()
         .map(|path| {
-            let collected = collect_exported_interfaces(graph, path);
+            let collected = collect_exported_interfaces(graph, path, &source_root);
+            if collected.missing_source {
+                missing.push(path.clone());
+            }
             json!({
                 "module": path,
                 "exports": collected.interfaces,
@@ -1064,12 +1095,17 @@ fn cmd_graph_interfaces_deps_of(
         })
         .collect();
 
+    let warnings = if missing.is_empty() {
+        Vec::new()
+    } else {
+        vec![missing_source_warning(&missing)]
+    };
     Ok((
         json!({
             "target": target_path,
             "dependencies": dependencies,
         }),
-        Vec::new(),
+        warnings,
     ))
 }
 
@@ -1096,29 +1132,42 @@ struct InterfaceCollection {
     sig_tokens: usize,
     /// 全部导出符号的 line_range 全文 token 合计（含函数体，上界参照）。
     full_tokens: usize,
+    /// 有导出符号但源文件读不到 → signature_text=null、token 回退 name 估算（偏低）。
+    /// 调用方据此向 warnings 上报，避免 total_signature_tokens 被静默污染。
+    missing_source: bool,
+}
+
+/// 解析签名读取用的源码根（一次性，避免逐文件重读 config）。见 `read_source_lines`。
+fn resolve_source_root() -> String {
+    let mut warnings = Vec::new();
+    load_config_or_default(&mut warnings).project.source_root
 }
 
 /// 收集指定文件下的导出接口（`is_exported=true` 的符号），按名称排序。
 ///
 /// `signature_text` 选项 A（不改 schema）：按 `line_range`（Span 1-based 闭区间）从源文件
-/// 读取符号文本，并对 body-bearing 种类（Function/Class/Variable）截断到首个 `{` 以剥离函数体，
-/// 仅保留签名（类型种类 Interface/Enum/TypeAlias 的 `{...}` 即类型定义本身，保留全文）。
-/// 源文件按 `file_path`（相对 cwd）读取；读不到时 `signature_text=null`，token 回退到 name 估算。
+/// 读取符号文本，对 body-bearing 种类（Function/Class/Variable）剥离函数体仅保留签名
+/// （类型种类 Interface/Enum/TypeAlias 的 `{...}` 即类型定义本身，保留全文）。
+/// 源文件经 `source_root` 解析；读不到时 `signature_text=null`、token 回退 name 估算，
+/// 并置 `missing_source=true`（调用方上报 warning）。
 fn collect_exported_interfaces(
     graph: &rustmigrate_core::graph::SourceGraph,
     file_path: &str,
+    source_root: &str,
 ) -> InterfaceCollection {
     // 源文件按行缓存（一次读取，供本文件全部符号切片）。
-    let lines: Option<Vec<String>> = read_source_lines(file_path);
+    let lines: Option<Vec<String>> = read_source_lines(file_path, source_root);
 
     let mut sig_tokens = 0usize;
     let mut full_tokens = 0usize;
+    let mut export_seen = false;
 
     let mut interfaces: Vec<serde_json::Value> = graph
         .symbols_in_file(file_path)
         .into_iter()
         .filter(|n| n.is_exported)
         .map(|n| {
+            export_seen = true;
             let (signature_text, sig_tok, full_tok) = match (&lines, &n.line_range) {
                 (Some(ls), Some(span)) => {
                     let (sig, full) = extract_signature(ls, span, n.node_type);
@@ -1150,19 +1199,20 @@ fn collect_exported_interfaces(
         interfaces,
         sig_tokens,
         full_tokens,
+        // 仅当确有导出符号却读不到源，才算污染（无导出文件读不到无所谓）。
+        missing_source: export_seen && lines.is_none(),
     }
 }
 
 /// 读取图节点 `file_path`（相对 build root）对应的源文件并按行返回。
 ///
 /// rel 路径相对 `graph build --root` 解析，build root 未持久化。按两候选回退兼容两种用法：
-/// (1) `source_root.join(rel)`——编排流 build root == config.project.source_root（默认 `src`）；
-/// (2) `rel` 直接相对 cwd——`--root .` 时 rel 已含完整子路径。首个存在的文件胜出。
-fn read_source_lines(rel_path: &str) -> Option<Vec<String>> {
-    let mut warnings = Vec::new();
-    let source_root = load_config_or_default(&mut warnings).project.source_root;
+/// (1) `source_root.join(rel)`——编排流 build root == config.project.source_root（默认 `src`，
+/// 此时 rel 相对 source_root，必须先试此候选）；(2) `rel` 直接相对 cwd——`--root .` 时 rel 已含
+/// 完整子路径。首个存在的文件胜出。两者皆失败返回 `None`（调用方据 `missing_source` 上报）。
+fn read_source_lines(rel_path: &str, source_root: &str) -> Option<Vec<String>> {
     let candidates = [
-        PathBuf::from(&source_root).join(rel_path),
+        PathBuf::from(source_root).join(rel_path),
         PathBuf::from(rel_path),
     ];
     candidates
@@ -1173,9 +1223,12 @@ fn read_source_lines(rel_path: &str) -> Option<Vec<String>> {
 
 /// 按 `line_range` 从源文件行切出符号文本，返回 `(签名, 全文)`。
 ///
-/// 全文 = line_range 全部行（含函数体，token 上界）；签名 = body-bearing 种类截断到首个 `{`
-/// 以剥离函数体后的文本。已知近似：对象类型参数 `f(o: { ... })` 的内联 `{` 会被提前截断
-/// （略偏低估），类型定义种类不截断故不受影响——Level 0 天花板度量足够。
+/// 全文 = line_range 全部行（含函数体，token 上界）；签名 = body-bearing 种类（Function/Class/
+/// Variable）剥离函数体后的文本。函数体起始 `{` 用括号深度感知扫描定位：只认 `()`/`[]`/`<>`
+/// 全部闭合（depth 0）处的首个 `{`，从而正确跳过泛型默认 `<T = {}>`、对象参数 `(o: { a })`
+/// 内的内联 `{`（否则会被提前截断、签名损坏、token 偏低）。
+/// 已知近似：`Variable` 的对象字面量初始化器 `const X = { ... }` 的 `{` 本就在 depth 0，
+/// 仍会被截断（丢初始化器类型）；类型定义种类（Interface/Enum/TypeAlias）不截断，保留全文。
 fn extract_signature(
     lines: &[String],
     span: &rustmigrate_core::types::common::Span,
@@ -1188,13 +1241,33 @@ fn extract_signature(
     }
     let full = lines[start..end].join("\n");
     let signature = match node_type {
-        NodeType::Function | NodeType::Class | NodeType::Variable => match full.find('{') {
+        NodeType::Function | NodeType::Class | NodeType::Variable => match find_body_brace(&full) {
             Some(i) => full[..i].trim_end().to_owned(),
             None => full.trim_end().to_owned(),
         },
         _ => full.trim_end().to_owned(),
     };
     (signature, full)
+}
+
+/// 定位函数/类体起始 `{` 的字节偏移：括号深度感知，只认 `()`/`[]`/`<>` 全闭合处的首个 `{`。
+///
+/// 跳过泛型/参数类型里的内联 `{`。`>` 仅在 `<` 深度>0 时配对，避免箭头 `=>` 的 `>` 把深度压负。
+fn find_body_brace(s: &str) -> Option<usize> {
+    let (mut paren, mut bracket, mut angle) = (0i32, 0i32, 0i32);
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' => paren += 1,
+            ')' => paren = (paren - 1).max(0),
+            '[' => bracket += 1,
+            ']' => bracket = (bracket - 1).max(0),
+            '<' => angle += 1,
+            '>' if angle > 0 => angle -= 1,
+            '{' if paren == 0 && bracket == 0 && angle == 0 => return Some(i),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// `graph stats`：图统计信息。
@@ -2319,5 +2392,89 @@ fn resolve_file_node(graph: &SourceGraph, module: &str) -> Result<NodeId, Migrat
             message: format!("模块名歧义，匹配到多个文件: {module}"),
             file: module.to_owned(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod signature_tests {
+    use super::*;
+    use rustmigrate_core::types::common::Span;
+
+    fn sig(src: &str, nt: NodeType) -> String {
+        let lines: Vec<String> = src.lines().map(|s| s.to_owned()).collect();
+        let span = Span {
+            start_line: 1,
+            end_line: lines.len() as u32,
+        };
+        extract_signature(&lines, &span, nt).0
+    }
+
+    #[test]
+    fn body_brace_skips_object_param_and_generic_default() {
+        // 对象参数内联 `{` 不应被当成函数体起始（深度感知）。
+        assert_eq!(
+            sig(
+                "export function f(o: { a: number }): string { return o.a + ''; }",
+                NodeType::Function
+            ),
+            "export function f(o: { a: number }): string"
+        );
+        // 泛型默认 `<T = {}>` 内联 `{` 同样跳过。
+        assert_eq!(
+            sig(
+                "export function g<T = {}>(x: T): T { return x; }",
+                NodeType::Function
+            ),
+            "export function g<T = {}>(x: T): T"
+        );
+    }
+
+    #[test]
+    fn body_brace_handles_arrow_return_without_underflow() {
+        // 箭头 `=>` 的 `>` 不应把 angle 深度压负而错位；Variable 箭头体被剥离。
+        assert_eq!(
+            sig(
+                "export const h = (a: number): number => { return a * 2; }",
+                NodeType::Variable
+            ),
+            "export const h = (a: number): number =>"
+        );
+    }
+
+    #[test]
+    fn interface_and_enum_keep_full_body() {
+        // 类型定义种类不截断，`{...}` 即类型本身。
+        let i = sig(
+            "export interface I {\n  a: number\n  b: string\n}",
+            NodeType::Interface,
+        );
+        assert!(
+            i.contains("a: number") && i.contains("b: string"),
+            "接口应保留成员: {i}"
+        );
+    }
+
+    #[test]
+    fn class_strips_body_at_top_level_brace() {
+        assert_eq!(
+            sig(
+                "export class C extends B<T> implements I {\n  m() {}\n}",
+                NodeType::Class
+            ),
+            "export class C extends B<T> implements I"
+        );
+    }
+
+    #[test]
+    fn out_of_range_span_yields_empty() {
+        let lines = vec!["a".to_owned()];
+        let span = Span {
+            start_line: 5,
+            end_line: 9,
+        };
+        assert_eq!(
+            extract_signature(&lines, &span, NodeType::Function),
+            (String::new(), String::new())
+        );
     }
 }

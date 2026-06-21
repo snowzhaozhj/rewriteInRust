@@ -84,9 +84,9 @@ Phase 1 关键实现（`cli/crates/core/src/graph/build.rs`）：
 ## 五、验证（先轻后重）
 
 - **Level 0（先量天花板，read-only）✅ 已量（假设成立，>40x 余量）**：`graph interfaces --members` 实现 + mobx 实测。
-  - **实测（reexport 透传分支，根因2未修，SCC=51 文件——比 41 真环更保守）**：51 文件 / 187 导出符号 → **签名总计 ~4,477 token**（body-stripped，契约 agent 实际输入）；含完整函数体上界 ~37,134 token；51 文件全源码绝对硬上界 ~64,635 token（258 KB÷4）。
-  - **结论**：三档全部远低于 200K 上下文窗口——realistic 4.5K（>40x 余量），即便喂全部原始源码（65K）也 ~3x 余量。**「契约 agent 装得下」假设成立，无需 SCC 内子簇分契约**。契约 agent 还需输出 stub 骨架（量级与签名相当）+ contract.md，输出预算同样宽裕。
-  - **度量法/已知近似**（不影响结论，均被上界兜底）：(a) 签名按 `line_range` 取行，body-bearing 种类（Function/Class/Variable）截断到首个 `{` 剥离函数体，Interface/Enum/TypeAlias 保留全文（类型定义本身）；(b) 类方法签名未单列（class 截断到 `{` 丢方法签名，mobx 核心以函数/interface/enum 为主故影响小，class 密集 SCC 的 realistic 值会升高，但 65K 原始源码绝对上界封顶）；(c) 对象类型参数 `f(o:{...})` 的内联 `{` 会被提前截断（略低估）。
+  - **实测（reexport 透传分支，根因2未修，SCC=51 文件——比 41 真环更保守）**：51 文件 / 187 导出符号 → **签名总计 ~4,627 token**（body-stripped，深度感知提取，契约 agent 实际输入）；含完整函数体上界 ~37,134 token；51 文件全源码绝对硬上界 ~64,635 token（258 KB÷4）。
+  - **结论**：三档全部远低于 200K 上下文窗口——realistic ~4.6K（>40x 余量），即便喂全部原始源码（65K）也 ~3x 余量。**「契约 agent 装得下」假设成立，无需 SCC 内子簇分契约**。契约 agent 还需输出 stub 骨架（量级与签名相当）+ contract.md，输出预算同样宽裕。
+  - **度量法/已知近似**（不影响结论，均被上界兜底）：(a) 签名按 `line_range` 取行，body-bearing 种类（Function/Class/Variable）剥离函数体，函数体起始 `{` 用**括号深度感知扫描**定位（跳过泛型默认 `<T={}>`、对象参数 `(o:{a})` 的内联 `{`，审查修复），Interface/Enum/TypeAlias 保留全文；(b) 类方法签名未单列（class 截断到体 `{`，丢方法签名，mobx 核心以函数/interface/enum 为主故影响小，class 密集 SCC 的 realistic 值会升高，但 65K 原始源码绝对上界封顶）；(c) `Variable` 对象字面量初始化器 `const X={...}` 的 `{` 在 depth 0 仍被截断（丢初始化器类型，略低估）。
   - **复现**：`cd /tmp/sprint-f-candidates/mobx/packages/mobx && rustmigrate init && rustmigrate graph build --root . --full && rustmigrate graph interfaces core/observable.ts --members`（读 `data.total_signature_tokens` / `total_fullrange_tokens`）。
 - **Level 1（CLI 单测，无 LLM）✅ 已补**：`smoke_graph_interfaces_members_whole_scc_group`（circular-deps 三向环整组、3 成员、`signature_text` 剥离函数体断言、token 合计）入 nextest，409 测试全过。`signature_text`/`token_estimate` 已透传 single/`--deps-of`/`--members` 三模式。
 - **Level 2（机制验证，无 LLM，最高价值先做）**：人工写 circular-deps 的 contract.md + stub 骨架 → 验 stub `cargo check` 过（契约门成立）→ 按契约填实现 → 整组 check/test 过 + `Rc::strong_count==1`（破环正确）。手写都跑不通则提示词无意义。
