@@ -105,6 +105,18 @@ pub trait LanguageAdapter: Send {
     /// `can_handle` 决定文件归属，此方法决定解析时尝试哪些后缀。
     fn resolve_extensions(&self) -> &[&str];
 
+    /// import specifier 中可被省略/替换的扩展名（含点），如 TS ESM 的
+    /// `[".js", ".jsx", ".mjs", ".cjs"]`——NodeNext 规范要求相对 import 带这些扩展名，
+    /// 但实际指向同名源文件（`.ts`/`.tsx`）。
+    ///
+    /// `resolve_import` 据此解析：先精确匹配原始路径（命中真实同扩展名文件），再 strip
+    /// 这些扩展名按 [`resolve_extensions`](Self::resolve_extensions) 候选重试。语言无关的
+    /// graph 层只消费此列表，不内嵌任何具体扩展名字面量。默认空——多数语言的 import 不带
+    /// 源文件扩展名。
+    fn import_specifier_extensions(&self) -> &[&str] {
+        &[]
+    }
+
     /// 分析单个文件，返回节点、边和依赖信息。
     ///
     /// `source` 为文件内容，`rel_path` 为相对于项目根的路径。

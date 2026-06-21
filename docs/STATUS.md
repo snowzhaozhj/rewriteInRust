@@ -5,8 +5,8 @@
 ## 当前位置
 
 - **Milestone**: M1 MVP ✅ → **M2 质量提升**
-- **Phase**: M2 Sprint D/E 全部完成（PR #22/#23/#24 **均已合并**）→ **Sprint F 验收进行中**
-- **测试基线**: 402 测试 / clippy -D / deny / fmt / shellcheck 全绿
+- **Phase**: M2 Sprint D/E + SCC 破环（PR #22/#23/#24/#25 **均已合并**）→ **Sprint F 验收进行中**
+- **测试基线**: 407 测试 / clippy -D / deny / fmt / shellcheck 全绿（含本轮新增 ESM 接线测试）
 
 ### Sprint F 进行中：破环（M2-SCALE-SCC）✅
 
@@ -22,6 +22,23 @@
 - **PR [#25](https://github.com/snowzhaozhj/rewriteInRust/pull/25)**（7 commit）：**mergeStateStatus=CLEAN**，GitHub CI 5 项全绿（check/deny/shellcheck/test/coverage），本地 `just ci` 全过（404 测试），**可直接验收合并**。
 - **已知 TODO**（代码已标注）：`TODO(perf)` 多源 BFS、`TODO(refactor)` 层级计算抽共用、`TODO(M3-FFI)` 单 SCC 超预算兜底（zod composite 8 文件 full-tier 会触发，留 Sprint F 后续）。
 - **Sprint F 后续**：zod/真实项目全量 LLM 翻译（需 FFI 兜底实现）。
+
+### Sprint F 验收进行中（无环路径优先）
+
+详细记录见 `docs/sprint-f-acceptance.md`。摘要：
+
+- **F1 选型**：dogfood 筛选 io-ts(16f)/zustand(15f) 为无环主项目，mobx(57f,51 文件 SCC) 留 F2-FFI 降级验收。
+- **F2 full 档端到端 PoC ✅**：io-ts FreeSemigroup/DecodeError 两模块 scaffold→翻译→check/test/clippy→状态机推进全打通（DecodeError 递归 ADT 触发 E0072→Box 修复，典型 Phase A compile_fixing）。
+- **F2 降级 ✅**：io-ts Schemable（HKT 密集，Rust 无 HKT）经 translating→compile_fixing→paused→degrade_skip 正确降级。
+- **阻塞结论**：io-ts(HKT 库)/zustand(前端框架库) 超出"模块化忠实翻译"边界 → F1≥3模块、F3 并行吞吐缺干净可翻译素材。**选型教训**：需预筛"可翻译性"（HKT/typeclass 密度、框架耦合、动态类型），待用户定重选项目 or 接受当前结论。
+
+### 🔴 重大 bug 修复 + 重构：graph 漏解析 ESM `.js` 扩展名 import（PR [#26](https://github.com/snowzhaozhj/rewriteInRust/pull/26)，OPEN）
+
+- **现象/根因**：现代 NodeNext TS 项目（jsonc-parser）相对 import 带 `.js`/`.mjs`/`.cjs`/`.jsx` 但指向 `.ts`/`.tsx` 源，`resolve_import` 无此映射 → imports 边全丢 → 误判无环、sprint 排序/门禁/SCC 折叠/并行编排连带失效（R3 实锤）。
+- **修复（commit 8aa6659）**：strip JS 扩展名后按源扩展名重试 + `can_handle` 排除 `.test`/`.spec` 测试文件。
+- **重构（commit a675a99）**：扩展名清单下沉到 `LanguageAdapter::import_specifier_extensions()`（TS 返回 `.js/.jsx/.mjs/.cjs`），build.rs 全量+增量两条路径收集为 `strip_exts` 传入 resolve_import——graph 层不再内嵌语言字面量（与 `resolve_extensions` 同构）。
+- **验证**：jsonc-parser `--full` 重建检出 `scanner→format→main→parser→edit` 5 文件环；新增 build_graph 端到端接线测试；core 346 + 全量 407 测试、clippy -D、fmt 全过。
+- **审查闭环（4 视角全跑）**：design-checker 无 MISMATCH；pr-review/codex 无 important、无回归；主审找出唯一 actionable nit（缺端到端接线测试）→已补；finder 报"精确匹配优先反转 ESM 重映射"经核实 REFUTED（`.js` 文件不被 `can_handle` 收集，永不进 file_set）。
 
 ### Sprint D/E 完成总结（3 个 PR，3 波并行执行）
 
@@ -83,7 +100,8 @@
 ### 下一步
 
 **新会话从这里开始** → **Sprint F 验收**（PLAN-M2 §9，7-10 天）：
-- 合并 PR #24 后开始
+- PR #22/#23/#24/#25 均已合并；**PR #26（ESM 修复）待合并** → 合并后基线 407 测试
+- 待用户定：Sprint F 重选"可翻译性"达标的中型无环 TS 项目（解析器/算法库/CLI 工具）补 F1≥3模块 + F3 并行吞吐，或接受当前 HKT 阻塞结论
 - F1: 真实项目端到端（3 个 5K-20K 行 TS 项目）
 - F2: 降级验收（circular-deps FFI）
 - F3: 并行吞吐（≥1.5 模块/小时）
