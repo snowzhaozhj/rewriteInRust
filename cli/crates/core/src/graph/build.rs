@@ -145,9 +145,25 @@ fn build_graph_inner(
         .collect();
     resolve_exts.sort();
 
+    // 收集所有 adapter 的 import specifier 扩展名（如 TS ESM 的 `.js`/`.mjs`）——
+    // graph 层据此 strip 后按源扩展名重试，不内嵌任何语言特定的扩展名字面量。
+    let mut strip_exts: Vec<&str> = adapters
+        .iter()
+        .flat_map(|a| a.import_specifier_extensions().iter().copied())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    strip_exts.sort();
+
     // 构建跨文件边（Imports + Calls）
     let file_set: HashSet<String> = files.iter().map(|(p, _)| make_relative(p, &root)).collect();
-    add_cross_file_edges(&mut graph, &file_analyses, &file_set, &resolve_exts);
+    add_cross_file_edges(
+        &mut graph,
+        &file_analyses,
+        &file_set,
+        &resolve_exts,
+        &strip_exts,
+    );
 
     let edge_build_ms = t_edge.map_or(0, |t| t.elapsed().as_millis() as u64);
     let total_ms = t_start.map_or(0, |t| t.elapsed().as_millis() as u64);
@@ -458,11 +474,25 @@ pub fn build_graph_incremental(
         .collect();
     resolve_exts.sort();
 
+    let mut strip_exts: Vec<&str> = adapters
+        .iter()
+        .flat_map(|a| a.import_specifier_extensions().iter().copied())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    strip_exts.sort();
+
     // 需要为变更文件重建跨文件边。先删除旧的跨文件出边，再重建。
     // 但由于 graph 已经 remove_nodes_by_file 了，旧的跨文件边已被删除。
     // 现在用 file_analyses 来重建。
     let file_set: HashSet<String> = current_rels.clone();
-    add_cross_file_edges(&mut graph, &file_analyses, &file_set, &resolve_exts);
+    add_cross_file_edges(
+        &mut graph,
+        &file_analyses,
+        &file_set,
+        &resolve_exts,
+        &strip_exts,
+    );
 
     let edge_build_ms = t_edge.map_or(0, |t| t.elapsed().as_millis() as u64);
     let total_ms = t_start.map_or(0, |t| t.elapsed().as_millis() as u64);
@@ -709,6 +739,7 @@ fn add_cross_file_edges(
     analyses: &HashMap<String, FileAnalysis>,
     file_set: &HashSet<String>,
     resolve_exts: &[&str],
+    strip_exts: &[&str],
 ) {
     // 名称索引：用于 O(1) 唯一名称查找，替代逐边 O(N) 的 find_unique_node。
     let mut class_index: HashMap<String, Vec<NodeId>> = HashMap::new();
@@ -742,7 +773,7 @@ fn add_cross_file_edges(
         let mut alias_to_original: HashMap<String, String> = HashMap::new();
         for import in &analysis.imports {
             if let Some(target_rel) =
-                resolve_import(&import.module_path, rel, file_set, resolve_exts)
+                resolve_import(&import.module_path, rel, file_set, resolve_exts, strip_exts)
             {
                 graph.add_edge(Dependency::new(
                     file_id.clone(),
@@ -880,6 +911,7 @@ fn resolve_import(
     current_rel: &str,
     file_set: &HashSet<String>,
     extensions: &[&str],
+    strip_exts: &[&str],
 ) -> Option<String> {
     if !module_path.starts_with('.') {
         return None;
@@ -894,21 +926,20 @@ fn resolve_import(
         return Some(normalized);
     }
 
-    // TS ESM（NodeNext/Node16）规范：相对 import 须带 `.js`/`.mjs`/`.cjs`/`.jsx`
-    // 扩展名，但实际指向同名 `.ts`/`.tsx` 源文件。strip JS 扩展名后按源扩展名重试，
-    // 否则现代 ESM TypeScript 项目（如 microsoft/node-jsonc-parser）的 import 边会全部
-    // 漏掉——依赖图断裂、误判无环、sprint 排序与门禁连带失效。
-    let js_stripped = normalized
-        .strip_suffix(".js")
-        .or_else(|| normalized.strip_suffix(".mjs"))
-        .or_else(|| normalized.strip_suffix(".cjs"))
-        .or_else(|| normalized.strip_suffix(".jsx"));
-    if let Some(base) = js_stripped {
-        for ext in extensions {
-            let with_ext = format!("{base}.{ext}");
-            if file_set.contains(&with_ext) {
-                return Some(with_ext);
+    // import specifier 带 adapter 声明的扩展名（如 TS ESM 的 `.js`/`.mjs`/`.cjs`/`.jsx`），
+    // 但实际指向同名源文件（如 `.ts`/`.tsx`）。strip 这些扩展名后按源扩展名重试，否则现代
+    // ESM TypeScript 项目（如 microsoft/node-jsonc-parser）的 import 边会全部漏掉——依赖图
+    // 断裂、误判无环、sprint 排序与门禁连带失效。扩展名列表由 adapter 提供，graph 层不内嵌
+    // 任何语言特定字面量。
+    for strip_ext in strip_exts {
+        if let Some(base) = normalized.strip_suffix(strip_ext) {
+            for ext in extensions {
+                let with_ext = format!("{base}.{ext}");
+                if file_set.contains(&with_ext) {
+                    return Some(with_ext);
+                }
             }
+            break;
         }
     }
 
@@ -1006,6 +1037,7 @@ mod tests {
     }
 
     const TS_EXTS: &[&str] = &["ts", "tsx"];
+    const TS_STRIP_EXTS: &[&str] = &[".js", ".jsx", ".mjs", ".cjs"];
 
     fn file_set(files: &[&str]) -> HashSet<String> {
         files.iter().map(|s| s.to_string()).collect()
@@ -1051,7 +1083,7 @@ mod tests {
     fn resolve_import_parent_dir() {
         let files = file_set(&["utils.ts", "sub/service.ts"]);
         assert_eq!(
-            resolve_import("../utils", "sub/service.ts", &files, TS_EXTS),
+            resolve_import("../utils", "sub/service.ts", &files, TS_EXTS, TS_STRIP_EXTS),
             Some("utils.ts".to_string())
         );
     }
@@ -1060,7 +1092,7 @@ mod tests {
     fn resolve_import_sibling() {
         let files = file_set(&["a/foo.ts", "a/bar.ts"]);
         assert_eq!(
-            resolve_import("./bar", "a/foo.ts", &files, TS_EXTS),
+            resolve_import("./bar", "a/foo.ts", &files, TS_EXTS, TS_STRIP_EXTS),
             Some("a/bar.ts".to_string())
         );
     }
@@ -1069,7 +1101,7 @@ mod tests {
     fn resolve_import_index_barrel() {
         let files = file_set(&["shared/index.ts"]);
         assert_eq!(
-            resolve_import("./shared", "app.ts", &files, TS_EXTS),
+            resolve_import("./shared", "app.ts", &files, TS_EXTS, TS_STRIP_EXTS),
             Some("shared/index.ts".to_string())
         );
     }
@@ -1080,7 +1112,13 @@ mod tests {
         // （zod 测试文件 `import { z } from ".."` 模式，曾因 `/index.ts` 前导斜杠漏边）。
         let files = file_set(&["index.ts", "__tests__/catch.test.ts"]);
         assert_eq!(
-            resolve_import("..", "__tests__/catch.test.ts", &files, TS_EXTS),
+            resolve_import(
+                "..",
+                "__tests__/catch.test.ts",
+                &files,
+                TS_EXTS,
+                TS_STRIP_EXTS
+            ),
             Some("index.ts".to_string())
         );
     }
@@ -1088,14 +1126,17 @@ mod tests {
     #[test]
     fn resolve_import_non_relative_returns_none() {
         let files = file_set(&["express.ts"]);
-        assert_eq!(resolve_import("express", "app.ts", &files, TS_EXTS), None);
+        assert_eq!(
+            resolve_import("express", "app.ts", &files, TS_EXTS, TS_STRIP_EXTS),
+            None
+        );
     }
 
     #[test]
     fn resolve_import_above_root_no_match() {
         let files = file_set(&["utils.ts"]);
         assert_eq!(
-            resolve_import("../../escape", "utils.ts", &files, TS_EXTS),
+            resolve_import("../../escape", "utils.ts", &files, TS_EXTS, TS_STRIP_EXTS),
             None
         );
     }
@@ -1104,7 +1145,7 @@ mod tests {
     fn resolve_import_exact_match_with_extension() {
         let files = file_set(&["lib/helper.ts"]);
         assert_eq!(
-            resolve_import("./helper.ts", "lib/app.ts", &files, TS_EXTS),
+            resolve_import("./helper.ts", "lib/app.ts", &files, TS_EXTS, TS_STRIP_EXTS),
             Some("lib/helper.ts".to_string())
         );
     }
@@ -1113,7 +1154,13 @@ mod tests {
     fn resolve_import_tsx_extension() {
         let files = file_set(&["components/Button.tsx"]);
         assert_eq!(
-            resolve_import("./Button", "components/App.tsx", &files, TS_EXTS),
+            resolve_import(
+                "./Button",
+                "components/App.tsx",
+                &files,
+                TS_EXTS,
+                TS_STRIP_EXTS
+            ),
             Some("components/Button.tsx".to_string())
         );
     }
@@ -1123,7 +1170,13 @@ mod tests {
         // TS ESM（NodeNext）：`./scanner.js` 实际指向 `scanner.ts` 源文件。
         let files = file_set(&["impl/scanner.ts"]);
         assert_eq!(
-            resolve_import("./scanner.js", "impl/parser.ts", &files, TS_EXTS),
+            resolve_import(
+                "./scanner.js",
+                "impl/parser.ts",
+                &files,
+                TS_EXTS,
+                TS_STRIP_EXTS
+            ),
             Some("impl/scanner.ts".to_string())
         );
     }
@@ -1132,15 +1185,15 @@ mod tests {
     fn resolve_import_mjs_cjs_jsx_extensions_map_to_source() {
         let files = file_set(&["a.ts", "b.ts", "C.tsx"]);
         assert_eq!(
-            resolve_import("./a.mjs", "root.ts", &files, TS_EXTS),
+            resolve_import("./a.mjs", "root.ts", &files, TS_EXTS, TS_STRIP_EXTS),
             Some("a.ts".to_string())
         );
         assert_eq!(
-            resolve_import("./b.cjs", "root.ts", &files, TS_EXTS),
+            resolve_import("./b.cjs", "root.ts", &files, TS_EXTS, TS_STRIP_EXTS),
             Some("b.ts".to_string())
         );
         assert_eq!(
-            resolve_import("./C.jsx", "root.ts", &files, TS_EXTS),
+            resolve_import("./C.jsx", "root.ts", &files, TS_EXTS, TS_STRIP_EXTS),
             Some("C.tsx".to_string())
         );
     }

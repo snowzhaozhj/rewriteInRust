@@ -64,6 +64,11 @@ impl LanguageAdapter for TypeScriptAdapter {
         &["ts", "tsx"]
     }
 
+    fn import_specifier_extensions(&self) -> &[&str] {
+        // TS ESM（NodeNext/Node16）：相对 import 带这些扩展名，但指向同名 .ts/.tsx 源。
+        &[".js", ".jsx", ".mjs", ".cjs"]
+    }
+
     fn analyze_file(&mut self, source: &str, rel_path: &str) -> Result<FileAnalysis> {
         let tree = self
             .parser
