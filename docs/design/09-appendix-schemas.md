@@ -126,7 +126,7 @@
 
 > **module `tier` 字段（M2-TIER-01a 已实现）**：`tier`（`trivial`/`standard`/`full`，`Option<ModuleTier>`）由 AST 语义特征驱动（`detect.rs`），决定翻译循环路径（见 [03 § 4.3.2](./03-execution-model.md#432-复杂度自适应分档tier-01m2)）。M1 的死字段 `risk` 已删除。分档理由（危险信号）记入 run 日志 + `AttemptRecord`，**不**新增持久化 `tier_signals` 字段。
 
-> **module `member_files` 字段（M2-SCALE-SCC 破环已实现，见 [MDR-004](../decisions/004-scc-fold-break-cycle.md)）**：`member_files`（`string[] | 省略`，`Option<Vec<String>>`，`#[serde(skip_serializing_if = "Option::is_none")]`）= composite 组成员文件 NodeId 列表，由 `state populate-modules` 对源码强连通分量（SCC）缩点折叠时写入。**单文件模块省略此字段**（module key 即唯一源文件）；含该字段时 module key 为组内字典序最小成员（组代表），translator 把组内全部互引文件整组翻译为一组 Rust `mod`。run 阶段依赖门禁须用 `state deps`（组感知，把组内非代表成员的文件级依赖映射回组代表 key），**不能**用 `graph deps`（纯图、文件级）。
+> **module `member_files` 字段（M2-SCALE-SCC 破环已实现，见 [MDR-004](../decisions/004-scc-fold-break-cycle.md)）**：`member_files`（`string[] | 省略`，`Option<Vec<String>>`，`#[serde(skip_serializing_if = "Option::is_none")]`）= composite 组成员文件 NodeId 列表，由 `state populate-modules` 对源码强连通分量（SCC）缩点折叠时写入。**单文件模块省略此字段**（module key 即唯一源文件）；含该字段时 module key 为组内字典序最小成员（组代表）。折叠后**翻译粒度=单文件**（SCC 是编译门禁单元≠翻译单元）：契约+stub→契约门→逐文件填空→整组编译门，见 [MDR-006](../decisions/006-scc-per-file-stub-first.md)。run 阶段依赖门禁须用 `state deps`（组感知，把组内非代表成员的文件级依赖映射回组代表 key），**不能**用 `graph deps`（纯图、文件级）。
 
 **`metadata` 字段说明**：
 
@@ -323,7 +323,7 @@ CLI 构建基础图（contains/imports 边），存储到 `.rust-migration/sourc
 - 退出码 0 → 排序成功，继续 Step 3。
 - 非零退出 → 解析诊断 JSON：
   - 若 `error` = `"graph_truncated"`（增量构建触发 §5.7.5 断路器，图不完整）→ 提示用户执行 `rustmigrate graph build --full` 后重跑 `/migrate analyze`，不进入 Step 3。
-  - 若输出含 `cycle_path`（检测到循环依赖）→ **不阻塞**。`topo-sort` 是纯排序原语（环 = 无法排序，故返回 E002），但源码环**不是迁移障碍**：破环（M2-SCALE-SCC，见 [MDR-004](../decisions/004-scc-fold-break-cycle.md)）收口在 `state populate-modules`，它用 Tarjan SCC 把每个强连通分量**缩点折叠为一个 composite 模块组**（`member_files` 列成员，整组翻译为一组 Rust `mod`，论据：Rust 同 crate 内 mod 间循环 `use` 合法）。故 analyze 仅记录环路径供诊断、继续进入 Step 3，由 populate 折叠成迁移单元。
+  - 若输出含 `cycle_path`（检测到循环依赖）→ **不阻塞**。`topo-sort` 是纯排序原语（环 = 无法排序，故返回 E002），但源码环**不是迁移障碍**：破环（M2-SCALE-SCC，见 [MDR-004](../decisions/004-scc-fold-break-cycle.md)）收口在 `state populate-modules`，它用 Tarjan SCC 把每个强连通分量**缩点折叠为一个 composite 模块组**（`member_files` 列成员，论据：Rust 同 crate 内 mod 间循环 `use` 合法；折叠后翻译粒度=单文件、SCC 仅作整组编译门禁，见 [MDR-006](../decisions/006-scc-per-file-stub-first.md)）。故 analyze 仅记录环路径供诊断、继续进入 Step 3，由 populate 折叠成迁移单元。
 
 完整 SCC 检测能力见 M2 `rustmigrate graph cycles`（破环流程见 [03 § 4.2 循环依赖处理](./03-execution-model.md#42-外循环sprint-级跨会话天周)）。
 

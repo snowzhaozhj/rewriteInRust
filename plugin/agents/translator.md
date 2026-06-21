@@ -72,15 +72,42 @@ tools: Bash, Read, Write, Grep, Glob
 
 > **一个模块未必只有一个源文件**：单文件模块 `member_files` 为 None；SCC 模块组的 `member_files` 列出组内全部互引源文件。判断模块形态后再决定翻译单元（见下「SCC 模块组翻译」）。
 
-### SCC 模块组翻译（循环依赖整组翻译）
+### SCC 模块组翻译（循环依赖：契约 → stub → 逐文件填空 → 整组门）
 
-源码里的循环依赖（强连通分量 SCC）被 populate 折叠成**一个模块**，其 `member_files` 含组内全部互引源文件。Rust **同一 crate 内 mod 之间允许互相 `use`（循环引用合法，只有 crate 间不行）**，所以这组文件无需任何破环处理——直接翻译即可。
+源码里的循环依赖（强连通分量 SCC）被 populate 折叠成**一个模块**，其 `member_files` 含组内全部互引源文件。Rust **同一 crate 内 mod 之间允许互相 `use`（循环引用合法，只有 crate 间不行）**，所以这组文件无需任何破环处理。但**图论 SCC 是排序/编译门禁单元，不是「一次 LLM 调用的翻译单元」**——真实项目的环可达数十文件，整组塞进一次翻译会撑爆上下文。因此翻译粒度=**单文件**，SCC 只作整组编译门禁。
 
-- **触发**：模块 `member_files` 非空（含多个文件）。把这组文件作为**一个翻译单元**整体翻译，而非逐模块独立 run。
-- **怎么做**：Phase A 保持源码模块粒度，**逐文件忠实翻译**为一组 Rust `mod`，文件间按源码原有 import 关系正常 `use` 互引。**不预合并成单文件、不提取 `shared-types` 破环、不造跨文件 API 契约**——这些是对 Rust 模块系统的误解，纯属过度设计。
-- **意图摘要**：在组的 intent.md 里简要记录组内**跨文件调用关系**（谁调用谁），帮 verifier 理解互引拓扑即可，不新增 schema。
-- **运行时对象环的所有权**（区别于 mod 间循环 `use`）：源码的循环**对象引用**（A 持有 B、B 持有 A）翻译后会形成 Rust 所有权环——用 `Rc<RefCell<T>>` 表达共享可变引用，并在环的**至少一条回边用 `Weak`** 打破强引用环（防 `Rc` 计数永不归零的内存泄漏，用 `upgrade()` 临时取强引用）。这是 TS 的 GC 环 → Rust 显式所有权的忠实表达，属 Phase A 语义忠实而非优化。`Weak.upgrade()` 的失效分支是破环引入的新边界，按「持有者已 drop 则无操作」标 `TODO(port)`。
+逐文件独立翻译的难题：各文件对跨引用符号必须用**一致的 Rust 类型表示**（含所有权 `Rc`/`Weak`/`RefCell`）。解法不靠「文档约定大家自觉」，而靠**编译器强制**——先产一份可编译的契约 + stub 骨架，逐文件 agent 只填空、禁改签名。机制三步：
+
+- **触发**：模块 `member_files` 非空（含多个文件）。**不要**当成单文件模块走普通 Phase A，按下面三步走。
+- **契约步（组级一次，详见下「契约步」小节）**：读全组导出签名 → 产 `intermediate/{group}-contract.md`（6 字段）+ `rust_root/` 可编译 stub 骨架（签名齐全、所有权类型已定、body 全 `todo!()`）。**契约门**：stub `cargo check` 通过才算 valid——跨文件签名一致、`Rc`/`Weak`/`RefCell` 所有权类型可解析，全由编译器保证，不靠 agent 自觉。
+- **填空步（文件级并行）**：每个成员文件一个翻译任务，输入=该文件源码 + 契约 + stub，产出=把对应 `mod` 的 `todo!()` 填成实现。**签名锁定**：不许改 struct 字段/fn 签名/mod 声明/`Cargo.toml`/共享 Error enum（这些在契约步已冻结）。从「自觉遵守文档」降为「填空，禁改签名」。这一步即本组的 Phase A 忠实翻译（见下「步骤二：Phase A」的 SCC 分支）。
+- **实现门（整组 check）**：全部填完后整组 `cargo check`/`test`（=并行编排的「真门」）→ compile_fixing → done。
+
+**不要**：预合并成单文件、提取 `shared-types` 破环、把整组当一次翻译——前两者是对 Rust 模块系统的误解，后者会撞上下文上限。
+
+### 契约步：组 Rust 契约 + stub 骨架（SCC 组专属，先于 Phase A 一次产出）
+
+读全组导出签名（用 `rustmigrate graph interfaces <group> --members` 一次取整组签名，紧凑——签名非函数体），产出两件互锁产物：
+
+**A. `intermediate/{group}-contract.md`（6 字段，逐文件 agent 据此填空、签名锁定不许改）**：
+
+| 字段 | 内容 |
+|------|------|
+| `module_map` | 源文件 → Rust mod 名 + 路径（组内/组外标注） |
+| `exported_symbols` | 跨引用符号的**完整 Rust 签名**（struct/enum/trait/fn，含所有权类型） |
+| `ownership_graph` | 对象引用环的**边表 + 每条边 Rc/Weak/Box 决策**，**显式标 Weak 回边**——这是单文件视角看不到的图级决策 |
+| `error_model` | 组共享 Error enum 完整定义（无 fallible 操作则显式写「无」） |
+| `visibility` | 各符号/字段 pub vs 私有（对应源 export/private） |
+| `cross_file_calls` | 依赖索引：调用方 → 被调 → 签名（逐文件 agent 按此表调用跨文件符号，不重新推断） |
+
+**B. `rust_root/<group>/` 可编译 stub 骨架**：struct/enum/trait/fn 签名齐全、所有权类型已定、函数体全 `todo!()`；`mod.rs`（或 `lib.rs`）写全 `mod` 声明；`Cargo.toml` 依赖一次写全。
+
+**所有权决策上移契约层**（区别于 mod 间循环 `use`）：源码的循环**对象引用**（A 持有 B、B 持有 A）翻译后会形成 Rust 所有权环——用 `Rc<RefCell<T>>` 表达共享可变引用，并在环的**至少一条回边用 `Weak`** 打破强引用环（防 `Rc` 计数永不归零的内存泄漏）。这条破环边是图级决策，**在契约 `ownership_graph` 里一次定死**，逐文件 agent 不再各自判断。这是 TS 的 GC 环 → Rust 显式所有权的忠实表达，属 Phase A 语义忠实而非优化。
+
+- **`Weak.upgrade()` 的失效分支**是破环引入的、TS 中不存在的新边界（emitter 可能先于 handler 释放）：按「持有者已 drop 则无操作」处理（`if let Some(..)` 静默跳过），在 `error_model` 里说明这是所有权模型差异而非语义 bug。
 - **环的测试陷阱**：若对象环存在自递归调用链（如 `handle→forward→emit→handle…`），测试须选**不回流的事件/入口验证单跳**让链路自然终止，**不得为通过测试而删改源调用结构**；可用 `Rc::strong_count` 断言破环成立（回边为 `Weak` 时计数不被抬高）。
+
+**契约门校验**：stub 骨架 `cargo check` 必须通过。check 失败说明跨文件签名不自洽（类型不匹配、所有权环无 Weak 回边导致借用冲突等）→ 修契约重出 stub，不放行逐文件翻译。stub-first 的价值就在这里：一致性在「填空之前」由编译器一次性锁死，而非等 N 个文件填完才暴露冲突。
 
 翻译分三步，每步是 SKILL.md 的一次独立调用。**意图摘要与 Phase A/B 分离**，是为了先冻结语义契约再翻译——避免边译边猜导致语义漂移。
 
@@ -110,9 +137,17 @@ tools: Bash, Read, Write, Grep, Glob
 - 类型/错误/字符串映射严格按 RULE-2/3/7；任何不确定一律 `TODO(port): <原因>`，**禁止猜测**。
 - 每处依据某条规则的翻译，在代码里留 `// PORT NOTE: RULE-N <说明>` 注释——这些注释是 `_porting_manifest.json` 的来源。
 
+**SCC 组成员文件的 Phase A = 填空，不是从零翻译**：若本次任务是 SCC 组的某个成员文件（调用方会注入契约 + stub），输入额外含 `intermediate/{group}-contract.md` + 该 mod 的 stub。此时 Phase A 是**把 stub 里对应 mod 的 `todo!()` 填成实现**：
+- **签名锁定**：struct 字段、fn 签名、所有权类型（`Rc`/`Weak`/`RefCell`）、mod 声明一律照 stub/契约**逐字节不改**。填完 `diff stub impl` 应仅 body 变化。
+- **改签名不是你的职责，但分两种情形回报编排器**：① 若契约签名**够用**、你只是想改得更顺手 → 别改，照填；② 若契约签名**不够用**（缺一个跨文件方法、所有权类型选错导致填不下去）→ 停下回报「契约不足 + 具体缺口」，由编排器走**契约增量**（改契约+stub→契约门复验→重填），不要硬塞或猜一个签名（会破其他文件对你的引用）。这与下「Phase B 改签名先改契约」同源。
+- **跨文件符号按契约调用**：调用组内其他文件的符号时，签名取 `cross_file_calls` 表，**不重新推断类型**。被调 mod 此刻可能还是 `todo!()`，但签名已在 stub 中存在，`use crate::...` 可正常解析（Rust 整 crate 名称解析，书写顺序无关）。
+- **零共享写**：不碰 `Cargo.toml`/`mod.rs`/共享 Error enum（契约步已冻结），故同 worktree 内多文件并行填空无写冲突。
+
 #### 多候选模式（M2-ADV-01）
 
 当模块 tier 为 `standard` 或 `full` 时，Phase A 产出 **2 个翻译候选**而非单一版本，由 verifier 做选优（见 verifier.md「候选选优」）。`trivial` 档不启用多候选——直翻即可，沿用单候选流程。
+
+**SCC 组例外：多候选上移到契约层，不在逐文件层展开**。SCC 组若启用多候选，是契约步产 **2 套契约/stub**（不同所有权 + 类型策略），verifier 先选优契约，选定后逐文件只填这一套——否则「逐文件 × 候选」组合爆炸。逐文件填空阶段恒为单候选（填选定契约的 stub）。
 
 **候选策略差异**：
 
@@ -172,6 +207,8 @@ tools: Bash, Read, Write, Grep, Glob
 
 超出这三类的重构留到 M2。流程：先 `cargo fix --allow-dirty` 自动修，剩余编译错误自己改。编译失败最多 **3 轮**（`max_retry_rounds`，与 SubAgent 重试计数器独立）；每轮失败前由 SKILL.md 落盘 `state transition --to compile_fixing --substatus "<当轮错误摘要>"`，并把部分结果写 `intermediate/attempts/{module}-phase-b-partial.rs`、置 substatus `phase_b_failed_at_round_N` 以便 `--retry` 重入。3 轮仍不过 → 进入 pause→degrade（生成降级分析报告，等待人类 `--degrade=ffi` 决策），不要强行输出能编译但语义可疑的代码。
 
+**SCC 组的 Phase B 不退回整组**（否则又撞上下文上限）：仍是逐文件惯用化（三类重写同上）。但 Phase B 若需改某个跨文件签名（如把 `Rc<RefCell<T>>` 收窄为 `Rc<T>`），**先改契约 + stub 再逐文件 apply**——不允许某个成员文件单方面改签名（会破其他文件对它的引用）。流程：改 `{group}-contract.md` 对应字段 → 更新 stub 签名 → stub `cargo check` 过（契约门复验）→ 受影响的成员文件按新签名各自 apply。签名冻结在 Phase B 同样生效，只是冻结基线随契约修订前移。
+
 ## 并行翻译 porting 规则约束（M2-SCALE-02）
 
 在并行编排模式下，编排器通过 `TranslationDispatch` 派发翻译任务时会注入 `PortingRules` 约束包。你在 worktree 内翻译时**必须遵守以下规则**：
@@ -182,6 +219,8 @@ tools: Bash, Read, Write, Grep, Glob
 2. **逃生口**（`allow_escape_hatch`）：既有 API 不够用时，用 `Error::Other(String)` 或 `anyhow` 作逃生口，不要为此扩展共享错误枚举。在代码旁标注 `// PORTING: escape hatch, cleanup 后处理`。
 3. **禁止破坏共享 API**（`no_break_shared_api`）：禁止删除或修改既有共享类型/函数的签名（包括改参数、改返回类型、改泛型约束）。
 4. **新增只 append**（`append_only`）：如果确需新增共享内容（新 variant、新 impl），只在文件末尾 append，不修改已有行。
+
+**SCC 组成员填空：共享写面全冻结（比 `append_only` 更严）**。SCC 逐文件任务在契约步已冻结全部共享写面——`Cargo.toml` / `mod.rs` / 共享 Error enum / 全部跨文件签名都已在契约 + stub 里定死。你作为成员文件 agent **纯填空、零共享写**：连 append 都不做（新增共享内容应在契约步改契约，不是填空时追加）。这保证同 worktree 内多成员并行填空无任何写冲突。
 
 ### 回传协议
 

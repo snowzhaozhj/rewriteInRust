@@ -40,6 +40,9 @@
 | `paused` | 报错退出：模块暂停中，先 `--degrade=ffi\|manual\|skip` 确认降级方式再续 |
 | `degrade_*` 无 `--force` | 报错：降级是人类决策，须 `--force` |
 | `degrade_*` + `--force` | 重置为 `translating`（清 substatus/attempts）→ 续第 2 步 |
+| `translating` + `contract_ready`（SCC 组：契约门已过） | 跳第 6 步的 6b 逐文件填空（契约+stub 已就绪，不重出契约） |
+| `translating` + `phase_a_in_progress`（SCC 组：部分成员已填） | 跳第 6 步 6b，按磁盘事实核对 `{group}-progress.json` 只重派未完成的成员文件 |
+| `translating` + `contract_revision`（SCC 组：契约增量修订中） | 回第 6 步 6a 重出契约+stub、过契约门后再续 6b（修约触发见 6b「契约不足的修约路径」） |
 | `translating` + `phase_a_complete_awaiting_review` | 跳第 7 步 |
 | `translating` + `phase_b_optimization_in_progress` / `phase_b_failed_at_round_N` | 跳第 9 步 |
 | `compile_fixing` | 跳第 9 步 |
@@ -50,7 +53,7 @@
 ### 2. 解除 blocked + 循环依赖检测
 遍历所有 `status=blocked` 模块，若其 `blocked_by` 引用的模块都已 `done`/`degrade_*`，则 `state transition --module <M> --to <pre_blocked_status> --reason 'blocked_by resolved'` 自动恢复并记日志。对 blocked 子图做 DFS 环检测：发现环即报错中止、输出环路径、记入 `metadata.last_error`（防 blocked 模块互相等待死锁）。
 
-> 源码 SCC（循环依赖）在 populate 阶段已被折叠成**一个模块组**（`member_files` 含组内全部源文件），由 translator 整组翻译（见 [translator.md](../../agents/translator.md)「SCC 模块组翻译」），不再因循环依赖被标 `blocked`。这里的环检测只针对 `blocked` 子图的等待死锁，与源码 SCC 无关。
+> 源码 SCC（循环依赖）在 populate 阶段已被折叠成**一个模块组**（`member_files` 含组内全部源文件），翻译粒度=单文件、SCC 仅作整组编译门禁（步骤 6「SCC 组 Phase A」：契约+stub→契约门→逐文件填空→整组真门，见 [translator.md](../../agents/translator.md)「SCC 模块组翻译」），不再因循环依赖被标 `blocked`。这里的环检测只针对 `blocked` 子图的等待死锁，与源码 SCC 无关。
 
 ### 3. 目标依赖就绪门禁
 `rustmigrate state deps <module>` 取**组感知**依赖就绪结果（破环 M2-SCALE-SCC）：它把 composite 组成员的文件级依赖映射回组代表 key、剔除组内自依赖、按终态判就绪，直接输出 `{dependencies, all_ready, blocking, unresolved}`。`all_ready=false` 则中止本次 run，把目标模块标 `blocked`、用 `blocking`（未就绪组代表 key）填 `blocked_by` 和 `pre_blocked_status`。
@@ -66,6 +69,10 @@
 向用户展示 intent.md 全文，请其「确认 / 修订」。修订则 translator 重新生成，最多 2 轮；第 3 轮仍不满意 → 置 `paused` + `requires_manual_review`，停。`.rustmigrate.toml` 设 `auto_confirm_intent=true` 可跳过本门禁（power-user）。
 
 ### 6. Phase A 忠实翻译（translator）
+
+**先判模块形态**：读 `modules[target].member_files`。为空（单文件模块）走下面「单文件 Phase A」；非空（SCC 模块组）走「SCC 组 Phase A（契约门 → 逐文件填空）」。
+
+#### 单文件 Phase A
 调 translator（**前/后记 subagent_call**，step_index=6）产出 Phase A 翻译。根据模块 tier 分两种模式：
 
 - **单候选**（`trivial` 档）：产出 Rust 源文件（写 `rust_root/`）+ `_porting_manifest.json` + 持久化 `intermediate/attempts/{module}-phase-a.rs`。**L1 校验**：Rust 文件存在且编译通过、manifest 非空。
@@ -73,10 +80,27 @@
 
 失败 ≤2 次重试；仍失败则回滚（删 `rust_root/{module}.rs` 部分写入，保留 intent.md + attempts/*，状态复位 `translating`/substatus=null）。成功后 `state transition --module <M> --substatus phase_a_complete_awaiting_review`（status 不变）。
 
+#### SCC 组 Phase A（契约门 → 逐文件填空）
+
+源码循环依赖被折叠成的模块组（`member_files` 多文件），翻译粒度=单文件、SCC 仅作整组编译门禁。详见 [translator.md](../../agents/translator.md)「SCC 模块组翻译」。分两阶段：
+
+**6a. 组契约 + stub + 契约门（组级一次）**：调 translator（**前/后记 subagent_call**，step_index=6）读全组导出签名（`rustmigrate graph interfaces <group> --members` 一次取整组；`<group>` 传组代表 module key，即该 SCC 组的 module 标识，命令按它定位整组），产出 `intermediate/{group}-contract.md`（6 字段）+ `rust_root/<group>/` 可编译 stub 骨架（签名齐全、body 全 `todo!()`、`mod.rs` 全 `mod` 声明、`Cargo.toml` 一次写全）。
+- **契约门校验（L1）**：① stub 骨架 `cargo check` 通过（跨文件签名自洽、所有权类型可解析）；② `{group}-contract.md` 6 字段（`module_map`/`exported_symbols`/`ownership_graph`/`error_model`/`visibility`/`cross_file_calls`）齐全非空。任一不满足按失败恢复重试（≤2 次），重试耗尽 → `paused` + `requires_manual_review`。
+- 契约门过 → **先**原子写 `intermediate/{group}-progress.json`（`{contract_valid: true, stub_check_passed: true, members: {}}`），**再** `state transition --module <M> --substatus contract_ready`（status 不变）。**顺序很关键**：先建 checkpoint 再标里程碑——否则若中断在两步之间，恢复按 `contract_ready` 跳 6b 时 progress.json 不存在（恢复逻辑见 6b 兜底）。
+
+**6b. 逐文件并行填空**：对 `member_files` 每个成员文件派一个 translator（**前/后记 subagent_call**，step_index=6），输入=该文件源码 + `{group}-contract.md` + 对应 mod 的 stub，产出=把该 mod 的 `todo!()` 填成实现。**签名锁定**：`diff` stub 与 impl 仅 body 变化（fn 签名/struct 字段/mod 声明/Cargo.toml/共享 Error enum 逐字节不变）。并行隔离与同 worktree 派发见 [workflow.md](./workflow.md)；串行 run 下顺序填各成员。
+- 置 `state transition --module <M> --substatus phase_a_in_progress`。每个成员文件填完即由编排器更新 `{group}-progress.json` 的 `members.{file}.phase_a=true`（细粒度 checkpoint，断点续跑只重派未完成成员）。
+- **恢复以磁盘事实为准**（progress.json 与磁盘不是同一原子写边界）：续跑时**不要只信 progress.json**——逐成员核对其 `rust_root/` 文件：仍含 `todo!()` 或缺文件 = 未完成（重派），无 `todo!()` 且签名锁通过 = 已完成（即使 progress.json 漏记也跳过）。冲突时以磁盘为准、并修正 progress.json。这样 substatus/progress/磁盘三者间任意中断点都能正确续跑、不重复派发已填成员（Level 3 已实证此「磁盘事实裁决」）。progress.json 不存在则视为契约后零成员完成，按磁盘逐一核对。
+- **契约不足的修约路径**（区别于「签名被改」）：成员填空时若发现**契约签名不够用**（如缺一个跨文件方法、所有权类型选错导致填不下去），这不是该成员的错、也不该靠重试死磕——走与 Phase B 同一套**契约增量**：回退到 6a 改 `{group}-contract.md` + stub → 契约门复验（stub check）→ 受影响成员按新契约重填。编排器据此记 `state transition --substatus contract_revision --reason "<缺口>"`、回滚相关成员的 `members.{file}.phase_a`。**单纯「签名被改」**（成员擅自改了够用的签名）才是打回该成员重填。
+- **L1 校验**：每个成员 mod 无 `todo!()` 残留（Phase A 该填的已填）+ **签名锁校验**（`diff` 仅 body 变化，签名被改 → 打回该成员重填）。全部成员填完后整组 `cargo check` 通过（实现门预检；正式真门在 verifier 测试与并行编排步骤 2d）。
+- 全部成员完成 → `state transition --module <M> --substatus phase_a_complete_awaiting_review`（status 不变），进第 7 步。
+
 ### 7. 候选选优 + 对抗审查（verifier）
 
 **7a. 候选选优**（仅 `standard`/`full` 档，M2-ADV-01）：
 调 verifier（**前/后记 subagent_call**，step_index=7a）读取 2 个候选 + `_candidate_manifest.json` + 意图摘要 + 源码，产出 `{module}-selection.md`（选中候选编号 + 评分 + 对比）。**L1**：存在、非空、含「候选选优结果」标题。选优后 verifier 将选中候选复制为 `attempts/{module}-phase-a.rs` 并写入 `rust_root/`、生成 `_porting_manifest.json`。`trivial` 档跳过此步。
+
+> **SCC 组跳过 7a**：SCC 组逐文件填空无 per-module 候选文件（`{module}-phase-a-candidate-{1,2}.rs` 不存在），故 7a 不适用。SCC 的多候选（若启用）是**契约层**的——契约步（6a）产 2 套契约/stub，由 verifier 在 6a 内选优契约后再进 6b 填空（见 [translator.md](../../agents/translator.md)「多候选模式」SCC 例外）。默认 SCC 组走单契约，6a 只产一套，7a 直接跳过、进 7b 对整组做对抗审查。
 
 **7b. 对抗审查**：
 调 verifier（**前/后记 subagent_call**，step_index=7b）读 `attempts/{module}-phase-a.rs`（多候选模式下为选优后的版本）+ 源码 + 规则，产出 `{module}-review.md`。**L1**：存在、非空、含差异列表。失败 ≤2 次重试；仍失败回滚（删 review.md，保留 Phase A 代码，状态保持 `phase_a_complete_awaiting_review`）。
@@ -86,6 +110,8 @@
 
 ### 9. Phase B 惯用化 + 编译修正（translator）
 `state transition --module <M> --substatus phase_b_optimization_in_progress`。先 `cargo fix --allow-dirty`，剩余错误交 translator（**前/后记 subagent_call**，step_index=9；仅三类重写：并发 / 取消安全 / 局部性能）。编译失败则 `state transition --to compile_fixing --substatus "<当轮错误摘要>"`，最多 **3 轮**（`max_retry_rounds`）；失败持久化 `attempts/{module}-phase-b-partial.rs`、置 `phase_b_failed_at_round_N`（供 `--retry`）。
+
+> **SCC 组的 Phase B 仍逐文件、不退回整组**（否则撞上下文上限）：逐成员文件做三类惯用化。若 Phase B 需改某跨文件签名，**先改 `{group}-contract.md` + stub 再逐文件 apply**（不允许单个成员单方面改签名破其他文件引用）：改契约字段 → 更新 stub 签名 → stub `cargo check` 过（契约门复验）→ 受影响成员按新签名各自 apply。签名冻结基线随契约修订前移，但**逐文件层仍是惯用化重写（三类）而非填 `todo!()`**——Phase B 的「逐文件」指改造粒度，不是退回填空。
 
 > **两个独立计数器**：SubAgent 超时 / 产出物校验失败计入 `max_retries_per_step`(2)；编译失败计入 `max_retry_rounds`(3)。任一耗尽 → pause→degrade：生成降级分析报告，置 `paused`，等用户 `--degrade=ffi|manual|skip` 确认。不要强行输出能编译但语义可疑的代码。
 

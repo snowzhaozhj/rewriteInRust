@@ -40,7 +40,7 @@
 - `nodes_by_type` 无 `function` 或 `function == 0`（纯类型定义 / 空文件，如 edge-cases fixture）→ `calls == 0` 是正确值而非漏报，**跳过本检查**，直接进下一步。
 
 ### 6. 拓扑排序 + 填充迁移序列
-`rustmigrate graph topo-sort`：查看迁移排序与环路径（纯排序原语，有环返回退出码 2 + `data.cycle_path`）。**破环（MDR-004）：有环不再暂停拆环**——源码循环依赖由 populate 自动折叠为 composite 模块组整体翻译，无论有无环都直接继续落盘。
+`rustmigrate graph topo-sort`：查看迁移排序与环路径（纯排序原语，有环返回退出码 2 + `data.cycle_path`）。**破环（MDR-004）：有环不再暂停拆环**——源码循环依赖由 populate 自动折叠为 composite 模块组（编译门禁单元；翻译粒度=单文件、契约+stub→逐文件填空→整组编译门，见 [translator.md](../../agents/translator.md)「SCC 模块组翻译」），无论有无环都直接继续落盘。
 
 落盘迁移序列并推进状态机（**写状态统一走 CLI**）：
 1. `rustmigrate state transition --to profile`
