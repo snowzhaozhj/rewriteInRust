@@ -230,7 +230,7 @@ pub struct ModuleState {
     pub blocked_by: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pre_blocked_status: Option<ModuleStatus>,
-    /// SCC 模块组成员文件（破环：循环依赖折叠为一个翻译单元）。
+    /// SCC 模块组成员文件（破环：循环依赖折叠为一个 composite 模块组，编译门禁单元；翻译粒度=单文件，见 MDR-006）。
     ///
     /// `None` = 单文件模块（module key 即唯一源文件）。
     /// `Some([..])` = 该模块由一组互引文件组成（module key 为组内字典序最小者），

@@ -205,7 +205,7 @@ pub enum StateCommands {
     /// 读取 `source-graph.db` → `migration_sequence()` 缩点为 SCC 模块组 → 为每个组写入
     /// `ModuleState{status:pending, sprint:<缩点DAG层级>, tier:auto, member_files:<多文件组>}` 并设 `sprint{current:1}`，原子落盘。
     /// module key 用组代表（首成员）NodeId 原值。破环（M2-SCALE-SCC）：循环依赖**不再拒绝**，
-    /// 整组折叠为一个 composite 模块整体翻译。run 阶段依赖门禁须用 `state deps`（组感知，
+    /// 整组折叠为一个 composite 模块（编译门禁单元；翻译粒度=单文件，见 MDR-006）。run 阶段依赖门禁须用 `state deps`（组感知，
     /// 把组内非代表成员的文件级依赖映射回组代表），**不能**用 `graph deps`（纯图、文件级，
     /// 折叠后组内成员不在 modules 表会落空）。
     /// 是 `/migrate analyze`→`/migrate run` 衔接的缺失 PLAN 步骤（见 PLAN.md §9.5 M1-PLAN-01）。
@@ -1549,7 +1549,7 @@ fn cmd_state_populate_modules(root: Option<&Path>, single_sprint: bool) -> CmdRe
     // 破环（M2-SCALE-SCC）：循环依赖不再拒绝，已在 migration_sequence 折叠为 SCC 模块组。
     if sequence.has_cycles() {
         warnings.push(format!(
-            "检测到 {} 个循环依赖，已折叠为 SCC 模块组整体翻译（无需打破环）",
+            "检测到 {} 个循环依赖，已折叠为 SCC 模块组（逐文件翻译 + 整组编译门，无需打破环）",
             sequence.cycles.len()
         ));
     }

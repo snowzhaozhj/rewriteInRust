@@ -57,13 +57,19 @@ rustmigrate state get modules
 2. **准备派发数据**（`TranslationDispatch`）：
    - `module_key`：模块标识
    - `worktree_path`：`.wt/{module}`
-   - `dependency_interfaces`：`rustmigrate graph interfaces <module> --deps-of <dep>` 收集已完成依赖的接口
+   - `dependency_interfaces`：`rustmigrate graph interfaces <module> --deps-of <dep>` 收集已完成依赖的接口。**SCC 组只收跨组依赖**——组内成员互引的签名已在 `{group}-contract.md` 的 `cross_file_calls` 里冻结，不再走 `dependency_interfaces`（重复且可能与契约不一致）。
    - `porting_rules`：`.rust-migration/porting/` 下适用规则
 
-3. **派发 SubAgent**（使用 Agent tool，`isolation: "worktree"`）：
-   每个 SubAgent 在独立 worktree 内执行完整翻译循环（即 run.md 步骤 2-11 的单模块流程：translate → cargo check → compile_fix → test）。SubAgent 完成后在 worktree 内 `git add -A && git commit`。
+3. **派发 SubAgent**（使用 Agent tool，`isolation: "worktree"`）。按模块形态分两种派发：
 
-   **派发前记台账**：
+   **单文件模块**：派一个 SubAgent，在独立 worktree 内执行完整翻译循环（run.md 步骤 2-11：translate → cargo check → compile_fix → test）。完成后 worktree 内 `git add -A && git commit`。
+
+   **SCC 模块组**（`member_files` 多文件）：在**同一个 worktree** 内分两波派发（对应 run.md 步骤 6 的 6a/6b）：
+   - **先派 1 个契约 agent**（translator）：产 `{group}-contract.md` + stub 骨架，过**契约门**（stub `cargo check`）。契约门不过不进下一波。
+   - **再派 N 个成员 agent 并行**（每成员文件一个 translator，同 worktree）：各自填对应 mod 的 `todo!()`，签名锁定、零共享写（共享写面已在契约步冻结，故同 worktree 并行无冲突）。N > `max_concurrent` 时分批。
+   - 全部成员填完后，编排器在该 worktree 内 `git add -A && git commit`（整组一次提交）。
+
+   **派发前记台账**（每波每 agent 都记）：
    ```bash
    rustmigrate state record-subagent-call --step-index 2 --subagent-name translator --status started
    ```
@@ -106,7 +112,9 @@ git merge wt/{module_2}
 
 #### 2d. 整组验证（真门）
 
-> 这是**唯一 done 真门**：agent 级 worktree 自检通过只升 `agent_done`（substatus），orphan rule / E0119 coherence / feature 冲突 / 宏展开 / 命名空间撞名等**跨并发兄弟冲突只能整组编译才暴露**，故必须整组验证后才升最终 `done`。
+> **两道门别混淆**：SCC 组内部有「**契约门**」（步骤 2a 第一波，stub `cargo check`——锁住跨文件签名一致，在逐文件填空*之前*）；本步是「**实现门 / done 真门**」（全部模块合并后整组 `cargo check`/`test`——验真实实现 + 跨并发兄弟冲突）。契约门保证「签名自洽、能填」，实现门保证「填对了、跨模块无冲突」。
+
+> 实现门是**唯一 done 真门**：agent 级 worktree 自检通过只升 `agent_done`（substatus），orphan rule / E0119 coherence / feature 冲突 / 宏展开 / 命名空间撞名等**跨并发兄弟冲突只能整组编译才暴露**，故必须整组验证后才升最终 `done`。
 
 全部分支合并后，在主 worktree 上执行整组 cargo check/test：
 

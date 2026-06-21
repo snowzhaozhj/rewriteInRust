@@ -20,7 +20,17 @@
   - **契约门**：stub 骨架（签名齐全、body 全 `todo!()`）`cargo check` 过 ⇒ 跨文件签名一致、`Rc`/`Weak`/`RefCell` 所有权类型可解析，一致性编译器强制。
   - **实现门**：impl 由 stub 逐文件填 `todo!()`（签名逐字节一致，`diff` 仅 body 变化），整组 `cargo test`(2 passed)/`clippy -D` 过 + `Rc::strong_count(&emitter)==1` 破环断言成立（Handler 持 `Weak` 回边）。
   - 两 crate 独立于 cli/ workspace（`publish=false`），作机制参考样例人工验证。**结论：stub-first 机制自洽可行**。
-- **下一步**：PR-C（提示词改造 translator/run/workflow + MDR + Level 3 LLM 端到端）。详见交接文档六、实施顺序。
+- **PR-C ✅（本轮）提示词改造 + MDR-006 + Level 3 LLM 端到端跑通**（分支 `feat/m2-scc-per-file-translation`）：
+  - **提示词改造**：`translator.md`（「SCC 模块组翻译」改契约步→填空步→整组门 + 新增「契约步」小节产 6 字段契约+stub + Phase A SCC 填空分支「签名锁/禁碰共享写面」+ 多候选 SCC 例外上移契约层 + 共享写面全冻结）；`run.md`（断点表加 `contract_ready`/`phase_a_in_progress` 路由行 + 步骤 6 拆 SCC 组 Phase A 的 6a 契约门/6b 逐文件填空 + progress checkpoint + 步骤 9 Phase B 契约增量）；`workflow.md`（§2a 派发「先契约 agent 再 N 成员并行同 worktree」+ `dependency_interfaces` 只对跨组 + §2d 两道门契约门/实现门）。**死链/小数 Step 自检通过**（契约步用命名非编号，避免与既有「步骤一/二/三」撞号）。
+  - **MDR-006 + 设计同步**：新增 [MDR-006](decisions/006-scc-per-file-stub-first.md)（SCC=编译门禁单元≠翻译单元 / stub-first / LLM-first 反推 + 与 MDR-004 关系表）；MDR-004 加前向指针；02 §3.4 / 03 §4.2 / 04 §5.7.6 / 09 附录「整组翻译」→「逐文件翻译」+ MDR-006 指针；CLI populate warning + 2 doc comment 文案对齐。
+  - **Level 3 LLM 端到端 ✅（headless live，circular-deps 3 文件真环）**：`/migrate analyze`（达 sprint_loop）→ `run shared`（sprint 1 依赖）→ `run file:emitter.ts`（SCC 组）全跑通。
+    - **契约门**：契约 agent 产 `emitter.ts-contract.md`（6 字段齐全）+ stub 骨架，`stub_check_passed=true`（progress.json）。
+    - **逐文件填空**：3 成员（emitter/event_bus/handler）填 todo!；**签名锁**生效（handler 100% 一致；emitter/event_bus 唯一差异是 clippy 驱动新增 `impl Default`，附加非签名变更）。
+    - **实现门**：整组 `cargo check`/`test`(12→13 passed)/`clippy -D` 全过。
+    - **破环（LLM-first 反推实证）**：LLM 选 **trait 抽象 + 依赖反转**（`forward(&self, bus: &EventBus, ..)` 参数注入消除回边）形成单向 DAG，**无需 Rc/Weak**——比交接文档预期的 Rc::strong_count 方案更干净，契约 stub 锁一致性的同时放开了所有权模型选择。
+    - **断点续跑 ✅**：模拟中断在 2/3（handler 回退 stub + substatus=`phase_a_in_progress`），`--retry` 重跑——契约 mtime 未变（**契约步跳过**）、**仅重派 handler**、回 done；编排器日志确认走 `phase_a_in_progress→6b 重派未完成成员`路由，并额外补了生产 Handler 直测回归护栏。
+  - **已知噪声（pre-existing，非本 PR）**：`stats compare` 是项目级非模块级，SCC 组函数/行数比偏高（被 scc_tests + lib 样板拉高），编排器已识别为噪声非优化。
+- **下一步**：PR-C 4 视角审查 + 提 PR；之后 Sprint F 真实项目（mobx 41 文件真环，需先修根因2 解析健壮性）全量 LLM 翻译。
 
 ### Sprint F 进行中：破环（M2-SCALE-SCC）✅
 
