@@ -133,6 +133,9 @@ pub enum GraphCommands {
         /// 批量输出 target 的直接依赖模块接口（M2 落地）。
         #[arg(long)]
         deps_of: Option<String>,
+        /// 整组模式：输出 module 所在 SCC 组全部成员的导出签名（契约 agent 输入，Phase 2）。
+        #[arg(long)]
+        members: bool,
     },
     /// 图统计信息（节点/边计数、分类计数）。
     Stats,
@@ -381,9 +384,14 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
             GraphCommands::TopoSort => cmd_graph_topo_sort(writer),
             GraphCommands::Deps { module } => emit(writer, cmd_graph_deps(module)),
             GraphCommands::Rdeps { module } => emit(writer, cmd_graph_rdeps(module)),
-            GraphCommands::Interfaces { module, deps_of } => {
-                emit(writer, cmd_graph_interfaces(module, deps_of.as_deref()))
-            }
+            GraphCommands::Interfaces {
+                module,
+                deps_of,
+                members,
+            } => emit(
+                writer,
+                cmd_graph_interfaces(module, deps_of.as_deref(), *members),
+            ),
             GraphCommands::Stats => emit(writer, cmd_graph_stats()),
             GraphCommands::Cycles => emit(writer, cmd_graph_cycles()),
             GraphCommands::Export { format } => emit(writer, cmd_graph_export(format)),
@@ -916,13 +924,19 @@ fn collect_imports_closure(
     visited.into_iter().collect()
 }
 
-/// `graph interfaces <module> [--deps-of <target>]`：模块导出接口签名。
+/// `graph interfaces <module> [--deps-of <target>] [--members]`：模块导出接口签名。
 ///
-/// 无 `--deps-of`：输出 `<module>` 内 `is_exported=true` 的符号节点。
-/// 有 `--deps-of`：以 `<target>` 为中心，取其 imports 边的 1-hop 出边邻居（直接依赖模块），
+/// `--members`（优先）：输出 `<module>` 所在 SCC 组全部成员的导出签名（Phase 2 契约 agent 输入）。
+/// 无标志：输出 `<module>` 内 `is_exported=true` 的符号节点。
+/// `--deps-of`：以 `<target>` 为中心，取其 imports 边的 1-hop 出边邻居（直接依赖模块），
 /// 批量输出每个依赖模块的导出接口签名（区别于 `graph deps` 的 BFS 传递闭包）。
-fn cmd_graph_interfaces(module: &str, deps_of: Option<&str>) -> CmdResult {
+fn cmd_graph_interfaces(module: &str, deps_of: Option<&str>, members: bool) -> CmdResult {
     let graph = load_graph()?;
+
+    // --members 整组模式：输出 module 所在 SCC 组全部成员的导出签名（Phase 2 契约 agent 输入）。
+    if members {
+        return cmd_graph_interfaces_members(&graph, module);
+    }
 
     // --deps-of 批量模式：输出 target 直接依赖模块的导出接口。
     if let Some(target) = deps_of {
@@ -931,12 +945,74 @@ fn cmd_graph_interfaces(module: &str, deps_of: Option<&str>) -> CmdResult {
 
     // 单模块模式：输出指定模块自身的导出接口。
     let file_path = resolve_module_file_path(&graph, module)?;
-    let interfaces = collect_exported_interfaces(&graph, &file_path);
+    let collected = collect_exported_interfaces(&graph, &file_path);
 
     Ok((
         json!({
             "module": file_path,
-            "interfaces": interfaces,
+            "interfaces": collected.interfaces,
+            "signature_tokens": collected.sig_tokens,
+        }),
+        Vec::new(),
+    ))
+}
+
+/// `--members` 整组模式：定位 module 所在 SCC 组，一次输出全组成员导出签名。
+///
+/// Phase 2「逐文件翻译 + 整组编译门」的契约 agent 输入：契约步骤需读全组 TS 签名，
+/// 此模式省去逐成员 N 次 CLI 调用。`total_signature_tokens` 即 Level 0 天花板度量
+/// （证「契约 agent 装得下」假设）。签名直读图节点的 `signature`（build 时 AST 提取）。
+fn cmd_graph_interfaces_members(
+    graph: &rustmigrate_core::graph::SourceGraph,
+    module: &str,
+) -> CmdResult {
+    let target_id = resolve_file_node(graph, module)?.to_string();
+
+    // 定位包含 target 的 SCC 组（migration_sequence 已按 sprint+字典序稳定排序）。
+    let sequence = migration_sequence(graph);
+    let group = sequence
+        .scc_groups
+        .iter()
+        .find(|g| g.members.iter().any(|m| m.to_string() == target_id))
+        .ok_or_else(|| MigrateError::Graph {
+            message: format!("模块未出现在任何 SCC 组（请确认已 graph build）: {module}"),
+            file: module.to_owned(),
+        })?;
+
+    let mut sig_tokens_total = 0usize;
+    let mut export_count = 0usize;
+
+    let member_views: Vec<serde_json::Value> = group
+        .members
+        .iter()
+        .filter_map(|id| id.file_path().map(|p| p.to_owned()))
+        .map(|path| {
+            let collected = collect_exported_interfaces(graph, &path);
+            sig_tokens_total += collected.sig_tokens;
+            export_count += collected.interfaces.len();
+            json!({
+                "module": path,
+                "exports": collected.interfaces,
+                "signature_tokens": collected.sig_tokens,
+            })
+        })
+        .collect();
+
+    let group_key = group
+        .members
+        .first()
+        .map(|id| id.to_string())
+        .unwrap_or_default();
+
+    Ok((
+        json!({
+            "group_key": group_key,
+            "is_cycle": group.is_cycle,
+            "sprint": group.sprint,
+            "member_count": group.members.len(),
+            "export_count": export_count,
+            "total_signature_tokens": sig_tokens_total,
+            "members": member_views,
         }),
         Vec::new(),
     ))
@@ -977,10 +1053,10 @@ fn cmd_graph_interfaces_deps_of(
     let dependencies: Vec<serde_json::Value> = dep_paths
         .iter()
         .map(|path| {
-            let exports = collect_exported_interfaces(graph, path);
+            let collected = collect_exported_interfaces(graph, path);
             json!({
                 "module": path,
-                "exports": exports,
+                "exports": collected.interfaces,
             })
         })
         .collect();
@@ -1009,23 +1085,43 @@ fn resolve_module_file_path(
         })
 }
 
+/// 单文件导出接口收集结果。
+struct InterfaceCollection {
+    /// 每个导出符号的 JSON 视图（含 signature + token_estimate）。
+    interfaces: Vec<serde_json::Value>,
+    /// 全部导出符号的签名 token 合计（bytes/4 估算）。
+    sig_tokens: usize,
+}
+
 /// 收集指定文件下的导出接口（`is_exported=true` 的符号），按名称排序。
+///
+/// 签名直读图节点的 `signature`（build 时 lang adapter 用 AST 提取，已持久化到 source-graph.db）——
+/// 不回读源文件、不在此层做语言相关切分。`token_estimate` = signature 的 `bytes/4`；
+/// 缺 signature（旧库或非符号节点）回退 name 估算。
 fn collect_exported_interfaces(
     graph: &rustmigrate_core::graph::SourceGraph,
     file_path: &str,
-) -> Vec<serde_json::Value> {
+) -> InterfaceCollection {
+    let mut sig_tokens = 0usize;
+
     let mut interfaces: Vec<serde_json::Value> = graph
         .symbols_in_file(file_path)
         .into_iter()
         .filter(|n| n.is_exported)
         .map(|n| {
-            // token 估算：签名近似为 name 的字节数 / 4（设计：bytes/4）。
-            let token_estimate = n.name.len().div_ceil(4);
+            let sig_tok = n
+                .signature
+                .as_deref()
+                .map(|s| s.len())
+                .unwrap_or(n.name.len())
+                .div_ceil(4);
+            sig_tokens += sig_tok;
             json!({
                 "name": n.name,
                 "node_type": n.node_type.to_string(),
                 "line_range": n.line_range,
-                "token_estimate": token_estimate,
+                "signature": n.signature,
+                "token_estimate": sig_tok,
             })
         })
         .collect();
@@ -1036,7 +1132,10 @@ fn collect_exported_interfaces(
             .unwrap_or_default()
             .cmp(b["name"].as_str().unwrap_or_default())
     });
-    interfaces
+    InterfaceCollection {
+        interfaces,
+        sig_tokens,
+    }
 }
 
 /// `graph stats`：图统计信息。

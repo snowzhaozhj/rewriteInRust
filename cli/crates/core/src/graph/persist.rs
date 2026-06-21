@@ -121,6 +121,7 @@ pub fn load_from_db(db_path: &Path) -> Result<SourceGraph> {
                 name: r.name,
                 file_path: r.file_path,
                 line_range,
+                signature: extra.signature,
                 is_exported: r.is_exported,
                 complexity,
                 is_async: extra.is_async,
@@ -451,6 +452,8 @@ struct NodeExtra {
     visibility: Option<Visibility>,
     is_abstract: bool,
     decorators: Vec<String>,
+    /// 符号声明签名（function/class 剥体、interface/enum 整节点；build 时 AST 提取）。
+    signature: Option<String>,
     /// RustTarget 专属。
     #[serde(default, deserialize_with = "lenient_enum")]
     rust_kind: Option<RustKind>,
@@ -465,6 +468,7 @@ impl From<&SourceNode> for NodeExtra {
             visibility: node.visibility,
             is_abstract: node.is_abstract,
             decorators: node.decorators.clone(),
+            signature: node.signature.clone(),
             rust_kind: node.rust_kind,
             rust_path: node.rust_path.clone(),
             crate_name: node.crate_name.clone(),
@@ -611,6 +615,36 @@ mod tests {
         }
 
         // 清理
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn persist_round_trip_preserves_signature() {
+        // signature 走 extra JSON，round-trip 后应原样保留（契约 agent 依赖此持久化）。
+        let root = fixtures_dir().join("linear-deps/src");
+        let original = build_graph_ts(&root).unwrap();
+        let db_path = temp_db_path("sig");
+
+        // 原图中任取一个带 signature 的符号节点。
+        let sample = original
+            .nodes()
+            .find(|n| n.signature.as_deref().is_some_and(|s| !s.is_empty()))
+            .expect("linear-deps 应至少有一个带 signature 的符号节点")
+            .clone();
+
+        save_to_db(&original, &db_path).unwrap();
+        let loaded = load_from_db(&db_path).unwrap();
+
+        let reloaded = loaded
+            .nodes()
+            .find(|n| n.id == sample.id)
+            .expect("加载后应含该节点");
+        assert_eq!(
+            reloaded.signature, sample.signature,
+            "signature 应 round-trip 保留: {}",
+            sample.id
+        );
+
         let _ = std::fs::remove_file(&db_path);
     }
 

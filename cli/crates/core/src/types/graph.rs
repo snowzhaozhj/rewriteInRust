@@ -126,6 +126,10 @@ pub struct SourceNode {
     pub file_path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line_range: Option<Span>,
+    /// 符号声明签名（build 时 lang adapter 用 AST 提取：function/class 剥函数体，
+    /// interface/enum 整节点）。契约 agent 输入来源，query 直读不回读源文件。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
     #[serde(default)]
     pub is_exported: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -164,6 +168,7 @@ impl SourceNode {
             name,
             file_path,
             line_range: None,
+            signature: None,
             is_exported: false,
             complexity: None,
             is_async: false,
