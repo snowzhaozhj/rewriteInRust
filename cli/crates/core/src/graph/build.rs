@@ -733,6 +733,107 @@ fn cross_symbol_name<'a>(callee: &'a str, base: &str) -> &'a str {
         .unwrap_or(callee)
 }
 
+/// 单文件的 re-export 结构（用于跨 barrel 的符号透传转发）。
+#[derive(Default)]
+struct ReExportInfo {
+    /// 本文件本地定义并导出的符号名——透传的终点（origin = 本文件）。
+    own: HashSet<String>,
+    /// 具名 re-export：可见名 → (源文件 rel, 源模块中的原始名)。
+    /// 含 `export { A as B } from 'm'`（B→(m,A)）与 `export * as ns from 'm'`（ns→(m,ns)）。
+    named: HashMap<String, (String, String)>,
+    /// 通配 re-export（`export * from 'm'`）的源文件 rel 列表。
+    wildcards: Vec<String>,
+}
+
+/// 为每个文件构建 re-export 信息表，供 [`resolve_reexport_origin`] 做符号透传。
+fn build_reexport_map(
+    analyses: &HashMap<String, FileAnalysis>,
+    file_set: &HashSet<String>,
+    resolve_exts: &[&str],
+    strip_exts: &[&str],
+) -> HashMap<String, ReExportInfo> {
+    let mut map: HashMap<String, ReExportInfo> = HashMap::new();
+    for (rel, analysis) in analyses {
+        let mut info = ReExportInfo::default();
+        let mut named_visible: HashSet<String> = HashSet::new();
+        for import in &analysis.imports {
+            if !import.reexport {
+                continue;
+            }
+            let Some(tgt) =
+                resolve_import(&import.module_path, rel, file_set, resolve_exts, strip_exts)
+            else {
+                continue; // 外部模块（npm 包）re-export，无法透传
+            };
+            if import.symbols.is_empty() {
+                // `export * from 'm'` 通配
+                info.wildcards.push(tgt);
+            } else {
+                for sym in &import.symbols {
+                    let visible = sym.alias.clone().unwrap_or_else(|| sym.name.clone());
+                    named_visible.insert(visible.clone());
+                    info.named.insert(visible, (tgt.clone(), sym.name.clone()));
+                }
+            }
+        }
+        // own = 本文件导出名 - 通配标记(`*<-m`) - 具名 re-export 可见名（剩下即本地定义+default）。
+        for name in &analysis.exported_names {
+            if name.starts_with('*') || named_visible.contains(name) {
+                continue;
+            }
+            info.own.insert(name.clone());
+        }
+        map.insert(rel.clone(), info);
+    }
+    map
+}
+
+/// 解析「从文件 `file` 导入符号 `symbol`」时该符号的真正定义文件（穿透 re-export barrel）。
+///
+/// 返回 `None` 表示无法透传（外部模块 / 解析不到），调用方回退到 `file` 本身。
+/// `visiting` 防循环 barrel 死递归；`memo` 缓存结果。
+fn resolve_reexport_origin(
+    map: &HashMap<String, ReExportInfo>,
+    file: &str,
+    symbol: &str,
+    memo: &mut HashMap<(String, String), Option<String>>,
+    visiting: &mut HashSet<(String, String)>,
+) -> Option<String> {
+    let key = (file.to_string(), symbol.to_string());
+    if let Some(cached) = memo.get(&key) {
+        return cached.clone();
+    }
+    if visiting.contains(&key) {
+        return None; // 循环 barrel：不写 memo，仅本路径返回 None
+    }
+    let info = map.get(file)?; // 外部 / 未知文件，无法透传
+
+    let result = if info.own.contains(symbol) {
+        Some(file.to_string())
+    } else if let Some((tgt, original)) = info.named.get(symbol).cloned() {
+        visiting.insert(key.clone());
+        // 链式 re-export：递归到源；源也解析不到则止于直接源模块。
+        let r = resolve_reexport_origin(map, &tgt, &original, memo, visiting).or(Some(tgt));
+        visiting.remove(&key);
+        r
+    } else {
+        // 通配：逐个源模块查该符号，命中即止。
+        let wildcards = info.wildcards.clone();
+        visiting.insert(key.clone());
+        let mut r = None;
+        for w in wildcards {
+            if let Some(o) = resolve_reexport_origin(map, &w, symbol, memo, visiting) {
+                r = Some(o);
+                break;
+            }
+        }
+        visiting.remove(&key);
+        r
+    };
+    memo.insert(key, result.clone());
+    result
+}
+
 /// 构建跨文件的 Imports 和 Calls 边。
 fn add_cross_file_edges(
     graph: &mut SourceGraph,
@@ -758,6 +859,13 @@ fn add_cross_file_edges(
         }
     }
 
+    // re-export 透传：把 `import {X} from './barrel'` 解析到 X 真正定义处，而非 barrel——
+    // 否则 barrel（如 mobx `internal.ts`：所有模块都 import 它、它又 `export *` 回所有模块）
+    // 会制造虚假双向边、整库坍缩成一个巨型 SCC。memo/visiting 跨文件复用。
+    let reexport_map = build_reexport_map(analyses, file_set, resolve_exts, strip_exts);
+    let mut origin_memo: HashMap<(String, String), Option<String>> = HashMap::new();
+    let mut origin_visiting: HashSet<(String, String)> = HashSet::new();
+
     // 按文件相对路径排序遍历，保证跨文件边的插入顺序确定（analyses 是 HashMap）
     let mut rels: Vec<&String> = analyses.keys().collect();
     rels.sort();
@@ -772,37 +880,78 @@ fn add_cross_file_edges(
         // 别名 → 原名映射（仅 Named import；namespace import 跳过以免污染）
         let mut alias_to_original: HashMap<String, String> = HashMap::new();
         for import in &analysis.imports {
-            if let Some(target_rel) =
+            let Some(target_rel) =
                 resolve_import(&import.module_path, rel, file_set, resolve_exts, strip_exts)
-            {
+            else {
+                continue;
+            };
+
+            // re-export（`export ... from`）：建 barrel→源 依赖边，但不进 import_map——
+            // 本文件并不“使用”这些转手符号，进 import_map 会污染调用解析。
+            if import.reexport {
                 graph.add_edge(Dependency::new(
                     file_id.clone(),
                     NodeId::file(&target_rel),
                     EdgeType::Imports,
                 ));
-                for sym in &import.symbols {
-                    let local_name = sym.alias.as_deref().unwrap_or(&sym.name);
-                    if ambiguous.contains(local_name) {
-                        continue;
+                continue;
+            }
+
+            // side-effect 导入（无符号，`import 'x'`）：直接连模块。
+            if import.symbols.is_empty() {
+                graph.add_edge(Dependency::new(
+                    file_id.clone(),
+                    NodeId::file(&target_rel),
+                    EdgeType::Imports,
+                ));
+                continue;
+            }
+
+            // 逐符号确定真正目标：具名符号穿透 barrel 到 origin；default/namespace 不透传。
+            let mut edge_done: HashSet<String> = HashSet::new();
+            for sym in &import.symbols {
+                let dest = if sym.kind == SymbolKind::Named {
+                    resolve_reexport_origin(
+                        &reexport_map,
+                        &target_rel,
+                        &sym.name,
+                        &mut origin_memo,
+                        &mut origin_visiting,
+                    )
+                    .unwrap_or_else(|| target_rel.clone())
+                } else {
+                    target_rel.clone()
+                };
+
+                if edge_done.insert(dest.clone()) {
+                    graph.add_edge(Dependency::new(
+                        file_id.clone(),
+                        NodeId::file(&dest),
+                        EdgeType::Imports,
+                    ));
+                }
+
+                let local_name = sym.alias.as_deref().unwrap_or(&sym.name);
+                if ambiguous.contains(local_name) {
+                    continue;
+                }
+                match import_map.get(local_name) {
+                    Some(existing) if existing != &dest => {
+                        import_map.remove(local_name);
+                        ambiguous.insert(local_name.to_string());
                     }
-                    match import_map.get(local_name) {
-                        Some(existing) if existing != &target_rel => {
-                            import_map.remove(local_name);
-                            ambiguous.insert(local_name.to_string());
-                        }
-                        _ => {
-                            import_map.insert(local_name.to_string(), target_rel.clone());
-                        }
+                    _ => {
+                        import_map.insert(local_name.to_string(), dest.clone());
                     }
-                    if sym.kind == SymbolKind::Named {
-                        if let Some(alias) = &sym.alias {
-                            match alias_to_original.get(alias.as_str()) {
-                                Some(existing) if existing != &sym.name => {
-                                    alias_to_original.remove(alias.as_str());
-                                }
-                                _ => {
-                                    alias_to_original.insert(alias.clone(), sym.name.clone());
-                                }
+                }
+                if sym.kind == SymbolKind::Named {
+                    if let Some(alias) = &sym.alias {
+                        match alias_to_original.get(alias.as_str()) {
+                            Some(existing) if existing != &sym.name => {
+                                alias_to_original.remove(alias.as_str());
+                            }
+                            _ => {
+                                alias_to_original.insert(alias.clone(), sym.name.clone());
                             }
                         }
                     }
@@ -1226,6 +1375,43 @@ mod tests {
             has_import,
             "ESM `import './b.js'` 应经 adapter 声明的扩展名解析为 a.ts→b.ts Imports 边"
         );
+    }
+
+    /// re-export 透传：barrel 假环不应折叠成 SCC。
+    /// a 定义 A；b 经 barrel 用 A；barrel `export *` a 和 b。
+    /// 无透传：b→barrel、barrel→b 成 2-环。透传后 b→a，barrel 无入边，无环。
+    #[test]
+    fn reexport_barrel_does_not_create_false_cycle() {
+        let dir = std::env::temp_dir().join("rustmigrate_reexport_barrel_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.ts"), "export const A = 1;\n").unwrap();
+        std::fs::write(
+            dir.join("b.ts"),
+            "import { A } from './barrel';\nexport const B = A + 1;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("barrel.ts"),
+            "export * from './a';\nexport * from './b';\n",
+        )
+        .unwrap();
+
+        let graph = build_graph_ts(&dir).unwrap();
+        // b 的 import 应透传到 a.ts（真正定义处），而非 barrel.ts。
+        let b_to_a = graph.edges().any(|e| {
+            e.edge_type == EdgeType::Imports
+                && e.source.as_str() == "file:b.ts"
+                && e.target.as_str() == "file:a.ts"
+        });
+        let b_to_barrel = graph.edges().any(|e| {
+            e.edge_type == EdgeType::Imports
+                && e.source.as_str() == "file:b.ts"
+                && e.target.as_str() == "file:barrel.ts"
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(b_to_a, "b 经 barrel 用 A，应透传为 b.ts→a.ts 边");
+        assert!(!b_to_barrel, "透传后 b.ts 不应再指向 barrel.ts");
     }
 
     #[test]

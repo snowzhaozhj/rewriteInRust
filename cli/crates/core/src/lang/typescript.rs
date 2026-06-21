@@ -514,26 +514,45 @@ fn walk_ast(node: Node, ctx: &mut AnalysisContext, top_level: bool) {
                 let count = node.child_count();
                 for i in 0..count {
                     if let Some(child) = node.child(i) {
-                        if child.kind() == "export_clause" {
-                            let cc = child.child_count();
-                            for j in 0..cc {
-                                if let Some(spec) = child.child(j) {
-                                    if spec.kind() == "export_specifier" {
-                                        let name = spec
-                                            .child_by_field_name("name")
-                                            .map(|n| text(n, ctx.source))
-                                            .unwrap_or_default();
-                                        let alias = spec
-                                            .child_by_field_name("alias")
-                                            .map(|n| text(n, ctx.source));
-                                        symbols.push(ImportedSymbol {
-                                            name,
-                                            alias,
-                                            kind: SymbolKind::Named,
-                                        });
+                        match child.kind() {
+                            "export_clause" => {
+                                let cc = child.child_count();
+                                for j in 0..cc {
+                                    if let Some(spec) = child.child(j) {
+                                        if spec.kind() == "export_specifier" {
+                                            let name = spec
+                                                .child_by_field_name("name")
+                                                .map(|n| text(n, ctx.source))
+                                                .unwrap_or_default();
+                                            let alias = spec
+                                                .child_by_field_name("alias")
+                                                .map(|n| text(n, ctx.source));
+                                            symbols.push(ImportedSymbol {
+                                                name,
+                                                alias,
+                                                kind: SymbolKind::Named,
+                                            });
+                                        }
                                     }
                                 }
                             }
+                            // `export * as ns from 'm'`：ns 绑定 m 的命名空间对象。记为具名
+                            // re-export（visible=ns，origin=m），区别于 `export *` 通配（symbols 空）。
+                            "namespace_export" => {
+                                let nc = child.child_count();
+                                for j in 0..nc {
+                                    if let Some(id) = child.child(j) {
+                                        if id.kind() == "identifier" {
+                                            symbols.push(ImportedSymbol {
+                                                name: text(id, ctx.source),
+                                                alias: None,
+                                                kind: SymbolKind::Namespace,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -545,6 +564,7 @@ fn walk_ast(node: Node, ctx: &mut AnalysisContext, top_level: bool) {
                     } else {
                         ImportKind::StaticValue
                     },
+                    reexport: true,
                 });
             }
         }
@@ -968,6 +988,7 @@ fn extract_import(node: Node, ctx: &mut AnalysisContext) {
         module_path,
         symbols,
         kind,
+        reexport: false,
     });
 }
 
@@ -1054,6 +1075,7 @@ fn extract_call(node: Node, ctx: &mut AnalysisContext) {
                         module_path: src.to_string(),
                         symbols: Vec::new(),
                         kind: ImportKind::Dynamic,
+                        reexport: false,
                     });
                     break;
                 }

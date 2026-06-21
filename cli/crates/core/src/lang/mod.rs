@@ -54,6 +54,12 @@ pub struct ImportInfo {
     pub symbols: Vec<ImportedSymbol>,
     /// 导入种类。
     pub kind: ImportKind,
+    /// 是否为 re-export（`export {X} from 'm'` / `export * from 'm'`），区别于
+    /// 普通 `import`。re-export 把 `module_path` 的符号转手导出，本文件并不"使用"它们；
+    /// graph 层据此做透传转发：消费方 `import {X} from './barrel'` 解析到 X 真正定义处,
+    /// 而非 barrel——否则 barrel re-export 会制造虚假循环依赖（如 mobx `internal.ts`）。
+    /// `symbols` 非空 = 具名 re-export（含 `export * as ns`）；为空 = `export *` 通配。
+    pub reexport: bool,
 }
 
 /// 导入符号的种类（互斥，枚举消除原 `is_default`/`is_namespace`

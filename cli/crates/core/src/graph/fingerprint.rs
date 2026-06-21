@@ -85,10 +85,11 @@ pub fn structure_hash(analysis: &FileAnalysis) -> String {
             .collect();
         sym_names.sort();
         import_sigs.push(format!(
-            "import:{}:{}:{:?}",
+            "import:{}:{}:{:?}:re={}",
             import.module_path,
             sym_names.join(","),
-            import.kind
+            import.kind,
+            import.reexport
         ));
     }
     import_sigs.sort();
@@ -234,6 +235,7 @@ mod tests {
                     kind: SymbolKind::Named,
                 }],
                 kind: ImportKind::StaticValue,
+                reexport: false,
             }],
             HashSet::new(),
         );
@@ -254,6 +256,7 @@ mod tests {
                     },
                 ],
                 kind: ImportKind::StaticValue,
+                reexport: false,
             }],
             HashSet::new(),
         );
