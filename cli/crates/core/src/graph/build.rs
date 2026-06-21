@@ -1198,6 +1198,36 @@ mod tests {
         );
     }
 
+    /// 端到端校验 adapter→build 接线：`import './b.js'` 经 `build_graph_ts`
+    /// 全量构建后应产生 Imports 边。单测 `resolve_import_js_*` 只验算法，本测试锁定
+    /// `TypeScriptAdapter::import_specifier_extensions()` 被 build_graph_inner 收集并
+    /// 传抵 resolve_import——回归（漏传 strip_exts 或 adapter 返回空）会被它捕获。
+    #[test]
+    fn build_graph_resolves_esm_js_import_edge() {
+        let dir = std::env::temp_dir().join("rustmigrate_esm_js_import_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("b.ts"), "export const b = 1;\n").unwrap();
+        std::fs::write(
+            dir.join("a.ts"),
+            // NodeNext：相对 import 带 `.js`，实际指向 b.ts
+            "import { b } from './b.js';\nexport const a = b;\n",
+        )
+        .unwrap();
+
+        let graph = build_graph_ts(&dir).unwrap();
+        let has_import = graph.edges().any(|e| {
+            e.edge_type == EdgeType::Imports
+                && e.source.as_str() == "file:a.ts"
+                && e.target.as_str() == "file:b.ts"
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            has_import,
+            "ESM `import './b.js'` 应经 adapter 声明的扩展名解析为 a.ts→b.ts Imports 边"
+        );
+    }
+
     #[test]
     fn cross_file_method_call_via_constructor_binding() {
         let dir = std::env::temp_dir().join("rustmigrate_method_call_test");
