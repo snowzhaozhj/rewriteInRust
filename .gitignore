@@ -1,5 +1,7 @@
 # Rust
 cli/target/
+docs/examples/**/target/
+docs/examples/**/Cargo.lock
 **/*.rs.bk
 
 # OS

@@ -1,0 +1,10 @@
+# 契约门样例：SCC 组 stub 骨架。组级一次产出，签名齐全、body 全 todo!()。
+# 验证：`cargo check` 通过 == 契约门成立（一致性由编译器保证，不靠 LLM 自觉）。
+[package]
+name = "circular-deps-group-stub"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
