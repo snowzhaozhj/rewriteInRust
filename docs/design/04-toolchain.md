@@ -253,6 +253,8 @@ struct NodeData {
     visibility: Option<Visibility>,     // pub / crate / private
     is_abstract: bool,                  // 是否抽象类
     decorators: Vec<String>,            // ["@Controller", "@Injectable"]
+    signature: Option<String>,          // 声明签名（build 时 AST 提取：function/class 剥体、
+                                        // interface/enum 整节点）。契约 agent 输入，见 MDR-005
     // RustTarget 专属
     rust_kind: Option<RustKind>,        // Struct / Enum / Trait / Function / Module / Crate
     rust_path: Option<String>,          // "my_crate::utils::string::capitalize"
