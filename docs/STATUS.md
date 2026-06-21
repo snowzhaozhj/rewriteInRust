@@ -30,7 +30,8 @@
     - **破环（LLM-first 反推实证）**：LLM 选 **trait 抽象 + 依赖反转**（`forward(&self, bus: &EventBus, ..)` 参数注入消除回边）形成单向 DAG，**无需 Rc/Weak**——比交接文档预期的 Rc::strong_count 方案更干净，契约 stub 锁一致性的同时放开了所有权模型选择。
     - **断点续跑 ✅**：模拟中断在 2/3（handler 回退 stub + substatus=`phase_a_in_progress`），`--retry` 重跑——契约 mtime 未变（**契约步跳过**）、**仅重派 handler**、回 done；编排器日志确认走 `phase_a_in_progress→6b 重派未完成成员`路由，并额外补了生产 Handler 直测回归护栏。
   - **已知噪声（pre-existing，非本 PR）**：`stats compare` 是项目级非模块级，SCC 组函数/行数比偏高（被 scc_tests + lib 样板拉高），编排器已识别为噪声非优化。
-- **下一步**：PR-C 4 视角审查 + 提 PR；之后 Sprint F 真实项目（mobx 41 文件真环，需先修根因2 解析健壮性）全量 LLM 翻译。
+  - **PR [#30](https://github.com/snowzhaozhj/rewriteInRust/pull/30)**（分支 `feat/m2-scc-per-file-translation`，2 commit）。**4 视角审查全跑 + 修复闭环**：主审 /code-review（代码面仅注释/字符串，无缺陷）；design-checker（6 字段/substatus/step 引用全一致，揪出 06-plugin-structure.md + analyze.md 残留「整体翻译」）；codex 异构（5 important 提示词逻辑缺口：契约不足修约路径 / 7a 多候选悬空 / checkpoint 原子性 / workflow 绕过 7-10）；pr-review（analyze.md 遗漏 + nits）。**5 important + nits 全修**（fix commit `91aa2ae`），fmt/lint/test(412) 全过。
+- **下一步**：Sprint F 真实项目（mobx 41 文件真环，需先修根因2 解析健壮性 `analyze_file` 缺 `has_error` 检查）全量 LLM 翻译。
 
 ### Sprint F 进行中：破环（M2-SCALE-SCC）✅
 
