@@ -600,6 +600,7 @@ fn extract_function(node: Node, ctx: &mut AnalysisContext) {
             ctx.rel_path.to_string(),
         );
         sn.line_range = Some(node_span(node));
+        sn.signature = Some(decl_signature(node, node, ctx.source));
         sn.is_exported = is_exported;
         sn.is_async = is_async;
         ctx.nodes.push(sn);
@@ -651,6 +652,8 @@ fn process_var_declaration(node: Node, ctx: &mut AnalysisContext) {
                 ctx.rel_path.to_string(),
             );
             sn.line_range = Some(node_span(declarator));
+            // 签名从 declarator 起始（与 line_range 同源）剥到箭头/函数体前。
+            sn.signature = Some(decl_signature(declarator, value, ctx.source));
             sn.is_exported = is_exported;
             sn.is_async = is_async;
             ctx.nodes.push(sn);
@@ -694,6 +697,8 @@ fn extract_class(node: Node, ctx: &mut AnalysisContext) {
         ctx.rel_path.to_string(),
     );
     sn.line_range = Some(node_span(node));
+    // class 体（方法实现）剥离，保留 `class C extends B implements I` heritage 头。
+    sn.signature = Some(decl_signature(node, node, ctx.source));
     sn.is_exported = is_exported;
     sn.is_abstract = is_abstract;
     ctx.nodes.push(sn);
@@ -874,6 +879,8 @@ fn extract_interface(node: Node, ctx: &mut AnalysisContext) {
         ctx.rel_path.to_string(),
     );
     sn.line_range = Some(node_span(node));
+    // interface body 即类型成员定义本身，整节点保留（不剥）。
+    sn.signature = Some(text(node, ctx.source));
     sn.is_exported = is_exported;
     ctx.nodes.push(sn);
 
@@ -939,6 +946,8 @@ fn extract_enum(node: Node, ctx: &mut AnalysisContext) {
             ctx.rel_path.to_string(),
         );
         sn.line_range = Some(node_span(node));
+        // enum 成员（值定义）即类型本身，整节点保留。
+        sn.signature = Some(text(node, ctx.source));
         sn.is_exported = is_exported;
         ctx.nodes.push(sn);
     }
@@ -1127,6 +1136,25 @@ fn callee_name(node: Node, source: &str) -> String {
 
 fn text(node: Node, source: &str) -> String {
     source.get(node.byte_range()).unwrap_or("").to_string()
+}
+
+/// 提取声明签名：从 `start_node` 起始到 `body_owner` 的 `body` 子节点起始之间（剥函数/类体）。
+///
+/// `body_owner` 无 `body` 字段时回退整段 `start_node` 文本。签名由 AST 子节点边界决定，
+/// 不靠字符串扫描——泛型/参数/返回类型/heritage 都在 body 前，天然完整保留。
+/// 仅 function/class/箭头函数用此剥体；interface/enum 的「body」即类型定义本身，应直接用
+/// [`text`] 取整节点（调用方区分）。
+fn decl_signature(start_node: Node, body_owner: Node, source: &str) -> String {
+    let start = start_node.start_byte();
+    let end = body_owner
+        .child_by_field_name("body")
+        .map(|b| b.start_byte())
+        .unwrap_or_else(|| start_node.end_byte());
+    source
+        .get(start..end.max(start))
+        .unwrap_or("")
+        .trim()
+        .to_string()
 }
 
 fn node_span(node: Node) -> Span {
@@ -1550,5 +1578,56 @@ class Service {
         assert!(!adapter.can_handle(Path::new("src/utils.spec.ts")));
         assert!(!adapter.can_handle(Path::new("src/Button.test.tsx")));
         assert!(!adapter.can_handle(Path::new("src/Button.spec.tsx")));
+    }
+
+    /// 取指定符号节点的 signature。
+    fn sig_of<'a>(result: &'a FileAnalysis, name: &str) -> &'a str {
+        result
+            .nodes
+            .iter()
+            .find(|n| n.name == name)
+            .unwrap_or_else(|| panic!("缺节点 {name}"))
+            .signature
+            .as_deref()
+            .unwrap_or_else(|| panic!("{name} 无 signature"))
+    }
+
+    #[test]
+    fn signature_extraction_by_kind() {
+        let mut adapter = TypeScriptAdapter::new().unwrap();
+        // 函数体含对象参数/泛型默认的内联 `{`，AST 切 body 边界天然跳过（不靠字符串扫描）。
+        let source = r#"
+export function f<T = {}>(o: { a: number }): string {
+    return o.a + '';
+}
+export const h = (a: number): number => { return a * 2; };
+export interface I {
+    a: number
+    b: string
+}
+export enum E { A, B }
+export class C extends B<T> implements I {
+    m() { return 1; }
+}
+"#;
+        let result = adapter.analyze_file(source, "sig.ts").unwrap();
+
+        // function：剥到 body 前，泛型默认/对象参数完整保留。
+        assert_eq!(
+            sig_of(&result, "f"),
+            "function f<T = {}>(o: { a: number }): string"
+        );
+        // 箭头 const：从 declarator 剥到箭头体前。
+        assert_eq!(sig_of(&result, "h"), "h = (a: number): number =>");
+        // interface：body 即类型成员，整节点保留。
+        let i = sig_of(&result, "I");
+        assert!(
+            i.contains("a: number") && i.contains("b: string"),
+            "接口应保留成员: {i}"
+        );
+        // enum：成员保留。
+        assert!(sig_of(&result, "E").contains("A"), "枚举应保留成员");
+        // class：剥方法体，保留 heritage 头。
+        assert_eq!(sig_of(&result, "C"), "class C extends B<T> implements I");
     }
 }

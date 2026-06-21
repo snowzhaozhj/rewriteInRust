@@ -64,10 +64,10 @@ Phase 1 关键实现（`cli/crates/core/src/graph/build.rs`）：
 
 ## 四、改动清单
 
-### CLI（先做，纯 Rust 可单测）— `cli/crates/cli/src/lib.rs`
-- `collect_exported_interfaces`（:1013）加 `signature_text` 字段：按 `line_range`（Span 1-based 闭区间）从源文件读签名行。**选项 A，不改 SourceNode/SQLite schema**（选项 B 加字段+build.rs 提取+migration 是 M3 级，过重）。
-- 新增 `graph interfaces <group> --members` 模式：一次输出整组所有成员导出签名（给契约 agent，省 N 次 CLI 调用）。
-- `cmd_graph_interfaces` / `_deps_of`（:924/:946）透传新字段。
+### signature 提取（已落地，**采选项 B 的轻量形态**）— 见七.架构修订
+- ~~选项 A：CLI 按 line_range 回读源文件 + 字符串扫描剥体~~ **已废弃**（CLI 重造 lexer + TS 语义泄漏到语言无关层 + 回读一致性风险，经用户质疑 + codex 确认重构）。
+- **采选项 B**，但发现 `nodes.extra` JSON 列正是稀疏属性扩展点 → **零 schema 改动、零 migration**（非原判的「M3 级过重」）：`SourceNode.signature` + `NodeExtra.signature` round-trip + lang 层 AST 提取（`decl_signature`：function/class 剥到 body 子节点前、interface/enum 整节点）+ `structure_hash` 纳入 signature。
+- CLI `collect_exported_interfaces` 直读 `node.signature`；新增 `graph interfaces <group> --members`（整组一次输出，省 N 次调用）；`signature`/`token_estimate` 透传 single/`--deps-of`/`--members` 三模式。
 
 ### 断点续跑 — orchestrator 管 intermediate 文件（**不改 core/state**）
 - `intermediate/{group}-progress.json`：`{contract_valid, stub_check_passed, members:{file:{phase_a,phase_b}}}`。每文件完成即更新（细粒度 checkpoint）。原子写（temp+rename），**仅编排器写**（SubAgent 不写，同「编排器持锁」哲学）。
@@ -84,11 +84,12 @@ Phase 1 关键实现（`cli/crates/core/src/graph/build.rs`）：
 ## 五、验证（先轻后重）
 
 - **Level 0（先量天花板，read-only）✅ 已量（假设成立，>40x 余量）**：`graph interfaces --members` 实现 + mobx 实测。
-  - **实测（reexport 透传分支，根因2未修，SCC=51 文件——比 41 真环更保守）**：51 文件 / 187 导出符号 → **签名总计 ~4,627 token**（body-stripped，深度感知提取，契约 agent 实际输入）；含完整函数体上界 ~37,134 token；51 文件全源码绝对硬上界 ~64,635 token（258 KB÷4）。
-  - **结论**：三档全部远低于 200K 上下文窗口——realistic ~4.6K（>40x 余量），即便喂全部原始源码（65K）也 ~3x 余量。**「契约 agent 装得下」假设成立，无需 SCC 内子簇分契约**。契约 agent 还需输出 stub 骨架（量级与签名相当）+ contract.md，输出预算同样宽裕。
-  - **度量法/已知近似**（不影响结论，均被上界兜底）：(a) 签名按 `line_range` 取行，body-bearing 种类（Function/Class/Variable）剥离函数体，函数体起始 `{` 用**括号深度感知扫描**定位（跳过泛型默认 `<T={}>`、对象参数 `(o:{a})` 的内联 `{`，审查修复），Interface/Enum/TypeAlias 保留全文；(b) 类方法签名未单列（class 截断到体 `{`，丢方法签名，mobx 核心以函数/interface/enum 为主故影响小，class 密集 SCC 的 realistic 值会升高，但 65K 原始源码绝对上界封顶）；(c) `Variable` 对象字面量初始化器 `const X={...}` 的 `{` 在 depth 0 仍被截断（丢初始化器类型，略低估）。
-  - **复现**：`cd /tmp/sprint-f-candidates/mobx/packages/mobx && rustmigrate init && rustmigrate graph build --root . --full && rustmigrate graph interfaces core/observable.ts --members`（读 `data.total_signature_tokens` / `total_fullrange_tokens`）。
-- **Level 1（CLI 单测，无 LLM）✅ 已补**：`smoke_graph_interfaces_members_whole_scc_group`（circular-deps 三向环整组、3 成员、`signature_text` 剥离函数体断言、token 合计）入 nextest，409 测试全过。`signature_text`/`token_estimate` 已透传 single/`--deps-of`/`--members` 三模式。
+  - **实测（reexport 透传分支，根因2未修，SCC=51 文件——比 41 真环更保守）**：51 文件 / 187 导出符号 → **签名总计 ~4,297 token**（AST 精确提取，契约 agent 实际输入）。
+  - **结论**：远低于 200K 上下文窗口（>40x 余量）。**「契约 agent 装得下」假设成立，无需 SCC 内子簇分契约**。契约 agent 还需输出 stub 骨架（量级与签名相当）+ contract.md，输出预算同样宽裕。
+  - **签名提取架构**（审查重构后，见七.架构修订）：`signature` 由 **build 时 lang adapter 用 tree-sitter AST 提取**（function/class 取 `node` 起始到 `body` 子节点起始、剥体；interface/enum 整节点即类型定义），存入 `SourceNode.signature` → `nodes.extra` JSON 列（零 schema 改动）→ query 直读，**不回读源文件、CLI 零语言相关逻辑**。AST 子节点边界天然处理泛型/对象参数/箭头，无字符串扫描歧义。signature 已纳入 `structure_hash`。
+  - **已知 scope 边界**（记 TODO，非本次）：函数重载（无 body 的 `function_signature` 当前 walk_ast 不提取）、匿名 `export default`（无 name 当前不入图）、class 方法签名未单列（方法是独立节点、通常非 exported）。mobx 核心以函数/interface/enum 为主，不受影响。
+  - **复现**：`cd /tmp/sprint-f-candidates/mobx/packages/mobx && rustmigrate init && rustmigrate graph build --root . --full && rustmigrate graph interfaces core/observable.ts --members`（读 `data.total_signature_tokens`）。
+- **Level 1（单测，无 LLM）✅ 已补**：core `signature_extraction_by_kind`（AST 按种类提取）+ `structure_hash_sensitive_to_signature`（增量正确性）+ `persist_round_trip_preserves_signature`；CLI e2e `smoke_graph_interfaces_members_whole_scc_group`（整组读图签名）。412 测试全过。
 - **Level 2（机制验证，无 LLM，最高价值先做）**：人工写 circular-deps 的 contract.md + stub 骨架 → 验 stub `cargo check` 过（契约门成立）→ 按契约填实现 → 整组 check/test 过 + `Rc::strong_count==1`（破环正确）。手写都跑不通则提示词无意义。
 - **Level 3（LLM 端到端，仅 circular-deps 3 文件真环，M2-SCALE-SCC 已用整组方式跑通过）**：新逐文件流程重跑——契约 agent 出 stub（check 过）→ 3 member agent 并行填 → 整组 check/test/clippy 全过 + Rc::strong_count 断言。**断点续跑**：中断在 2/3 文件，重跑验证只重派第 3 个。
 - 全程 `just ci`。mobx 41 文件 LLM 实跑留 Phase 2 之后（需先修根因2 + Level 0 确认契约上限）。
@@ -103,8 +104,8 @@ Phase 1 关键实现（`cli/crates/core/src/graph/build.rs`）：
 
 1. 读本文 + `docs/STATUS.md`（Sprint F 段含本轮记录）。
 2. 确认 Phase 1 PR #26 是否已合并、`feat/m2-graph-reexport-transparency` 是否已开 PR/合并；据此决定基线分支（建议从 reexport 分支或其合并后的 master 切新分支 `feat/m2-scc-per-file-translation`）。
-3. **先做 Level 0**：clone mobx → `graph build --full` → `graph interfaces --members`（实现后）量 41 文件签名 token，确认契约方案上限。
-4. 从 PR-A 开始：CLI `graph interfaces` 加 signature_text（选项 A）+ `--members`。
+3. ~~先做 Level 0~~ **✅ 已完成**：mobx 51 文件 SCC 签名 ~4.3K token，>40x 余量（见五.Level 0）。
+4. ~~PR-A signature_text（选项 A）~~ **✅ 已落地**：signature 进图（AST 提取，见八.5 架构修订）+ `--members`。下一步 PR-B（Level 2）。
 5. 改提示词前重读 `docs/learnings/agent-skill-prompt-guide.md`。
 
 ## 八、关键风险（Plan agent 对抗结论）
@@ -114,8 +115,33 @@ Phase 1 关键实现（`cli/crates/core/src/graph/build.rs`）：
 - 多候选组合爆炸 → 上移契约层。
 - Phase B 撞上限 → 契约增量。
 
+## 八.5 架构修订（signature 进图，Level 0 落地时确立）
+
+> 初版按交接文档「选项 A」在 CLI 回读源文件 + 字符串扫描剥体。用户质疑「为何在 CLI 重造
+> lexer + TS 语义泄漏到语言无关层」，codex 异构确认后重构为下述正确架构。
+
+**反模式（已废弃）**：build 时 tree-sitter AST 信息齐全却只存 line_range（丢文本）；query 时
+为补签名回读源文件 + 手写括号扫描剥 body。三病：重复 IO + 重造 lexer；一致性风险（build 后源
+改/删、行号错位）；TS 语义泄漏到语言无关 CLI 层（M3 接 Python/C 必错）。
+
+**正确架构**：signature 是 AST 提取的符号静态属性，与 line_range 同级——
+1. **lang 层提取**（`typescript.rs` `decl_signature`）：function/class 取 `node` 起始到
+   `body` 子节点起始（剥体）；interface/enum 整节点（body 即类型）。AST 边界天然处理
+   泛型/对象参数/箭头，无字符串歧义。提取点：extract_function/class/interface/enum + 箭头 const。
+2. **存图**：`SourceNode.signature: Option<String>` → `NodeExtra.signature` → `nodes.extra`
+   JSON 列。**零 schema 改动、零 migration**（extra 列即稀疏属性扩展点，`#[serde(default)]` 前向兼容）。
+3. **增量正确性（codex 抓的致命点）**：signature 纳入 `structure_hash`，否则改返回类型时
+   content_hash 变但 structure_hash 不变 → 增量判 COSMETIC → 不重写节点 → **DB signature 过期**。
+4. **query 直读**：CLI `collect_exported_interfaces` 读 `node.signature`，**零源文件回读、零语言逻辑**。
+
+**scope 边界（TODO，非本次）**：函数重载（无 body 的 `function_signature` 当前 walk_ast 不提取）、
+匿名 `export default`（无 name 当前不入图）、class 方法签名未单列。这些是已有解析 gap，独立于本次重构。
+
 ## 九、参考文件位置速查
-- `cli/crates/cli/src/lib.rs`：`collect_exported_interfaces`:1013 / `cmd_graph_interfaces`:924 / populate:1429-1568 / `state deps`:1613-1729
+- `cli/crates/cli/src/lib.rs`：`collect_exported_interfaces`（直读 node.signature）/ `cmd_graph_interfaces_members` / populate / `state deps`
+- `cli/crates/core/src/lang/typescript.rs`：`decl_signature`（AST 签名提取）/ extract_function/class/interface/enum
+- `cli/crates/core/src/graph/persist.rs`：`NodeExtra.signature`（extra JSON round-trip）
+- `cli/crates/core/src/graph/fingerprint.rs`：`structure_hash`（含 signature）
 - `cli/crates/core/src/types/state.rs`：`ModuleState`:207 / `member_files`:233 / substatus:212
 - `cli/crates/core/src/graph/topo.rs`：`SccGroup`:45 / `build_scc_groups`:164
 - `cli/crates/core/src/graph/build.rs`：`build_reexport_map` / `resolve_reexport_origin` / `add_cross_file_edges`

@@ -11,11 +11,11 @@
 
 ### Phase 2 Level 0 ✅ 天花板假设已证（最大盲点闭合）
 
-- **量了再信**：`graph interfaces --members`（整组 SCC 导出签名一次输出）+ `signature_text`（按 line_range 读源、body-bearing 剥离函数体）已实现，透传 single/`--deps-of`/`--members` 三模式。
-- **mobx 实测（SCC=51 文件 / 187 导出，比 41 真环保守）**：签名总计 **~4,627 token**（深度感知提取）；含函数体上界 ~37K；全源码绝对硬上界 ~65K。**三档全远低于 200K 窗口 → 「契约 agent 装得下」成立，>40x 余量，无需 SCC 子簇分契约**。
-- **审查闭环（PR #27，4 视角全跑）**：design-checker 零 MISMATCH；主审+pr-review+codex 收敛出 2 项 important（签名首 `{` 截断命中泛型/对象参数 → 改括号深度感知扫描；源读不到静默低估 → 加 missing_source warning）+ 效率/文档 nit，**已全修**；export* 歧义/路径排序记为 pre-existing/edge。
-- **Level 1**：`--members` happy/缺源告警 e2e + `signature_tests` 深度感知单测入 nextest，全过 + clippy -D + fmt。
-- **下一步**：Phase 2 PR-A 收尾（signature_text 已落地，可补 cmd_graph_interfaces 文档串） → PR-B（Level 2 手写契约+stub 机制自洽）→ PR-C（提示词改造 + Level 3 LLM 端到端）。详见交接文档六、实施顺序。
+- **量了再信**：`graph interfaces --members`（整组 SCC 导出签名一次输出）已实现。`signature` 由 **build 时 lang adapter 用 tree-sitter AST 提取**（function/class 剥到 body 子节点前、interface/enum 整节点），与 `line_range` 同级**持久化进图**（`nodes.extra` JSON 列，零 schema 改动），query 直读 `node.signature`。
+- **mobx 实测（SCC=51 文件 / 187 导出，比 41 真环保守）**：签名总计 **~4,297 token**（AST 精确提取）。**远低于 200K 窗口 → 「契约 agent 装得下」成立，>40x 余量，无需 SCC 子簇分契约**。
+- **架构重构（审查驱动）**：初版在 CLI 层回读源文件 + 手写括号扫描（mini-lexer）剥函数体——经用户质疑「为何在 CLI 重造 lexer + TS 语义泄漏到语言无关层」+ codex 异构确认，重构为「build 时 AST 提取、存图、query 直读」。codex 抓到**致命点**：signature 必须纳入 `structure_hash`，否则改返回类型时增量判 COSMETIC→不重写节点→DB signature 过期（已修 + 回归测试）。删除 read_source_lines/find_body_brace/missing_source warning 整套回读补丁。
+- **Level 1**：core 单测 `signature_extraction_by_kind`（AST 按种类提取）+ `structure_hash_sensitive_to_signature`（增量正确性）+ `persist_round_trip_preserves_signature`；CLI e2e `--members` 读图签名。**412 测试全过** + clippy -D + fmt。
+- **下一步**：PR-A 收尾合并 → PR-B（Level 2 手写契约+stub 机制自洽）→ PR-C（提示词改造 + Level 3 LLM 端到端）。详见交接文档六、实施顺序。
 
 ### Sprint F 进行中：破环（M2-SCALE-SCC）✅
 

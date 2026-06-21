@@ -58,9 +58,15 @@ pub fn structure_hash(analysis: &FileAnalysis) -> String {
         if node.node_type == crate::types::graph::NodeType::File {
             continue;
         }
+        // signature 纳入哈希：否则仅改参数/返回类型时 structure_hash 不变，增量会判 COSMETIC
+        // 跳过节点重写，DB 里持久化的 node.signature 过期。
         signatures.push(format!(
-            "{}:{}:{}:{}",
-            node.node_type, node.name, node.is_exported, node.is_async
+            "{}:{}:{}:{}:{}",
+            node.node_type,
+            node.name,
+            node.is_exported,
+            node.is_async,
+            node.signature.as_deref().unwrap_or("")
         ));
     }
     signatures.sort();
@@ -261,6 +267,24 @@ mod tests {
             HashSet::new(),
         );
         assert_ne!(structure_hash(&a1), structure_hash(&a2));
+    }
+
+    #[test]
+    fn structure_hash_sensitive_to_signature() {
+        // 仅签名不同（如改返回类型）必须改变 structure_hash，否则增量判 COSMETIC
+        // 跳过节点重写 → DB 持久化的 signature 过期。
+        let mut n1 = make_fn_node("f", true);
+        n1.signature = Some("function f(x: number): string".to_string());
+        let mut n2 = make_fn_node("f", true);
+        n2.signature = Some("function f(x: number): number".to_string());
+
+        let a1 = make_analysis(vec![n1], Vec::new(), HashSet::new());
+        let a2 = make_analysis(vec![n2], Vec::new(), HashSet::new());
+        assert_ne!(
+            structure_hash(&a1),
+            structure_hash(&a2),
+            "返回类型变化应改变 structure_hash"
+        );
     }
 
     #[test]
