@@ -29,18 +29,19 @@ pub struct MigrationSequence {
     pub parallel_groups: Vec<Vec<NodeId>>,
     /// 所有检测到的环。
     pub cycles: Vec<Vec<NodeId>>,
-    /// 缩点后的 SCC 翻译单元（破环：每个 SCC 折叠为一个迁移单位）。
+    /// 缩点后的 SCC 迁移单位（破环：每个 SCC 折叠为一个编译门禁单元）。
     ///
     /// 覆盖图中**全部** File 节点（单文件 = 单成员组），按缩点 DAG 拓扑层级排序。
     /// populate 以此为迁移单位：单成员组 → 单文件模块；多成员组 → composite 模块组。
     pub scc_groups: Vec<SccGroup>,
 }
 
-/// 一个 SCC 翻译单元（缩点后的迁移单位）。
+/// 一个 SCC 迁移单位（缩点后的编译门禁单元）。
 ///
 /// 破环核心：源码中的循环依赖（互引文件）不再拒绝迁移，而是整组折叠为一个
-/// 翻译单元——translator 一次性翻译为一组 Rust `mod`（同 crate 内 mod 间允许循环
-/// `use`，无需破环），仅当组大到超上下文预算时才退化为 FFI 切分（TODO，兜底路径）。
+/// 编译门禁单元——同 crate 内 mod 间允许循环 `use`（无需破环）。**翻译粒度=单文件**
+/// （SCC 是编译门禁单元≠翻译单元；契约+stub→逐文件填空→整组编译门，见 MDR-006），
+/// 仅当组大到超上下文预算时才退化为 FFI 切分（TODO，兜底路径）。
 #[derive(Debug, Clone, Serialize)]
 pub struct SccGroup {
     /// 组内成员文件节点（按 NodeId 字典序排序；第一个作 module key 代表）。
@@ -121,7 +122,7 @@ pub fn migration_sequence(graph: &SourceGraph) -> MigrationSequence {
         .collect();
     let has_cycles = !cycles.is_empty();
 
-    // 缩点为 SCC 翻译单元（破环：覆盖全部 File 节点，含单文件单成员组）
+    // 缩点为 SCC 迁移单位（破环：覆盖全部 File 节点，含单文件单成员组）
     let scc_groups = build_scc_groups(&sccs, &file_graph, &index_to_id);
 
     // 计算迁移顺序

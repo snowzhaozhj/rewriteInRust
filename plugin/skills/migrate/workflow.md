@@ -64,10 +64,11 @@ rustmigrate state get modules
 
    **单文件模块**：派一个 SubAgent，在独立 worktree 内执行完整翻译循环（run.md 步骤 2-11：translate → cargo check → compile_fix → test）。完成后 worktree 内 `git add -A && git commit`。
 
-   **SCC 模块组**（`member_files` 多文件）：在**同一个 worktree** 内分两波派发（对应 run.md 步骤 6 的 6a/6b）：
-   - **先派 1 个契约 agent**（translator）：产 `{group}-contract.md` + stub 骨架，过**契约门**（stub `cargo check`）。契约门不过不进下一波。
-   - **再派 N 个成员 agent 并行**（每成员文件一个 translator，同 worktree）：各自填对应 mod 的 `todo!()`，签名锁定、零共享写（共享写面已在契约步冻结，故同 worktree 并行无冲突）。N > `max_concurrent` 时分批。
-   - 全部成员填完后，编排器在该 worktree 内 `git add -A && git commit`（整组一次提交）。
+   **SCC 模块组**（`member_files` 多文件）：在**同一个 worktree** 内执行该组的完整 run.md 步骤 2-11，**仅步骤 6（Phase A）展开为两波**（6a/6b），其余步骤（7 审查/8 结构门/9 Phase B/10 测试）照单模块流程组级各跑一次——SCC 组绕过这些门会让等价审查/测试失守：
+   - **步骤 6a 先派 1 个契约 agent**（translator）：产 `{group}-contract.md` + stub 骨架，过**契约门**（stub `cargo check`）。契约门不过不进下一波。
+   - **步骤 6b 再派 N 个成员 agent 并行**（每成员文件一个 translator，同 worktree）：各自填对应 mod 的 `todo!()`，签名锁定、零共享写（共享写面已在契约步冻结，故同 worktree 并行无冲突）。N > `max_concurrent` 时分批。
+   - **步骤 7-10**：6b 全部填完后，照 run.md 对整组跑一次对抗审查/结构门/Phase B/测试（候选选优步对 SCC 跳过，理由见 run.md 步骤 7a）。
+   - 全部通过后，编排器在该 worktree 内 `git add -A && git commit`（整组一次提交）。
 
    **派发前记台账**（每波每 agent 都记）：
    ```bash

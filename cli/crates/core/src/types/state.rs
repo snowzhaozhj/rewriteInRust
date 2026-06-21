@@ -234,7 +234,7 @@ pub struct ModuleState {
     ///
     /// `None` = 单文件模块（module key 即唯一源文件）。
     /// `Some([..])` = 该模块由一组互引文件组成（module key 为组内字典序最小者），
-    /// translator 一次性把整组翻译为一组 Rust `mod`（同 crate 内允许 mod 间循环 `use`，无需破环）。
+    /// 整组是一个编译门禁单元，逐文件翻译为一组 Rust `mod`（同 crate 内允许 mod 间循环 `use`，无需破环；见 MDR-006）。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub member_files: Option<Vec<String>>,
 }

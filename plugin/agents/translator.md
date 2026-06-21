@@ -138,7 +138,8 @@ tools: Bash, Read, Write, Grep, Glob
 - 每处依据某条规则的翻译，在代码里留 `// PORT NOTE: RULE-N <说明>` 注释——这些注释是 `_porting_manifest.json` 的来源。
 
 **SCC 组成员文件的 Phase A = 填空，不是从零翻译**：若本次任务是 SCC 组的某个成员文件（调用方会注入契约 + stub），输入额外含 `intermediate/{group}-contract.md` + 该 mod 的 stub。此时 Phase A 是**把 stub 里对应 mod 的 `todo!()` 填成实现**：
-- **签名锁定**：struct 字段、fn 签名、所有权类型（`Rc`/`Weak`/`RefCell`）、mod 声明一律照 stub/契约**逐字节不改**。填完 `diff stub impl` 应仅 body 变化。需要改签名 → 不是你的职责，回报编排器去改契约（见下「Phase B 不退回整组」同理）。
+- **签名锁定**：struct 字段、fn 签名、所有权类型（`Rc`/`Weak`/`RefCell`）、mod 声明一律照 stub/契约**逐字节不改**。填完 `diff stub impl` 应仅 body 变化。
+- **改签名不是你的职责，但分两种情形回报编排器**：① 若契约签名**够用**、你只是想改得更顺手 → 别改，照填；② 若契约签名**不够用**（缺一个跨文件方法、所有权类型选错导致填不下去）→ 停下回报「契约不足 + 具体缺口」，由编排器走**契约增量**（改契约+stub→契约门复验→重填），不要硬塞或猜一个签名（会破其他文件对你的引用）。这与下「Phase B 改签名先改契约」同源。
 - **跨文件符号按契约调用**：调用组内其他文件的符号时，签名取 `cross_file_calls` 表，**不重新推断类型**。被调 mod 此刻可能还是 `todo!()`，但签名已在 stub 中存在，`use crate::...` 可正常解析（Rust 整 crate 名称解析，书写顺序无关）。
 - **零共享写**：不碰 `Cargo.toml`/`mod.rs`/共享 Error enum（契约步已冻结），故同 worktree 内多文件并行填空无写冲突。
 
