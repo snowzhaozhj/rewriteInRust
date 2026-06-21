@@ -7,7 +7,14 @@
 - **Milestone**: M1 MVP ✅ → **M2 质量提升**
 - **Phase**: M2 Sprint D/E + SCC 破环（PR #22/#23/#24/#25 **均已合并**）→ **Sprint F 验收进行中**
 - **测试基线**: 407 测试 / clippy -D / deny / fmt / shellcheck 全绿（含本轮新增 ESM 接线测试）
-- **🔜 下一步大改（已规划，待新会话实施）**：Phase 2「SCC 逐成员文件翻译 + 整组编译门禁」——详见 **[docs/phase2-scc-per-file-handoff.md](phase2-scc-per-file-handoff.md)**（含三根因链、stub-first 契约设计、改动清单、分级验证、续接指引）。
+- **🔜 下一步大改（进行中）**：Phase 2「SCC 逐成员文件翻译 + 整组编译门禁」——详见 **[docs/phase2-scc-per-file-handoff.md](phase2-scc-per-file-handoff.md)**（含三根因链、stub-first 契约设计、改动清单、分级验证、续接指引）。
+
+### Phase 2 Level 0 ✅ 天花板假设已证（最大盲点闭合）
+
+- **量了再信**：`graph interfaces --members`（整组 SCC 导出签名一次输出）+ `signature_text`（按 line_range 读源、body-bearing 剥离函数体）已实现，透传 single/`--deps-of`/`--members` 三模式。
+- **mobx 实测（SCC=51 文件 / 187 导出，比 41 真环保守）**：签名总计 **~4,477 token**；含函数体上界 ~37K；全源码绝对硬上界 ~65K。**三档全远低于 200K 窗口 → 「契约 agent 装得下」成立，>40x 余量，无需 SCC 子簇分契约**。
+- **Level 1**：`smoke_graph_interfaces_members_whole_scc_group` 入 nextest，**409 测试全过** + clippy -D + fmt。
+- **下一步**：Phase 2 PR-A 收尾（signature_text 已落地，可补 cmd_graph_interfaces 文档串） → PR-B（Level 2 手写契约+stub 机制自洽）→ PR-C（提示词改造 + Level 3 LLM 端到端）。详见交接文档六、实施顺序。
 
 ### Sprint F 进行中：破环（M2-SCALE-SCC）✅
 

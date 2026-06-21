@@ -83,8 +83,12 @@ Phase 1 关键实现（`cli/crates/core/src/graph/build.rs`）：
 
 ## 五、验证（先轻后重）
 
-- **Level 0（先量天花板，read-only）**：`graph interfaces --members` 对 mobx 实测 41 文件导出签名总 token——证「契约 agent 装得下」这一**未验证假设**。装不下需 SCC 内子簇分契约（另案）。**这是 Plan agent 标的最大盲点，务必先量。**
-- **Level 1（CLI 单测，无 LLM）**：circular-deps fixture 断言每导出符号 `signature_text` 正确；`--members` 一次输出 3 成员。进 `cargo nextest`。
+- **Level 0（先量天花板，read-only）✅ 已量（假设成立，>40x 余量）**：`graph interfaces --members` 实现 + mobx 实测。
+  - **实测（reexport 透传分支，根因2未修，SCC=51 文件——比 41 真环更保守）**：51 文件 / 187 导出符号 → **签名总计 ~4,477 token**（body-stripped，契约 agent 实际输入）；含完整函数体上界 ~37,134 token；51 文件全源码绝对硬上界 ~64,635 token（258 KB÷4）。
+  - **结论**：三档全部远低于 200K 上下文窗口——realistic 4.5K（>40x 余量），即便喂全部原始源码（65K）也 ~3x 余量。**「契约 agent 装得下」假设成立，无需 SCC 内子簇分契约**。契约 agent 还需输出 stub 骨架（量级与签名相当）+ contract.md，输出预算同样宽裕。
+  - **度量法/已知近似**（不影响结论，均被上界兜底）：(a) 签名按 `line_range` 取行，body-bearing 种类（Function/Class/Variable）截断到首个 `{` 剥离函数体，Interface/Enum/TypeAlias 保留全文（类型定义本身）；(b) 类方法签名未单列（class 截断到 `{` 丢方法签名，mobx 核心以函数/interface/enum 为主故影响小，class 密集 SCC 的 realistic 值会升高，但 65K 原始源码绝对上界封顶）；(c) 对象类型参数 `f(o:{...})` 的内联 `{` 会被提前截断（略低估）。
+  - **复现**：`cd /tmp/sprint-f-candidates/mobx/packages/mobx && rustmigrate init && rustmigrate graph build --root . --full && rustmigrate graph interfaces core/observable.ts --members`（读 `data.total_signature_tokens` / `total_fullrange_tokens`）。
+- **Level 1（CLI 单测，无 LLM）✅ 已补**：`smoke_graph_interfaces_members_whole_scc_group`（circular-deps 三向环整组、3 成员、`signature_text` 剥离函数体断言、token 合计）入 nextest，409 测试全过。`signature_text`/`token_estimate` 已透传 single/`--deps-of`/`--members` 三模式。
 - **Level 2（机制验证，无 LLM，最高价值先做）**：人工写 circular-deps 的 contract.md + stub 骨架 → 验 stub `cargo check` 过（契约门成立）→ 按契约填实现 → 整组 check/test 过 + `Rc::strong_count==1`（破环正确）。手写都跑不通则提示词无意义。
 - **Level 3（LLM 端到端，仅 circular-deps 3 文件真环，M2-SCALE-SCC 已用整组方式跑通过）**：新逐文件流程重跑——契约 agent 出 stub（check 过）→ 3 member agent 并行填 → 整组 check/test/clippy 全过 + Rc::strong_count 断言。**断点续跑**：中断在 2/3 文件，重跑验证只重派第 3 个。
 - 全程 `just ci`。mobx 41 文件 LLM 实跑留 Phase 2 之后（需先修根因2 + Level 0 确认契约上限）。
@@ -104,7 +108,7 @@ Phase 1 关键实现（`cli/crates/core/src/graph/build.rs`）：
 5. 改提示词前重读 `docs/learnings/agent-skill-prompt-guide.md`。
 
 ## 八、关键风险（Plan agent 对抗结论）
-- 契约 agent 上限未量化 → Level 0 先验。
+- ~~契约 agent 上限未量化 → Level 0 先验。~~ **✅ 已量化解除**：mobx 51 文件 SCC 签名 ~4.5K token，>40x 余量（见五.Level 0）。最大盲点已闭合。
 - 契约缺编译保证 → **stub-first 解决**（最重要加固，别退回纯 .md 契约）。
 - 共享写面并发撕裂 → 全冻结解决。
 - 多候选组合爆炸 → 上移契约层。

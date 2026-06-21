@@ -1491,6 +1491,62 @@ fn smoke_graph_interfaces_deps_of_nonexistent_target_errors() {
     });
 }
 
+// === graph interfaces --members 整组模式（Phase 2 契约 agent 输入）===
+
+#[test]
+fn smoke_graph_interfaces_members_whole_scc_group() {
+    // circular-deps: {emitter, event-bus, handler} 三向引用环折叠为一个 SCC 组。
+    // --members 以任一成员定位整组，一次输出全组导出签名（含 signature_text + token 合计）。
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("circular-deps"), tmp.path());
+    with_cwd(tmp.path(), || {
+        build_graph_for_query();
+        let (code, json) = run(&["graph", "interfaces", "emitter.ts", "--members"]);
+        assert_eq!(code, 0, "graph interfaces --members 应成功: {json}");
+        assert_eq!(json["status"], "ok");
+
+        let data = &json["data"];
+        assert_eq!(data["is_cycle"], true, "三向环应为 cycle: {data}");
+        assert_eq!(data["member_count"], 3, "环应含 3 成员: {data}");
+
+        // 全组成员模块名应覆盖三文件。
+        let members = data["members"].as_array().unwrap();
+        let modules: Vec<&str> = members
+            .iter()
+            .map(|m| m["module"].as_str().unwrap())
+            .collect();
+        for f in ["emitter.ts", "event-bus.ts", "handler.ts"] {
+            assert!(
+                modules.iter().any(|m| m.contains(f)),
+                "成员应含 {f}: {modules:?}"
+            );
+        }
+
+        // signature_text 应被提取（--root src 下经 source_root 回退候选读到源文件），
+        // Emitter 类签名应剥离函数体为 `export class Emitter`。
+        let emitter = members
+            .iter()
+            .find(|m| m["module"].as_str().unwrap().contains("emitter.ts"))
+            .unwrap();
+        let exports = emitter["exports"].as_array().unwrap();
+        let cls = exports.iter().find(|e| e["name"] == "Emitter").unwrap();
+        assert_eq!(
+            cls["signature_text"].as_str().unwrap(),
+            "export class Emitter",
+            "class 签名应剥离函数体: {cls}"
+        );
+
+        // 整组 token 合计：签名 <= 全文上界，且均为正数。
+        let sig = data["total_signature_tokens"].as_u64().unwrap();
+        let full = data["total_fullrange_tokens"].as_u64().unwrap();
+        assert!(sig > 0, "签名 token 合计应为正: {data}");
+        assert!(
+            sig <= full,
+            "签名 token 应 <= 全文上界: sig={sig} full={full}"
+        );
+    });
+}
+
 // === graph export 测试 ===
 
 #[test]
