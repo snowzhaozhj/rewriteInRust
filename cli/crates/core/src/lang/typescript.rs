@@ -47,7 +47,17 @@ impl LanguageAdapter for TypeScriptAdapter {
 
     fn can_handle(&self, path: &Path) -> bool {
         let name = path.file_name().unwrap_or_default().to_string_lossy();
-        (name.ends_with(".ts") || name.ends_with(".tsx")) && !name.ends_with(".d.ts")
+        // 排除 .d.ts（类型声明）与 .test/.spec（测试文件）——均非迁移源：测试随源码以
+        // Rust `#[cfg(test)]`/`tests/` 重写（设计 09 §507），不作为独立迁移单元；设计 06
+        // 的 exclude 默认亦含 `src/**/*.test.ts`。
+        // TODO: 用户自定义 exclude glob（ProjectConfig.exclude）尚未在 collect_source_files
+        // 应用，excluded_imports 输出（设计 04 §5.7.4）亦未实现 —— 独立任务。
+        (name.ends_with(".ts") || name.ends_with(".tsx"))
+            && !name.ends_with(".d.ts")
+            && !name.ends_with(".test.ts")
+            && !name.ends_with(".test.tsx")
+            && !name.ends_with(".spec.ts")
+            && !name.ends_with(".spec.tsx")
     }
 
     fn resolve_extensions(&self) -> &[&str] {
@@ -1508,5 +1518,10 @@ class Service {
         assert!(!adapter.can_handle(Path::new("src/utils.d.ts")));
         assert!(!adapter.can_handle(Path::new("src/main.rs")));
         assert!(!adapter.can_handle(Path::new("src/app.py")));
+        // 测试文件非迁移源，应排除
+        assert!(!adapter.can_handle(Path::new("src/utils.test.ts")));
+        assert!(!adapter.can_handle(Path::new("src/utils.spec.ts")));
+        assert!(!adapter.can_handle(Path::new("src/Button.test.tsx")));
+        assert!(!adapter.can_handle(Path::new("src/Button.spec.tsx")));
     }
 }

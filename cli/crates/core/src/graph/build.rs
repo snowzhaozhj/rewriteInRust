@@ -894,6 +894,24 @@ fn resolve_import(
         return Some(normalized);
     }
 
+    // TS ESM（NodeNext/Node16）规范：相对 import 须带 `.js`/`.mjs`/`.cjs`/`.jsx`
+    // 扩展名，但实际指向同名 `.ts`/`.tsx` 源文件。strip JS 扩展名后按源扩展名重试，
+    // 否则现代 ESM TypeScript 项目（如 microsoft/node-jsonc-parser）的 import 边会全部
+    // 漏掉——依赖图断裂、误判无环、sprint 排序与门禁连带失效。
+    let js_stripped = normalized
+        .strip_suffix(".js")
+        .or_else(|| normalized.strip_suffix(".mjs"))
+        .or_else(|| normalized.strip_suffix(".cjs"))
+        .or_else(|| normalized.strip_suffix(".jsx"));
+    if let Some(base) = js_stripped {
+        for ext in extensions {
+            let with_ext = format!("{base}.{ext}");
+            if file_set.contains(&with_ext) {
+                return Some(with_ext);
+            }
+        }
+    }
+
     // 按 adapter 提供的扩展名生成候选：{path}.ext, {path}/index.ext
     for ext in extensions {
         // normalized 为空 = import 解析到 src 根目录（如 `__tests__/x.ts` 的 `from ".."`）。
@@ -1097,6 +1115,33 @@ mod tests {
         assert_eq!(
             resolve_import("./Button", "components/App.tsx", &files, TS_EXTS),
             Some("components/Button.tsx".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_import_js_extension_maps_to_ts() {
+        // TS ESM（NodeNext）：`./scanner.js` 实际指向 `scanner.ts` 源文件。
+        let files = file_set(&["impl/scanner.ts"]);
+        assert_eq!(
+            resolve_import("./scanner.js", "impl/parser.ts", &files, TS_EXTS),
+            Some("impl/scanner.ts".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_import_mjs_cjs_jsx_extensions_map_to_source() {
+        let files = file_set(&["a.ts", "b.ts", "C.tsx"]);
+        assert_eq!(
+            resolve_import("./a.mjs", "root.ts", &files, TS_EXTS),
+            Some("a.ts".to_string())
+        );
+        assert_eq!(
+            resolve_import("./b.cjs", "root.ts", &files, TS_EXTS),
+            Some("b.ts".to_string())
+        );
+        assert_eq!(
+            resolve_import("./C.jsx", "root.ts", &files, TS_EXTS),
+            Some("C.tsx".to_string())
         );
     }
 
