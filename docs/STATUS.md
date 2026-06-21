@@ -7,6 +7,7 @@
 - **Milestone**: M1 MVP ✅ → **M2 质量提升**
 - **Phase**: M2 Sprint D/E + SCC 破环（PR #22/#23/#24/#25 **均已合并**）→ **Sprint F 验收进行中**
 - **测试基线**: 407 测试 / clippy -D / deny / fmt / shellcheck 全绿（含本轮新增 ESM 接线测试）
+- **🔜 下一步大改（已规划，待新会话实施）**：Phase 2「SCC 逐成员文件翻译 + 整组编译门禁」——详见 **[docs/phase2-scc-per-file-handoff.md](phase2-scc-per-file-handoff.md)**（含三根因链、stub-first 契约设计、改动清单、分级验证、续接指引）。
 
 ### Sprint F 进行中：破环（M2-SCALE-SCC）✅
 
