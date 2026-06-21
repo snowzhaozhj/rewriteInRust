@@ -90,22 +90,22 @@ Phase 1 关键实现（`cli/crates/core/src/graph/build.rs`）：
   - **已知 scope 边界**（记 TODO，非本次）：函数重载（无 body 的 `function_signature` 当前 walk_ast 不提取）、匿名 `export default`（无 name 当前不入图）、class 方法签名未单列（方法是独立节点、通常非 exported）。mobx 核心以函数/interface/enum 为主，不受影响。
   - **复现**：`cd /tmp/sprint-f-candidates/mobx/packages/mobx && rustmigrate init && rustmigrate graph build --root . --full && rustmigrate graph interfaces core/observable.ts --members`（读 `data.total_signature_tokens`）。
 - **Level 1（单测，无 LLM）✅ 已补**：core `signature_extraction_by_kind`（AST 按种类提取）+ `structure_hash_sensitive_to_signature`（增量正确性）+ `persist_round_trip_preserves_signature`；CLI e2e `smoke_graph_interfaces_members_whole_scc_group`（整组读图签名）。412 测试全过。
-- **Level 2（机制验证，无 LLM，最高价值先做）**：人工写 circular-deps 的 contract.md + stub 骨架 → 验 stub `cargo check` 过（契约门成立）→ 按契约填实现 → 整组 check/test 过 + `Rc::strong_count==1`（破环正确）。手写都跑不通则提示词无意义。
+- **Level 2（机制验证，无 LLM）✅ 已证（PR-B）**：产物 `docs/examples/scc-stub-first-contract/`（`contract.md` 6 字段 + `stub/` 契约门 + `impl/` 实现门）。stub 骨架 `cargo check` 过=契约门成立；impl 由 stub 逐文件填 `todo!()`（签名逐字节一致，diff 仅 body 变化），整组 `cargo test`(2 passed)/`clippy -D` 过 + `Rc::strong_count(&emitter)==1`（Handler 持 `Weak` 破环）。**机制自洽可行**。
 - **Level 3（LLM 端到端，仅 circular-deps 3 文件真环，M2-SCALE-SCC 已用整组方式跑通过）**：新逐文件流程重跑——契约 agent 出 stub（check 过）→ 3 member agent 并行填 → 整组 check/test/clippy 全过 + Rc::strong_count 断言。**断点续跑**：中断在 2/3 文件，重跑验证只重派第 3 个。
 - 全程 `just ci`。mobx 41 文件 LLM 实跑留 Phase 2 之后（需先修根因2 + Level 0 确认契约上限）。
 
 ## 六、实施顺序（可分 PR）
 
 1. **PR-A（CLI）**：`graph interfaces` signature_text + `--members` + 单测（Level 0/1）。独立可合。
-2. **PR-B（机制）**：Level 2 手写契约+stub 验证机制自洽（产出 circular-deps 契约样例进 fixtures/docs）。
-3. **PR-C（提示词）**：translator/run/workflow 改造 + MDR + Level 3 LLM 端到端。
+2. **PR-B（机制）✅ 已完成**：Level 2 手写契约+stub 验证机制自洽（产物 `docs/examples/scc-stub-first-contract/`）。
+3. **PR-C（提示词）⬅ 下一步**：translator/run/workflow 改造 + MDR + Level 3 LLM 端到端。
 
 ## 七、续接指引（新会话开工步骤）
 
 1. 读本文 + `docs/STATUS.md`（Sprint F 段含本轮记录）。
 2. 确认 Phase 1 PR #26 是否已合并、`feat/m2-graph-reexport-transparency` 是否已开 PR/合并；据此决定基线分支（建议从 reexport 分支或其合并后的 master 切新分支 `feat/m2-scc-per-file-translation`）。
 3. ~~先做 Level 0~~ **✅ 已完成**：mobx 51 文件 SCC 签名 ~4.3K token，>40x 余量（见五.Level 0）。
-4. ~~PR-A signature_text（选项 A）~~ **✅ 已落地**：signature 进图（AST 提取，见八.5 架构修订）+ `--members`。下一步 PR-B（Level 2）。
+4. ~~PR-A signature_text~~ **✅ 已落地**（#27/#28 合并）；~~PR-B Level 2 机制验证~~ **✅ 已证**（`docs/examples/scc-stub-first-contract/`）。**下一步 PR-C**（提示词改造 + Level 3 LLM 端到端）。
 5. 改提示词前重读 `docs/learnings/agent-skill-prompt-guide.md`。
 
 ## 八、关键风险（Plan agent 对抗结论）

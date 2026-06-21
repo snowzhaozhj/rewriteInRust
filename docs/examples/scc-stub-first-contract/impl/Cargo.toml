@@ -1,0 +1,10 @@
+# 实现门样例：由 stub 骨架逐文件填 todo!() 得到，签名与 stub 逐字节一致。
+# 验证：`cargo check && cargo test` 通过 == 实现门成立；测试断言 Rc::strong_count==1 == 破环正确。
+[package]
+name = "circular-deps-group-impl"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
