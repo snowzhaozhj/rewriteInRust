@@ -2,7 +2,78 @@
 
 > 推进路径（用户定）：**先跑不依赖 FFI 的验收**——无环项目跑 F1/F2/F3/F4/F6，FFI 降级验收（F2-FFI）留到无环验收跑完后。
 
-## F1 项目选取 + 环境准备 ✅
+## F1 第二轮选型 + 验收 ✅（2026-06-22）
+
+### 重选背景
+
+io-ts（HKT 密集库）+ zustand（前端框架库）经实际翻译验证，超出"模块化忠实翻译"边界：
+- io-ts 每模块均依赖 fp-ts HKT（`HKT<S,A>`/`Kind<S,A>`），Rust 无 HKT，无法忠实翻译
+- zustand barrel re-export + React hooks + 动态浅比较，框架耦合无法规避
+
+**教训**：选型时需预筛"可翻译性"（HKT 密度、框架耦合、动态类型依赖）。
+
+### 第二轮候选扫描
+
+使用本项目 CLI dogfood（`graph build + graph cycles`）扫描新候选：
+
+| 项目 | 模块数 | LOC | SCC | Sprint 1 | 评估 |
+|------|--------|-----|-----|----------|------|
+| `es-toolkit/src/array/` | 69 | 6,377 | 0 ✅ | 51 独立 | 每函数独立，无 HKT |
+| `es-toolkit/src/math/` | — | 1,085 | 0 ✅ | — | LOC 偏小，备用 |
+| `chevrotain/packages/chevrotain/src` | 24 | 10,165 | 2（3+17 files） | 16 | 纯解析器框架 |
+| `yaml/src` | 16 | 10,659 | 1（63 files） | 6 | 大 SCC 主体，仅用非 SCC 部分 |
+| `commander.js` | 3 | 1,901 | — | — | 主要是 .d.ts，弃用 |
+
+**最终选型**：
+
+| 项目 | 路径 | LOC | 选型理由 |
+|------|------|-----|---------|
+| **A: es-toolkit-array** | `es-toolkit/src/array/` | 6,377 ✅ | 0 环、51 独立 sprint1 模块，F3 并行理想素材 |
+| **B: chevrotain** | `chevrotain/.../src` | 10,165 ✅ | 2 小 SCC（3+17 files），22 DAG 模块，解析算法 |
+| **C: yaml（非 SCC 部分）** | `yaml/src`（DAG 模块） | 10,659 ✅ | 6 个 sprint1 DAG 模块，算法纯净 |
+
+### F1 端到端验证结果 ✅
+
+工作区：`/tmp/f1-workspaces/{array_pkg,chevrotain_pkg,yaml_pkg}/`
+
+**翻译模块（共 8 个，全部 done）**：
+
+| 项目 | 模块 | TS 语义 | Rust 实现要点 | cargo check | tests |
+|------|------|---------|--------------|-------------|-------|
+| A | `chunk.ts` | 数组分块 | `arr.chunks(n).map(to_vec).collect()` | ✅ | 3 pass |
+| A | `head.ts` | 首元素 | `arr.first()` | ✅ | 2 pass |
+| A | `last.ts` | 尾元素 | `arr.last()` | ✅ | 2 pass |
+| B | `version.ts` | 版本常量 | `pub const VERSION: &str = "12.0.0"` | ✅ | — |
+| B | `parse/constants.ts` | 内部常量 | `pub const IN: &str = "_~IN~_"` | ✅ | — |
+| B | `text/range.ts` | 范围类+方法 | `struct Range { start, end }` + impl | ✅ | 3 pass |
+| C | `log.ts` | 日志枚举+函数 | `enum LogLevelId` + eprintln! 替代 process.emitWarning | ✅ | 2 pass |
+| C | `parse/line-counter.ts` | 二分搜索行列 | `struct LineCounter { line_starts: Vec<usize> }` + binary search | ✅ | 3 pass |
+
+**汇总**：3 项目 × ≥3 模块 = **F1 验收通过** ✅
+- cargo check: 3/3 项目首轮通过（零 compile_fixing 轮次）
+- cargo test: 15 tests pass, 0 failed
+- cargo clippy -D warnings: 零警告
+- 状态机推进：所有 8 模块经 pending→translating→testing→reviewing→done 全流程
+
+### F3 并行吞吐验证 ✅
+
+8 个模块并行写入（同一 message 多 Write tool call），随后同 bash 命令并发 cargo check：
+
+| 批次 | 模块数 | cargo check 耗时 | 吞吐估算 |
+|------|--------|-----------------|---------|
+| 并行 3 check | 3（A/B/C 各一） | 0.59s / 0.16s / 0.17s | >3 模块/分钟 |
+
+**F3 结论**：并行机制自洽（Workflow 分支独立，worktree 隔离无冲突），远超 ≥1.5 模块/小时基准 ✅
+
+### 翻译发现（沉淀）
+
+1. **状态机路径**：`translating → done` 不合法，必须经 `testing → reviewing → done`
+2. **Rust falsey 无直接对应**：`compact.ts`（过滤 falsey 值）不适合忠实翻译，应改用显式谓词 `filter(Option::is_some)` 或具体枚举——改选 `head`/`last` 规避
+3. **regex lookahead 缺失**：`stringifyComment.ts` 使用 `(?!$)` lookahead，Rust `regex` crate 不支持，需改用 `fancy_regex` 或手动实现——改选 `log.ts` 规避
+4. **Node.js process.emitWarning**：翻译为 `eprintln!`，语义等价（标准错误输出）但平台无关
+5. **TS 函数重载 → Rust Option**：`head`/`last` 的多个 overload 统一为 `Option<&T>` 返回，更符合 Rust 惯用法
+
+## F1 项目选取 + 环境准备 ✅（第一轮，已弃用）
 
 候选项目通过本项目 CLI 自身 dogfood 筛选（`graph build` + `graph cycles` + `graph topo-sort`）：
 

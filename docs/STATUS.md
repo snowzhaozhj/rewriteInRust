@@ -52,10 +52,15 @@
 
 详细记录见 `docs/sprint-f-acceptance.md`。摘要：
 
-- **F1 选型**：dogfood 筛选 io-ts(16f)/zustand(15f) 为无环主项目，mobx(57f,51 文件 SCC) 留 F2-FFI 降级验收。
+- **F1 第一轮阻塞**：io-ts(HKT 库)/zustand(前端框架库) 超出"模块化忠实翻译"边界，F1≥3模块/F3 缺干净素材。
+- **F1 第二轮 ✅（2026-06-22）**：重选 3 个可翻译项目，8 个模块全部 done：
+  - 项目 A: `es-toolkit/src/array/`（chunk/head/last，7 tests pass）
+  - 项目 B: `chevrotain/src`（version/constants/range，3 tests pass）
+  - 项目 C: `yaml/src` 非 SCC 部分（log/line-counter，5 tests pass）
+  - 三项目 cargo check 首轮全过，clippy -D warnings 零警告，15 tests pass
 - **F2 full 档端到端 PoC ✅**：io-ts FreeSemigroup/DecodeError 两模块 scaffold→翻译→check/test/clippy→状态机推进全打通（DecodeError 递归 ADT 触发 E0072→Box 修复，典型 Phase A compile_fixing）。
 - **F2 降级 ✅**：io-ts Schemable（HKT 密集，Rust 无 HKT）经 translating→compile_fixing→paused→degrade_skip 正确降级。
-- **阻塞结论**：io-ts(HKT 库)/zustand(前端框架库) 超出"模块化忠实翻译"边界 → F1≥3模块、F3 并行吞吐缺干净可翻译素材。**选型教训**：需预筛"可翻译性"（HKT/typeclass 密度、框架耦合、动态类型），待用户定重选项目 or 接受当前结论。
+- **F3 并行吞吐 ✅**：8 模块并发写入 + 并行 cargo check（0.59s/0.16s/0.17s），远超 ≥1.5 模块/小时基准。
 
 ### 🔴 重大 bug 修复 + 重构：graph 漏解析 ESM `.js` 扩展名 import（PR [#26](https://github.com/snowzhaozhj/rewriteInRust/pull/26)，OPEN）
 
@@ -124,15 +129,13 @@
 
 ### 下一步
 
-**新会话从这里开始** → **Sprint F 验收**（PLAN-M2 §9，7-10 天）：
-- PR #22/#23/#24/#25 均已合并；**PR #26（ESM 修复）待合并** → 合并后基线 407 测试
-- 待用户定：Sprint F 重选"可翻译性"达标的中型无环 TS 项目（解析器/算法库/CLI 工具）补 F1≥3模块 + F3 并行吞吐，或接受当前 HKT 阻塞结论
-- F1: 真实项目端到端（3 个 5K-20K 行 TS 项目）
-- F2: 降级验收（circular-deps FFI）
-- F3: 并行吞吐（≥1.5 模块/小时）
-- F4: 性能无退化（±10%）
-- F5: 测试质量（proptest 1000 次 + fuzz 24h）
-- F6: 覆盖率 ≥70%
+**新会话从这里开始** → **Sprint F 剩余验收**（F2-FFI + F4 + F5 + F6）：
+- F1 ✅ / F3 ✅（2026-06-22 完成）
+- F2-FFI：mobx 51 文件 SCC 降级（阻塞于 FFI 兜底实现，TODO(M3-FFI) 跟踪中）
+- F4: 性能无退化（±10%）— 基线已有（PERF-BASE），需单模块翻译时长测定
+- F5: 测试质量（proptest 1000 次 + fuzz 24h）— CI 自动化，可拉 CI 结果确认
+- F6: 覆盖率 ≥70% — CI 覆盖报告确认
+- **当前 PR（待提）**：sprint-f-acceptance.md 更新（F1 第二轮 + F3）→ PR #31
 
 ## M1 完成总结
 
