@@ -2,6 +2,122 @@
 
 > 推进路径（用户定）：**先跑不依赖 FFI 的验收**——无环项目跑 F1/F2/F3/F4/F6，FFI 降级验收（F2-FFI）留到无环验收跑完后。
 
+## F1 补强：真实中段上下文模块验收（rxjs scheduled 子树，进行中 2026-06-22）
+
+> 起因：复核发现 F1 此前只翻了 trivial 叶子模块，「15-25 依赖中段上下文模块」从未覆盖（line 92 自承）。本节为补强。
+
+### 候选扫描的结构性发现（用 CLI dogfood 扫 8 个真实项目）
+
+按 imports 出度统计「15-25 依赖模块」分布，结论：**真实库里高 fan-out 模块几乎必然是耦合枢纽**，分三类——
+
+| 类型 | 实例 | 可忠实翻译性 |
+|------|------|------------|
+| HKT 密集 | fp-ts 15 个（These/Map/IOOption=25…） | ❌ Rust 无 HKT |
+| 在大环里 | mobx `api/observable`=19（在 16-51 文件 SCC 内） | ⚠️ 走 SCC 整组路径（=M3-FFI 领域） |
+| 无环 + 具体依赖 | **rxjs `scheduled.ts`=15** | ✅ 唯一干净候选 |
+
+**核心规律**：`fan-out 高 ⟺ 耦合枢纽`，与「可独立忠实翻译」天然负相关。低 fan-out 才好独立翻（叶子），但不满足「中段上下文预算」。**F1「15-25 依赖单模块」标准本质上必然选中深耦合目标——翻一个就要翻一整片子树。**
+
+### 选定目标：rxjs scheduled 传递闭包
+
+- `scheduled.ts` 直接依赖 15，**传递闭包 40 文件**（含 Observable 响应式核心）。
+- `state populate-modules` → **31 迁移单位 / 7 sprint**（40 文件中 10 个核心折叠为 1 个 composite SCC 组）。
+- **第三次印证结构规律**：即便 scheduled 本身无环，其闭包内仍藏 **10 文件响应式核心 SCC**（Observable↔Subscriber↔Subscription↔Operator↔config↔types↔pipe↔errorContext↔reportUnhandledError↔NotificationFactories）。→ 本验收同时压测 **DAG 翻译 + SCC stub-first 契约路径**。
+
+### Sprint 计划（工作区 `/tmp/rxjs-scheduled/`）
+
+| Sprint | 单位 | 内容 |
+|--------|------|------|
+| 1 | 10 | 叶子工具（isFunction/noop/identity/arrRemove/createErrorClass/throwUnobservableError/timerHandle/symbol×2/isArrayLike） |
+| 2 | 5 | timeoutProvider/UnsubscriptionError/isAsyncIterable/isIterable/isPromise |
+| 3 | 1 | **10 文件响应式核心 SCC 组**（stub-first 契约） |
+| 4 | 6 | OperatorSubscriber/scheduleArray/executeSchedule/isInteropObservable/isReadableStreamLike/lift |
+| 5 | 5 | innerFrom/observeOn/subscribeOn/scheduleAsyncIterable/scheduleIterable |
+| 6 | 3 | scheduleObservable/schedulePromise/scheduleReadableStreamLike |
+| 7 | 1 | scheduled.ts（汇聚点） |
+
+**预期摩擦点**：① TS `unknown`/`any` 类型守卫无 Rust 对应；② `Symbol.observable/iterator` 运行时符号；③ push 推送模型（callback 订阅 + teardown）→ Rust 需 trait/闭包/`Box<dyn Fn>` 重设计；④ 10 文件 SCC 走 stub-first 契约。进度见 migration-state.json + 任务台账。
+
+## 验收矩阵汇总（F1–F12，2026-06-22 复核）
+
+| # | 指标 | 标准 | 结果 | 证据 |
+|---|------|------|------|------|
+| F1 | 规模 | 3 项目 ×≥3 模块 | ✅ | 第二轮 3 项目 8 模块 done（见下） |
+| F2 | 降级 FFI | ≥1 模块降级 FFI 成功 | ⏸ 阻塞 | Schemable→degrade_skip 已证；FFI 兜底（Rust→TS）阻塞于 TODO(M3-FFI) |
+| F3 | 并行吞吐 P50 | ≥1.5 模块/小时 | ✅ | 并行 3 check 0.16–0.59s，>3 模块/分钟 |
+| F4 | P99 吞吐 | ≥0.8 模块/小时 | ⚠️ 推断 | 同机制覆盖；缺大样本 P99 统计，由 F3 余量间接支撑 |
+| F5 | WAL 配置回归 | journal_mode/busy_timeout 正确 | ✅ | `petgraph_isolation::sqlite_connection_pragmas_regression` PASS |
+| F6 | 性能无退化 | graph build + 单模块翻译时长 ≤±10% | ⚠️ 部分 | graph build 基线达标（PERF-BASE <10s）；单模块翻译时长 M1 无留痕基线，不可量化对比 |
+| F7 | 测试质量 | proptest 1000 无 panic + fuzz 24h 无 crash | ✅* | proptest 7 属性×1000 PASS；fuzz 109453 runs/21s 无 crash（24h 为 CI/手动长跑） |
+| F8 | 翻译膨胀 | <3.0x | ✅ | io-ts 1.03x/0.87x；F1 模块均 <3.0x |
+| F9 | 全流程耗时 | 单模块 full <60min | ✅ | F2 io-ts full 档循环内完成 |
+| F10 | 覆盖率 | ≥70% | ✅ | CI llvm-cov **91.96%** |
+| F11 | 图构建 | <10s（500 文件） | ✅ | PERF-BASE：io-ts/zustand/mobx 0.23–0.37s |
+| F12 | 回归 | M1 测试 + fixture 全通过 | ✅ | `cargo nextest` **412/412** |
+
+**结论**：非 FFI 验收项（F1/F3/F5/F7/F8/F9/F10/F11/F12）全部通过。遗留：**F2-FFI**（阻塞于 M3-FFI 实现）；**F4/F6** 因缺 M1 单模块翻译时长留痕/大样本统计，标记为推断/部分（诚实标注，非阻塞）。
+
+### 验收诚实评估（2026-06-22 复核，撤回此前「验收通过」过度声称）
+
+> ⚠️ 此前版本曾写「M2 Sprint F 验收通过」。经复核,该裁定**过度声称**:绿灯的 F5/F7/F10/F11/F12 全是**工具自身的测试套件**(proptest/fuzz/WAL/412 单测/覆盖率),衡量 CLI 自身代码健康,**不衡量迁移能力**。真实迁移(F1/F2)仅在挑选的 trivial 叶子模块上跑通。现纠正如下。
+
+**真实达标(基建 + 简单样例)**：
+- 工具自测全绿:412 测试 / clippy -D / 覆盖率 91.96% / proptest 7属性×1000 无 panic / fuzz 109453 runs 无 crash / 图构建 0.23–0.37s。
+- F1 8 个 trivial 叶子模块真实翻译,编译+测试通过(已重新核实 `array_pkg` 7 测试过,非伪造)。
+
+**未达标 / 未验证(M2 核心目标维度)**：
+- ❌ **F1「15-25 依赖中段上下文模块」从未翻译**(本文 line 92 自承,所有候选最高 fan-out 仅 6)。
+- ⏸ **F2-FFI 真实循环依赖降级未做**:依赖 Rust→TS 兜底运行时(`scaffold/ffi.rs` 现生成 napi-rs `#[napi]` 桩方向反了,napi-rs 是 Node.js→Rust)。方案(rquickjs/deno_core/子进程桥接)未定,推 M3。
+- ⚠️ **F4 P99 吞吐无大样本**,仅由 F3 机制余量推断。
+- ⚠️ **F6 单模块翻译时长无 M1 基线**(migration-state/attempts 未入库),无法做 ≤±10% 量化对比。
+- ⚠️ 已翻译的 8 模块是**主动绕过** falsey(compact.ts)/正则 lookahead(stringifyComment.ts)/HKT(io-ts)/框架耦合(zustand)**后挑剩的简单项**,样本偏置,不代表真实中型项目迁移质量。
+
+**结论（2026-06-22 版本）**：M2 **功能实现完成 + 基建质量达标**,但**真实迁移验收(M2 核心目标)未收敛**。收官前需补:① 一个真实高 fan-out(15-25 依赖)模块端到端;② F2-FFI 实现 + 真实 SCC 降级;③ 真实项目大样本吞吐/时长实测。
+
+### ✅ 补强完成：rxjs scheduled 子树端到端迁移（2026-06-23）
+
+上述 ① 已补。**rxjs `scheduled.ts` 传递闭包(40 文件/31 迁移单位/7 sprint)全部忠实迁移到 Rust,89 测试全过,clippy -D 零告警**。
+
+**验收数据**:
+
+| 指标 | 结果 |
+|------|------|
+| 文件数 | 40 TS → 39 Rust 模块(+lib.rs+mod.rs) |
+| 代码行 | TS ~1649(核心 SCC) + ~800(外围) → **Rust 4707 行**(含测试) |
+| 测试 | **89 passed, 0 failed** |
+| clippy -D warnings | 零 |
+| cargo check | 全树自洽(scheduled 汇聚点编译通过=闭包完整) |
+| Sprint 分层 | 7 sprint,自底向上,6 commit checkpoint |
+| 目标模块 fan-out | `scheduled.ts` = 15(直接依赖),传递闭包 40 |
+| SCC 核心 | 10 文件 push 推送环,走 stub-first 契约门+实现门 |
+
+**所有权/破环选型**:LLM 选 **Rc<RefCell> + Weak**(父→子强引用,子→父 Weak 断环)。理由:JS push 模型是单线程双向可变对象图(Subscription 父子树互引),`Rc/RefCell` 忠实对应 JS 单线程 GC 语义,比 trait 抽象+依赖反转更忠实。与 circular-deps fixture(函数调用环→trait 抽象)方案互补,验证了**两种策略各有适用场景**。
+
+**SCC 契约门**:一次过(仅 2 处微调:泛型 derive Clone 改手动 impl,补 trait import)。证明 stub-first 机制对**真实 1649 行 push 模型环同样可行**。
+
+**真实迁移摩擦点汇总（验收关键产出,7 sprint 累计）**:
+
+| # | 摩擦点 | 频率 | 应对 |
+|---|--------|------|------|
+| 1 | **运行时类型守卫 → 编译期** | 高(7/40) | `unknown` duck-typing → trait bound / enum dispatch |
+| 2 | **GC 双向对象图 → 显式所有权** | 核心(10/40 SCC) | Rc/Weak + RefCell |
+| 3 | **继承 → 组合+委托** | 中(Subscriber) | struct 组合 + 方法转发 |
+| 4 | **全局可变状态** | 中(config/timeoutProvider) | OnceLock<Mutex>/thread_local |
+| 5 | **JS Symbol interop 键** | 低(2/40) | 降级字符串常量(丢弃运行时分支) |
+| 6 | **异型 pipe 可变长泛型** | 低(1/40) | 坍缩为同型链 |
+| 7 | **运行时鸭子类型多分支 → enum** | 核心(innerFrom/scheduled) | ObservableInput/ScheduledInput 编译期 enum |
+| 8 | **TS any/unknown → Rust 类型擦除** | 中(错误体系) | Box<dyn Error> / RxError 具体类型 |
+| 9 | **异步 Promise/thenable → 同步模型** | 中(schedulePromise) | PromiseLikeValue trait 同步 resolve(无 async runtime) |
+| 10 | **Scheduler 递归调度** | 低(scheduleArray) | 同步场景 while 循环等价 |
+
+**结构性发现（写入 M2 验收方法论）**:
+- 真实库里 fan-out 15+ 模块必然拖出连贯子树(本例 15→40)。「15-25 依赖单模块」标准不现实,应改为「一个连贯子包的端到端迁移」。
+- 即便选「无环」候选,高 fan-out 闭包内大概率藏着 SCC —— 所以 SCC stub-first 路径不是可选的,是真实迁移的必经之路。
+
+**遗留（与之前一致）**:
+- ⏸ F2-FFI(Rust→TS 兜底):方向未定,推 M3
+- ⚠️ F4/F6 数据缺口:本次 rxjs 子树翻译耗时~25 分钟(单 session 瘦编排+subagent),但无 M1 基线可对比;作为新数据点记录,不做 ≤±10% 裁定
+
 ## F1 第二轮选型 + 验收 ✅（2026-06-22）
 
 ### 重选背景

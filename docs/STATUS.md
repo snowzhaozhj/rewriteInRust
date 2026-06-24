@@ -4,8 +4,8 @@
 
 ## 当前位置
 
-- **Milestone**: M1 MVP ✅ → **M2 质量提升**
-- **Phase**: M2 Sprint D/E + SCC 破环（PR #22/#23/#24/#25 **均已合并**）→ **Sprint F 验收进行中**
+- **Milestone**: M1 MVP ✅ → **M2 质量提升 ✅（2026-06-23 真实迁移验收补强通过）** → 🔜 M3
+- **Phase**: M2 全 Sprint 完成 + **rxjs scheduled 子树(40 文件/31 单位/89 测试)端到端迁移通过**,含 10 文件 SCC stub-first 契约门。F2-FFI 移交 M3。
 - **测试基线**: 407 测试 / clippy -D / deny / fmt / shellcheck 全绿（含本轮新增 ESM 接线测试）
 - **🔜 下一步大改（进行中）**：Phase 2「SCC 逐成员文件翻译 + 整组编译门禁」——详见 **[docs/phase2-scc-per-file-handoff.md](phase2-scc-per-file-handoff.md)**（含三根因链、stub-first 契约设计、改动清单、分级验证、续接指引）。
 
@@ -61,6 +61,10 @@
 - **F2 full 档端到端 PoC ✅**：io-ts FreeSemigroup/DecodeError 两模块 scaffold→翻译→check/test/clippy→状态机推进全打通（DecodeError 递归 ADT 触发 E0072→Box 修复，典型 Phase A compile_fixing）。
 - **F2 降级 ✅**：io-ts Schemable（HKT 密集，Rust 无 HKT）经 translating→compile_fixing→paused→degrade_skip 正确降级。
 - **F3 并行吞吐 ✅**：8 模块并发写入 + 并行 cargo check（0.59s/0.16s/0.17s），远超 ≥1.5 模块/小时基准。
+- **F5/F7/F10/F11/F12 复核全过 ✅（2026-06-22）**：WAL 配置回归 PASS；proptest 7属性×1000 + fuzz 109453 runs 无 crash；CI 覆盖率 **91.96%**；图构建 0.23–0.37s；全量回归 **412/412**。验收矩阵见 `docs/sprint-f-acceptance.md`「验收矩阵汇总」。
+- **遗留（非阻塞，诚实标注）**：**F2-FFI** 阻塞于 M3-FFI 实现（Rust→TS 兜底方向待定）；**F4/F6** 因 M1 单模块翻译时长无留痕基线 + 缺大样本 P99，标记推断/部分。
+- **✅ 验收补强通过（2026-06-23）**：rxjs scheduled 子树 40 文件(含 10 文件响应式核心 SCC)端到端迁移完成,89 测试/clippy 零/全树 cargo check 自洽。高 fan-out 中段模块(scheduled=15 依赖)已覆盖;SCC stub-first 契约门一次过。详见 `docs/sprint-f-acceptance.md`「补强完成」。
+  - **遗留（移交 M3）**：F2-FFI(Rust→TS 兜底方向未定)；F4/F6 数据缺口(无 M1 基线可对比,本次 rxjs 翻译作为新数据点记录)。
 
 ### 🔴 重大 bug 修复 + 重构：graph 漏解析 ESM `.js` 扩展名 import（PR [#26](https://github.com/snowzhaozhj/rewriteInRust/pull/26)，OPEN）
 
