@@ -21,8 +21,9 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::error::{MigrateError, Result};
-use crate::graph::build::build_graph_ts;
+use crate::graph::build::build_graph_for_lang;
 use crate::stats::loc::count_loc;
+use crate::types::common::SourceLang;
 use crate::types::graph::NodeType;
 
 /// 函数/控制流计数手段（JSON 序列化为 kebab-case，与历史输出一致）。
@@ -112,12 +113,17 @@ pub fn compare_structure(source_root: &Path, rust_root: &Path) -> Result<Compare
     })
 }
 
-/// 度量源码侧（TS）：tokei 取 code 行；tree-sitter 取 Function 节点数与控制流嵌套。
+/// 度量源码侧：tokei 取 code 行；tree-sitter 取 Function 节点数与控制流嵌套。
 fn measure_source(root: &Path) -> Result<StructureMetrics> {
-    let loc = count_loc(root)?; // 目录不存在在此返回 FileNotFound
-    let graph = build_graph_ts(root)?;
+    measure_source_for_lang(root, SourceLang::TypeScript)
+}
+
+/// 按指定语言度量源码侧。
+fn measure_source_for_lang(root: &Path, lang: SourceLang) -> Result<StructureMetrics> {
+    let loc = count_loc(root)?;
+    let graph = build_graph_for_lang(root, lang)?;
     let functions = graph.nodes_by_type(NodeType::Function).len();
-    let max_nesting = ts_max_nesting(root)?;
+    let max_nesting = source_max_nesting(root, lang)?;
     Ok(StructureMetrics {
         root: root.to_string_lossy().into_owned(),
         code: loc.code,
@@ -152,23 +158,34 @@ fn measure_rust(root: &Path) -> Result<StructureMetrics> {
 
 // === 源码侧（tree-sitter）控制流嵌套 ===
 
-/// 计算源码目录下所有 TS 文件的最大控制流嵌套层级（取全目录最大值）。
-fn ts_max_nesting(root: &Path) -> Result<usize> {
+/// 计算源码目录下所有源文件的最大控制流嵌套层级（取全目录最大值）。
+fn source_max_nesting(root: &Path, lang: SourceLang) -> Result<usize> {
     use tree_sitter::Parser;
     let mut parser = Parser::new();
+    let (grammar, control_flow_fn): (_, fn(&str) -> bool) = match lang {
+        SourceLang::TypeScript => (
+            tree_sitter_typescript::language_typescript(),
+            is_ts_control_flow,
+        ),
+        _ => {
+            return Err(MigrateError::NotImplemented(format!(
+                "源码嵌套深度分析尚未支持: {lang}"
+            )))
+        }
+    };
     parser
-        .set_language(&tree_sitter_typescript::language_typescript())
-        .map_err(|e| MigrateError::Config(format!("tree-sitter TypeScript 语法加载失败: {e}")))?;
+        .set_language(&grammar)
+        .map_err(|e| MigrateError::Config(format!("tree-sitter 语法加载失败: {e}")))?;
 
     let mut max = 0usize;
-    for path in collect_ts_files(root)? {
+    for path in collect_source_files(root, lang)? {
         let Ok(src) = std::fs::read_to_string(&path) else {
             continue;
         };
         let Some(tree) = parser.parse(&src, None) else {
             continue;
         };
-        max = max.max(ts_node_nesting(tree.root_node(), 0));
+        max = max.max(node_nesting(tree.root_node(), 0, control_flow_fn));
     }
     Ok(max)
 }
@@ -189,8 +206,8 @@ fn is_ts_control_flow(kind: &str) -> bool {
 /// 递归计算 AST 子树的控制流最大嵌套深度。
 ///
 /// 遇到控制流节点深度 +1；非控制流节点透传当前深度。返回子树内出现过的最大深度。
-fn ts_node_nesting(node: tree_sitter::Node, depth: usize) -> usize {
-    let here = if is_ts_control_flow(node.kind()) {
+fn node_nesting(node: tree_sitter::Node, depth: usize, is_control_flow: fn(&str) -> bool) -> usize {
+    let here = if is_control_flow(node.kind()) {
         depth + 1
     } else {
         depth
@@ -198,7 +215,7 @@ fn ts_node_nesting(node: tree_sitter::Node, depth: usize) -> usize {
     let mut max = here;
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        max = max.max(ts_node_nesting(child, here));
+        max = max.max(node_nesting(child, here, is_control_flow));
     }
     max
 }
@@ -237,15 +254,22 @@ fn collect_rust_files(root: &Path) -> Result<Vec<std::path::PathBuf>> {
     collect_by_ext(root, &["rs"])
 }
 
-/// 收集 TS 源文件（`.ts` / `.tsx`，排除 `.d.ts`）。
-fn collect_ts_files(root: &Path) -> Result<Vec<std::path::PathBuf>> {
-    let mut files = collect_by_ext(root, &["ts", "tsx"])?;
-    files.retain(|p| {
-        !p.file_name()
-            .map(|n| n.to_string_lossy().ends_with(".d.ts"))
-            .unwrap_or(false)
-    });
-    Ok(files)
+/// 按语言收集源文件。
+fn collect_source_files(root: &Path, lang: SourceLang) -> Result<Vec<std::path::PathBuf>> {
+    match lang {
+        SourceLang::TypeScript => {
+            let mut files = collect_by_ext(root, &["ts", "tsx"])?;
+            files.retain(|p| {
+                !p.file_name()
+                    .map(|n| n.to_string_lossy().ends_with(".d.ts"))
+                    .unwrap_or(false)
+            });
+            Ok(files)
+        }
+        SourceLang::Python => collect_by_ext(root, &["py"]),
+        SourceLang::C => collect_by_ext(root, &["c", "h"]),
+        SourceLang::Go => collect_by_ext(root, &["go"]),
+    }
 }
 
 // === Rust 侧轻量词法扫描 ===

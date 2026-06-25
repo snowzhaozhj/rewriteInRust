@@ -85,7 +85,7 @@ impl LanguageAdapter for TypeScriptAdapter {
             imports: Vec::new(),
             calls: Vec::new(),
             exported_names: std::collections::HashSet::new(),
-            constructor_bindings: std::collections::HashMap::new(),
+            instance_type_bindings: std::collections::HashMap::new(),
         };
 
         // 第一遍：收集 export 名称
@@ -120,8 +120,61 @@ impl LanguageAdapter for TypeScriptAdapter {
             imports: ctx.imports,
             calls: ctx.calls,
             exported_names: ctx.exported_names,
-            constructor_bindings: ctx.constructor_bindings,
+            instance_type_bindings: ctx.instance_type_bindings,
         })
+    }
+
+    fn resolve_import(
+        &self,
+        specifier: &str,
+        current_file: &str,
+        exists: &dyn Fn(&str) -> bool,
+    ) -> Option<String> {
+        if !specifier.starts_with('.') {
+            return None;
+        }
+
+        let current_dir = Path::new(current_file).parent().unwrap_or(Path::new(""));
+        let resolved = current_dir.join(specifier);
+        let normalized = crate::graph::build::normalize_path(&resolved)?;
+
+        if exists(&normalized) {
+            return Some(normalized);
+        }
+
+        let resolve_exts = self.resolve_extensions();
+        let strip_exts = self.import_specifier_extensions();
+
+        for strip_ext in strip_exts {
+            if let Some(base) = normalized.strip_suffix(strip_ext) {
+                for ext in resolve_exts {
+                    let with_ext = format!("{base}.{ext}");
+                    if exists(&with_ext) {
+                        return Some(with_ext);
+                    }
+                }
+                break;
+            }
+        }
+
+        for ext in resolve_exts {
+            if !normalized.is_empty() {
+                let with_ext = format!("{normalized}.{ext}");
+                if exists(&with_ext) {
+                    return Some(with_ext);
+                }
+            }
+            let barrel = if normalized.is_empty() {
+                format!("index.{ext}")
+            } else {
+                format!("{normalized}/index.{ext}")
+            };
+            if exists(&barrel) {
+                return Some(barrel);
+            }
+        }
+
+        None
     }
 
     fn detect_tier(&mut self, source: &str) -> crate::types::state::ModuleTier {
@@ -373,7 +426,7 @@ struct AnalysisContext<'a> {
     calls: Vec<CallInfo>,
     exported_names: std::collections::HashSet<String>,
     /// 本地构造绑定（`const x = new Foo()` → `"x" → "Foo"`）。
-    constructor_bindings: std::collections::HashMap<String, String>,
+    instance_type_bindings: std::collections::HashMap<String, String>,
 }
 
 // === Export 收集 ===
@@ -617,7 +670,7 @@ fn is_function_value(kind: &str) -> bool {
 
 /// 从 `lexical_declaration`/`variable_declaration` 中提取：
 /// 1. 函数表达式绑定（`const f = () => {}`）→ Function 节点
-/// 2. 构造绑定（`const x = new Foo()`）→ constructor_bindings 映射
+/// 2. 构造绑定（`const x = new Foo()`）→ instance_type_bindings 映射
 fn process_var_declaration(node: Node, ctx: &mut AnalysisContext) {
     let count = node.child_count();
     for i in 0..count {
@@ -674,7 +727,7 @@ fn process_var_declaration(node: Node, ctx: &mut AnalysisContext) {
                 let class_name = text(constructor, ctx.source);
                 if !class_name.is_empty() {
                     let var_name = text(name_node, ctx.source);
-                    ctx.constructor_bindings.insert(var_name, class_name);
+                    ctx.instance_type_bindings.insert(var_name, class_name);
                 }
             }
         }
@@ -1560,9 +1613,9 @@ class Service {
         );
         // 方法体内的 constructor binding 不应泄漏到文件级
         assert!(
-            result.constructor_bindings.is_empty(),
-            "方法体内 const svc = new OtherService() 不应泄漏到 constructor_bindings: {:?}",
-            result.constructor_bindings
+            result.instance_type_bindings.is_empty(),
+            "方法体内 const svc = new OtherService() 不应泄漏到 instance_type_bindings: {:?}",
+            result.instance_type_bindings
         );
     }
 

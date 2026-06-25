@@ -9,8 +9,8 @@ use crate::types::common::SourceLang;
 pub fn create_adapter(lang: SourceLang) -> Result<Box<dyn LanguageAdapter>> {
     match lang {
         SourceLang::TypeScript => Ok(Box::new(TypeScriptAdapter::new()?)),
-        _ => Err(MigrateError::Config(format!(
-            "language adapter not yet implemented: {lang}"
+        _ => Err(MigrateError::NotImplemented(format!(
+            "语言适配器尚未实现: {lang}"
         ))),
     }
 }
@@ -30,6 +30,6 @@ mod tests {
         let result = create_adapter(SourceLang::Python);
         assert!(result.is_err());
         let msg = result.as_ref().err().unwrap().to_string();
-        assert!(msg.contains("not yet implemented"));
+        assert!(msg.contains("尚未实现"));
     }
 }

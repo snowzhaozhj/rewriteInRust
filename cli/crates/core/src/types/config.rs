@@ -111,7 +111,7 @@ pub struct MigrateConfig {
 #[serde(default)]
 pub struct ProjectConfig {
     pub name: String,
-    pub source_language: SourceLang,
+    pub source_language: Option<SourceLang>,
     pub source_root: String,
     pub rust_root: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -128,18 +128,39 @@ impl Default for ProjectConfig {
     fn default() -> Self {
         Self {
             name: String::new(),
-            source_language: SourceLang::TypeScript,
+            source_language: None,
             source_root: "src".to_string(),
             rust_root: "rust-src".to_string(),
             source_commit: None,
-            exclude: vec![
-                "node_modules".to_string(),
-                "dist".to_string(),
-                ".git".to_string(),
-            ],
+            exclude: vec![".git".to_string()],
             adapter_path: None,
         }
     }
+}
+
+/// 按语言返回默认排除目录。
+pub fn default_excludes_for_lang(lang: SourceLang) -> Vec<String> {
+    let mut excludes = vec![".git".to_string()];
+    match lang {
+        SourceLang::TypeScript => {
+            excludes.extend(["node_modules".to_string(), "dist".to_string()]);
+        }
+        SourceLang::Python => {
+            excludes.extend([
+                "__pycache__".to_string(),
+                ".venv".to_string(),
+                "venv".to_string(),
+                ".mypy_cache".to_string(),
+            ]);
+        }
+        SourceLang::C => {
+            excludes.extend(["build".to_string(), ".obj".to_string()]);
+        }
+        SourceLang::Go => {
+            excludes.push("vendor".to_string());
+        }
+    }
+    excludes
 }
 
 /// 迁移策略配置。

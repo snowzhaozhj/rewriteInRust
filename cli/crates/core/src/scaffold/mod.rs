@@ -8,5 +8,6 @@ pub use degrade_report::{
     generate_degrade_report, DegradeEstimate, DegradeOptions, DegradeReport, ErrorSnippet,
     FailureCategory,
 };
+#[allow(deprecated)]
 pub use ffi::{count_exports, generate_ffi_binding, select_cycle_break_point, FfiInterface};
 pub use template::{scaffold_project, scaffold_project_with_bin};

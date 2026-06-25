@@ -5,23 +5,37 @@
 ## 当前位置
 
 - **Milestone**: M1 ✅ → M2 ✅ → **M3 多语言支持（Python 优先）**
-- **阶段**: M3 规划中，尚未开始实施
-- **测试基线**: 407 测试 / clippy -D / deny / fmt / shellcheck 全绿
-- **CI 覆盖率**: 91.96%
-- **最新 PR**: [#32](https://github.com/snowzhaozhj/rewriteInRust/pull/32)（M2 Sprint F rxjs 验收）
+- **阶段**: M3 Sprint A（多语言泛化 + 遗留清理）✅ → 待合并
+- **测试基线**: 415 测试 / clippy -D / deny / fmt / shellcheck 全绿
+- **CI 覆盖率**: 待更新
+- **最新 PR**: [#34](https://github.com/snowzhaozhj/rewriteInRust/pull/34)（M3 Sprint A）
 
-### M2 遗留移交 M3
+### M2 遗留（Sprint A 已全部关闭）
 
-| 项目 | 说明 | 代码位置 |
-|------|------|---------|
-| **FFI 方向不匹配** | napi-rs 是 Node→Rust，降级需 Rust→TS。候选：rquickjs / deno_core / 子进程桥接 | `scaffold/ffi.rs` TODO(M3-FFI) |
-| **TS 特有概念泛化** | `constructor_bindings` / `ImportKind::StaticType` / `SymbolKind::Default` 需下沉到 adapter 或用通用 metadata | `lang/mod.rs` TODO(M3) |
-| **DEVIATION 4 项待 MDR** | fingerprint 提取范围、事务类型 DEFERRED、WAL pragma 未设置、exported_names 额外维度 | `docs/STATUS.md` 历史记录 |
-| **F2-FFI 验收缺口** | mobx 51 文件 SCC 降级因 FFI 方向问题未跑通 | `docs/sprint-f-acceptance.md` |
+| 项目 | 处理 |
+|------|------|
+| FFI 方向不匹配 | ✅ MDR-007：取消 FFI，degrade_skip 唯一路径 |
+| TS 特有概念泛化 | ✅ LANG-05：constructor_bindings → instance_type_bindings |
+| DEVIATION 4 项待 MDR | ✅ MDR-008：4 项偏差补录 |
+| F2-FFI 验收缺口 | ✅ MDR-007 标记为"设计变更取消" |
+
+### Sprint A 完成清单
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| LANG-01 adapter 工厂 | ✅ | `lang/registry.rs` + `create_adapter()` |
+| LANG-02 resolve_import 下沉 | ✅ | trait 新增方法，build.rs 通过 adapter 调用 |
+| LANG-03 build_graph 泛化 | ✅ | 4 个便捷函数改用工厂 + `build_graph_for_lang` |
+| LANG-04 alias 漏边修复 | ✅ | 函数调用分支补 alias_to_original 查找 |
+| LANG-05 instance_type_bindings | ✅ | constructor_bindings 改名 + 删 TODO(M3) |
+| LANG-06 配置泛化 | ✅ | source_language: Option + default_excludes_for_lang |
+| LANG-07 stats 泛化 | ✅ | collect_source_files(lang) + source_max_nesting |
+| FFI-CLOSE | ✅ | ffi.rs deprecated + MDR-007 |
+| DEV-01 DEVIATION MDR | ✅ | MDR-008 补录 4 项偏差 |
 
 ### 下一步
 
-**新会话从这里开始** → 读 `docs/PLAN-M3.md` → 按 Sprint 执行。
+**新会话从这里开始** → 读 `docs/PLAN-M3.md` → Sprint B（Python Adapter Core）。
 
 ### M3 多语言扩展点（调研结论，2026-06-24）
 

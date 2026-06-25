@@ -10,8 +10,9 @@ use std::time::Instant;
 use serde::Serialize;
 
 use crate::error::{MigrateError, Result};
+use crate::lang::registry::create_adapter;
 use crate::lang::{FileAnalysis, LanguageAdapter, SymbolKind};
-use crate::types::common::{NodeId, EXCLUDED_DIRS};
+use crate::types::common::{NodeId, SourceLang, EXCLUDED_DIRS};
 use crate::types::graph::{Dependency, EdgeSubKind, EdgeType, NodeType};
 
 use super::fingerprint::{self, ChangeLevel, FileFingerprint};
@@ -83,6 +84,7 @@ fn build_graph_inner(
 
     let mut graph = SourceGraph::new();
     let mut file_analyses: HashMap<String, FileAnalysis> = HashMap::new();
+    let mut file_adapter_map: HashMap<String, usize> = HashMap::new();
     let mut all_edges: Vec<Dependency> = Vec::new();
     let mut fingerprints: Vec<FileFingerprint> = Vec::new();
 
@@ -123,6 +125,7 @@ fn build_graph_inner(
         }
         all_edges.extend(analysis.edges.iter().cloned());
 
+        file_adapter_map.insert(rel.clone(), *adapter_idx);
         file_analyses.insert(rel, analysis);
     }
     let parse_ms = t_start.map_or(0, |t| t.elapsed().as_millis() as u64);
@@ -136,33 +139,14 @@ fn build_graph_inner(
         graph.add_edge(edge.clone());
     }
 
-    // 收集所有 adapter 的解析扩展名（去重 + 排序保证确定性）
-    let mut resolve_exts: Vec<&str> = adapters
-        .iter()
-        .flat_map(|a| a.resolve_extensions().iter().copied())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    resolve_exts.sort();
-
-    // 收集所有 adapter 的 import specifier 扩展名（如 TS ESM 的 `.js`/`.mjs`）——
-    // graph 层据此 strip 后按源扩展名重试，不内嵌任何语言特定的扩展名字面量。
-    let mut strip_exts: Vec<&str> = adapters
-        .iter()
-        .flat_map(|a| a.import_specifier_extensions().iter().copied())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    strip_exts.sort();
-
-    // 构建跨文件边（Imports + Calls）
+    // 构建跨文件边（Imports + Calls），通过 adapter 的 resolve_import 解析
     let file_set: HashSet<String> = files.iter().map(|(p, _)| make_relative(p, &root)).collect();
     add_cross_file_edges(
         &mut graph,
         &file_analyses,
         &file_set,
-        &resolve_exts,
-        &strip_exts,
+        adapters,
+        &file_adapter_map,
     );
 
     let edge_build_ms = t_edge.map_or(0, |t| t.elapsed().as_millis() as u64);
@@ -186,11 +170,15 @@ pub fn build_graph(root: &Path, adapters: &mut [Box<dyn LanguageAdapter>]) -> Re
     build_graph_inner(root, adapters, false).map(|(graph, _, _)| graph)
 }
 
+/// 按指定语言构建图。
+pub fn build_graph_for_lang(root: &Path, lang: SourceLang) -> Result<SourceGraph> {
+    let mut adapters: Vec<Box<dyn LanguageAdapter>> = vec![create_adapter(lang)?];
+    build_graph(root, &mut adapters)
+}
+
 /// 便捷函数：用默认 TypeScript adapter 构建图。
 pub fn build_graph_ts(root: &Path) -> Result<SourceGraph> {
-    let mut adapters: Vec<Box<dyn LanguageAdapter>> =
-        vec![Box::new(crate::lang::typescript::TypeScriptAdapter::new()?)];
-    build_graph(root, &mut adapters)
+    build_graph_for_lang(root, SourceLang::TypeScript)
 }
 
 /// 带性能画像的图构建：返回 `(SourceGraph, BuildProfile)`。
@@ -206,8 +194,7 @@ pub fn build_graph_profiled(
 
 /// 便捷函数：用默认 TypeScript adapter 构建图（带性能画像）。
 pub fn build_graph_ts_profiled(root: &Path) -> Result<(SourceGraph, BuildProfile)> {
-    let mut adapters: Vec<Box<dyn LanguageAdapter>> =
-        vec![Box::new(crate::lang::typescript::TypeScriptAdapter::new()?)];
+    let mut adapters: Vec<Box<dyn LanguageAdapter>> = vec![create_adapter(SourceLang::TypeScript)?];
     build_graph_profiled(root, &mut adapters)
 }
 
@@ -216,8 +203,7 @@ pub fn build_graph_ts_full(
     root: &Path,
     profile: bool,
 ) -> Result<(SourceGraph, BuildProfile, Vec<FileFingerprint>)> {
-    let mut adapters: Vec<Box<dyn LanguageAdapter>> =
-        vec![Box::new(crate::lang::typescript::TypeScriptAdapter::new()?)];
+    let mut adapters: Vec<Box<dyn LanguageAdapter>> = vec![create_adapter(SourceLang::TypeScript)?];
     build_graph_inner(root, &mut adapters, profile)
 }
 
@@ -333,6 +319,7 @@ pub fn build_graph_incremental(
 
     // 解析变更文件，判断 COSMETIC vs STRUCTURAL
     let mut file_analyses: HashMap<String, FileAnalysis> = HashMap::new();
+    let mut file_adapter_map: HashMap<String, usize> = HashMap::new();
     let mut new_fingerprints: Vec<FileFingerprint> = Vec::new();
 
     for (rel, _file_path, adapter_idx, ch, source) in &to_analyze {
@@ -361,11 +348,13 @@ pub fn build_graph_incremental(
                 }
                 ChangeLevel::Structural => {
                     structural_files.push(rel.clone());
+                    file_adapter_map.insert(rel.clone(), *adapter_idx);
                     file_analyses.insert(rel.clone(), analysis);
                 }
             }
         } else {
             // 新文件总是 STRUCTURAL
+            file_adapter_map.insert(rel.clone(), *adapter_idx);
             file_analyses.insert(rel.clone(), analysis);
         }
 
@@ -425,6 +414,7 @@ pub fn build_graph_incremental(
         let ch = fingerprint::content_hash(&source);
         let sh = fingerprint::structure_hash(&analysis);
 
+        file_adapter_map.insert(rel.clone(), adapter_idx);
         file_analyses.insert(rel.clone(), analysis);
         new_fingerprints.push(FileFingerprint {
             file_path: rel.clone(),
@@ -465,23 +455,6 @@ pub fn build_graph_incremental(
         graph.add_edge(edge.clone());
     }
 
-    // 重建跨文件边——只针对有变更的文件
-    let mut resolve_exts: Vec<&str> = adapters
-        .iter()
-        .flat_map(|a| a.resolve_extensions().iter().copied())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    resolve_exts.sort();
-
-    let mut strip_exts: Vec<&str> = adapters
-        .iter()
-        .flat_map(|a| a.import_specifier_extensions().iter().copied())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    strip_exts.sort();
-
     // 需要为变更文件重建跨文件边。先删除旧的跨文件出边，再重建。
     // 但由于 graph 已经 remove_nodes_by_file 了，旧的跨文件边已被删除。
     // 现在用 file_analyses 来重建。
@@ -490,8 +463,8 @@ pub fn build_graph_incremental(
         &mut graph,
         &file_analyses,
         &file_set,
-        &resolve_exts,
-        &strip_exts,
+        adapters,
+        &file_adapter_map,
     );
 
     let edge_build_ms = t_edge.map_or(0, |t| t.elapsed().as_millis() as u64);
@@ -556,8 +529,7 @@ pub fn build_graph_ts_incremental(
     db_path: &Path,
     profile: bool,
 ) -> Result<(SourceGraph, BuildProfile, IncrementalStats)> {
-    let mut adapters: Vec<Box<dyn LanguageAdapter>> =
-        vec![Box::new(crate::lang::typescript::TypeScriptAdapter::new()?)];
+    let mut adapters: Vec<Box<dyn LanguageAdapter>> = vec![create_adapter(SourceLang::TypeScript)?];
     build_graph_incremental(root, db_path, &mut adapters, profile)
 }
 
@@ -749,19 +721,20 @@ struct ReExportInfo {
 fn build_reexport_map(
     analyses: &HashMap<String, FileAnalysis>,
     file_set: &HashSet<String>,
-    resolve_exts: &[&str],
-    strip_exts: &[&str],
+    adapters: &[Box<dyn LanguageAdapter>],
+    file_adapter_map: &HashMap<String, usize>,
 ) -> HashMap<String, ReExportInfo> {
+    let exists = |p: &str| file_set.contains(p);
     let mut map: HashMap<String, ReExportInfo> = HashMap::new();
     for (rel, analysis) in analyses {
         let mut info = ReExportInfo::default();
         let mut named_visible: HashSet<String> = HashSet::new();
+        let adapter_idx = file_adapter_map.get(rel).copied().unwrap_or(0);
         for import in &analysis.imports {
             if !import.reexport {
                 continue;
             }
-            let Some(tgt) =
-                resolve_import(&import.module_path, rel, file_set, resolve_exts, strip_exts)
+            let Some(tgt) = adapters[adapter_idx].resolve_import(&import.module_path, rel, &exists)
             else {
                 continue; // 外部模块（npm 包）re-export，无法透传
             };
@@ -839,8 +812,8 @@ fn add_cross_file_edges(
     graph: &mut SourceGraph,
     analyses: &HashMap<String, FileAnalysis>,
     file_set: &HashSet<String>,
-    resolve_exts: &[&str],
-    strip_exts: &[&str],
+    adapters: &[Box<dyn LanguageAdapter>],
+    file_adapter_map: &HashMap<String, usize>,
 ) {
     // 名称索引：用于 O(1) 唯一名称查找，替代逐边 O(N) 的 find_unique_node。
     let mut class_index: HashMap<String, Vec<NodeId>> = HashMap::new();
@@ -862,7 +835,8 @@ fn add_cross_file_edges(
     // re-export 透传：把 `import {X} from './barrel'` 解析到 X 真正定义处，而非 barrel——
     // 否则 barrel（如 mobx `internal.ts`：所有模块都 import 它、它又 `export *` 回所有模块）
     // 会制造虚假双向边、整库坍缩成一个巨型 SCC。memo/visiting 跨文件复用。
-    let reexport_map = build_reexport_map(analyses, file_set, resolve_exts, strip_exts);
+    let reexport_map = build_reexport_map(analyses, file_set, adapters, file_adapter_map);
+    let exists = |p: &str| file_set.contains(p);
     let mut origin_memo: HashMap<(String, String), Option<String>> = HashMap::new();
     let mut origin_visiting: HashSet<(String, String)> = HashSet::new();
 
@@ -879,9 +853,10 @@ fn add_cross_file_edges(
         let mut ambiguous: HashSet<String> = HashSet::new();
         // 别名 → 原名映射（仅 Named import；namespace import 跳过以免污染）
         let mut alias_to_original: HashMap<String, String> = HashMap::new();
+        let adapter_idx = file_adapter_map.get(rel.as_str()).copied().unwrap_or(0);
         for import in &analysis.imports {
             let Some(target_rel) =
-                resolve_import(&import.module_path, rel, file_set, resolve_exts, strip_exts)
+                adapters[adapter_idx].resolve_import(&import.module_path, rel, &exists)
             else {
                 continue;
             };
@@ -997,7 +972,11 @@ fn add_cross_file_edges(
                 } else if let Some(src_file) = import_map.get(callee_base) {
                     // 2. 通过 import 解析到其他文件的函数。
                     let sym = cross_symbol_name(&call.callee, callee_base);
-                    let cross_id = NodeId::symbol(NodeType::Function, src_file, sym);
+                    let original = alias_to_original
+                        .get(sym)
+                        .map(String::as_str)
+                        .unwrap_or(sym);
+                    let cross_id = NodeId::symbol(NodeType::Function, src_file, original);
                     if graph.node_index(&cross_id).is_some() {
                         graph.add_edge(Dependency::new(file_id.clone(), cross_id, EdgeType::Calls));
                     }
@@ -1009,7 +988,7 @@ fn add_cross_file_edges(
                     let receiver = &call.callee[..dot_pos];
                     let method = &call.callee[dot_pos + 1..];
                     let class_name = analysis
-                        .constructor_bindings
+                        .instance_type_bindings
                         .get(receiver)
                         .map(String::as_str)
                         .unwrap_or(receiver);
@@ -1055,6 +1034,7 @@ fn add_cross_file_edges(
     }
 }
 
+#[cfg(test)]
 fn resolve_import(
     module_path: &str,
     current_rel: &str,
@@ -1118,7 +1098,7 @@ fn resolve_import(
 }
 
 /// 归一化相对路径。路径逃逸项目根时返回 None。
-fn normalize_path(path: &Path) -> Option<String> {
+pub(crate) fn normalize_path(path: &Path) -> Option<String> {
     let mut parts: Vec<&str> = Vec::new();
     for component in path.components() {
         match component {
@@ -1481,6 +1461,35 @@ mod tests {
         assert!(
             has_authenticate,
             "diamond-deps: service.authenticate() 应解析为跨文件方法调用 Calls 边"
+        );
+    }
+
+    #[test]
+    fn cross_file_function_call_with_import_alias() {
+        let dir = std::env::temp_dir().join("rustmigrate_alias_fn_call_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("utils.ts"),
+            "export function greet(name: string): string { return name; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("main.ts"),
+            "import { greet as hello } from './utils';\nhello('world');\n",
+        )
+        .unwrap();
+
+        let graph = build_graph_ts(&dir).unwrap();
+        let has_call = graph.edges().any(|e| {
+            e.edge_type == EdgeType::Calls
+                && e.source.as_str() == "file:main.ts"
+                && e.target.as_str() == "function:utils.ts:greet"
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            has_call,
+            "import 别名函数调用应解析到原函数名 greet，而非别名 hello"
         );
     }
 
