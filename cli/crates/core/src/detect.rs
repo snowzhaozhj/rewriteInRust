@@ -7,14 +7,19 @@
 use std::path::Path;
 
 use crate::error::{MigrateError, Result};
-use crate::lang::typescript::TypeScriptAdapter;
-use crate::lang::LanguageAdapter;
+use crate::lang::registry::create_adapter;
+use crate::types::common::SourceLang;
 use crate::types::state::ModuleTier;
 
 /// 对单个源文件进行复杂度分档。
 pub fn detect_tier(file_path: &Path) -> Result<ModuleTier> {
+    detect_tier_for_lang(file_path, SourceLang::TypeScript)
+}
+
+/// 对单个源文件按指定语言进行复杂度分档。
+pub fn detect_tier_for_lang(file_path: &Path, lang: SourceLang) -> Result<ModuleTier> {
     let source = std::fs::read_to_string(file_path).map_err(MigrateError::Io)?;
-    let mut adapter = TypeScriptAdapter::new()?;
+    let mut adapter = create_adapter(lang)?;
     if !adapter.can_handle(file_path) {
         return Ok(ModuleTier::Full);
     }
@@ -23,7 +28,7 @@ pub fn detect_tier(file_path: &Path) -> Result<ModuleTier> {
 
 /// 从源码字符串分档（供测试使用，默认 TypeScript）。
 pub fn detect_tier_from_source(source: &str) -> Result<ModuleTier> {
-    let mut adapter = TypeScriptAdapter::new()?;
+    let mut adapter = create_adapter(SourceLang::TypeScript)?;
     Ok(adapter.detect_tier(source))
 }
 
