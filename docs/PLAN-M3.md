@@ -48,7 +48,7 @@ Sprint A (多语言泛化 + 遗留清理) → Sprint B (Python Adapter Core)
 | M3-LANG-05 | **FileAnalysis 泛化**：`constructor_bindings` 改名为 `instance_type_bindings`（语义不变：变量名→类型名，TS `new Foo()` 和 Python `Foo()` 都填充）；删除 `lang/mod.rs` 的 TODO(M3) 注释 | 0.5d | — |
 | M3-LANG-06 | **配置泛化**：`ProjectConfig` 默认 `source_language` 改为 `None`（需显式设置）；exclude 列表按语言从配置注入（TS: `node_modules`，Python: `__pycache__`/`.venv`） | 0.5d | LANG-01 |
 | M3-LANG-07 | **stats 泛化**：`collect_ts_files()` → `collect_source_files(lang)`；`ts_max_nesting()` 按 `SourceLang` 分发创建 parser + 控制流节点集 | 1d | LANG-01 |
-| M3-FFI-CLOSE | **FFI 关闭**：`scaffold/ffi.rs` 标记 `#[deprecated]` + 文件头注释说明归档原因；删除 TODO(M3-FFI)；新增 MDR 记录决策（degrade_skip 为唯一降级路径 + 理由） | 0.5d | — |
+| M3-FFI-CLOSE | **FFI 关闭 + 权威文档同步**：`scaffold/ffi.rs` 标记 `#[deprecated]`；删除 TODO(M3-FFI)；新增 MDR 记录决策；同步更新 PLAN.md §11（删 PyO3 binding）、08-roadmap §M3（删 PyO3 验收指标、Mypy→tree-sitter）、02 架构图（标注 PyO3/Mypy 取消）、04 工具链（Python 段更新） | 1d | — |
 | M3-DEV-01 | **DEVIATION 4 项 MDR 补录**：fingerprint 提取范围、事务类型 DEFERRED、WAL pragma、exported_names 额外维度 | 0.5d | — |
 
 **验收标准**：
@@ -100,9 +100,10 @@ Sprint A (多语言泛化 + 遗留清理) → Sprint B (Python Adapter Core)
 
 **验收标准**：
 - [ ] `adapters/python/adapter.json` 符合 06 §11.2 JSON Schema 契约
-- [ ] `/migrate analyze` + `run` 对 Python fixture headless 跑通
+- [ ] `/migrate analyze` 产出 `migration-state.json`（Python 项目正确填充模块状态）
+- [ ] `/migrate run` 对 Python fixture headless 跑通，至少 1 模块状态推进到 `translating`
 - [ ] translator 可根据 `source_language` 切换类型映射表
-- [ ] 降级报告输出原因和推荐替代
+- [ ] 降级报告输出原因和推荐替代；`blocked_by_skip` 标记传播到上游模块
 
 ---
 
@@ -115,16 +116,19 @@ Sprint A (多语言泛化 + 遗留清理) → Sprint B (Python Adapter Core)
 | M3-VAL-01 | **真实项目选型**：选 2 个 <3K 行开源 Python 项目（纯计算/数据处理类，避免 I/O 密集/框架绑定）；要求有 pytest 测试覆盖 | 0.5d | — |
 | M3-VAL-02 | **项目 A 端到端迁移**：analyze → graph build → state populate → sprint_loop → 至少 1 模块 done（cargo check + test + clippy 过） | 2d | PLG-06, VAL-01 |
 | M3-VAL-03 | **项目 B 端到端迁移**：同上，第二个项目至少 1 模块 done | 2d | VAL-02 |
-| M3-VAL-04 | **差异测试框架**：Python 原始 → Rust 迁移后行为对比（JSON I/O 对齐测试） | 1.5d | VAL-02 |
+| M3-VAL-04 | **差异测试框架**：Python 原始行为录制（pytest 输出 JSON fixture）→ Rust 迁移后对比（cargo test 消费同一 fixture）；验证至少 1 个迁移模块的输入/输出行为一致 | 1.5d | VAL-02 |
 | M3-VAL-05 | **性能回归验证**：TS 路径性能不退化（±10%）；Python 路径建立基准 | 0.5d | VAL-02 |
-| M3-VAL-06 | **设计文档同步**：08-roadmap M3 验收标记 + 04-toolchain Python 工具链 + 02-architecture Python 适配器 | 1d | VAL-03 |
-| M3-VAL-07 | **全量回归 + 覆盖率**：`just ci` 全过；覆盖率 ≥70% | 0.5d | ALL |
-
+| M3-VAL-06 | **graduate 验证**：`/migrate graduate` 对 Python 项目正确识别"已完成"vs"未完成"状态（复用 M2 已有 graduate 逻辑，验证 Python 路径兼容） | 0.5d | VAL-02 |
+| M3-VAL-07 | **设计文档同步**：08-roadmap M3 验收标记 + 04-toolchain Python 工具链 + 02-architecture Python 适配器 + PLAN.md §11 PyO3/Mypy 方向更新 | 1d | VAL-03 |
+| M3-VAL-08 | **全量回归 + 覆盖率**：`just ci` 全过；覆盖率 ≥70% | 0.5d | ALL |
 **验收标准**：
 - [ ] 2 个真实 Python 项目中 ≥1 模块迁移到 done
 - [ ] 迁移产物 `cargo check` + `cargo test` + `clippy -D` 全过
+- [ ] 差异测试：Python 原始行为与 Rust 迁移后行为对齐（JSON fixture 对比通过）
+- [ ] `/migrate graduate` 对 Python 项目正确识别完成/未完成状态
+- [ ] TS 路径性能不退化（±10%）
 - [ ] TS 路径全量回归无退化
-- [ ] 设计文档 M3 交付物全部同步
+- [ ] 设计文档 M3 交付物全部同步（含 PLAN.md §11 方向更新）
 
 ---
 
@@ -132,11 +136,11 @@ Sprint A (多语言泛化 + 遗留清理) → Sprint B (Python Adapter Core)
 
 | Sprint | 任务数 | 预估工时 | 关键交付 |
 |--------|--------|---------|---------|
-| A 多语言泛化 + 遗留清理 | 9 | 7d | resolve_import 下沉 + adapter 工厂 + M2 遗留关闭 |
+| A 多语言泛化 + 遗留清理 | 9 | 7.5d | resolve_import 下沉 + adapter 工厂 + M2 遗留关闭 + 权威文档同步 |
 | B Python Adapter Core | 9 | 11.5d | PythonAdapter 全方法 + 3 fixture + grammar 契约 |
 | C Plugin Python 适配 | 6 | 7d | adapters/python/ + 提示词多语言 + 降级报告增强 |
-| D 端到端验收 | 7 | 8d | 2 个真实项目 + 差异测试 |
-| **合计** | **31** | **~33.5d** | |
+| D 端到端验收 | 8 | 8.5d | 2 个真实项目 + 差异测试 + graduate 验证 |
+| **合计** | **32** | **~34.5d** | |
 
 ## M2 遗留关闭清单（M3 全部处理，不再拖）
 
@@ -175,3 +179,32 @@ Sprint A (多语言泛化 + 遗留清理) → Sprint B (Python Adapter Core)
 | D-M3-02 | FFI 桥接 | **取消——degrade_skip 为唯一降级路径** | 模块级跨运行时桥接造成状态不同步、调试/部署复杂；翻不了的模块用 Rust crate 替代或标记 out-of-scope |
 | D-M3-03 | Python type annotation 提取深度 | **(a) 仅 AST 注解（PEP 484/526）** | 不走统一 IR，LLM 负责映射；mypy 是 M4 优化 |
 | D-M3-04 | 图引擎与 adapter 分界 | **resolve_import 下沉到 adapter，build.rs 其余逻辑保持语言无关** | 业界共识：import 解析是语言内部事务（Dependabot/Snyk/Sourcetrail 验证）；图引擎价值在一致性保障而非解析逻辑 |
+
+## 08-roadmap M3 交付物对账表
+
+> 08-roadmap-and-reference.md §M3 列出的交付物与 PLAN-M3 的对应关系。确保无遗漏。
+
+| 08-roadmap M3 交付物 | PLAN-M3 状态 | 说明 |
+|---------------------|-------------|------|
+| Python LanguageAdapter（Mypy 类型提取 + PyO3 桥接） | **DEVIATION** → M3-PY-01~09 | 工具链变更：tree-sitter 替代 Mypy（D-M3-01）；PyO3 取消（D-M3-02）。Sprint A 同步更新 08-roadmap |
+| Python 专用迁移规则模板（porting-template.md） | ✅ M3-PLG-02 | 覆盖 |
+| 统一差异测试框架 | ✅ M3-VAL-04 | 覆盖（Python 行为录制 + JSON fixture 对比） |
+| `/migrate graduate` 毕业评估 | ✅ M3-VAL-06 | M2 已有基础逻辑，M3 验证 Python 路径兼容 |
+| 性能基准对比自动化（criterion 集成） | **M2 已完成** | M2 Sprint E 已有 `graph build --profile` 性能基准（ADV-04）；M3 做 ±10% 回归验证（VAL-05），不重复 criterion 集成 |
+| 并发测试（loom/shuttle 集成） | **M2 已完成** | M2 Sprint E 已有 proptest 7 属性 × 1000 + cargo-fuzz（VER-01/02）；loom/shuttle 为 08 早期规划，M2 用 proptest 替代 |
+| 依赖图可视化（Mermaid 自动生成） | **M2 已完成** | M2 Sprint E 已实现 `graph export --format mermaid`（CLI-03） |
+
+## PLAN-M2 推迟到 M3 的候选项对账
+
+> PLAN-M2.md §11 推迟项与 PLAN-M3 的对应关系。
+
+| PLAN-M2 推迟项 | PLAN-M3 状态 | 说明 |
+|---------------|-------------|------|
+| 图 schema 扩展（TypeAlias/Variable/Community） | **部分覆盖** | M3-PY-04 新增 global variable 节点；TypeAlias/Community 推到 M4 |
+| FTS5 全文搜索 | **不做** | M4 scope，非 Python 支持的前置条件 |
+| 规则治理工具化 | **不做** | M4 scope |
+| 降级决策学习 | **不做** | M4 scope |
+| 类型复杂度前置降级信号 | **不做** | M4 scope |
+| 跨文件方法调用档 2（receiver 类型环境） | **不做** | M4 scope，M3 用粗粒度名称匹配 |
+| 适配器规则版本陈旧检测 | **不做** | M4 scope |
+| index.json 自动生成 | **不做** | M4 scope |
