@@ -590,6 +590,7 @@ fn cmd_init() -> CmdResult {
         let mut cfg = rustmigrate_core::types::config::MigrateConfig::default();
         cfg.project.name = project_name();
         cfg.project.source_language = Some(lang);
+        cfg.project.exclude = rustmigrate_core::types::config::default_excludes_for_lang(lang);
         let toml_str = toml::to_string(&cfg)?;
         std::fs::write(&config, toml_str)?;
     }
@@ -2075,9 +2076,9 @@ fn cmd_stats_compare(source: Option<&Path>, rust: Option<&Path>) -> CmdResult {
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from(&cfg.project.rust_root));
 
-    // source_language 未设置时自动探测，回退 TypeScript
+    // source_language 未设置时按 source_root 自动探测，回退 TypeScript
     let source_lang = cfg.project.source_language.unwrap_or_else(|| {
-        rustmigrate_core::profile::detect_language(std::path::Path::new("."))
+        rustmigrate_core::profile::detect_language(&source_root)
             .unwrap_or(rustmigrate_core::types::common::SourceLang::TypeScript)
     });
     if source_lang != rustmigrate_core::types::common::SourceLang::TypeScript {

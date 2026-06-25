@@ -1,6 +1,6 @@
 //! FFI binding 桩代码生成（已归档）。
 //!
-//! M3 决策（MDR-M3-FFI）：FFI 桥接取消，`degrade_skip` 为唯一降级路径。
+//! M3 决策（MDR-007）：FFI 桥接取消，`degrade_skip` 为唯一降级路径。
 //! 原因：模块级跨运行时桥接造成状态不同步、调试/部署复杂。
 //! 翻不了的模块用 Rust crate 替代或标记 out-of-scope。
 //!

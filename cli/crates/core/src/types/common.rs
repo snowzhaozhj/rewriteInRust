@@ -253,3 +253,21 @@ impl From<&str> for SchemaVersion {
 
 /// 文件遍历时排除的目录名。
 pub const EXCLUDED_DIRS: &[&str] = &["node_modules", ".git", "dist", "build", "target"];
+
+/// 归一化相对路径（消除 `.` 和 `..`）。路径逃逸项目根时返回 None。
+pub fn normalize_path(path: &std::path::Path) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                parts.pop()?;
+            }
+            std::path::Component::Normal(s) => {
+                parts.push(s.to_str().unwrap_or(""));
+            }
+            _ => {}
+        }
+    }
+    Some(parts.join("/"))
+}

@@ -136,7 +136,7 @@ impl LanguageAdapter for TypeScriptAdapter {
 
         let current_dir = Path::new(current_file).parent().unwrap_or(Path::new(""));
         let resolved = current_dir.join(specifier);
-        let normalized = crate::graph::build::normalize_path(&resolved)?;
+        let normalized = crate::types::common::normalize_path(&resolved)?;
 
         if exists(&normalized) {
             return Some(normalized);

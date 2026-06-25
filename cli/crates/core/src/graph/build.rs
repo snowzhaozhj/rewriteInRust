@@ -1039,80 +1039,12 @@ fn resolve_import(
     module_path: &str,
     current_rel: &str,
     file_set: &HashSet<String>,
-    extensions: &[&str],
-    strip_exts: &[&str],
+    _extensions: &[&str],
+    _strip_exts: &[&str],
 ) -> Option<String> {
-    if !module_path.starts_with('.') {
-        return None;
-    }
-
-    let current_dir = Path::new(current_rel).parent().unwrap_or(Path::new(""));
-    let resolved = current_dir.join(module_path);
-    let normalized = normalize_path(&resolved)?;
-
-    // 精确匹配（已带扩展名的路径）
-    if file_set.contains(&normalized) {
-        return Some(normalized);
-    }
-
-    // import specifier 带 adapter 声明的扩展名（如 TS ESM 的 `.js`/`.mjs`/`.cjs`/`.jsx`），
-    // 但实际指向同名源文件（如 `.ts`/`.tsx`）。strip 这些扩展名后按源扩展名重试，否则现代
-    // ESM TypeScript 项目（如 microsoft/node-jsonc-parser）的 import 边会全部漏掉——依赖图
-    // 断裂、误判无环、sprint 排序与门禁连带失效。扩展名列表由 adapter 提供，graph 层不内嵌
-    // 任何语言特定字面量。
-    for strip_ext in strip_exts {
-        if let Some(base) = normalized.strip_suffix(strip_ext) {
-            for ext in extensions {
-                let with_ext = format!("{base}.{ext}");
-                if file_set.contains(&with_ext) {
-                    return Some(with_ext);
-                }
-            }
-            break;
-        }
-    }
-
-    // 按 adapter 提供的扩展名生成候选：{path}.ext, {path}/index.ext
-    for ext in extensions {
-        // normalized 为空 = import 解析到 src 根目录（如 `__tests__/x.ts` 的 `from ".."`）。
-        // 根目录本身不是文件，跳过 `{path}.ext`；barrel 候选不能带前导斜杠，否则
-        // `/index.ext` 永不匹配根下的 `index.ext`，导致 `from ".."` 这类 barrel 导入漏边
-        // （进而 SCC 断裂、漏报循环依赖）。
-        if !normalized.is_empty() {
-            let with_ext = format!("{normalized}.{ext}");
-            if file_set.contains(&with_ext) {
-                return Some(with_ext);
-            }
-        }
-        let barrel = if normalized.is_empty() {
-            format!("index.{ext}")
-        } else {
-            format!("{normalized}/index.{ext}")
-        };
-        if file_set.contains(&barrel) {
-            return Some(barrel);
-        }
-    }
-
-    None
-}
-
-/// 归一化相对路径。路径逃逸项目根时返回 None。
-pub(crate) fn normalize_path(path: &Path) -> Option<String> {
-    let mut parts: Vec<&str> = Vec::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                parts.pop()?;
-            }
-            std::path::Component::Normal(s) => {
-                parts.push(s.to_str().unwrap_or(""));
-            }
-            _ => {}
-        }
-    }
-    Some(parts.join("/"))
+    use crate::lang::typescript::TypeScriptAdapter;
+    let adapter = TypeScriptAdapter::new().expect("TS adapter init");
+    adapter.resolve_import(module_path, current_rel, &|p| file_set.contains(p))
 }
 
 #[cfg(test)]
