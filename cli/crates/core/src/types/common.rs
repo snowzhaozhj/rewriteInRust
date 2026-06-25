@@ -251,8 +251,30 @@ impl From<&str> for SchemaVersion {
     }
 }
 
-/// 文件遍历时排除的目录名。
-pub const EXCLUDED_DIRS: &[&str] = &["node_modules", ".git", "dist", "build", "target"];
+/// 文件遍历时排除的目录名——**语言未知时的保守全集**。
+///
+/// 用于语言探测期（`profile::detect` 在确定语言前遍历，鸡生蛋）以及尚未接入
+/// 用户配置的遍历点（graph/stats）。内容是
+/// [`crate::types::config::default_excludes_for_lang`] 各语言的并集，一致性由
+/// config 模块的 `excluded_dirs_is_union_of_all_langs` 测试保证（防止漂移）。
+pub const EXCLUDED_DIRS: &[&str] = &[
+    // 通用（COMMON_EXCLUDES）
+    ".git",
+    "target",
+    // TypeScript
+    "node_modules",
+    "dist",
+    // Python
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".mypy_cache",
+    // C
+    "build",
+    ".obj",
+    // Go
+    "vendor",
+];
 
 /// 归一化相对路径（消除 `.` 和 `..`）。路径逃逸项目根时返回 None。
 pub fn normalize_path(path: &std::path::Path) -> Option<String> {

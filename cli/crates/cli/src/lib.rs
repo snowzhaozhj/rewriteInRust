@@ -590,7 +590,8 @@ fn cmd_init() -> CmdResult {
         let mut cfg = rustmigrate_core::types::config::MigrateConfig::default();
         cfg.project.name = project_name();
         cfg.project.source_language = Some(lang);
-        cfg.project.exclude = rustmigrate_core::types::config::default_excludes_for_lang(lang);
+        // exclude 留空：语言默认排除走 EXCLUDED_DIRS（生效）；本字段为用户自定义追加，
+        // Sprint C 接入遍历前不写入，避免"配置看似生效实则不生效"的假象。
         let toml_str = toml::to_string(&cfg)?;
         std::fs::write(&config, toml_str)?;
     }

@@ -50,8 +50,8 @@ impl LanguageAdapter for TypeScriptAdapter {
         // 排除 .d.ts（类型声明）与 .test/.spec（测试文件）——均非迁移源：测试随源码以
         // Rust `#[cfg(test)]`/`tests/` 重写（设计 09 §507），不作为独立迁移单元；设计 06
         // 的 exclude 默认亦含 `src/**/*.test.ts`。
-        // TODO: 用户自定义 exclude glob（ProjectConfig.exclude）尚未在 collect_source_files
-        // 应用，excluded_imports 输出（设计 04 §5.7.4）亦未实现 —— 独立任务。
+        // TODO(M3-PLG): 用户自定义 exclude glob（ProjectConfig.exclude）尚未接入遍历，
+        // excluded_imports 输出（设计 04 §5.7.4）亦未实现 —— Sprint C 用户配置接入。
         (name.ends_with(".ts") || name.ends_with(".tsx"))
             && !name.ends_with(".d.ts")
             && !name.ends_with(".test.ts")

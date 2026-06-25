@@ -116,7 +116,12 @@ pub struct ProjectConfig {
     pub rust_root: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_commit: Option<String>,
-    #[serde(default)]
+    /// 用户自定义排除目录（追加在语言默认排除之上）。
+    ///
+    /// TODO(M3-PLG): 当前遍历（graph/profile/stats）统一用语言无关的
+    /// [`crate::types::common::EXCLUDED_DIRS`] 全集，**尚未读取本字段**。
+    /// Sprint C（用户配置接入）将本字段贯穿遍历链路（build_graph 等接收 exclude 参数）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exclude: Vec<String>,
     /// 语言适配器目录（含 `analysis-tools.json` 和 `porting-template.md`）。
     /// 省略时由 SKILL.md analyze 流程按优先级自动定位。
@@ -132,35 +137,35 @@ impl Default for ProjectConfig {
             source_root: "src".to_string(),
             rust_root: "rust-src".to_string(),
             source_commit: None,
-            exclude: vec![".git".to_string()],
+            exclude: Vec::new(),
             adapter_path: None,
         }
     }
 }
 
-/// 按语言返回默认排除目录。
-pub fn default_excludes_for_lang(lang: SourceLang) -> Vec<String> {
-    let mut excludes = vec![".git".to_string()];
+/// 任何项目都应排除的非源码目录（VCS、Rust 构建产物）。
+pub const COMMON_EXCLUDES: &[&str] = &[".git", "target"];
+
+/// 某语言专属的依赖 / 构建产物目录（不含 [`COMMON_EXCLUDES`]）。
+///
+/// 排除目录的**唯一权威**：[`crate::types::common::EXCLUDED_DIRS`]（语言未知时的全集）
+/// 由本函数各语言并集派生，一致性由 `excluded_dirs_is_union_of_all_langs` 测试保证。
+pub fn lang_vendor_dirs(lang: SourceLang) -> &'static [&'static str] {
     match lang {
-        SourceLang::TypeScript => {
-            excludes.extend(["node_modules".to_string(), "dist".to_string()]);
-        }
-        SourceLang::Python => {
-            excludes.extend([
-                "__pycache__".to_string(),
-                ".venv".to_string(),
-                "venv".to_string(),
-                ".mypy_cache".to_string(),
-            ]);
-        }
-        SourceLang::C => {
-            excludes.extend(["build".to_string(), ".obj".to_string()]);
-        }
-        SourceLang::Go => {
-            excludes.push("vendor".to_string());
-        }
+        SourceLang::TypeScript => &["node_modules", "dist"],
+        SourceLang::Python => &["__pycache__", ".venv", "venv", ".mypy_cache"],
+        SourceLang::C => &["build", ".obj"],
+        SourceLang::Go => &["vendor"],
     }
-    excludes
+}
+
+/// 某语言的完整默认排除 = [`COMMON_EXCLUDES`] + 语言专属 vendor 目录。
+pub fn default_excludes_for_lang(lang: SourceLang) -> Vec<String> {
+    COMMON_EXCLUDES
+        .iter()
+        .chain(lang_vendor_dirs(lang))
+        .map(|s| s.to_string())
+        .collect()
 }
 
 /// 迁移策略配置。
@@ -335,3 +340,42 @@ pub struct ValidationConfig {}
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RulesConfig {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::common::EXCLUDED_DIRS;
+    use std::collections::BTreeSet;
+
+    /// 防漂移：语言无关全集 `EXCLUDED_DIRS` 必须等于各语言默认排除的并集，
+    /// 保证排除目录单一来源（新增语言/目录时两处同步）。
+    #[test]
+    fn excluded_dirs_is_union_of_all_langs() {
+        let union: BTreeSet<String> = [
+            SourceLang::TypeScript,
+            SourceLang::Python,
+            SourceLang::C,
+            SourceLang::Go,
+        ]
+        .iter()
+        .flat_map(|l| default_excludes_for_lang(*l))
+        .collect();
+        let constant: BTreeSet<String> = EXCLUDED_DIRS.iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            union, constant,
+            "EXCLUDED_DIRS 必须等于各语言 default_excludes_for_lang 的并集"
+        );
+    }
+
+    /// 语言默认排除含通用目录 + 该语言 vendor 目录。
+    #[test]
+    fn default_excludes_compose_common_and_vendor() {
+        let py = default_excludes_for_lang(SourceLang::Python);
+        assert!(py.contains(&".git".to_string()), "应含通用 .git");
+        assert!(py.contains(&".venv".to_string()), "应含 Python .venv");
+        assert!(
+            !py.contains(&"node_modules".to_string()),
+            "Python 不应含 TS 的 node_modules"
+        );
+    }
+}
