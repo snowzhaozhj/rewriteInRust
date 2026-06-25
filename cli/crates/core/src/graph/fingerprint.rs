@@ -162,7 +162,7 @@ mod tests {
             imports,
             calls: Vec::new(),
             exported_names: exported,
-            constructor_bindings: HashMap::new(),
+            instance_type_bindings: HashMap::new(),
         }
     }
 

@@ -4,6 +4,7 @@
 //! 文件识别、单文件分析（节点+边+导入信息）。
 //! 各语言（TypeScript/Python/C/Go）实现此 trait 即可接入。
 
+pub mod registry;
 pub mod typescript;
 
 use std::collections::HashMap;
@@ -26,9 +27,8 @@ pub struct FileAnalysis {
     pub calls: Vec<CallInfo>,
     /// 所有导出名称（含 re-export、type-only export、default）。
     pub exported_names: std::collections::HashSet<String>,
-    // TODO(M3): constructor_bindings / ImportKind::StaticType / SymbolKind::Default
-    // 是 TS 特有概念，M3 多语言扩展时应下沉到 TS adapter 或用通用 metadata 传递。
-    pub constructor_bindings: HashMap<String, String>,
+    /// 实例变量名 → 类型名映射（TS `new Foo()` / Python `Foo()` 均填充）。
+    pub instance_type_bindings: HashMap<String, String>,
 }
 
 /// 导入的种类（互斥，枚举消除原 `is_type_only`/`is_side_effect`/`is_dynamic`
@@ -127,6 +127,19 @@ pub trait LanguageAdapter: Send {
     ///
     /// `source` 为文件内容，`rel_path` 为相对于项目根的路径。
     fn analyze_file(&mut self, source: &str, rel_path: &str) -> Result<FileAnalysis>;
+
+    /// 解析 import specifier 到相对文件路径。
+    ///
+    /// `specifier`：原始 import 路径（如 `./utils`、`express`）。
+    /// `current_file`：当前文件的项目相对路径。
+    /// `exists`：检查候选路径是否在项目文件集中。
+    /// 返回 `None` 表示外部依赖或无法解析。
+    fn resolve_import(
+        &self,
+        specifier: &str,
+        current_file: &str,
+        exists: &dyn Fn(&str) -> bool,
+    ) -> Option<String>;
 
     /// 评估源码的翻译复杂度分档。
     ///

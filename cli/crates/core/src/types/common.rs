@@ -251,5 +251,53 @@ impl From<&str> for SchemaVersion {
     }
 }
 
-/// 文件遍历时排除的目录名。
-pub const EXCLUDED_DIRS: &[&str] = &["node_modules", ".git", "dist", "build", "target"];
+/// 文件遍历时排除的目录名——**跨语言统计专用全集**。
+///
+/// 仅用于"目的就是跨语言扫描"的两处：`profile::detect`（在确定语言前探测主语言，
+/// 鸡生蛋）和 `stats::loc`（统计所有语言行数）。**图构建与结构对比按已知语言精确
+/// 排除**（`graph::build` / `stats::compare` 用 [`crate::types::config::lang_vendor_dirs`]），
+/// 不用本全集——否则别语言的 vendor 名会误伤本语言项目的同名业务目录。
+///
+/// 全集是**有意的近似**：它也会忽略命中别语言 vendor 名的业务目录（如 TS 项目的
+/// `build/`），但这两处可容忍——detect 是探测语言前的鸡生蛋两害相权（不排则被
+/// `node_modules` 淹没主语言判定）；loc 比值两侧对称排除以保可比性，优先于单侧绝对
+/// 精度。要正确性的"哪些文件进依赖图"另走精确排除（见上）。
+///
+/// 内容是 [`crate::types::config::default_excludes_for_lang`] 各语言的并集，一致性由
+/// config 模块的 `excluded_dirs_is_union_of_all_langs` 测试保证（防止漂移）。
+pub const EXCLUDED_DIRS: &[&str] = &[
+    // 通用（COMMON_EXCLUDES）
+    ".git",
+    "target",
+    // TypeScript
+    "node_modules",
+    "dist",
+    // Python
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".mypy_cache",
+    // C
+    "build",
+    ".obj",
+    // Go
+    "vendor",
+];
+
+/// 归一化相对路径（消除 `.` 和 `..`）。路径逃逸项目根时返回 None。
+pub fn normalize_path(path: &std::path::Path) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                parts.pop()?;
+            }
+            std::path::Component::Normal(s) => {
+                parts.push(s.to_str().unwrap_or(""));
+            }
+            _ => {}
+        }
+    }
+    Some(parts.join("/"))
+}

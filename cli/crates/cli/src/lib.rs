@@ -589,7 +589,9 @@ fn cmd_init() -> CmdResult {
     if !config_already {
         let mut cfg = rustmigrate_core::types::config::MigrateConfig::default();
         cfg.project.name = project_name();
-        cfg.project.source_language = lang;
+        cfg.project.source_language = Some(lang);
+        // exclude 留空：语言默认排除走 EXCLUDED_DIRS（生效）；本字段为用户自定义追加，
+        // Sprint C 接入遍历前不写入，避免"配置看似生效实则不生效"的假象。
         let toml_str = toml::to_string(&cfg)?;
         std::fs::write(&config, toml_str)?;
     }
@@ -2075,14 +2077,15 @@ fn cmd_stats_compare(source: Option<&Path>, rust: Option<&Path>) -> CmdResult {
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from(&cfg.project.rust_root));
 
-    // stats compare 源侧走 tree-sitter-typescript 解析（measure_source 强绑 TS）。非 TS 项目若放行，
-    // 源侧会收集到 0 个文件、静默给出半残比值（functions/nesting 全 0、ratio 为 null）——显式报错
-    // 而非静默半残。Python/C/Go 前端在 M3 按 source_language 分派解析器。
-    if cfg.project.source_language != rustmigrate_core::types::common::SourceLang::TypeScript {
+    // source_language 未设置时按 source_root 自动探测，回退 TypeScript
+    let source_lang = cfg.project.source_language.unwrap_or_else(|| {
+        rustmigrate_core::profile::detect_language(&source_root)
+            .unwrap_or(rustmigrate_core::types::common::SourceLang::TypeScript)
+    });
+    if source_lang != rustmigrate_core::types::common::SourceLang::TypeScript {
         return Err(MigrateError::Config(format!(
-            "stats compare 当前仅支持 TypeScript 源（配置 source_language={}）；\
+            "stats compare 当前仅支持 TypeScript 源（配置 source_language={source_lang}）；\
              Python/C/Go 源的结构对比在 M3 实现",
-            cfg.project.source_language
         )));
     }
 

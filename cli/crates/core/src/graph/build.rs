@@ -10,8 +10,10 @@ use std::time::Instant;
 use serde::Serialize;
 
 use crate::error::{MigrateError, Result};
+use crate::lang::registry::create_adapter;
 use crate::lang::{FileAnalysis, LanguageAdapter, SymbolKind};
-use crate::types::common::{NodeId, EXCLUDED_DIRS};
+use crate::types::common::{NodeId, SourceLang};
+use crate::types::config::default_excludes_for_lang;
 use crate::types::graph::{Dependency, EdgeSubKind, EdgeType, NodeType};
 
 use super::fingerprint::{self, ChangeLevel, FileFingerprint};
@@ -83,6 +85,7 @@ fn build_graph_inner(
 
     let mut graph = SourceGraph::new();
     let mut file_analyses: HashMap<String, FileAnalysis> = HashMap::new();
+    let mut file_adapter_map: HashMap<String, usize> = HashMap::new();
     let mut all_edges: Vec<Dependency> = Vec::new();
     let mut fingerprints: Vec<FileFingerprint> = Vec::new();
 
@@ -123,6 +126,7 @@ fn build_graph_inner(
         }
         all_edges.extend(analysis.edges.iter().cloned());
 
+        file_adapter_map.insert(rel.clone(), *adapter_idx);
         file_analyses.insert(rel, analysis);
     }
     let parse_ms = t_start.map_or(0, |t| t.elapsed().as_millis() as u64);
@@ -136,33 +140,14 @@ fn build_graph_inner(
         graph.add_edge(edge.clone());
     }
 
-    // 收集所有 adapter 的解析扩展名（去重 + 排序保证确定性）
-    let mut resolve_exts: Vec<&str> = adapters
-        .iter()
-        .flat_map(|a| a.resolve_extensions().iter().copied())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    resolve_exts.sort();
-
-    // 收集所有 adapter 的 import specifier 扩展名（如 TS ESM 的 `.js`/`.mjs`）——
-    // graph 层据此 strip 后按源扩展名重试，不内嵌任何语言特定的扩展名字面量。
-    let mut strip_exts: Vec<&str> = adapters
-        .iter()
-        .flat_map(|a| a.import_specifier_extensions().iter().copied())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    strip_exts.sort();
-
-    // 构建跨文件边（Imports + Calls）
+    // 构建跨文件边（Imports + Calls），通过 adapter 的 resolve_import 解析
     let file_set: HashSet<String> = files.iter().map(|(p, _)| make_relative(p, &root)).collect();
     add_cross_file_edges(
         &mut graph,
         &file_analyses,
         &file_set,
-        &resolve_exts,
-        &strip_exts,
+        adapters,
+        &file_adapter_map,
     );
 
     let edge_build_ms = t_edge.map_or(0, |t| t.elapsed().as_millis() as u64);
@@ -186,11 +171,15 @@ pub fn build_graph(root: &Path, adapters: &mut [Box<dyn LanguageAdapter>]) -> Re
     build_graph_inner(root, adapters, false).map(|(graph, _, _)| graph)
 }
 
+/// 按指定语言构建图。
+pub fn build_graph_for_lang(root: &Path, lang: SourceLang) -> Result<SourceGraph> {
+    let mut adapters: Vec<Box<dyn LanguageAdapter>> = vec![create_adapter(lang)?];
+    build_graph(root, &mut adapters)
+}
+
 /// 便捷函数：用默认 TypeScript adapter 构建图。
 pub fn build_graph_ts(root: &Path) -> Result<SourceGraph> {
-    let mut adapters: Vec<Box<dyn LanguageAdapter>> =
-        vec![Box::new(crate::lang::typescript::TypeScriptAdapter::new()?)];
-    build_graph(root, &mut adapters)
+    build_graph_for_lang(root, SourceLang::TypeScript)
 }
 
 /// 带性能画像的图构建：返回 `(SourceGraph, BuildProfile)`。
@@ -206,8 +195,7 @@ pub fn build_graph_profiled(
 
 /// 便捷函数：用默认 TypeScript adapter 构建图（带性能画像）。
 pub fn build_graph_ts_profiled(root: &Path) -> Result<(SourceGraph, BuildProfile)> {
-    let mut adapters: Vec<Box<dyn LanguageAdapter>> =
-        vec![Box::new(crate::lang::typescript::TypeScriptAdapter::new()?)];
+    let mut adapters: Vec<Box<dyn LanguageAdapter>> = vec![create_adapter(SourceLang::TypeScript)?];
     build_graph_profiled(root, &mut adapters)
 }
 
@@ -216,8 +204,7 @@ pub fn build_graph_ts_full(
     root: &Path,
     profile: bool,
 ) -> Result<(SourceGraph, BuildProfile, Vec<FileFingerprint>)> {
-    let mut adapters: Vec<Box<dyn LanguageAdapter>> =
-        vec![Box::new(crate::lang::typescript::TypeScriptAdapter::new()?)];
+    let mut adapters: Vec<Box<dyn LanguageAdapter>> = vec![create_adapter(SourceLang::TypeScript)?];
     build_graph_inner(root, &mut adapters, profile)
 }
 
@@ -333,6 +320,7 @@ pub fn build_graph_incremental(
 
     // 解析变更文件，判断 COSMETIC vs STRUCTURAL
     let mut file_analyses: HashMap<String, FileAnalysis> = HashMap::new();
+    let mut file_adapter_map: HashMap<String, usize> = HashMap::new();
     let mut new_fingerprints: Vec<FileFingerprint> = Vec::new();
 
     for (rel, _file_path, adapter_idx, ch, source) in &to_analyze {
@@ -361,11 +349,13 @@ pub fn build_graph_incremental(
                 }
                 ChangeLevel::Structural => {
                     structural_files.push(rel.clone());
+                    file_adapter_map.insert(rel.clone(), *adapter_idx);
                     file_analyses.insert(rel.clone(), analysis);
                 }
             }
         } else {
             // 新文件总是 STRUCTURAL
+            file_adapter_map.insert(rel.clone(), *adapter_idx);
             file_analyses.insert(rel.clone(), analysis);
         }
 
@@ -425,6 +415,7 @@ pub fn build_graph_incremental(
         let ch = fingerprint::content_hash(&source);
         let sh = fingerprint::structure_hash(&analysis);
 
+        file_adapter_map.insert(rel.clone(), adapter_idx);
         file_analyses.insert(rel.clone(), analysis);
         new_fingerprints.push(FileFingerprint {
             file_path: rel.clone(),
@@ -465,23 +456,6 @@ pub fn build_graph_incremental(
         graph.add_edge(edge.clone());
     }
 
-    // 重建跨文件边——只针对有变更的文件
-    let mut resolve_exts: Vec<&str> = adapters
-        .iter()
-        .flat_map(|a| a.resolve_extensions().iter().copied())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    resolve_exts.sort();
-
-    let mut strip_exts: Vec<&str> = adapters
-        .iter()
-        .flat_map(|a| a.import_specifier_extensions().iter().copied())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    strip_exts.sort();
-
     // 需要为变更文件重建跨文件边。先删除旧的跨文件出边，再重建。
     // 但由于 graph 已经 remove_nodes_by_file 了，旧的跨文件边已被删除。
     // 现在用 file_analyses 来重建。
@@ -490,8 +464,8 @@ pub fn build_graph_incremental(
         &mut graph,
         &file_analyses,
         &file_set,
-        &resolve_exts,
-        &strip_exts,
+        adapters,
+        &file_adapter_map,
     );
 
     let edge_build_ms = t_edge.map_or(0, |t| t.elapsed().as_millis() as u64);
@@ -556,8 +530,7 @@ pub fn build_graph_ts_incremental(
     db_path: &Path,
     profile: bool,
 ) -> Result<(SourceGraph, BuildProfile, IncrementalStats)> {
-    let mut adapters: Vec<Box<dyn LanguageAdapter>> =
-        vec![Box::new(crate::lang::typescript::TypeScriptAdapter::new()?)];
+    let mut adapters: Vec<Box<dyn LanguageAdapter>> = vec![create_adapter(SourceLang::TypeScript)?];
     build_graph_incremental(root, db_path, &mut adapters, profile)
 }
 
@@ -630,8 +603,15 @@ fn collect_source_files(
     root: &Path,
     adapters: &[Box<dyn LanguageAdapter>],
 ) -> Result<Vec<(PathBuf, usize)>> {
+    // 排除目录按**参与语言**精确取并集，而非全语言全集——否则别语言的 vendor 名
+    // （如 C 的 `build`、Go 的 `vendor`）会误伤本语言项目的同名业务目录（如 TS 的
+    // `src/build/`），目录级跳过使 can_handle 够不到里面的真实源码、依赖图缺节点。
+    let excludes: HashSet<String> = adapters
+        .iter()
+        .flat_map(|a| default_excludes_for_lang(a.language()))
+        .collect();
     let mut files = Vec::new();
-    collect_recursive(root, adapters, &mut files)?;
+    collect_recursive(root, adapters, &excludes, &mut files)?;
     files.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(files)
 }
@@ -639,6 +619,7 @@ fn collect_source_files(
 fn collect_recursive(
     dir: &Path,
     adapters: &[Box<dyn LanguageAdapter>],
+    excludes: &HashSet<String>,
     files: &mut Vec<(PathBuf, usize)>,
 ) -> Result<()> {
     let entries = std::fs::read_dir(dir).map_err(MigrateError::Io)?;
@@ -647,10 +628,10 @@ fn collect_recursive(
         let path = entry.path();
         if path.is_dir() {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
-            if EXCLUDED_DIRS.contains(&name.as_ref()) {
+            if excludes.contains(name.as_ref()) {
                 continue;
             }
-            collect_recursive(&path, adapters, files)?;
+            collect_recursive(&path, adapters, excludes, files)?;
         } else if let Some(idx) = adapters.iter().position(|a| a.can_handle(&path)) {
             files.push((path, idx));
         }
@@ -749,19 +730,20 @@ struct ReExportInfo {
 fn build_reexport_map(
     analyses: &HashMap<String, FileAnalysis>,
     file_set: &HashSet<String>,
-    resolve_exts: &[&str],
-    strip_exts: &[&str],
+    adapters: &[Box<dyn LanguageAdapter>],
+    file_adapter_map: &HashMap<String, usize>,
 ) -> HashMap<String, ReExportInfo> {
+    let exists = |p: &str| file_set.contains(p);
     let mut map: HashMap<String, ReExportInfo> = HashMap::new();
     for (rel, analysis) in analyses {
         let mut info = ReExportInfo::default();
         let mut named_visible: HashSet<String> = HashSet::new();
+        let adapter_idx = file_adapter_map.get(rel).copied().unwrap_or(0);
         for import in &analysis.imports {
             if !import.reexport {
                 continue;
             }
-            let Some(tgt) =
-                resolve_import(&import.module_path, rel, file_set, resolve_exts, strip_exts)
+            let Some(tgt) = adapters[adapter_idx].resolve_import(&import.module_path, rel, &exists)
             else {
                 continue; // 外部模块（npm 包）re-export，无法透传
             };
@@ -839,8 +821,8 @@ fn add_cross_file_edges(
     graph: &mut SourceGraph,
     analyses: &HashMap<String, FileAnalysis>,
     file_set: &HashSet<String>,
-    resolve_exts: &[&str],
-    strip_exts: &[&str],
+    adapters: &[Box<dyn LanguageAdapter>],
+    file_adapter_map: &HashMap<String, usize>,
 ) {
     // 名称索引：用于 O(1) 唯一名称查找，替代逐边 O(N) 的 find_unique_node。
     let mut class_index: HashMap<String, Vec<NodeId>> = HashMap::new();
@@ -862,7 +844,8 @@ fn add_cross_file_edges(
     // re-export 透传：把 `import {X} from './barrel'` 解析到 X 真正定义处，而非 barrel——
     // 否则 barrel（如 mobx `internal.ts`：所有模块都 import 它、它又 `export *` 回所有模块）
     // 会制造虚假双向边、整库坍缩成一个巨型 SCC。memo/visiting 跨文件复用。
-    let reexport_map = build_reexport_map(analyses, file_set, resolve_exts, strip_exts);
+    let reexport_map = build_reexport_map(analyses, file_set, adapters, file_adapter_map);
+    let exists = |p: &str| file_set.contains(p);
     let mut origin_memo: HashMap<(String, String), Option<String>> = HashMap::new();
     let mut origin_visiting: HashSet<(String, String)> = HashSet::new();
 
@@ -879,9 +862,10 @@ fn add_cross_file_edges(
         let mut ambiguous: HashSet<String> = HashSet::new();
         // 别名 → 原名映射（仅 Named import；namespace import 跳过以免污染）
         let mut alias_to_original: HashMap<String, String> = HashMap::new();
+        let adapter_idx = file_adapter_map.get(rel.as_str()).copied().unwrap_or(0);
         for import in &analysis.imports {
             let Some(target_rel) =
-                resolve_import(&import.module_path, rel, file_set, resolve_exts, strip_exts)
+                adapters[adapter_idx].resolve_import(&import.module_path, rel, &exists)
             else {
                 continue;
             };
@@ -997,7 +981,11 @@ fn add_cross_file_edges(
                 } else if let Some(src_file) = import_map.get(callee_base) {
                     // 2. 通过 import 解析到其他文件的函数。
                     let sym = cross_symbol_name(&call.callee, callee_base);
-                    let cross_id = NodeId::symbol(NodeType::Function, src_file, sym);
+                    let original = alias_to_original
+                        .get(sym)
+                        .map(String::as_str)
+                        .unwrap_or(sym);
+                    let cross_id = NodeId::symbol(NodeType::Function, src_file, original);
                     if graph.node_index(&cross_id).is_some() {
                         graph.add_edge(Dependency::new(file_id.clone(), cross_id, EdgeType::Calls));
                     }
@@ -1009,7 +997,7 @@ fn add_cross_file_edges(
                     let receiver = &call.callee[..dot_pos];
                     let method = &call.callee[dot_pos + 1..];
                     let class_name = analysis
-                        .constructor_bindings
+                        .instance_type_bindings
                         .get(receiver)
                         .map(String::as_str)
                         .unwrap_or(receiver);
@@ -1055,84 +1043,17 @@ fn add_cross_file_edges(
     }
 }
 
+#[cfg(test)]
 fn resolve_import(
     module_path: &str,
     current_rel: &str,
     file_set: &HashSet<String>,
-    extensions: &[&str],
-    strip_exts: &[&str],
+    _extensions: &[&str],
+    _strip_exts: &[&str],
 ) -> Option<String> {
-    if !module_path.starts_with('.') {
-        return None;
-    }
-
-    let current_dir = Path::new(current_rel).parent().unwrap_or(Path::new(""));
-    let resolved = current_dir.join(module_path);
-    let normalized = normalize_path(&resolved)?;
-
-    // 精确匹配（已带扩展名的路径）
-    if file_set.contains(&normalized) {
-        return Some(normalized);
-    }
-
-    // import specifier 带 adapter 声明的扩展名（如 TS ESM 的 `.js`/`.mjs`/`.cjs`/`.jsx`），
-    // 但实际指向同名源文件（如 `.ts`/`.tsx`）。strip 这些扩展名后按源扩展名重试，否则现代
-    // ESM TypeScript 项目（如 microsoft/node-jsonc-parser）的 import 边会全部漏掉——依赖图
-    // 断裂、误判无环、sprint 排序与门禁连带失效。扩展名列表由 adapter 提供，graph 层不内嵌
-    // 任何语言特定字面量。
-    for strip_ext in strip_exts {
-        if let Some(base) = normalized.strip_suffix(strip_ext) {
-            for ext in extensions {
-                let with_ext = format!("{base}.{ext}");
-                if file_set.contains(&with_ext) {
-                    return Some(with_ext);
-                }
-            }
-            break;
-        }
-    }
-
-    // 按 adapter 提供的扩展名生成候选：{path}.ext, {path}/index.ext
-    for ext in extensions {
-        // normalized 为空 = import 解析到 src 根目录（如 `__tests__/x.ts` 的 `from ".."`）。
-        // 根目录本身不是文件，跳过 `{path}.ext`；barrel 候选不能带前导斜杠，否则
-        // `/index.ext` 永不匹配根下的 `index.ext`，导致 `from ".."` 这类 barrel 导入漏边
-        // （进而 SCC 断裂、漏报循环依赖）。
-        if !normalized.is_empty() {
-            let with_ext = format!("{normalized}.{ext}");
-            if file_set.contains(&with_ext) {
-                return Some(with_ext);
-            }
-        }
-        let barrel = if normalized.is_empty() {
-            format!("index.{ext}")
-        } else {
-            format!("{normalized}/index.{ext}")
-        };
-        if file_set.contains(&barrel) {
-            return Some(barrel);
-        }
-    }
-
-    None
-}
-
-/// 归一化相对路径。路径逃逸项目根时返回 None。
-fn normalize_path(path: &Path) -> Option<String> {
-    let mut parts: Vec<&str> = Vec::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                parts.pop()?;
-            }
-            std::path::Component::Normal(s) => {
-                parts.push(s.to_str().unwrap_or(""));
-            }
-            _ => {}
-        }
-    }
-    Some(parts.join("/"))
+    use crate::lang::typescript::TypeScriptAdapter;
+    let adapter = TypeScriptAdapter::new().expect("TS adapter init");
+    adapter.resolve_import(module_path, current_rel, &|p| file_set.contains(p))
 }
 
 #[cfg(test)]
@@ -1183,6 +1104,34 @@ mod tests {
         let mut adapters: Vec<Box<dyn LanguageAdapter>> = vec![];
         let graph = build_graph(&root, &mut adapters).unwrap();
         assert_eq!(graph.node_count(), 0);
+    }
+
+    #[test]
+    fn excludes_are_language_precise_not_union() {
+        // 回归：TS 项目里叫 `build/` 的业务目录（`build` 是 C 的 vendor 名，不是 TS 的）
+        // 不应被误排——否则目录级跳过会漏掉里面的真实 .ts 源码。node_modules（TS vendor）仍排除。
+        let dir = std::env::temp_dir().join("rustmigrate_lang_precise_excludes");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("build")).unwrap();
+        std::fs::create_dir_all(dir.join("node_modules/pkg")).unwrap();
+        std::fs::write(dir.join("build/gen.ts"), "export function g() {}\n").unwrap();
+        std::fs::write(
+            dir.join("node_modules/pkg/index.ts"),
+            "export function dep() {}\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("main.ts"), "export function m() {}\n").unwrap();
+
+        let graph = build_graph_ts(&dir).unwrap();
+        let has = |id: &str| graph.node_index(&NodeId::new(id)).is_some();
+        let build_kept = has("file:build/gen.ts");
+        let node_modules_excluded = !has("file:node_modules/pkg/index.ts");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            build_kept,
+            "TS 项目的 build/ 业务目录源码不应被误排（build 是 C 的 vendor 名）"
+        );
+        assert!(node_modules_excluded, "node_modules（TS vendor）应被排除");
     }
 
     const TS_EXTS: &[&str] = &["ts", "tsx"];
@@ -1481,6 +1430,35 @@ mod tests {
         assert!(
             has_authenticate,
             "diamond-deps: service.authenticate() 应解析为跨文件方法调用 Calls 边"
+        );
+    }
+
+    #[test]
+    fn cross_file_function_call_with_import_alias() {
+        let dir = std::env::temp_dir().join("rustmigrate_alias_fn_call_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("utils.ts"),
+            "export function greet(name: string): string { return name; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("main.ts"),
+            "import { greet as hello } from './utils';\nhello('world');\n",
+        )
+        .unwrap();
+
+        let graph = build_graph_ts(&dir).unwrap();
+        let has_call = graph.edges().any(|e| {
+            e.edge_type == EdgeType::Calls
+                && e.source.as_str() == "file:main.ts"
+                && e.target.as_str() == "function:utils.ts:greet"
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            has_call,
+            "import 别名函数调用应解析到原函数名 greet，而非别名 hello"
         );
     }
 
