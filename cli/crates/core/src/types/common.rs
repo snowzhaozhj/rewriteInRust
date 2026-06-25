@@ -258,6 +258,11 @@ impl From<&str> for SchemaVersion {
 /// 排除**（`graph::build` / `stats::compare` 用 [`crate::types::config::lang_vendor_dirs`]），
 /// 不用本全集——否则别语言的 vendor 名会误伤本语言项目的同名业务目录。
 ///
+/// 全集是**有意的近似**：它也会忽略命中别语言 vendor 名的业务目录（如 TS 项目的
+/// `build/`），但这两处可容忍——detect 是探测语言前的鸡生蛋两害相权（不排则被
+/// `node_modules` 淹没主语言判定）；loc 比值两侧对称排除以保可比性，优先于单侧绝对
+/// 精度。要正确性的"哪些文件进依赖图"另走精确排除（见上）。
+///
 /// 内容是 [`crate::types::config::default_excludes_for_lang`] 各语言的并集，一致性由
 /// config 模块的 `excluded_dirs_is_union_of_all_langs` 测试保证（防止漂移）。
 pub const EXCLUDED_DIRS: &[&str] = &[
