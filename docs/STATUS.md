@@ -43,6 +43,6 @@
 ## 历史归档
 
 - **M1 详细记录**：[STATUS-M1-archive.md](STATUS-M1-archive.md)
+- **M2 详细记录**：[STATUS-M2-archive.md](STATUS-M2-archive.md)（Sprint D/E/F 任务清单、PR 记录、审查修复、已知问题处理状态）
 - **M2 计划**：[PLAN-M2.md](PLAN-M2.md)（55 项任务 + 5 项验收，Sprint A→F）
 - **M2 Sprint F 验收**：[sprint-f-acceptance.md](sprint-f-acceptance.md)
-- **M2 关键成果**：407 测试 / 91.96% 覆盖率 / 32 个 PR / SCC stub-first 契约 / rxjs 40 文件端到端验收通过
