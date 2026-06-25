@@ -12,7 +12,8 @@ use serde::Serialize;
 use crate::error::{MigrateError, Result};
 use crate::lang::registry::create_adapter;
 use crate::lang::{FileAnalysis, LanguageAdapter, SymbolKind};
-use crate::types::common::{NodeId, SourceLang, EXCLUDED_DIRS};
+use crate::types::common::{NodeId, SourceLang};
+use crate::types::config::default_excludes_for_lang;
 use crate::types::graph::{Dependency, EdgeSubKind, EdgeType, NodeType};
 
 use super::fingerprint::{self, ChangeLevel, FileFingerprint};
@@ -602,8 +603,15 @@ fn collect_source_files(
     root: &Path,
     adapters: &[Box<dyn LanguageAdapter>],
 ) -> Result<Vec<(PathBuf, usize)>> {
+    // 排除目录按**参与语言**精确取并集，而非全语言全集——否则别语言的 vendor 名
+    // （如 C 的 `build`、Go 的 `vendor`）会误伤本语言项目的同名业务目录（如 TS 的
+    // `src/build/`），目录级跳过使 can_handle 够不到里面的真实源码、依赖图缺节点。
+    let excludes: HashSet<String> = adapters
+        .iter()
+        .flat_map(|a| default_excludes_for_lang(a.language()))
+        .collect();
     let mut files = Vec::new();
-    collect_recursive(root, adapters, &mut files)?;
+    collect_recursive(root, adapters, &excludes, &mut files)?;
     files.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(files)
 }
@@ -611,6 +619,7 @@ fn collect_source_files(
 fn collect_recursive(
     dir: &Path,
     adapters: &[Box<dyn LanguageAdapter>],
+    excludes: &HashSet<String>,
     files: &mut Vec<(PathBuf, usize)>,
 ) -> Result<()> {
     let entries = std::fs::read_dir(dir).map_err(MigrateError::Io)?;
@@ -619,10 +628,10 @@ fn collect_recursive(
         let path = entry.path();
         if path.is_dir() {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
-            if EXCLUDED_DIRS.contains(&name.as_ref()) {
+            if excludes.contains(name.as_ref()) {
                 continue;
             }
-            collect_recursive(&path, adapters, files)?;
+            collect_recursive(&path, adapters, excludes, files)?;
         } else if let Some(idx) = adapters.iter().position(|a| a.can_handle(&path)) {
             files.push((path, idx));
         }
@@ -1095,6 +1104,34 @@ mod tests {
         let mut adapters: Vec<Box<dyn LanguageAdapter>> = vec![];
         let graph = build_graph(&root, &mut adapters).unwrap();
         assert_eq!(graph.node_count(), 0);
+    }
+
+    #[test]
+    fn excludes_are_language_precise_not_union() {
+        // 回归：TS 项目里叫 `build/` 的业务目录（`build` 是 C 的 vendor 名，不是 TS 的）
+        // 不应被误排——否则目录级跳过会漏掉里面的真实 .ts 源码。node_modules（TS vendor）仍排除。
+        let dir = std::env::temp_dir().join("rustmigrate_lang_precise_excludes");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("build")).unwrap();
+        std::fs::create_dir_all(dir.join("node_modules/pkg")).unwrap();
+        std::fs::write(dir.join("build/gen.ts"), "export function g() {}\n").unwrap();
+        std::fs::write(
+            dir.join("node_modules/pkg/index.ts"),
+            "export function dep() {}\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("main.ts"), "export function m() {}\n").unwrap();
+
+        let graph = build_graph_ts(&dir).unwrap();
+        let has = |id: &str| graph.node_index(&NodeId::new(id)).is_some();
+        let build_kept = has("file:build/gen.ts");
+        let node_modules_excluded = !has("file:node_modules/pkg/index.ts");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            build_kept,
+            "TS 项目的 build/ 业务目录源码不应被误排（build 是 C 的 vendor 名）"
+        );
+        assert!(node_modules_excluded, "node_modules（TS vendor）应被排除");
     }
 
     const TS_EXTS: &[&str] = &["ts", "tsx"];

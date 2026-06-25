@@ -251,11 +251,14 @@ impl From<&str> for SchemaVersion {
     }
 }
 
-/// 文件遍历时排除的目录名——**语言未知时的保守全集**。
+/// 文件遍历时排除的目录名——**跨语言统计专用全集**。
 ///
-/// 用于语言探测期（`profile::detect` 在确定语言前遍历，鸡生蛋）以及尚未接入
-/// 用户配置的遍历点（graph/stats）。内容是
-/// [`crate::types::config::default_excludes_for_lang`] 各语言的并集，一致性由
+/// 仅用于"目的就是跨语言扫描"的两处：`profile::detect`（在确定语言前探测主语言，
+/// 鸡生蛋）和 `stats::loc`（统计所有语言行数）。**图构建与结构对比按已知语言精确
+/// 排除**（`graph::build` / `stats::compare` 用 [`crate::types::config::lang_vendor_dirs`]），
+/// 不用本全集——否则别语言的 vendor 名会误伤本语言项目的同名业务目录。
+///
+/// 内容是 [`crate::types::config::default_excludes_for_lang`] 各语言的并集，一致性由
 /// config 模块的 `excluded_dirs_is_union_of_all_langs` 测试保证（防止漂移）。
 pub const EXCLUDED_DIRS: &[&str] = &[
     // 通用（COMMON_EXCLUDES）

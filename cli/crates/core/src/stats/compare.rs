@@ -25,6 +25,7 @@ use crate::graph::build::build_graph_for_lang;
 use crate::lang::registry::create_adapter;
 use crate::stats::loc::count_loc;
 use crate::types::common::SourceLang;
+use crate::types::config::{lang_vendor_dirs, COMMON_EXCLUDES};
 use crate::types::graph::NodeType;
 
 /// 函数/控制流计数手段（JSON 序列化为 kebab-case，与历史输出一致）。
@@ -223,9 +224,12 @@ fn node_nesting(node: tree_sitter::Node, depth: usize, is_control_flow: fn(&str)
 
 // === 文件收集 ===
 
-/// 复用 [`crate::types::common::EXCLUDED_DIRS`] 排除目录，按 `accept` 判定收集文件。
-fn collect_files(root: &Path, accept: impl Fn(&Path) -> bool) -> Result<Vec<std::path::PathBuf>> {
-    use crate::types::common::EXCLUDED_DIRS;
+/// 按 `excludes` 跳过目录、按 `accept` 判定收集文件。
+fn collect_files(
+    root: &Path,
+    excludes: &[&str],
+    accept: impl Fn(&Path) -> bool,
+) -> Result<Vec<std::path::PathBuf>> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -235,7 +239,7 @@ fn collect_files(root: &Path, accept: impl Fn(&Path) -> bool) -> Result<Vec<std:
             let path = entry.path();
             if path.is_dir() {
                 let name = path.file_name().unwrap_or_default().to_string_lossy();
-                if EXCLUDED_DIRS.contains(&name.as_ref()) {
+                if excludes.contains(&name.as_ref()) {
                     continue;
                 }
                 stack.push(path);
@@ -248,18 +252,23 @@ fn collect_files(root: &Path, accept: impl Fn(&Path) -> bool) -> Result<Vec<std:
     Ok(out)
 }
 
-/// 收集 Rust 源文件（`.rs`）。
+/// 收集 Rust 源文件（`.rs`）——Rust 产物目录走通用排除（`.git`/`target`）。
 fn collect_rust_files(root: &Path) -> Result<Vec<std::path::PathBuf>> {
-    collect_files(root, |p| {
+    collect_files(root, COMMON_EXCLUDES, |p| {
         p.extension().and_then(|e| e.to_str()) == Some("rs")
     })
 }
 
-/// 按语言收集源文件——后缀与归属判定复用 adapter 的 `can_handle`，
-/// 与 graph 构建路径口径一致（同样排除 `.d.ts`/`.test`/`.spec`）。
+/// 按语言收集源文件——目录排除用该语言精确排除（非全语言全集，避免误伤同名业务目录）；
+/// 后缀与归属判定复用 adapter 的 `can_handle`，与 graph 构建路径口径一致。
 fn collect_source_files(root: &Path, lang: SourceLang) -> Result<Vec<std::path::PathBuf>> {
     let adapter = create_adapter(lang)?;
-    collect_files(root, |p| adapter.can_handle(p))
+    let excludes: Vec<&str> = lang_vendor_dirs(lang)
+        .iter()
+        .copied()
+        .chain(COMMON_EXCLUDES.iter().copied())
+        .collect();
+    collect_files(root, &excludes, |p| adapter.can_handle(p))
 }
 
 // === Rust 侧轻量词法扫描 ===
