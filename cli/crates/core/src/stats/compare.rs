@@ -22,6 +22,7 @@ use serde::Serialize;
 
 use crate::error::{MigrateError, Result};
 use crate::graph::build::build_graph_for_lang;
+use crate::lang::registry::create_adapter;
 use crate::stats::loc::count_loc;
 use crate::types::common::SourceLang;
 use crate::types::graph::NodeType;
@@ -222,8 +223,8 @@ fn node_nesting(node: tree_sitter::Node, depth: usize, is_control_flow: fn(&str)
 
 // === 文件收集 ===
 
-/// 复用 [`crate::types::common::EXCLUDED_DIRS`] 排除目录，按后缀收集文件。
-fn collect_by_ext(root: &Path, exts: &[&str]) -> Result<Vec<std::path::PathBuf>> {
+/// 复用 [`crate::types::common::EXCLUDED_DIRS`] 排除目录，按 `accept` 判定收集文件。
+fn collect_files(root: &Path, accept: impl Fn(&Path) -> bool) -> Result<Vec<std::path::PathBuf>> {
     use crate::types::common::EXCLUDED_DIRS;
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -238,10 +239,8 @@ fn collect_by_ext(root: &Path, exts: &[&str]) -> Result<Vec<std::path::PathBuf>>
                     continue;
                 }
                 stack.push(path);
-            } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                if exts.contains(&ext) {
-                    out.push(path);
-                }
+            } else if accept(&path) {
+                out.push(path);
             }
         }
     }
@@ -251,25 +250,16 @@ fn collect_by_ext(root: &Path, exts: &[&str]) -> Result<Vec<std::path::PathBuf>>
 
 /// 收集 Rust 源文件（`.rs`）。
 fn collect_rust_files(root: &Path) -> Result<Vec<std::path::PathBuf>> {
-    collect_by_ext(root, &["rs"])
+    collect_files(root, |p| {
+        p.extension().and_then(|e| e.to_str()) == Some("rs")
+    })
 }
 
-/// 按语言收集源文件。
+/// 按语言收集源文件——后缀与归属判定复用 adapter 的 `can_handle`，
+/// 与 graph 构建路径口径一致（同样排除 `.d.ts`/`.test`/`.spec`）。
 fn collect_source_files(root: &Path, lang: SourceLang) -> Result<Vec<std::path::PathBuf>> {
-    match lang {
-        SourceLang::TypeScript => {
-            let mut files = collect_by_ext(root, &["ts", "tsx"])?;
-            files.retain(|p| {
-                !p.file_name()
-                    .map(|n| n.to_string_lossy().ends_with(".d.ts"))
-                    .unwrap_or(false)
-            });
-            Ok(files)
-        }
-        SourceLang::Python => collect_by_ext(root, &["py"]),
-        SourceLang::C => collect_by_ext(root, &["c", "h"]),
-        SourceLang::Go => collect_by_ext(root, &["go"]),
-    }
+    let adapter = create_adapter(lang)?;
+    collect_files(root, |p| adapter.can_handle(p))
 }
 
 // === Rust 侧轻量词法扫描 ===
@@ -563,5 +553,42 @@ fn real() {
         assert!(json["source"]["functions"].is_number());
         assert!(json["function_ratio"]["ratio"].is_number());
         assert_eq!(json["rust"]["method"], "lexical-scan");
+    }
+
+    #[test]
+    fn compare_excludes_test_files_consistently() {
+        // 回归：函数计数（走 build_graph→adapter.can_handle）与嵌套深度
+        // （走 collect_source_files）必须用同一份文件集——测试/声明文件两侧都排除。
+        let dir = tempfile::tempdir().unwrap();
+        let src_dir = dir.path().join("src");
+        let rust_dir = dir.path().join("rust");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::create_dir_all(&rust_dir).unwrap();
+
+        // 真实源：1 函数，嵌套 1。
+        fs::write(
+            src_dir.join("a.ts"),
+            "export function f(x: number) {\n  if (x > 0) { return x; }\n}\n",
+        )
+        .unwrap();
+        // 测试文件：深嵌套（if>for>while），不应进入任何统计。
+        fs::write(
+            src_dir.join("a.test.ts"),
+            "test('x', () => {\n  if (1) { for (;;) { while (1) { break; } } }\n});\n",
+        )
+        .unwrap();
+        // 类型声明：也不应进入。
+        fs::write(src_dir.join("a.d.ts"), "export declare const z: number;\n").unwrap();
+        fs::write(rust_dir.join("a.rs"), "pub fn f(x: i64) -> i64 { x }\n").unwrap();
+
+        let report = compare_structure(&src_dir, &rust_dir).unwrap();
+        assert_eq!(
+            report.source.functions, 1,
+            "仅 a.ts 的 f，测试/声明文件排除"
+        );
+        assert_eq!(
+            report.source.max_nesting, 1,
+            "嵌套深度仅看 a.ts，测试文件的深嵌套不计入（口径与函数计数一致）"
+        );
     }
 }
