@@ -6,7 +6,10 @@
 
 - **Milestone**: M1 ✅ → M2 ✅ → **M3 多语言支持（Python 优先）**
 - **阶段**: Sprint A ✅ → Sprint B ✅ → Sprint C（PR-C1 ✅ / PR-C2 ✅ / PLG-05 ✅；**PR-C3 仅剩 PLG-06 端到端验证未做**）→ **进行中：Sprint E M3-DEC-01 拆解引擎**
-- **Sprint E**: 治"小而机械文件被过度处理"（<10 行翻半小时）。方案权威 = [decomposition-redesign.md](./decomposition-redesign.md)（grilling + 两轮 Codex 审查定稿）。**当前 = M3-DEC-01 拆解引擎（CLI），规划阶段**；完成后 M3-DEC-GATE 真实项目验收（硬前置），过门后 M3-DEC-02 轻量翻译路径。任务见 [PLAN-M3.md](./PLAN-M3.md) Sprint E。
+- **Sprint E**: 治"小而机械文件被过度处理"（<10 行翻半小时）。方案权威 = [decomposition-redesign.md](./decomposition-redesign.md)（grilling + 两轮 Codex 审查定稿）。**M3-DEC-01 拆解引擎 4 波已实现完成（分支 `feat/m3-dec01-decompose-engine`，待 PR 审查/合并）**；下一步 = M3-DEC-GATE 真实项目验收（硬前置，需用户给 1-2 个真实 Python 目标项目），过门后 M3-DEC-02 轻量翻译路径。任务见 [PLAN-M3.md](./PLAN-M3.md) Sprint E。
+  - DEC-01 四波（commit）：Wave1 图基建（被用符号持久化+deps-of 裁剪+footprint 原语 `2321f10`）/ Wave2 机械判定 predicate+危险分类 `4746c7f` / Wave3 凸性合批+composite_kind+冻结字段+run 守门 `992ea32` / Wave4 dry-run 报告+§8 四维度判据 `afc08da`
+  - 计划已落实 Codex 计划审查 4 项 important（I-1 composite_kind 持久化 / I-2 超预算转人工 / I-3 边 metadata 查询 API / I-4 canonical hash 确定性）
+  - 验收入口：`rustmigrate graph decompose --root <src> --budget <N>`（dry-run，只读，输出四维度报告）
 - **决策（2026-06-27）**：跳过 Sprint D 单独验收，直接做 Sprint E；DEC-GATE 在真实项目上验收拆解，顺带覆盖 Sprint D「真实 Python 项目」价值，且避免 PLG-06 被 DEC-02 重塑返工。PLG-06 暂挂。
 - **测试基线**: 471 测试 / clippy -D / deny / fmt / shellcheck 全绿
 - **CI 覆盖率**: 待更新
