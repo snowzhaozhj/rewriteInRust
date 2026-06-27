@@ -76,6 +76,21 @@ Sprint A (多语言泛化 + 遗留清理) → Sprint B (Python Adapter Core)
 | M3-PY-08 | **Python graph 集成测试**：端到端验证 fixture 偏序约束满足；signature round-trip；`__init__.py` re-export 透传正确 | 1d | PY-03~07 |
 | M3-PY-09 | **adapter 注册 + grammar 契约测试**：`registry.rs` 注册 Python adapter；新增 `ast_contract_python.rs` 测试 tree-sitter-python 节点类型稳定性 | 0.5d | PY-01 |
 
+### 执行策略（PR 拆解 + 并行）
+
+```
+Step 1: PR-B1 (Foundation)     → PY-01 + PY-09         [~1d]
+Step 2: PR-B2 (Core Analysis)  → PY-02~06              [~5d, 内部双线并行]
+         ├─ Track A: PY-02 → PY-03   (import 解析 → resolve)
+         └─ Track B: PY-04 → PY-05 + PY-06  (符号 → 调用 + 签名)
+Step 3: PR-B3 (Validation)     → PY-07 + PY-08         [~2.5d]
+```
+
+- PR-B1 是所有后续前置，先做先合
+- PR-B2 两条 Track 只共享 PY-01 的 adapter 结构，互不依赖
+- PR-B3 作为验收层独立 PR，发现问题不回溯改前面的 PR
+- 日历时间：~7-8d（PR-B2 内部并行压缩）
+
 **验收标准**：
 - [ ] 3 个 Python fixture 的 `ground-truth.json` 偏序约束全部满足
 - [ ] `cargo run -- graph build --root fixtures/py-linear-deps` 输出正确依赖图
