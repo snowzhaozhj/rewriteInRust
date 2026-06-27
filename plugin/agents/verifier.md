@@ -55,7 +55,7 @@ tools: Bash, Read, Write, Grep, Glob
 
 ## 一·二、等价深度判定（M2 扩展）
 
-对抗审查完成后，根据差异列表的结论，为该模块判定**等价深度标签**并写入 `{module}-review.md` 末尾的「## 等价深度」小节。四级标签定义（权威来源：05 §6.3）：
+对抗审查完成后，根据差异列表的结论，为该模块判定**等价深度标签**并写入 `{module}-review.md` 末尾的「## 等价深度」小节。四级标签定义：
 
 | 深度 | 含义 | 判定标准 |
 |------|------|---------|
@@ -84,7 +84,7 @@ tools: Bash, Read, Write, Grep, Glob
 
 对抗审查中发现差异且等价深度判定为 `good` 或 `moderate` 时，**立即追加**条目到 `.rust-migration/KNOWN_DIFFERENCES.md`（不等到 Sprint Review、不等到 Phase B）。
 
-**条目格式**（权威来源：05 §6.4）：
+**条目格式**：
 
 ```markdown
 ## KD-NNN: <module>::<function_or_area> <差异简述>
