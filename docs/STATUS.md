@@ -87,10 +87,14 @@ PY-01 ─┬→ PY-02 → PY-03 ─────┐
 - [x] PR-C1：Python adapter 资产（[#38](https://github.com/snowzhaozhj/rewriteInRust/pull/38)，审查必修全落实，待合并）
   - 审查：迁移规则正确性 + 设计契约 2 视角全跑；2+1 项 important 已修（regex 反向引用/环视、dict 插入顺序、PLG-01 偏离落 MDR-009）+ 多项 nit
   - MDR-009：适配器 shell 脚本模式取消，adapter 目录契约 = analysis-tools.json + porting-template.md
-- [ ] PR-C2：translator.md/analyzer.md/verifier.md 多语言分支（PLG-03 + PLG-04）
+- [x] PR-C2：translator.md/analyzer.md/verifier.md 多语言分支（PLG-03 + PLG-04，待审查/合并）
+  - translator.md（PLG-03）：核心规则节加「语言基线」——TS 内嵌表仅 source_language=typescript 套用，非 TS 以 `adapters/<lang>/porting-template.md` 为权威；RULE-2 表标 TS 基线；Phase A 加 Python 特化小节（`self` 参数转换 / `__init__.py` 包→mod 树 / 无 type-only import 区分）
+  - analyzer.md（PLG-04）：R6 源语言特化分析——Python 框架识别（django/flask/fastapi 等）+ 动态特性扫描（getattr/eval/metaclass/monkeypatch）记入 `gaps.dynamic_features`（输出格式示例同步加键）
+  - verifier.md（PLG-04）：9 维度表后加「源语言特化探测案例」——Python 替换 TS 案例（int 任意精度 / dict 插入序 / str 码点 vs UTF-8 / GIL·multiprocessing 进程隔离 / except pass·try-finally / Decimal 禁降级 f64）
+  - 自检：改动区无死链；plugin validate 通过
 - [ ] PR-C3：degrade_skip 降级报告增强 + 端到端验证（PLG-05 + PLG-06）
 
-> **遗留待办**（M3-VAL-07 设计文档同步时处理）：设计文档 06 §11.2 正文仍描述废弃的 shell adapter 契约，需按 MDR-009 改写为两文件契约。
+> **遗留待办**（M3-VAL-07 设计文档同步时处理）：① 设计文档 06 §11.2 正文仍描述废弃的 shell adapter 契约，需按 MDR-009 改写为两文件契约；② verifier.md 第 58/87 行仍有 `权威来源：05 §6.x` 死链（pre-existing，违反提示词自包含规范），需内联或删除。
 
 ### M3 多语言扩展点（调研结论，2026-06-24）
 

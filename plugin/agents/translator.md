@@ -26,8 +26,10 @@ tools: Bash, Read, Write, Grep, Glob
 
 > 以下为 MVP 通用核心规则（层级=通用 AND MVP=是）。生成项目专有规则时以这些为基线，结合 `source-graph.db` 中的实际类型/调用做特化。
 
+> **语言基线（多语言强制）**：下方内嵌的 RULE-2/3/7/8 映射表是 **TypeScript 基线**，仅当 `source_language=typescript` 时直接套用。源项目是其他语言（Python 等）时，**以对应适配器的 `adapters/<lang>/porting-template.md` 为类型映射/错误/字符串/命名规则的权威基线**——它给出该语言→Rust 的惯用法差异（如 Python 的 `int` 任意精度、`dict` 插入序、`self` 参数、GIL）。规则生成步骤本就读取该模板（见「输入/输出契约」），翻译循环（Phase A/B）也须按它特化，而非套用 TS 表。RULE-20（不确定性）与 RULE-3 的「禁 `unwrap` 掩盖错误」是语言无关的硬规则，所有语言一致生效。
+
 ### RULE-2 类型映射（必含）
-源类型 → Rust 类型对照。TypeScript 基线：
+源类型 → Rust 类型对照。**TypeScript 基线**（非 TS 项目以 `adapters/<lang>/porting-template.md` 的类型映射表为准）：
 
 | 源类型 | Rust 类型 |
 |--------|-----------|
@@ -136,6 +138,12 @@ tools: Bash, Read, Write, Grep, Glob
 - 保留源码的函数划分、控制流结构、命名对应关系（仅按 RULE-8 转 snake_case）。函数数量、控制流嵌套应与源码大致 1:1（Phase A 后由 `stats compare` 做结构门禁，越界会被打回重做）。
 - 类型/错误/字符串映射严格按 RULE-2/3/7；任何不确定一律 `TODO(port): <原因>`，**禁止猜测**。
 - 每处依据某条规则的翻译，在代码里留 `// PORT NOTE: RULE-N <说明>` 注释——这些注释是 `_porting_manifest.json` 的来源。
+
+**Phase A 语言特化（非 TS 项目按 `source_language` 生效）**：忠实翻译的「1:1 结构对应」要落到源语言的实际语义形态，不能套用 TS 假设。Python 项目须额外注意：
+
+- **`self` 参数转换**：Python 方法首参 `self` 是显式形参，翻译成 Rust `&self`/`&mut self`/`self`（按方法是否读/写/消费状态选），**不映射为结构体字段或普通参数**。`@classmethod` 的 `cls` / `@staticmethod` → 不带 receiver 的关联函数（`impl` 块内 `fn`）。`__init__` → `Self::new()` 关联函数返回 `Self`。这是结构对应的一部分，属 Phase A 忠实翻译而非优化。
+- **`__init__.py` 包结构**：Python 包（含 `__init__.py` 的目录）→ Rust 模块树（`mod.rs` 或 `<pkg>/mod.rs`）；`__init__.py` 里的 re-export（`from .x import Y`）→ `pub use`。源图把包节点折叠后，翻译单元仍是源文件，按图节点 ID 定位（见上「定位源文件」），不要把整包合并成单文件。
+- **无 type-only import 区分**：Python 的 `import` 全是运行时值导入，**没有 TS `import type` 那种纯类型导入**（即使 `TYPE_CHECKING` 块内的 import 也是同一套 import 语法，只是延迟求值）。翻译依赖时**不要套用 TS 的「剥离 type-only import」逻辑**——Python 每个 import 都对应实际的值/类型使用，按图的 `imports` 边如实建立 Rust `use`，由编译器裁剪未用项即可。
 
 **SCC 组成员文件的 Phase A = 填空，不是从零翻译**：若本次任务是 SCC 组的某个成员文件（调用方会注入契约 + stub），输入额外含 `intermediate/{group}-contract.md` + 该 mod 的 stub。此时 Phase A 是**把 stub 里对应 mod 的 `todo!()` 填成实现**：
 - **签名锁定**：struct 字段、fn 签名、所有权类型（`Rc`/`Weak`/`RefCell`）、mod 声明一律照 stub/契约**逐字节不改**。填完 `diff stub impl` 应仅 body 变化。

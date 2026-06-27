@@ -35,6 +35,22 @@ tools: Bash, Read, Write, Grep, Glob
 
 维度 9 是契约核对而非属性测试：接口签名、前后置条件、错误模型、并发模型、边界处理、副作用逐项比对意图摘要。
 
+### 源语言特化探测案例（按 `source_language` 选用）
+
+9 维度本身语言无关，但**上表案例是 TypeScript 基线**。源项目是 Python 时，TS 的 JS-number/UTF-16 案例不适用（语义不同），按下表替换对应维度的探测点：
+
+| # | 维度 | Python 探测案例（替换 TS 案例） |
+|---|------|------|
+| 1 | 边界值 | Python `max([])` 抛 `ValueError`（非 TS 的 `-Infinity`）；验 Rust `iter().max()` 的 `None` 分支是否还原"空集合报错/降级"语义而非默认 0 |
+| 2 | 类型边界 | **Python `int` 任意精度，永不溢出**；映射到固定整型（`i64` 等）后大数会 wrap（debug panic）——验是否按取值范围选 `i128`/`num-bigint`。另：Python `/` 恒为浮点除、`//` 为 floor 除——验除法语义未被 Rust 整数除静默改写 |
+| 3 | 集合操作 | **Python `dict`（3.7+）保插入序**，Rust `HashMap` 随机——依赖遍历/序列化顺序须用 `IndexMap`；`set` 无序两语言一致，不必纠结 |
+| 5 | 字符串 | Python `len("😀")` == 1（**按 Unicode 码点**，与 TS 的 UTF-16 码元 ==2 又不同），Rust `.len()` == 4（字节）/ `.chars().count()` == 1——验长度/切片按码点语义选对；`s[a:b]` 是码点切片，Rust `&s[a..b]` 是字节切片且须落字符边界 |
+| 6 | 并发 | **GIL**：Python 多线程不真并行、`multiprocessing` 是**进程隔离**（pickle 传值、无共享内存）；映射到 Rust `thread`/`rayon` 变共享内存——验原"无共享"假设被打破处是否补了 `Arc<Mutex>` 同步 |
+| 7 | 错误路径 | `except: pass` 吞异常 → 验 Rust 是否显式处理而非 `unwrap()`；`try/finally` 清理 → 验是否用 `Drop`/RAII 还原而非丢失清理 |
+| 8 | 浮点精度 | Python `float` 即 f64，`0.1+0.2 != 0.3` 与 Rust 一致；重点验 **`decimal.Decimal` 是否被错误降级为 `f64`**（金融/精确计算会丢精度，属严重度高差异） |
+
+维度 4（时间/日期）跨语言探测点一致（时区/DST/闰秒边界），不另列。Python 动态特性（`getattr`/metaclass 等）若 analyzer 已记入画像 `gaps.dynamic_features`，在维度 9 核对 translator 是否对其留了 `TODO(port)` 而非猜测实现。
+
 `{module}-review.md` 须含「## 差异列表」标题，逐条写：维度、源码行为、Rust 行为、严重度、修正建议。无差异也要显式写明"已核对维度 X，未发现差异"，不要留空。
 
 ## 一·二、等价深度判定（M2 扩展）
