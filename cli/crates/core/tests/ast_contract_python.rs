@@ -71,6 +71,33 @@ const CONTRACTS: &[Contract] = &[
         kind: "identifier",
         required_fields: &[],
     },
+    // decorated_definition（顶层装饰器包裹函数/类）
+    Contract {
+        kind: "decorated_definition",
+        required_fields: &[],
+    },
+    // keyword_argument（metaclass=... 检测）
+    Contract {
+        kind: "keyword_argument",
+        required_fields: &["name"],
+    },
+    // 顶层控制流
+    Contract {
+        kind: "for_statement",
+        required_fields: &["body"],
+    },
+    Contract {
+        kind: "while_statement",
+        required_fields: &["body"],
+    },
+    Contract {
+        kind: "if_statement",
+        required_fields: &[],
+    },
+    Contract {
+        kind: "with_statement",
+        required_fields: &["body"],
+    },
     // 属性访问
     Contract {
         kind: "attribute",
@@ -92,6 +119,9 @@ def add(a: int, b: int) -> int:
 class Base:
     pass
 
+class Meta(metaclass=type):
+    pass
+
 class Derived(Base):
     def method(self):
         self.value = os.path.join("a", "b")
@@ -103,15 +133,24 @@ def risky():
     except ValueError:
         pass
 
-def inner():
-    nonlocal_var = 1
-
 def use_nonlocal():
     x = 0
     def nested():
         nonlocal x
         x += 1
     nested()
+
+for i in range(10):
+    pass
+
+while False:
+    break
+
+if counter > 0:
+    pass
+
+with open("f") as fh:
+    pass
 
 result = eval("1+1")
 

@@ -95,14 +95,32 @@ fn scan_tier_signals(root: Node, source: &str) -> PyTierSignals {
                 s.has_non_trivial_content = true;
                 check_danger_in_subtree(child, source, &mut s);
             }
+            "decorated_definition" => {
+                s.has_non_trivial_content = true;
+                check_danger_in_subtree(child, source, &mut s);
+            }
             "expression_statement" => {
-                // 顶层简单赋值（`X = 42`）不算非平凡
                 let inner = child.child(0);
                 if inner.is_some_and(|n| n.kind() != "assignment") {
                     s.has_non_trivial_content = true;
                 }
+                check_danger_in_subtree(child, source, &mut s);
             }
-            _ => {}
+            "global_statement" | "nonlocal_statement" => {
+                s.has_non_trivial_content = true;
+                s.has_danger = true;
+            }
+            "try_statement" => {
+                s.has_non_trivial_content = true;
+                s.has_danger = true;
+            }
+            "for_statement" | "while_statement" | "if_statement" | "with_statement" => {
+                s.has_non_trivial_content = true;
+                check_danger_in_subtree(child, source, &mut s);
+            }
+            _ => {
+                s.has_non_trivial_content = true;
+            }
         }
     }
     s
@@ -114,28 +132,37 @@ fn check_danger_in_subtree(node: Node, source: &str, signals: &mut PyTierSignals
 
     while let Some(current) = stack.pop() {
         match current.kind() {
-            // async/await
             "async" => {
                 signals.has_danger = true;
                 return;
             }
-            // try/except（异常处理 = 复杂控制流）
             "try_statement" => {
                 signals.has_danger = true;
                 return;
             }
-            // metaclass / __getattr__ / __setattr__（动态属性）
-            "decorator" => {
-                let text = &source[current.byte_range()];
-                if text.contains("metaclass") || text.contains("__getattr__") {
-                    signals.has_danger = true;
-                    return;
-                }
-            }
-            // global/nonlocal（全局状态）
             "global_statement" | "nonlocal_statement" => {
                 signals.has_danger = true;
                 return;
+            }
+            // metaclass=... 在 class 定义的 argument_list 中
+            "keyword_argument" => {
+                if let Some(name_node) = current.child_by_field_name("name") {
+                    let name = &source[name_node.byte_range()];
+                    if name == "metaclass" {
+                        signals.has_danger = true;
+                        return;
+                    }
+                }
+            }
+            // __getattr__/__setattr__/__delattr__ 方法定义（动态属性）
+            "function_definition" => {
+                if let Some(name_node) = current.child_by_field_name("name") {
+                    let name = &source[name_node.byte_range()];
+                    if name == "__getattr__" || name == "__setattr__" || name == "__delattr__" {
+                        signals.has_danger = true;
+                        return;
+                    }
+                }
             }
             // exec/eval（动态代码执行）
             "call" => {
@@ -243,5 +270,67 @@ def dynamic(code):
     return eval(code)
 "#;
         assert_eq!(adapter.detect_tier(source), ModuleTier::Full);
+    }
+
+    #[test]
+    fn detect_tier_full_toplevel_eval() {
+        let mut adapter = PythonAdapter::new().unwrap();
+        let source = "result = eval('1+1')\n";
+        assert_eq!(adapter.detect_tier(source), ModuleTier::Full);
+    }
+
+    #[test]
+    fn detect_tier_full_toplevel_try() {
+        let mut adapter = PythonAdapter::new().unwrap();
+        let source = r#"
+try:
+    import optional_lib
+except ImportError:
+    optional_lib = None
+"#;
+        assert_eq!(adapter.detect_tier(source), ModuleTier::Full);
+    }
+
+    #[test]
+    fn detect_tier_full_metaclass() {
+        let mut adapter = PythonAdapter::new().unwrap();
+        let source = r#"
+class Singleton(metaclass=SingletonMeta):
+    pass
+"#;
+        assert_eq!(adapter.detect_tier(source), ModuleTier::Full);
+    }
+
+    #[test]
+    fn detect_tier_full_getattr() {
+        let mut adapter = PythonAdapter::new().unwrap();
+        let source = r#"
+class Proxy:
+    def __getattr__(self, name):
+        return getattr(self._target, name)
+"#;
+        assert_eq!(adapter.detect_tier(source), ModuleTier::Full);
+    }
+
+    #[test]
+    fn detect_tier_standard_decorated() {
+        let mut adapter = PythonAdapter::new().unwrap();
+        let source = r#"
+@app.route("/")
+def index():
+    return "hello"
+"#;
+        assert_eq!(adapter.detect_tier(source), ModuleTier::Standard);
+    }
+
+    #[test]
+    fn detect_tier_standard_toplevel_for() {
+        let mut adapter = PythonAdapter::new().unwrap();
+        let source = r#"
+items = []
+for i in range(10):
+    items.append(i)
+"#;
+        assert_eq!(adapter.detect_tier(source), ModuleTier::Standard);
     }
 }
