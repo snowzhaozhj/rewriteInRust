@@ -6,7 +6,7 @@ pub mod template;
 
 pub use degrade_report::{
     generate_degrade_report, DegradeEstimate, DegradeOptions, DegradeReport, ErrorSnippet,
-    FailureCategory,
+    FailureCategory, RecommendedCrate,
 };
 #[allow(deprecated)]
 pub use ffi::{count_exports, generate_ffi_binding, select_cycle_break_point, FfiInterface};

@@ -17,6 +17,27 @@ pub struct DegradeReport {
     pub attempted_fixes: Vec<String>,
     /// 三种降级方式的预估代价。
     pub degrade_options: DegradeOptions,
+    /// 推荐的 Rust 生态替代 crate（`degrade_skip` 时输出，见 MDR-007）。
+    ///
+    /// 被裁剪模块的能力交由这些 crate 替代；依赖此模块的上游模块翻译时，
+    /// 据此把被裁剪依赖替换为推荐 crate 调用，而非留空导致编译失败
+    /// （= MDR-007「上游模块注入 `blocked_by_skip` context」的承载数据）。
+    ///
+    /// 来源：translator 依失败分类与被裁剪模块职责从 Rust 生态推荐——
+    /// CLI 侧无 crate 生态知识，`generate_degrade_report` 默认产出空列表，
+    /// 由 translator SubAgent 在降级诊断 JSON 中填充。
+    /// 依赖解析失败 / 语义鸿沟类降级通常可给出推荐；纯编译错误类可为空。
+    #[serde(default)]
+    pub recommended_alternatives: Vec<RecommendedCrate>,
+}
+
+/// 推荐的 Rust 生态替代 crate。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecommendedCrate {
+    /// crate 名（crates.io 上的包名）。
+    pub crate_name: String,
+    /// 推荐理由：该 crate 如何覆盖被裁剪模块的能力。
+    pub rationale: String,
 }
 
 /// 失败分类。
@@ -124,6 +145,8 @@ pub fn generate_degrade_report(
         error_snippets,
         attempted_fixes,
         degrade_options,
+        // CLI 不臆造 crate 推荐（无生态知识）；由 translator 在降级诊断 JSON 中填充。
+        recommended_alternatives: Vec::new(),
     }
 }
 
@@ -260,6 +283,56 @@ mod tests {
             deserialized.degrade_options.skip.downstream_impact,
             "0 个下游模块将受影响，需调整依赖或同步裁剪"
         );
+    }
+
+    #[test]
+    fn test_generate_default_alternatives_empty() {
+        // CLI 侧生成器不臆造 crate 推荐——默认空列表，留给 translator 填充。
+        let report = generate_degrade_report("m", sample_snippets(), vec![], 2, 1);
+        assert!(report.recommended_alternatives.is_empty());
+    }
+
+    #[test]
+    fn test_recommended_alternatives_roundtrip() {
+        // translator 填充推荐 crate 后，序列化往返不丢字段。
+        let mut report = generate_degrade_report("img_codec", vec![], vec![], 3, 2);
+        report.recommended_alternatives = vec![
+            RecommendedCrate {
+                crate_name: "image".to_string(),
+                rationale: "覆盖原模块的 PNG/JPEG 解码能力".to_string(),
+            },
+            RecommendedCrate {
+                crate_name: "imageproc".to_string(),
+                rationale: "替代原模块的图像滤镜算子".to_string(),
+            },
+        ];
+
+        let json = serde_json::to_string_pretty(&report).unwrap();
+        let deserialized: DegradeReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.recommended_alternatives.len(), 2);
+        assert_eq!(deserialized.recommended_alternatives[0].crate_name, "image");
+        assert_eq!(
+            deserialized.recommended_alternatives[1].rationale,
+            "替代原模块的图像滤镜算子"
+        );
+    }
+
+    #[test]
+    fn test_legacy_json_without_alternatives_deserializes() {
+        // 旧降级报告 JSON（无 recommended_alternatives 字段）仍可反序列化（serde default 向后兼容）。
+        let legacy = r#"{
+            "module": "old",
+            "failure_category": "semantic_gap",
+            "error_snippets": [],
+            "attempted_fixes": [],
+            "degrade_options": {
+                "ffi": {"effort": "low", "description": "x", "downstream_impact": "y"},
+                "manual": {"effort": "high", "description": "x", "downstream_impact": "y"},
+                "skip": {"effort": "low", "description": "x", "downstream_impact": "y"}
+            }
+        }"#;
+        let report: DegradeReport = serde_json::from_str(legacy).unwrap();
+        assert!(report.recommended_alternatives.is_empty());
     }
 
     #[test]
