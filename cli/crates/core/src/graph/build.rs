@@ -3,7 +3,7 @@
 //! 遍历项目目录，通过 `LanguageAdapter` trait 分析每个文件，
 //! 组装成完整的 `SourceGraph`。不依赖任何特定语言实现。
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -825,6 +825,24 @@ fn resolve_reexport_origin(
     result
 }
 
+/// 标记某依赖 dest 为"用到全部导出"（use-all，不可裁剪）。
+///
+/// `None` 是吸收态：default/namespace/side-effect/re-export 任一命中即覆盖具名集合。
+fn mark_dep_all(map: &mut BTreeMap<String, Option<BTreeSet<String>>>, dest: String) {
+    map.insert(dest, None);
+}
+
+/// 向依赖 dest 的被用具名符号集追加一个符号名（dest 已是 use-all 时 no-op）。
+fn add_dep_symbol(
+    map: &mut BTreeMap<String, Option<BTreeSet<String>>>,
+    dest: String,
+    name: String,
+) {
+    if let Some(set) = map.entry(dest).or_insert_with(|| Some(BTreeSet::new())) {
+        set.insert(name);
+    }
+}
+
 /// 构建跨文件的 Imports 和 Calls 边。
 fn add_cross_file_edges(
     graph: &mut SourceGraph,
@@ -871,6 +889,10 @@ fn add_cross_file_edges(
         let mut ambiguous: HashSet<String> = HashSet::new();
         // 别名 → 原名映射（仅 Named import；namespace import 跳过以免污染）
         let mut alias_to_original: HashMap<String, String> = HashMap::new();
+        // dest 文件 → 被用符号集（None=use-all 不可裁剪）。跨同文件多条 import 聚合，
+        // 循环末按 dest 各发射一条带 used_symbols 的 Imports 边（DB PRIMARY KEY 本就按
+        // (source,target,edge_type) 去重，此处聚合避免 OR IGNORE 丢符号；M3-DEC-01）。
+        let mut dest_usage: BTreeMap<String, Option<BTreeSet<String>>> = BTreeMap::new();
         let adapter_idx = file_adapter_map.get(rel.as_str()).copied().unwrap_or(0);
         for import in &analysis.imports {
             let Some(target_rel) =
@@ -880,28 +902,19 @@ fn add_cross_file_edges(
             };
 
             // re-export（`export ... from`）：建 barrel→源 依赖边，但不进 import_map——
-            // 本文件并不“使用”这些转手符号，进 import_map 会污染调用解析。
+            // 本文件并不“使用”这些转手符号，进 import_map 会污染调用解析。记 use-all。
             if import.reexport {
-                graph.add_edge(Dependency::new(
-                    file_id.clone(),
-                    NodeId::file(&target_rel),
-                    EdgeType::Imports,
-                ));
+                mark_dep_all(&mut dest_usage, target_rel);
                 continue;
             }
 
-            // side-effect 导入（无符号，`import 'x'`）：直接连模块。
+            // side-effect 导入（无符号，`import 'x'`）：直接连模块。记 use-all。
             if import.symbols.is_empty() {
-                graph.add_edge(Dependency::new(
-                    file_id.clone(),
-                    NodeId::file(&target_rel),
-                    EdgeType::Imports,
-                ));
+                mark_dep_all(&mut dest_usage, target_rel);
                 continue;
             }
 
             // 逐符号确定真正目标：具名符号穿透 barrel 到 origin；default/namespace 不透传。
-            let mut edge_done: HashSet<String> = HashSet::new();
             for sym in &import.symbols {
                 let dest = if sym.kind == SymbolKind::Named {
                     resolve_reexport_origin(
@@ -916,12 +929,11 @@ fn add_cross_file_edges(
                     target_rel.clone()
                 };
 
-                if edge_done.insert(dest.clone()) {
-                    graph.add_edge(Dependency::new(
-                        file_id.clone(),
-                        NodeId::file(&dest),
-                        EdgeType::Imports,
-                    ));
+                // 被用符号累加：Named 记原名（可裁剪）；default/namespace 记 use-all。
+                if sym.kind == SymbolKind::Named {
+                    add_dep_symbol(&mut dest_usage, dest.clone(), sym.name.clone());
+                } else {
+                    mark_dep_all(&mut dest_usage, dest.clone());
                 }
 
                 let local_name = sym.alias.as_deref().unwrap_or(&sym.name);
@@ -950,6 +962,15 @@ fn add_cross_file_edges(
                     }
                 }
             }
+        }
+
+        // 按 dest 发射 Imports 边（每依赖一条，附聚合后的被用符号；BTreeMap 保证确定序）。
+        for (dest, usage) in dest_usage {
+            let mut dep = Dependency::new(file_id.clone(), NodeId::file(&dest), EdgeType::Imports);
+            if let Some(set) = usage {
+                dep.used_symbols = Some(set.into_iter().collect());
+            }
+            graph.add_edge(dep);
         }
 
         // Calls 边（跨文件：通过 imports 解析调用目标）
@@ -1468,6 +1489,74 @@ mod tests {
         assert!(
             has_call,
             "import 别名函数调用应解析到原函数名 greet，而非别名 hello"
+        );
+    }
+
+    #[test]
+    fn imports_edge_records_used_named_symbols() {
+        let dir = std::env::temp_dir().join("rustmigrate_used_symbols_named");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("utils.ts"),
+            "export function greet(n: string): string { return n; }\n\
+             export function shout(n: string): string { return n; }\n\
+             export function unused(): void {}\n",
+        )
+        .unwrap();
+        // 两条 import 语句同指 utils：聚合后应为 {greet, shout}（排序去重，单边）。
+        std::fs::write(
+            dir.join("main.ts"),
+            "import { greet } from './utils';\n\
+             import { shout } from './utils';\n\
+             greet('a');\nshout('b');\n",
+        )
+        .unwrap();
+
+        let graph = build_graph_ts(&dir).unwrap();
+        let imports: Vec<&Dependency> = graph
+            .edges()
+            .filter(|e| {
+                e.edge_type == EdgeType::Imports
+                    && e.source.as_str() == "file:main.ts"
+                    && e.target.as_str() == "file:utils.ts"
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(imports.len(), 1, "同 dest 多条 import 应聚合为单边");
+        assert_eq!(
+            imports[0].used_symbols.as_deref(),
+            Some(["greet".to_string(), "shout".to_string()].as_slice()),
+            "具名导入应记录被用符号（排序），不含未导入的 unused"
+        );
+    }
+
+    #[test]
+    fn imports_edge_namespace_is_use_all() {
+        let dir = std::env::temp_dir().join("rustmigrate_used_symbols_ns");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("utils.ts"), "export function greet(): void {}\n").unwrap();
+        std::fs::write(
+            dir.join("main.ts"),
+            "import * as u from './utils';\nu.greet();\n",
+        )
+        .unwrap();
+
+        let graph = build_graph_ts(&dir).unwrap();
+        let edge = graph
+            .edges()
+            .find(|e| {
+                e.edge_type == EdgeType::Imports
+                    && e.source.as_str() == "file:main.ts"
+                    && e.target.as_str() == "file:utils.ts"
+            })
+            .cloned();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            edge.and_then(|e| e.used_symbols),
+            None,
+            "namespace 导入不可裁剪，used_symbols 应为 None（use-all）"
         );
     }
 

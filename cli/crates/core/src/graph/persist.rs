@@ -21,6 +21,25 @@ use crate::types::graph::{
 
 use super::SourceGraph;
 
+/// 幂等补列：为旧库的 `edges` 表补 `used_symbols` 列（M3-DEC-01）。
+///
+/// `CREATE TABLE IF NOT EXISTS` 对已存在的表是 no-op，不会补新列；SQLite 又无
+/// `ADD COLUMN IF NOT EXISTS`。故对旧库显式 `ALTER TABLE`，忽略列已存在
+/// （新库由 schema.sql 直接建出该列）/ 表不存在（空库，SELECT 自会处理）两类错误。
+fn ensure_edge_columns(conn: &Connection) -> Result<()> {
+    match conn.execute("ALTER TABLE edges ADD COLUMN used_symbols TEXT", []) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("duplicate column name") || msg.contains("no such table") {
+                Ok(())
+            } else {
+                Err(e.into())
+            }
+        }
+    }
+}
+
 /// 将图写入 SQLite 数据库。
 ///
 /// 使用 `schema.sql` 建表，先清空旧数据再插入，全程事务保护。
@@ -30,6 +49,7 @@ pub fn save_to_db(graph: &SourceGraph, db_path: &Path) -> Result<()> {
 
     // 建表（IF NOT EXISTS，幂等）
     conn.execute_batch(include_str!("../schema.sql"))?;
+    ensure_edge_columns(&conn)?;
 
     let tx = conn.transaction()?;
 
@@ -59,6 +79,7 @@ pub fn load_from_db(db_path: &Path) -> Result<SourceGraph> {
 
     let conn = Connection::open(db_path)?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+    ensure_edge_columns(&conn)?;
     let mut graph = SourceGraph::new();
 
     // 加载节点
@@ -140,7 +161,7 @@ pub fn load_from_db(db_path: &Path) -> Result<SourceGraph> {
     // 加载边
     {
         let mut stmt = conn.prepare(
-            "SELECT source, target, edge_type, provenance, weight, sub_kind, mapping_notes FROM edges",
+            "SELECT source, target, edge_type, provenance, weight, sub_kind, mapping_notes, used_symbols FROM edges",
         )?;
 
         let rows = stmt.query_map([], |row| {
@@ -152,6 +173,7 @@ pub fn load_from_db(db_path: &Path) -> Result<SourceGraph> {
                 weight: row.get(4)?,
                 sub_kind: row.get(5)?,
                 mapping_notes: row.get(6)?,
+                used_symbols: row.get(7)?,
             })
         })?;
 
@@ -175,6 +197,19 @@ pub fn load_from_db(db_path: &Path) -> Result<SourceGraph> {
                 &edge_id,
                 &mut graph.warnings,
             );
+            // used_symbols：JSON 数组 → Vec<String>；解析失败回退 None 并告警，不阻断加载。
+            let used_symbols = match r.used_symbols.as_deref() {
+                None => None,
+                Some(s) => match serde_json::from_str::<Vec<String>>(s) {
+                    Ok(v) => Some(v),
+                    Err(_) => {
+                        graph
+                            .warnings
+                            .push(format!("边 {edge_id} 的 used_symbols 非法 JSON，已忽略"));
+                        None
+                    }
+                },
+            };
             graph.add_edge(Dependency {
                 source: NodeId::new(r.source),
                 target: NodeId::new(r.target),
@@ -183,6 +218,7 @@ pub fn load_from_db(db_path: &Path) -> Result<SourceGraph> {
                 weight: r.weight,
                 sub_kind,
                 mapping_notes: r.mapping_notes,
+                used_symbols,
             });
         }
     }
@@ -227,11 +263,21 @@ fn insert_graph_rows(tx: &rusqlite::Transaction, graph: &SourceGraph) -> Result<
     {
         let mut stmt = tx.prepare(
             "INSERT OR IGNORE INTO edges \
-             (source, target, edge_type, provenance, weight, sub_kind, mapping_notes) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             (source, target, edge_type, provenance, weight, sub_kind, mapping_notes, used_symbols) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         )?;
 
         for edge in graph.edges() {
+            // used_symbols 序列化为 JSON 数组字符串；None 存 NULL。
+            let used_symbols_json = edge
+                .used_symbols
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|e| MigrateError::Graph {
+                    message: format!("used_symbols 序列化失败: {e}"),
+                    file: String::new(),
+                })?;
             stmt.execute(params![
                 edge.source.as_str(),
                 edge.target.as_str(),
@@ -240,6 +286,7 @@ fn insert_graph_rows(tx: &rusqlite::Transaction, graph: &SourceGraph) -> Result<
                 edge.weight,
                 edge.sub_kind.map(|s| s.to_string()),
                 edge.mapping_notes,
+                used_symbols_json,
             ])?;
         }
     }
@@ -262,6 +309,7 @@ pub fn save_incremental(
     let mut conn = Connection::open(db_path)?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
     conn.execute_batch(include_str!("../schema.sql"))?;
+    ensure_edge_columns(&conn)?;
 
     let tx = conn.transaction()?;
 
@@ -434,6 +482,7 @@ struct EdgeRow {
     weight: f64,
     sub_kind: Option<String>,
     mapping_notes: Option<String>,
+    used_symbols: Option<String>,
 }
 
 // === 节点扩展属性序列化 ===
@@ -572,6 +621,61 @@ mod tests {
             ));
         }
         set.len()
+    }
+
+    #[test]
+    fn used_symbols_round_trip() {
+        use crate::types::graph::{EdgeType, NodeType, SourceNode};
+        let mut g = SourceGraph::new();
+        g.add_node(SourceNode::new(
+            NodeId::file("a.ts"),
+            NodeType::File,
+            "a.ts".to_string(),
+            "a.ts".to_string(),
+        ));
+        g.add_node(SourceNode::new(
+            NodeId::file("b.ts"),
+            NodeType::File,
+            "b.ts".to_string(),
+            "b.ts".to_string(),
+        ));
+        let mut dep = Dependency::new(
+            NodeId::file("a.ts"),
+            NodeId::file("b.ts"),
+            EdgeType::Imports,
+        );
+        dep.used_symbols = Some(vec!["bar".to_string(), "foo".to_string()]);
+        g.add_edge(dep);
+
+        let db_path = temp_db_path("used_symbols");
+        save_to_db(&g, &db_path).unwrap();
+        let loaded = load_from_db(&db_path).unwrap();
+        let _ = std::fs::remove_file(&db_path);
+
+        let edge = loaded
+            .edges()
+            .find(|e| e.edge_type == EdgeType::Imports)
+            .expect("Imports 边应存在");
+        assert_eq!(
+            edge.used_symbols,
+            Some(vec!["bar".to_string(), "foo".to_string()]),
+            "used_symbols 应在 SQLite 往返后保留"
+        );
+    }
+
+    #[test]
+    fn load_legacy_db_without_used_symbols_column() {
+        // 模拟旧库：建当前 schema 后删掉 used_symbols 列，load 应靠 ensure_edge_columns 补列而不报错。
+        let db_path = temp_db_path("legacy_no_used_symbols");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(include_str!("../schema.sql")).unwrap();
+            conn.execute("ALTER TABLE edges DROP COLUMN used_symbols", [])
+                .unwrap();
+        }
+        let loaded = load_from_db(&db_path).expect("旧库（缺 used_symbols 列）应能加载");
+        let _ = std::fs::remove_file(&db_path);
+        assert_eq!(loaded.edge_count(), 0);
     }
 
     #[test]
@@ -779,6 +883,7 @@ mod tests {
             weight: 2.5,
             sub_kind: None,
             mapping_notes: None,
+            used_symbols: None,
         });
 
         let db_path = temp_db_path("edges");

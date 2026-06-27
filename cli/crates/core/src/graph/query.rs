@@ -1,13 +1,13 @@
 //! 图查询：neighbors / paths / subgraph / stats。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use petgraph::stable_graph::NodeIndex;
 use petgraph::visit::EdgeRef;
 use petgraph::Direction;
 
 use crate::types::common::NodeId;
-use crate::types::graph::{EdgeType, NodeType, SourceNode};
+use crate::types::graph::{Dependency, EdgeType, NodeType, SourceNode};
 
 use super::SourceGraph;
 
@@ -58,6 +58,24 @@ impl SourceGraph {
             .collect()
     }
 
+    /// 获取指定节点的出边（含完整 `Dependency` 边元数据，如 `used_symbols`）。
+    ///
+    /// 与 `outgoing_edges` 的区别：后者只暴露 `(节点, EdgeType)`、丢弃整条边。
+    /// footprint 估算与 `deps-of` 按符号裁剪需读 `used_symbols`，故用此 API（M3-DEC-01）。
+    pub fn outgoing_edges_full(&self, id: &NodeId) -> Vec<(&SourceNode, &Dependency)> {
+        let idx = match self.node_index(id) {
+            Some(i) => i,
+            None => return Vec::new(),
+        };
+        self.graph
+            .edges_directed(idx, Direction::Outgoing)
+            .filter_map(|e| {
+                let target = self.graph.node_weight(e.target())?;
+                Some((target, e.weight()))
+            })
+            .collect()
+    }
+
     /// 获取指定节点的入边（含边类型信息）。
     pub fn incoming_edges(&self, id: &NodeId) -> Vec<(&SourceNode, EdgeType)> {
         let idx = match self.node_index(id) {
@@ -71,6 +89,59 @@ impl SourceGraph {
                 Some((source, e.weight().edge_type))
             })
             .collect()
+    }
+
+    /// 聚合本文件对各依赖文件实际用到的符号（M3-DEC-01）。
+    ///
+    /// 返回 dep 文件路径 → `Some(被用具名符号集)`（可裁剪）| `None`（use-all，不可裁剪）。
+    /// `None` 为吸收态：同一 dep 多条边任一为 use-all 即整体 use-all。供 `deps-of`
+    /// 按符号裁剪与 footprint 估算共用。
+    pub fn imported_symbols_by_dep(
+        &self,
+        file: &NodeId,
+    ) -> BTreeMap<String, Option<BTreeSet<String>>> {
+        let mut map: BTreeMap<String, Option<BTreeSet<String>>> = BTreeMap::new();
+        for (node, dep) in self.outgoing_edges_full(file) {
+            if dep.edge_type != EdgeType::Imports || node.node_type != NodeType::File {
+                continue;
+            }
+            let path = node.file_path.clone();
+            match &dep.used_symbols {
+                None => {
+                    map.insert(path, None);
+                }
+                Some(syms) => {
+                    if let Some(set) = map.entry(path).or_insert_with(|| Some(BTreeSet::new())) {
+                        set.extend(syms.iter().cloned());
+                    }
+                }
+            }
+        }
+        map
+    }
+
+    /// footprint 的"依赖签名"部分（token≈bytes/4，M3-DEC-01）：1-hop 依赖中
+    /// target 实际用到的导出符号签名规模之和。
+    ///
+    /// 自身源码规模由调用方（持有源文件内容）相加得完整 footprint；本函数只算图能确定的部分。
+    pub fn dependency_signature_tokens(&self, file: &NodeId) -> usize {
+        let used = self.imported_symbols_by_dep(file);
+        let mut total = 0usize;
+        for (path, usage) in &used {
+            for n in self.symbols_in_file(path) {
+                if !n.is_exported {
+                    continue;
+                }
+                if let Some(set) = usage {
+                    if !set.contains(&n.name) {
+                        continue;
+                    }
+                }
+                let sig = n.signature.as_deref().unwrap_or(&n.name);
+                total += sig.len().div_ceil(4);
+            }
+        }
+        total
     }
 
     /// 按节点类型过滤所有节点。
@@ -188,5 +259,38 @@ mod tests {
         let graph = SourceGraph::new();
         let result = graph.outgoing(&NodeId::new("nonexistent"));
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn imported_symbols_and_footprint() {
+        let dir = std::env::temp_dir().join("rustmigrate_query_used_symbols");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("dep.ts"),
+            "export function greet(name: string): string { return name; }\n\
+             export function unused(): void {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("main.ts"),
+            "import { greet } from './dep';\ngreet('x');\n",
+        )
+        .unwrap();
+
+        let graph = build_graph_ts(&dir).unwrap();
+        let main = NodeId::file("main.ts");
+        let by_dep = graph.imported_symbols_by_dep(&main);
+        let toks = graph.dependency_signature_tokens(&main);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut expected = std::collections::BTreeSet::new();
+        expected.insert("greet".to_string());
+        assert_eq!(
+            by_dep.get("dep.ts"),
+            Some(&Some(expected)),
+            "应只聚合被用具名符号 greet（不含 unused）"
+        );
+        assert!(toks > 0, "footprint 依赖签名应统计到 greet 的签名 token");
     }
 }

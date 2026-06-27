@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS edges (
     weight    REAL DEFAULT 1.0,
     sub_kind  TEXT,           -- 边的子类型（如 implements / constructor）
     mapping_notes TEXT,       -- 迁移映射备注
+    used_symbols TEXT,        -- Imports 边：target 实际用到的符号名 JSON 数组（NULL=用到全部，M3-DEC-01）
     PRIMARY KEY (source, target, edge_type)
 );
 

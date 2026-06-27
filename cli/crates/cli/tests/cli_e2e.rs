@@ -1497,6 +1497,31 @@ fn smoke_graph_interfaces_deps_of_exports_content() {
                 "导出接口应含 token_estimate"
             );
         }
+
+        // 按符号裁剪（M3-DEC-01）：service.ts 仅 import { clamp, Range, fetchData }，
+        // 未被使用的 Predicate 应从 deps-of 输出裁掉。
+        assert!(
+            !export_names.contains(&"Predicate"),
+            "未被 import 的 Predicate 应被裁剪: {export_names:?}"
+        );
+        let used: Vec<&str> = utils_dep["used_symbols"]
+            .as_array()
+            .expect("纯具名依赖应有 used_symbols 数组")
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            used,
+            vec!["Range", "clamp", "fetchData"],
+            "used_symbols 应为被用具名符号（排序）: {used:?}"
+        );
+        // footprint 的依赖签名规模应为正数。
+        assert!(
+            json["data"]["dependency_signature_tokens"]
+                .as_u64()
+                .is_some_and(|t| t > 0),
+            "应输出正的 dependency_signature_tokens: {json}"
+        );
     });
 }
 

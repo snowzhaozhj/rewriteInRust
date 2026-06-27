@@ -30,7 +30,7 @@ use rustmigrate_core::scaffold::scaffold_project;
 use rustmigrate_core::state::{MigrationStateMachine, SprintAdvanceResult};
 use rustmigrate_core::stats::{compare_structure, count_loc};
 use rustmigrate_core::types::common::{NodeId, Timestamp};
-use rustmigrate_core::types::graph::{EdgeType, NodeType, SourceNode};
+use rustmigrate_core::types::graph::{EdgeType, NodeType};
 use rustmigrate_core::types::state::{
     humanize_module_key, ModuleState, ModuleStatus, ModuleTier, ProjectState, SprintState,
 };
@@ -970,9 +970,9 @@ fn cmd_graph_interfaces(module: &str, deps_of: Option<&str>, members: bool) -> C
         return cmd_graph_interfaces_deps_of(&graph, target);
     }
 
-    // 单模块模式：输出指定模块自身的导出接口。
+    // 单模块模式：输出指定模块自身的导出接口（不裁剪）。
     let file_path = resolve_module_file_path(&graph, module)?;
-    let collected = collect_exported_interfaces(&graph, &file_path);
+    let collected = collect_exported_interfaces(&graph, &file_path, None);
 
     Ok((
         json!({
@@ -1014,7 +1014,7 @@ fn cmd_graph_interfaces_members(
         .iter()
         .filter_map(|id| id.file_path().map(|p| p.to_owned()))
         .map(|path| {
-            let collected = collect_exported_interfaces(graph, &path);
+            let collected = collect_exported_interfaces(graph, &path, None);
             sig_tokens_total += collected.sig_tokens;
             export_count += collected.interfaces.len();
             json!({
@@ -1059,30 +1059,18 @@ fn cmd_graph_interfaces_deps_of(
             file: target.to_owned(),
         })?;
 
-    // 取 imports 边的 1-hop 出边邻居（仅 File 节点）。
-    let dep_nodes: Vec<&SourceNode> = graph
-        .outgoing_edges(&target_node)
-        .into_iter()
-        .filter(|(_, edge_type)| *edge_type == EdgeType::Imports)
-        .map(|(node, _)| node)
-        .filter(|node| node.node_type == NodeType::File)
-        .collect();
+    // 聚合 1-hop imports 依赖的被用符号（dep 路径 → Some(集)|None=use-all），BTreeMap 有序。
+    let dep_usage = graph.imported_symbols_by_dep(&target_node);
 
-    // 去重并排序（BTreeSet 保证有序迭代，确定性输出）。
-    let dep_paths: Vec<String> = dep_nodes
+    // 对每个依赖模块收集导出接口（按被用符号裁剪，M3-DEC-01）。
+    let dependencies: Vec<serde_json::Value> = dep_usage
         .iter()
-        .map(|n| n.file_path.clone())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect();
-
-    // 对每个依赖模块收集导出接口。
-    let dependencies: Vec<serde_json::Value> = dep_paths
-        .iter()
-        .map(|path| {
-            let collected = collect_exported_interfaces(graph, path);
+        .map(|(path, usage)| {
+            let collected = collect_exported_interfaces(graph, path, usage.as_ref());
             json!({
                 "module": path,
+                "used_symbols": usage,           // null = use-all（不可裁剪）
+                "signature_tokens": collected.sig_tokens,
                 "exports": collected.interfaces,
             })
         })
@@ -1092,6 +1080,8 @@ fn cmd_graph_interfaces_deps_of(
         json!({
             "target": target_path,
             "dependencies": dependencies,
+            // footprint 的依赖签名部分（token≈bytes/4）；自身源码规模由上层相加。
+            "dependency_signature_tokens": graph.dependency_signature_tokens(&target_node),
         }),
         Vec::new(),
     ))
@@ -1128,6 +1118,7 @@ struct InterfaceCollection {
 fn collect_exported_interfaces(
     graph: &rustmigrate_core::graph::SourceGraph,
     file_path: &str,
+    used: Option<&std::collections::BTreeSet<String>>,
 ) -> InterfaceCollection {
     let mut sig_tokens = 0usize;
 
@@ -1135,6 +1126,9 @@ fn collect_exported_interfaces(
         .symbols_in_file(file_path)
         .into_iter()
         .filter(|n| n.is_exported)
+        // used=Some(set)：仅保留 target 实际用到的具名符号（按符号裁剪，M3-DEC-01）；
+        // used=None：use-all（namespace/default/side-effect/re-export 或旧库），返回全量。
+        .filter(|n| used.map_or(true, |set| set.contains(&n.name)))
         .map(|n| {
             let sig_tok = n
                 .signature

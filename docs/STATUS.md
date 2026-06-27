@@ -5,11 +5,13 @@
 ## 当前位置
 
 - **Milestone**: M1 ✅ → M2 ✅ → **M3 多语言支持（Python 优先）**
-- **阶段**: M3 Sprint B ✅ → Sprint C（Plugin Python 适配）→ **新增 Sprint E（模块拆解粒度重设计，计划已定稿）**
-- **Sprint E**: 治"小而机械文件被过度处理"（<10 行翻半小时）。方案权威 = [decomposition-redesign.md](./decomposition-redesign.md)（grilling + 两轮 Codex 审查定稿）。下一步 = M3-DEC-01 拆解引擎（CLI），完成后 M3-DEC-GATE 真实项目验收（硬前置），过门后 M3-DEC-02 轻量翻译路径。任务见 [PLAN-M3.md](./PLAN-M3.md) Sprint E。
+- **阶段**: Sprint A ✅ → Sprint B ✅ → Sprint C（PR-C1 ✅ / PR-C2 ✅ / PLG-05 ✅；**PR-C3 仅剩 PLG-06 端到端验证未做**）→ **进行中：Sprint E M3-DEC-01 拆解引擎**
+- **Sprint E**: 治"小而机械文件被过度处理"（<10 行翻半小时）。方案权威 = [decomposition-redesign.md](./decomposition-redesign.md)（grilling + 两轮 Codex 审查定稿）。**当前 = M3-DEC-01 拆解引擎（CLI），规划阶段**；完成后 M3-DEC-GATE 真实项目验收（硬前置），过门后 M3-DEC-02 轻量翻译路径。任务见 [PLAN-M3.md](./PLAN-M3.md) Sprint E。
+- **决策（2026-06-27）**：跳过 Sprint D 单独验收，直接做 Sprint E；DEC-GATE 在真实项目上验收拆解，顺带覆盖 Sprint D「真实 Python 项目」价值，且避免 PLG-06 被 DEC-02 重塑返工。PLG-06 暂挂。
 - **测试基线**: 471 测试 / clippy -D / deny / fmt / shellcheck 全绿
 - **CI 覆盖率**: 待更新
-- **最新 PR**: [#37](https://github.com/snowzhaozhj/rewriteInRust/pull/37)（PR-B3 Python 验收层，已合并）
+- **最新合并 PR**: [#41](https://github.com/snowzhaozhj/rewriteInRust/pull/41)（decomposition 重设计方案）；[#40](https://github.com/snowzhaozhj/rewriteInRust/pull/40) PLG-05；[#39](https://github.com/snowzhaozhj/rewriteInRust/pull/39) PR-C2
+- **开放 PR**: [#42](https://github.com/snowzhaozhj/rewriteInRust/pull/42)（M3-VAL-07 设计文档 §11.2 两文件契约同步 + verifier 死链清理，纯文档待合并）
 
 ### M2 遗留（Sprint A 已全部关闭）
 
@@ -99,7 +101,7 @@ PY-01 ─┬→ PY-02 → PY-03 ─────┐
     - nit 未采纳：self 段指针化（保留结构映射防 run 阶段丢失，专项亦认可可接受）
 - [ ] PR-C3：degrade_skip 降级报告增强 + 端到端验证（PLG-05 + PLG-06）
 
-> **遗留待办**（M3-VAL-07 设计文档同步时处理）：① 设计文档 06 §11.2 正文仍描述废弃的 shell adapter 契约，需按 MDR-009 改写为两文件契约；② verifier.md 第 58/87 行仍有 `权威来源：05 §6.x` 死链（pre-existing，违反提示词自包含规范），需内联或删除。
+> **遗留待办**：✅ 已由 PR [#42](https://github.com/snowzhaozhj/rewriteInRust/pull/42) 处理（M3-VAL-07）——① 设计文档 06 §11.2 按 MDR-009 改写为两文件契约；② verifier.md 第 58/87 行 `权威来源：05 §6.x` 死链已清理。待合并。
 
 ### M3 多语言扩展点（调研结论，2026-06-24）
 
