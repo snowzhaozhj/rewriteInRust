@@ -104,6 +104,10 @@ impl LanguageAdapter for PythonAdapter {
         current_file: &str,
         exists: &dyn Fn(&str) -> bool,
     ) -> Option<String> {
+        if specifier.is_empty() {
+            return None;
+        }
+
         if !specifier.starts_with('.') {
             // 绝对导入：尝试项目内文件
             let as_path = specifier.replace('.', "/");
@@ -135,6 +139,14 @@ impl LanguageAdapter for PythonAdapter {
         };
 
         let normalized = normalize_path(&target)?;
+
+        if normalized.is_empty() {
+            // 根目录包的 __init__.py
+            if exists("__init__.py") {
+                return Some("__init__.py".to_string());
+            }
+            return None;
+        }
 
         let candidate_py = format!("{normalized}.py");
         if exists(&candidate_py) {
@@ -476,12 +488,26 @@ fn extract_py_from_import(node: Node, ctx: &mut PyAnalysisContext, in_type_check
         kind
     };
 
-    ctx.imports.push(ImportInfo {
-        module_path,
-        symbols,
-        kind: final_kind,
-        reexport: false,
-    });
+    // `from . import utils` — 每个 symbol 可能是子模块，生成独立 ImportInfo
+    // 使 graph 层能解析到 ./utils.py（而非仅 ./__init__.py）
+    let is_pure_relative = module_path.chars().all(|c| c == '.');
+    if is_pure_relative && !has_wildcard && !symbols.is_empty() {
+        for sym in &symbols {
+            ctx.imports.push(ImportInfo {
+                module_path: format!("{}{}", module_path, sym.name),
+                symbols: vec![sym.clone()],
+                kind: final_kind,
+                reexport: false,
+            });
+        }
+    } else {
+        ctx.imports.push(ImportInfo {
+            module_path,
+            symbols,
+            kind: final_kind,
+            reexport: false,
+        });
+    }
 }
 
 fn build_from_module_path(node: Node, source: &str) -> String {
@@ -631,9 +657,7 @@ fn extract_py_function(node: Node, ctx: &mut PyAnalysisContext, decorators: &[St
     sn.is_async = is_async;
 
     if !decorators.is_empty() {
-        // 将 decorators 拼入 signature 头部（为了保留信息但不修改 signature 字段语义，
-        // 我们不覆盖 signature——保持与 TS adapter 一致：signature 只含声明头）
-        // 但 decorator 信息通过节点 line_range 覆盖整个 decorated 范围
+        sn.decorators = decorators.to_vec();
         if let Some(parent) = node.parent() {
             if parent.kind() == "decorated_definition" {
                 sn.line_range = Some(py_node_span(parent));
@@ -699,8 +723,41 @@ fn build_class_signature(node: Node, source: &str) -> String {
         .child_by_field_name("body")
         .map(|b| b.start_byte())
         .unwrap_or_else(|| node.end_byte());
-    let sig = source.get(start..end).unwrap_or("").trim_end();
-    sig.strip_suffix(':').unwrap_or(sig).trim_end().to_string()
+    let header = source.get(start..end).unwrap_or("").trim_end();
+    let header = header.strip_suffix(':').unwrap_or(header).trim_end();
+
+    // 方法列表骨架
+    let mut methods = Vec::new();
+    if let Some(body) = node.child_by_field_name("body") {
+        let mut cursor = body.walk();
+        for child in body.children(&mut cursor) {
+            let fn_node = match child.kind() {
+                "function_definition" => Some(child),
+                "decorated_definition" => {
+                    let mut inner = None;
+                    let mut ic = child.walk();
+                    for c in child.children(&mut ic) {
+                        if c.kind() == "function_definition" {
+                            inner = Some(c);
+                        }
+                    }
+                    inner
+                }
+                _ => None,
+            };
+            if let Some(f) = fn_node {
+                if let Some(n) = f.child_by_field_name("name") {
+                    methods.push(py_node_text(n, source).to_string());
+                }
+            }
+        }
+    }
+
+    if methods.is_empty() {
+        header.to_string()
+    } else {
+        format!("{header} [{methods}]", methods = methods.join(", "))
+    }
 }
 
 fn extract_py_bases(node: Node, class_id: &NodeId, ctx: &mut PyAnalysisContext) {
@@ -793,7 +850,7 @@ fn extract_py_method(
     class_id: &NodeId,
     class_name: &str,
     ctx: &mut PyAnalysisContext,
-    _decorators: &[String],
+    decorators: &[String],
 ) {
     let Some(name_node) = node.child_by_field_name("name") else {
         return;
@@ -820,7 +877,15 @@ fn extract_py_method(
     );
     sn.line_range = Some(py_node_span(node));
     sn.is_async = is_async;
+    sn.signature = Some(build_function_signature(node, ctx.source));
+    if !decorators.is_empty() {
+        sn.decorators = decorators.to_vec();
+    }
     ctx.nodes.push(sn);
+
+    // self → class_name 绑定，使 self.method() 调用可解析
+    ctx.instance_type_bindings
+        .insert("self".to_string(), class_name.to_string());
 
     ctx.edges.push(Dependency::new(
         class_id.clone(),
@@ -1108,12 +1173,16 @@ for i in range(10):
         let source = "from os import path\nfrom . import utils\nfrom ..models import Base\n";
         let result = adapter.analyze_file(source, "pkg/sub/test.py").unwrap();
 
+        // from os import path → 1 entry
+        // from . import utils → 1 entry with module_path=".utils" (submodule resolution)
+        // from ..models import Base → 1 entry
         assert_eq!(result.imports.len(), 3);
 
         assert_eq!(result.imports[0].module_path, "os");
         assert_eq!(result.imports[0].symbols[0].name, "path");
 
-        assert_eq!(result.imports[1].module_path, ".");
+        // `from . import utils` → module_path 带上 symbol 名以解析子模块
+        assert_eq!(result.imports[1].module_path, ".utils");
         assert_eq!(result.imports[1].symbols[0].name, "utils");
 
         assert_eq!(result.imports[2].module_path, "..models");
