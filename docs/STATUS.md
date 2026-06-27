@@ -84,9 +84,13 @@ PY-01 ─┬→ PY-02 → PY-03 ─────┐
 > 的 shell 脚本模式从未落地。Python adapter 对齐 TS 实际结构，不建 adapter.json/detect.sh。
 
 **进度**：
-- [x] PR-C1：Python adapter 资产（commit 54158b0，审查中）
-- [ ] PR-C2：提示词多语言分支
-- [ ] PR-C3：降级报告 + 端到端验证
+- [x] PR-C1：Python adapter 资产（[#38](https://github.com/snowzhaozhj/rewriteInRust/pull/38)，审查必修全落实，待合并）
+  - 审查：迁移规则正确性 + 设计契约 2 视角全跑；2+1 项 important 已修（regex 反向引用/环视、dict 插入顺序、PLG-01 偏离落 MDR-009）+ 多项 nit
+  - MDR-009：适配器 shell 脚本模式取消，adapter 目录契约 = analysis-tools.json + porting-template.md
+- [ ] PR-C2：translator.md/analyzer.md/verifier.md 多语言分支（PLG-03 + PLG-04）
+- [ ] PR-C3：degrade_skip 降级报告增强 + 端到端验证（PLG-05 + PLG-06）
+
+> **遗留待办**（M3-VAL-07 设计文档同步时处理）：设计文档 06 §11.2 正文仍描述废弃的 shell adapter 契约，需按 MDR-009 改写为两文件契约。
 
 ### M3 多语言扩展点（调研结论，2026-06-24）
 
