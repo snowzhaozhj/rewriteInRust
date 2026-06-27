@@ -47,8 +47,8 @@ tools: Bash, Read, Grep, Glob
 - **TypeScript**：框架识别走 `package.json` 依赖 + import 特征；type-only import（`import type`）已由 graph build 区分。
 - **Python**：
   - **框架识别**：从 `imports` 边 + 依赖清单（`requirements.txt` / `pyproject.toml` / `setup.py`）判断 django / flask / fastapi / pydantic / sqlalchemy 等，写入 `frameworks`。
-  - **动态特性扫描（迁移高风险点）**：`getattr`/`setattr`/`__getattr__`、`eval`/`exec`、metaclass、monkey patching、`importlib` 动态导入、`*args`/`**kwargs` 透传——这些**静态不可判定**，graph build 的 calls/uses_type 边无法捕获。逐处记入 `gaps.dynamic_features`（含源文件 + 简述），**不猜测其运行时行为**。这是 translator 留 `TODO(port)` 与人工决策的输入，也是 tier 复核信号（动态特性密集的模块倾向升档）。
-  - **无 type-only 区分**：Python import 全是值导入，不存在 TS 的纯类型导入；不要据此误判"纯类型文件"。
+  - **动态特性扫描（迁移高风险点）**：`getattr`/`setattr`/`__getattr__`、`eval`/`exec`、metaclass、monkey patching、`importlib` 动态导入、`*args`/`**kwargs` 透传——这些**静态不可判定**，graph build 的 calls/uses_type 边无法捕获。逐处记入 `gaps.dynamic_features`（每条为 `"<源文件>: <简述>"` 字符串，与 `missing_calls` 同形），**不猜测其运行时行为**。这是 translator 留 `TODO(port)` 与人工决策的输入，也是 tier 复核信号（动态特性密集的模块倾向升档）。
+  - **type-only import**：Python 无 TS 的 `import type` 语法关键字，但 `if TYPE_CHECKING:` 块是惯用的仅类型导入，graph build 已将其标为 `StaticType`（区别于运行时值导入）。不要据「无 `import type` 语法」误判这类导入不存在，或把含 `TYPE_CHECKING` 块的文件错判为纯类型文件。
 
 ## 输出格式
 
