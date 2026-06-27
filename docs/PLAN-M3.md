@@ -29,6 +29,7 @@
 ```
 Sprint A (多语言泛化 + 遗留清理) → Sprint B (Python Adapter Core)
   → Sprint C (Plugin Python 适配) → Sprint D (端到端验收)
+  → Sprint E (模块拆解粒度重设计，见 decomposition-redesign.md)
 ```
 
 预计 8-10 周。A→B 串行（B 依赖 A 的泛化），C 依赖 B，D 依赖全部。
@@ -147,6 +148,28 @@ Step 3: PR-B3 (Validation)     → PY-07 + PY-08         [~2.5d]
 
 ---
 
+## Sprint E：模块拆解粒度重设计（~2 周）
+
+**目标**：治"小而机械的文件被过度处理"（<10 行文件翻译约半小时）。方案权威见 [decomposition-redesign.md](./decomposition-redesign.md)（grilling 访谈 + 两轮 Codex 审查定稿）。
+
+**核心**：两个正交决策——① 单元大小 ← footprint（自身字符 + 实际用到的依赖符号签名）硬约束；② 流程深浅 ← "可证明机械 vs 其余"二分 + 危险信号→规则注入。分组用 condensation 折环 + 凸性拓扑 first-fit 按预算装箱；机械合批组走新增轻量路径。**翻译前先在真实项目上量化验收拆解（硬前置）。**
+
+| 任务 ID | 内容 | 预估 | 依赖 |
+|---------|------|------|------|
+| M3-DEC-01 | **PR-1 拆解引擎（CLI）**：图保留"被用符号" + `graph interfaces --deps-of` 按符号裁剪并输出签名规模 + footprint 估算器；机械判定 predicate（替换二值 danger token）+ 危险信号→规则/定向测试映射；凸性拓扑 first-fit 合批 → composite（循环/合批类型标记）+ 冻结计划 state 字段 + run 守门；dry-run 拆解报告 + 验收门判据 | ~5d | — |
+| M3-DEC-GATE | **拆解验收（活动，非代码）**：用户给 1-2 个真实目标项目 + 补小/中/大规模档；跑 PR-1 dry-run，对四维度判据（目标达成 / 不变量+确定性 100% / 内聚 ≥1.5× 随机 / 分类合理含锚点反例 + 人工抽检 ≥80%）。**不过门不许做 DEC-02。** | ~1d | DEC-01 |
+| M3-DEC-02 | **PR-2 轻量翻译路径（Plugin，过门后）**：run.md 机械合批组轻量路径（一次翻完 + 一次编译 + 一次签批 + content-hash 复用；单模块整体 dispatch、整批重跑恢复） | ~2d | DEC-GATE 通过 |
+
+**验收标准**：
+- [ ] DEC-GATE 四维度全过（在真实项目上）
+- [ ] 机械小文件不再各自成独立模块、不再各跑完整重型流水线
+- [ ] 拆解计划确定性可复现（跑两次字节级一致）+ 断点续传以冻结计划为准
+- [ ] TS 既有路径无回归
+
+**砍掉/推迟**（避免过度设计，详见设计文档 §9）：砍 keep-together 架构单元 / agent 规划阶段 / 多轴难度打分；推迟内聚加权打包、跨复杂度合并、大文件自动拆分、失败处理（交 agent，待真实失败数据）。
+
+---
+
 ## 任务总览
 
 | Sprint | 任务数 | 预估工时 | 关键交付 |
@@ -155,7 +178,8 @@ Step 3: PR-B3 (Validation)     → PY-07 + PY-08         [~2.5d]
 | B Python Adapter Core | 9 | 11.5d | PythonAdapter 全方法 + 3 fixture + grammar 契约 |
 | C Plugin Python 适配 | 6 | 7d | adapters/python/ + 提示词多语言 + 降级报告增强 |
 | D 端到端验收 | 8 | 8.5d | 2 个真实项目 + 差异测试 + graduate 验证 |
-| **合计** | **32** | **~34.5d** | |
+| E 模块拆解粒度重设计 | 3 | ~8d | 拆解引擎 + 拆解验收门 + 轻量翻译路径（见 decomposition-redesign.md） |
+| **合计** | **35** | **~42.5d** | |
 
 ## M2 遗留关闭清单（M3 全部处理，不再拖）
 
