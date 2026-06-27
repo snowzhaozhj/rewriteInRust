@@ -50,6 +50,7 @@ struct GroundTruth {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)] // node_type/note 仅为完整反序列化 ground-truth.json，未在断言中读取
 struct NodeSpec {
     id: String,
     #[serde(rename = "type")]
@@ -95,22 +96,19 @@ fn load_ground_truth(fixture: &str) -> GroundTruth {
 // 通用断言（节点存在 / 节点属性 / 边存在 / 拓扑偏序）
 // =============================================================
 
+/// 节点双向严格校验：ground-truth 节点集合必须与实际图节点集合完全相等
+/// （既不能缺失，也不能有未声明的多余节点——后者防止 adapter 多产出节点被掩盖）。
 fn assert_nodes(fixture: &str) {
     let gt = load_ground_truth(fixture);
     let graph = build(fixture);
-    let all_ids: HashSet<String> = graph.nodes().map(|n| n.id.as_str().to_owned()).collect();
+    let actual: HashSet<String> = graph.nodes().map(|n| n.id.as_str().to_owned()).collect();
+    let expected: HashSet<String> = gt.nodes.iter().map(|n| n.id.clone()).collect();
 
-    let mut missing = Vec::new();
-    for spec in &gt.nodes {
-        if !all_ids.contains(&spec.id) {
-            missing.push(format!("{} ({})", spec.id, spec.node_type));
-        }
-    }
+    let missing: Vec<&String> = expected.difference(&actual).collect();
+    let unexpected: Vec<&String> = actual.difference(&expected).collect();
     assert!(
-        missing.is_empty(),
-        "{fixture} 缺失节点:\n  {}\n实际节点:\n  {}",
-        missing.join("\n  "),
-        all_ids.iter().cloned().collect::<Vec<_>>().join("\n  ")
+        missing.is_empty() && unexpected.is_empty(),
+        "{fixture} 节点集合不匹配:\n  缺失（ground-truth 有但图中无）: {missing:?}\n  多余（图中有但 ground-truth 未声明）: {unexpected:?}"
     );
 }
 
@@ -119,9 +117,6 @@ fn assert_node_attributes(fixture: &str) {
     let graph = build(fixture);
 
     for spec in &gt.nodes {
-        if spec.note.is_some() {
-            continue;
-        }
         let idx = graph
             .node_index(&NodeId::new(&spec.id))
             .unwrap_or_else(|| panic!("{fixture} 节点 {} 不存在", spec.id));
@@ -144,47 +139,47 @@ fn assert_node_attributes(fixture: &str) {
     }
 }
 
+/// 边四元组 key：`(source, target, edge_type, sub_kind)`。
+/// 纳入 `sub_kind` 后，构造调用（`Constructor`）/继承的子类型标注错误或缺失都会被捕获；
+/// 无 sub_kind 统一表示为 `"None"`，避免「该为 None 却标了值」漏检。
+fn edge_key(source: &str, target: &str, edge_type: &str, sub_kind: &str) -> String {
+    format!("{source}\t{target}\t{edge_type}\t{sub_kind}")
+}
+
+/// 边双向严格校验：ground-truth 边集合（含 sub_kind）必须与实际图边集合完全相等。
 fn assert_edges(fixture: &str) {
     let gt = load_ground_truth(fixture);
     let graph = build(fixture);
 
-    let actual: HashSet<(String, String, String)> = graph
+    let actual: HashSet<String> = graph
         .edges()
         .map(|e| {
-            (
-                e.source.as_str().to_owned(),
-                e.target.as_str().to_owned(),
-                e.edge_type.to_string(),
+            let sub = e
+                .sub_kind
+                .map(|s| format!("{s:?}"))
+                .unwrap_or_else(|| "None".to_owned());
+            edge_key(
+                e.source.as_str(),
+                e.target.as_str(),
+                &e.edge_type.to_string(),
+                &sub,
             )
         })
         .collect();
+    let expected: HashSet<String> = gt
+        .edges
+        .iter()
+        .map(|spec| {
+            let sub = spec.sub_kind.clone().unwrap_or_else(|| "None".to_owned());
+            edge_key(&spec.source, &spec.target, &spec.edge_type, &sub)
+        })
+        .collect();
 
-    let mut missing = Vec::new();
-    for spec in &gt.edges {
-        if spec.note.is_some() {
-            continue;
-        }
-        let key = (
-            spec.source.clone(),
-            spec.target.clone(),
-            spec.edge_type.clone(),
-        );
-        if !actual.contains(&key) {
-            missing.push(format!(
-                "{} --[{}]--> {}",
-                spec.source, spec.edge_type, spec.target
-            ));
-        }
-    }
+    let missing: Vec<&String> = expected.difference(&actual).collect();
+    let unexpected: Vec<&String> = actual.difference(&expected).collect();
     assert!(
-        missing.is_empty(),
-        "{fixture} 缺失边:\n  {}\n实际边:\n  {}",
-        missing.join("\n  "),
-        actual
-            .iter()
-            .map(|(s, t, e)| format!("{s} --[{e}]--> {t}"))
-            .collect::<Vec<_>>()
-            .join("\n  ")
+        missing.is_empty() && unexpected.is_empty(),
+        "{fixture} 边集合不匹配（key=source\\ttarget\\ttype\\tsub_kind）:\n  缺失: {missing:?}\n  多余: {unexpected:?}"
     );
 }
 
@@ -362,6 +357,11 @@ fn py_circular_deps_nodes() {
 }
 
 #[test]
+fn py_circular_deps_node_attributes() {
+    assert_node_attributes("py-circular-deps");
+}
+
+#[test]
 fn py_circular_deps_edges() {
     assert_edges("py-circular-deps");
 }
@@ -381,12 +381,18 @@ fn py_circular_deps_topo_error() {
     let cycles = detect_cycles(&graph);
     assert!(!cycles.is_empty(), "应检测到至少一个环");
 
-    for member in &spec.cycle_contains {
-        let found = cycles
+    // 精确断言：cycle_contains 的全部成员必须落在「同一个」环（SCC）内，
+    // 而非分散在多个互不相关的环里——后者会让「a/b 实为两个独立环」的错误蒙混过关。
+    let members = &spec.cycle_contains;
+    let joint = cycles.iter().any(|c| {
+        members
             .iter()
-            .any(|c| c.iter().any(|id| id.as_str().contains(member)));
-        assert!(found, "环中应包含 {member}，实际环: {cycles:?}");
-    }
+            .all(|m| c.iter().any(|id| id.as_str().contains(m)))
+    });
+    assert!(
+        joint,
+        "应存在同时包含 {members:?} 全部成员的单个环，实际环: {cycles:?}"
+    );
 }
 
 #[test]

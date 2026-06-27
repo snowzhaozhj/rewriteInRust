@@ -6,7 +6,7 @@
 
 - **Milestone**: M1 ✅ → M2 ✅ → **M3 多语言支持（Python 优先）**
 - **阶段**: M3 Sprint B（Python Adapter Core）→ PR-B1 ✅ / PR-B2 ✅ / **PR-B3 验收层完成待 PR**
-- **测试基线**: 438 测试（+23 Python 集成）/ clippy -D / deny / fmt / shellcheck 全绿
+- **测试基线**: 471 测试（+24 Python 集成 +1 CLI e2e Python）/ clippy -D / deny / fmt / shellcheck 全绿
 - **CI 覆盖率**: 待更新
 - **最新 PR**: [#36](https://github.com/snowzhaozhj/rewriteInRust/pull/36)（PR-B2 Core Analysis）
 
@@ -60,9 +60,11 @@ PY-01 ─┬→ PY-02 → PY-03 ─────┐
 
 **PR-B3 交付**：
 - 4 个 Python fixture：`py-linear-deps`（线性+`__all__`+async+构造调用）/ `py-diamond-deps`（菱形+继承 extends）/ `py-circular-deps`（环检测+shared 不在环）/ `py-pkg-deps`（`__init__.py` 包+re-export 透传偏序+`TYPE_CHECKING` StaticType）
-- `python_ground_truth.rs`：23 测试，验证节点/边/拓扑偏序 + Python 特有断言（extends 无 Implements、signature round-trip、StaticType import、构造调用 sub_kind）
-- CLI `cmd_graph_build`：`detect_language` 路由 adapter，非 TS 强制全量并提示降级；新增 `build_graph_full(root, lang, profile)`；TS 增量路径不回归
+- `python_ground_truth.rs`：24 测试，节点/边**双向严格校验**（含 sub_kind，防多余/缺失/标注错误漏检）+ 拓扑偏序 + Python 特有断言（extends 无 Implements、signature round-trip、StaticType import、构造 sub_kind、循环 SCC 精确同环）
+- CLI `cmd_graph_build`：源语言优先取 config（避免热路径重复全树扫描），未配置才 `detect_language` 探测，失败显式告警回退 TS；非 TS 强制全量并提示降级；新增 `build_graph_full(root, lang, profile)`；TS 增量路径不回归
+- `cli_e2e.rs` 新增 Python graph build 端到端用例（探测→降级→status=warning）
 - `cargo run -- graph build --root fixtures/py-linear-deps` 输出 node=12/edge=15 ✓
+- **审查**：4 视角全跑（主审/设计契约/专项/异构交叉）；6 项测试保真+CLI 健壮性问题已修，无遗留 important
 
 ### M3 多语言扩展点（调研结论，2026-06-24）
 
