@@ -11,6 +11,7 @@
 //! （示例基于 tree-sitter-typescript 0.21.x，AST 形状随 grammar 版本可能演进，
 //! 以 node-types.json 与该测试为准）。
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use tree_sitter::{Node, Parser};
@@ -20,7 +21,8 @@ use crate::types::common::{NodeId, SourceLang, Span};
 use crate::types::graph::{Dependency, EdgeSubKind, EdgeType, NodeType, SourceNode};
 
 use super::{
-    CallInfo, FileAnalysis, ImportInfo, ImportKind, ImportedSymbol, LanguageAdapter, SymbolKind,
+    CallInfo, DangerCategory, FileAnalysis, FileClassification, FileKind, ImportInfo, ImportKind,
+    ImportedSymbol, LanguageAdapter, SymbolKind,
 };
 
 /// TypeScript 语言适配器（基于 tree-sitter-typescript）。
@@ -196,6 +198,19 @@ impl LanguageAdapter for TypeScriptAdapter {
             ModuleTier::Trivial
         }
     }
+
+    fn classify_file(&mut self, source: &str) -> FileClassification {
+        // 解析失败 → 保守 Normal（绝不会被判机械合批）。
+        let tree = match self.parser.parse(source, None) {
+            Some(t) => t,
+            None => return FileClassification::conservative(),
+        };
+        let root = tree.root_node();
+        if root.has_error() {
+            return FileClassification::conservative();
+        }
+        classify_ts(root, source)
+    }
 }
 
 #[derive(Default)]
@@ -328,6 +343,206 @@ fn scan_subtree_signals(node: Node, source: &str, s: &mut TsTierSignals) {
         }
         let mut cursor = current.walk();
         for child in current.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+}
+
+// === 机械/危险分类（M3-DEC-01）===
+
+/// 顶层文件类型判定的累积标志。
+#[derive(Default)]
+struct TsKindFlags {
+    /// 含函数/类/控制流/表达式语句/可变变量/const-函数 → Normal。
+    saw_logic: bool,
+    /// 含纯 const 字面量绑定。
+    saw_const: bool,
+    /// 含纯类型声明（interface/type/enum）。
+    saw_type: bool,
+    /// 含 re-export（`export ... from`）。
+    saw_reexport: bool,
+}
+
+/// TS 文件机械/危险分类：file_kind（顶层结构）+ danger（全树扫描，6 类）。
+fn classify_ts(root: Node, source: &str) -> FileClassification {
+    let mut danger: BTreeSet<DangerCategory> = BTreeSet::new();
+    collect_ts_danger(root, source, &mut danger);
+
+    let mut flags = TsKindFlags::default();
+    let mut cursor = root.walk();
+    for child in root.children(&mut cursor) {
+        match child.kind() {
+            "import_statement" | "comment" | "empty_statement" => {}
+            "export_statement" => {
+                // `export ... from '...'`（有 source 字段）= re-export；否则归类被导出的声明。
+                if child.child_by_field_name("source").is_some() {
+                    flags.saw_reexport = true;
+                } else {
+                    let mut cc = child.walk();
+                    for sub in child.children(&mut cc) {
+                        ts_update_kind_flags(sub, source, &mut flags, &mut danger);
+                    }
+                }
+            }
+            _ => ts_update_kind_flags(child, source, &mut flags, &mut danger),
+        }
+    }
+
+    let file_kind = if flags.saw_logic {
+        FileKind::Normal
+    } else if flags.saw_const {
+        FileKind::PureConstant
+    } else if flags.saw_type {
+        FileKind::PureType
+    } else {
+        // 仅 re-export / 仅 import / 空文件：均为无自身逻辑的转发/空壳，视作 Barrel（机械）。
+        FileKind::Barrel
+    };
+
+    FileClassification {
+        file_kind,
+        danger: danger.into_iter().collect(),
+    }
+}
+
+/// 按单个顶层声明节点更新 file_kind 标志（顶层 let/var 与表达式语句顺带记危险信号）。
+fn ts_update_kind_flags(
+    node: Node,
+    source: &str,
+    flags: &mut TsKindFlags,
+    danger: &mut BTreeSet<DangerCategory>,
+) {
+    match node.kind() {
+        "interface_declaration" | "type_alias_declaration" | "enum_declaration" => {
+            flags.saw_type = true;
+        }
+        "function_declaration" | "class_declaration" | "abstract_class_declaration" => {
+            flags.saw_logic = true;
+        }
+        "lexical_declaration" | "variable_declaration" => {
+            let text = ts_node_text(node, source);
+            if text.starts_with("let ") || text.starts_with("var ") {
+                flags.saw_logic = true;
+                danger.insert(DangerCategory::SharedMutableGlobal);
+            } else if ts_const_has_function_initializer(node) {
+                flags.saw_logic = true; // const f = () => {...} 本质是函数
+            } else {
+                flags.saw_const = true;
+            }
+        }
+        "expression_statement" => {
+            flags.saw_logic = true;
+            danger.insert(DangerCategory::IoSideEffect);
+        }
+        "if_statement" | "for_statement" | "for_in_statement" | "while_statement"
+        | "do_statement" | "try_statement" | "switch_statement" => {
+            // 控制流 → Normal（非机械），但本身**不是**危险信号（不进 danger，
+            // 否则 "10 行带 if" 会误判重型——见 decomposition-redesign §8 锚点）。
+            flags.saw_logic = true;
+        }
+        _ => {}
+    }
+}
+
+/// const 绑定的初始化器是否为函数（arrow/function expression）。
+fn ts_const_has_function_initializer(decl: Node) -> bool {
+    let mut cursor = decl.walk();
+    for d in decl.children(&mut cursor) {
+        if d.kind() == "variable_declarator" {
+            if let Some(val) = d.child_by_field_name("value") {
+                if matches!(
+                    val.kind(),
+                    "arrow_function" | "function" | "function_expression" | "generator_function"
+                ) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// 全树扫描 6 类危险信号（控制流不在内）。
+fn collect_ts_danger(root: Node, source: &str, danger: &mut BTreeSet<DangerCategory>) {
+    let mut stack = vec![root];
+    while let Some(cur) = stack.pop() {
+        match cur.kind() {
+            "await_expression" => {
+                danger.insert(DangerCategory::Concurrency);
+            }
+            "call_expression" => {
+                if let Some(func) = cur.child_by_field_name("function") {
+                    let text = ts_node_text(func, source);
+                    if matches!(
+                        text,
+                        "Promise.all"
+                            | "Promise.race"
+                            | "Promise.allSettled"
+                            | "Promise.any"
+                            | "setTimeout"
+                            | "setInterval"
+                            | "setImmediate"
+                            | "process.nextTick"
+                            | "queueMicrotask"
+                    ) {
+                        danger.insert(DangerCategory::Concurrency);
+                    }
+                    if text.starts_with("Math.")
+                        || matches!(
+                            text,
+                            "parseFloat"
+                                | "parseInt"
+                                | "Number"
+                                | "Number.isNaN"
+                                | "Number.isFinite"
+                        )
+                    {
+                        danger.insert(DangerCategory::NumericPrecision);
+                    }
+                }
+            }
+            "import_statement" => {
+                if is_io_import(cur, source) {
+                    danger.insert(DangerCategory::IoSideEffect);
+                }
+            }
+            "conditional_type" => {
+                danger.insert(DangerCategory::DynamicReflection);
+            }
+            "predefined_type" => {
+                let text = ts_node_text(cur, source);
+                if text == "never" || text == "unknown" || text == "any" {
+                    danger.insert(DangerCategory::DynamicReflection);
+                }
+            }
+            "typeof_expression" | "instanceof_expression" => {
+                danger.insert(DangerCategory::DynamicReflection);
+            }
+            "as_expression" => {
+                let text = ts_node_text(cur, source);
+                if text.ends_with("as any") || text.ends_with("as unknown") {
+                    danger.insert(DangerCategory::DynamicReflection);
+                }
+            }
+            "function_declaration" | "method_definition" | "arrow_function"
+            | "function_expression" => {
+                if cur.child_by_field_name("async").is_some()
+                    || ts_node_text(cur, source).starts_with("async ")
+                    || ts_node_text(cur, source).starts_with("async\n")
+                {
+                    danger.insert(DangerCategory::Concurrency);
+                }
+            }
+            "identifier" => {
+                let text = ts_node_text(cur, source);
+                if text == "NaN" || text == "Infinity" {
+                    danger.insert(DangerCategory::NumericPrecision);
+                }
+            }
+            _ => {}
+        }
+        let mut cursor = cur.walk();
+        for child in cur.children(&mut cursor) {
             stack.push(child);
         }
     }
@@ -1682,5 +1897,92 @@ export class C extends B<T> implements I {
         assert!(sig_of(&result, "E").contains("A"), "枚举应保留成员");
         // class：剥方法体，保留 heritage 头。
         assert_eq!(sig_of(&result, "C"), "class C extends B<T> implements I");
+    }
+
+    // === classify_file（M3-DEC-01 机械/危险分类）===
+
+    fn classify(src: &str) -> FileClassification {
+        TypeScriptAdapter::new().unwrap().classify_file(src)
+    }
+
+    #[test]
+    fn classify_barrel_is_mechanical() {
+        let c = classify("export * from './a';\nexport { b } from './b';\n");
+        assert_eq!(c.file_kind, FileKind::Barrel);
+        assert!(c.danger.is_empty());
+        assert!(c.is_mechanical());
+    }
+
+    #[test]
+    fn classify_pure_type_is_mechanical() {
+        let c = classify(
+            "export interface User { id: number; name: string; }\n\
+             export type Id = number;\nexport enum Color { Red, Green }\n",
+        );
+        assert_eq!(c.file_kind, FileKind::PureType);
+        assert!(c.is_mechanical());
+    }
+
+    #[test]
+    fn classify_pure_constant_is_mechanical() {
+        let c = classify("export const MAX = 100;\nconst NAME = 'x';\n");
+        assert_eq!(c.file_kind, FileKind::PureConstant);
+        assert!(c.is_mechanical());
+    }
+
+    #[test]
+    fn classify_const_arrow_is_normal() {
+        // const f = () => {...} 本质是函数，非纯常量。
+        let c = classify("export const inc = (x: number) => x + 1;\n");
+        assert_eq!(c.file_kind, FileKind::Normal);
+        assert!(!c.is_mechanical());
+    }
+
+    #[test]
+    fn classify_plain_if_is_not_danger() {
+        // 锚点（decomposition-redesign §8）：10 行带 if 不因 if 进重型——
+        // if 使文件 Normal（非机械），但**不**进 danger（无规则注入触发）。
+        let c = classify(
+            "export function pick(x: number): number {\n\
+               if (x > 0) { return x; }\n  return 0;\n}\n",
+        );
+        assert_eq!(c.file_kind, FileKind::Normal);
+        assert!(
+            c.danger.is_empty(),
+            "纯 if 控制流不应命中危险信号: {:?}",
+            c.danger
+        );
+        assert!(!c.is_mechanical(), "含逻辑的 Normal 文件非机械");
+    }
+
+    #[test]
+    fn classify_math_hits_numeric_precision() {
+        // 锚点：3 行 clamp 带 Math 命中数值精度危险信号。
+        let c = classify(
+            "export function clamp(v: number, lo: number, hi: number): number {\n\
+               return Math.min(Math.max(v, lo), hi);\n}\n",
+        );
+        assert_eq!(c.file_kind, FileKind::Normal);
+        assert!(c.danger.contains(&DangerCategory::NumericPrecision));
+        assert!(!c.is_mechanical());
+    }
+
+    #[test]
+    fn classify_async_hits_concurrency() {
+        let c = classify("export async function load(): Promise<void> { await go(); }\n");
+        assert!(c.danger.contains(&DangerCategory::Concurrency));
+    }
+
+    #[test]
+    fn classify_top_level_let_is_shared_mutable_global() {
+        let c = classify("export let counter = 0;\n");
+        assert_eq!(c.file_kind, FileKind::Normal);
+        assert!(c.danger.contains(&DangerCategory::SharedMutableGlobal));
+    }
+
+    #[test]
+    fn classify_unparseable_is_conservative() {
+        let c = classify("export function broken( {{{ \n");
+        assert_eq!(c, FileClassification::conservative());
     }
 }
