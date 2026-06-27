@@ -199,13 +199,22 @@ pub fn build_graph_ts_profiled(root: &Path) -> Result<(SourceGraph, BuildProfile
     build_graph_profiled(root, &mut adapters)
 }
 
-/// 便捷函数：全量构建 + 返回指纹（CLI 全量路径用，一次遍历同时产出图和指纹）。
+/// 便捷函数：按指定语言全量构建 + 返回指纹（CLI 全量路径用，一次遍历同时产出图和指纹）。
+pub fn build_graph_full(
+    root: &Path,
+    lang: SourceLang,
+    profile: bool,
+) -> Result<(SourceGraph, BuildProfile, Vec<FileFingerprint>)> {
+    let mut adapters: Vec<Box<dyn LanguageAdapter>> = vec![create_adapter(lang)?];
+    build_graph_inner(root, &mut adapters, profile)
+}
+
+/// 便捷函数：用默认 TypeScript adapter 全量构建 + 返回指纹。
 pub fn build_graph_ts_full(
     root: &Path,
     profile: bool,
 ) -> Result<(SourceGraph, BuildProfile, Vec<FileFingerprint>)> {
-    let mut adapters: Vec<Box<dyn LanguageAdapter>> = vec![create_adapter(SourceLang::TypeScript)?];
-    build_graph_inner(root, &mut adapters, profile)
+    build_graph_full(root, SourceLang::TypeScript, profile)
 }
 
 // === 增量构建 ===

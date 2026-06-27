@@ -1,0 +1,32 @@
+{
+  "description": "Python 包结构 + __init__.py re-export + TYPE_CHECKING: pkg/__init__ re-export base.Base/impl.Worker；base 经 if TYPE_CHECKING 引用 types.Config（StaticType）；main 经包入口导入。无环。",
+  "nodes": [
+    { "id": "file:main.py", "type": "File" },
+    { "id": "file:pkg/__init__.py", "type": "File" },
+    { "id": "file:pkg/base.py", "type": "File" },
+    { "id": "file:pkg/impl.py", "type": "File" },
+    { "id": "file:pkg/types.py", "type": "File" },
+    { "id": "class:pkg/base.py:Base", "type": "Class", "is_exported": false },
+    { "id": "class:pkg/impl.py:Worker", "type": "Class", "is_exported": false },
+    { "id": "class:pkg/types.py:Config", "type": "Class", "is_exported": true },
+    { "id": "function:pkg/impl.py:Worker.run", "type": "Function", "is_exported": false },
+    { "id": "function:pkg/impl.py:Worker.helper", "type": "Function", "is_exported": false },
+    { "id": "function:main.py:go", "type": "Function", "is_exported": false }
+  ],
+  "edges": [
+    { "source": "file:main.py", "target": "file:pkg/__init__.py", "type": "imports" },
+    { "source": "file:pkg/__init__.py", "target": "file:pkg/base.py", "type": "imports" },
+    { "source": "file:pkg/__init__.py", "target": "file:pkg/impl.py", "type": "imports" },
+    { "source": "file:pkg/impl.py", "target": "file:pkg/base.py", "type": "imports" },
+    { "source": "file:pkg/base.py", "target": "file:pkg/types.py", "type": "imports", "note": "来自 if TYPE_CHECKING 块（ImportKind::StaticType），仍归一化为 imports 边参与依赖图" },
+    { "source": "class:pkg/impl.py:Worker", "target": "class:pkg/base.py:Base", "type": "extends" },
+    { "source": "file:pkg/types.py", "target": "class:pkg/types.py:Config", "type": "exports" }
+  ],
+  "topo_order_constraints": [
+    ["file:pkg/types.py", "file:pkg/base.py"],
+    ["file:pkg/base.py", "file:pkg/impl.py"],
+    ["file:pkg/impl.py", "file:pkg/__init__.py"],
+    ["file:pkg/base.py", "file:pkg/__init__.py"],
+    ["file:pkg/__init__.py", "file:main.py"]
+  ]
+}

@@ -17,7 +17,7 @@ use serde_json::json;
 
 use rustmigrate_core::detect::detect_tier;
 use rustmigrate_core::error::MigrateError;
-use rustmigrate_core::graph::build::{build_graph_ts_full, build_graph_ts_incremental};
+use rustmigrate_core::graph::build::{build_graph_full, build_graph_ts_incremental};
 use rustmigrate_core::graph::export::{export_dot, export_json, export_mermaid};
 use rustmigrate_core::graph::persist::{load_from_db, save_to_db};
 use rustmigrate_core::graph::topo::{detect_cycles, migration_sequence, topological_sort};
@@ -710,15 +710,27 @@ fn format_tool_missing(code: &str, status: &ToolStatus) -> String {
 /// `--full` 强制全量重建。
 /// `--profile` 开启时输出 per-phase 耗时的性能画像 JSON（见 04-toolchain.md § 5.7.4.1）。
 fn cmd_graph_build(root: &Path, full: bool, profile: bool) -> CmdResult {
+    use rustmigrate_core::types::common::SourceLang;
     let mut warnings: Vec<String> = Vec::new();
 
     // 确保 `.rust-migration/` 存在后再写 db。
     std::fs::create_dir_all(work_dir())?;
     let db = db_path();
 
-    if full {
+    // 探测源语言，路由到对应 adapter；探测失败回退 TypeScript。
+    let lang = rustmigrate_core::profile::detect_language(root).unwrap_or(SourceLang::TypeScript);
+
+    // 增量构建目前仅 TypeScript 支持指纹三级变更检测；其他语言强制全量。
+    let effective_full = if !full && lang != SourceLang::TypeScript {
+        warnings.push(format!("{lang} 源暂不支持增量构建，已降级为全量构建"));
+        true
+    } else {
+        full
+    };
+
+    if effective_full {
         // 全量构建（一次遍历同时产出图和指纹）
-        let (graph, build_profile, fps) = build_graph_ts_full(root, profile)?;
+        let (graph, build_profile, fps) = build_graph_full(root, lang, profile)?;
         warnings.extend(graph.warnings().iter().cloned());
 
         // 持久化

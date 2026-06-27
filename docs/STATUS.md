@@ -5,10 +5,10 @@
 ## 当前位置
 
 - **Milestone**: M1 ✅ → M2 ✅ → **M3 多语言支持（Python 优先）**
-- **阶段**: M3 Sprint A（多语言泛化 + 遗留清理）✅ → 待合并
-- **测试基线**: 415 测试 / clippy -D / deny / fmt / shellcheck 全绿
+- **阶段**: M3 Sprint B（Python Adapter Core）→ PR-B1 ✅ / PR-B2 ✅ / **PR-B3 验收层完成待 PR**
+- **测试基线**: 438 测试（+23 Python 集成）/ clippy -D / deny / fmt / shellcheck 全绿
 - **CI 覆盖率**: 待更新
-- **最新 PR**: [#34](https://github.com/snowzhaozhj/rewriteInRust/pull/34)（M3 Sprint A）
+- **最新 PR**: [#36](https://github.com/snowzhaozhj/rewriteInRust/pull/36)（PR-B2 Core Analysis）
 
 ### M2 遗留（Sprint A 已全部关闭）
 
@@ -55,8 +55,14 @@ PY-01 ─┬→ PY-02 → PY-03 ─────┐
 
 **进度**：
 - [x] PR-B1：PY-01 adapter 骨架 + PY-09 注册/契约
-- [ ] PR-B2：PY-02 import 解析 + PY-03 resolve + PY-04 符号 + PY-05 调用 + PY-06 签名
-- [ ] PR-B3：PY-07 fixture + PY-08 集成测试
+- [x] PR-B2：PY-02 import 解析 + PY-03 resolve + PY-04 符号 + PY-05 调用 + PY-06 签名
+- [x] PR-B3：PY-07 fixture（4 个）+ PY-08 集成测试（23 测试）+ CLI graph build 语言检测泛化
+
+**PR-B3 交付**：
+- 4 个 Python fixture：`py-linear-deps`（线性+`__all__`+async+构造调用）/ `py-diamond-deps`（菱形+继承 extends）/ `py-circular-deps`（环检测+shared 不在环）/ `py-pkg-deps`（`__init__.py` 包+re-export 透传偏序+`TYPE_CHECKING` StaticType）
+- `python_ground_truth.rs`：23 测试，验证节点/边/拓扑偏序 + Python 特有断言（extends 无 Implements、signature round-trip、StaticType import、构造调用 sub_kind）
+- CLI `cmd_graph_build`：`detect_language` 路由 adapter，非 TS 强制全量并提示降级；新增 `build_graph_full(root, lang, profile)`；TS 增量路径不回归
+- `cargo run -- graph build --root fixtures/py-linear-deps` 输出 node=12/edge=15 ✓
 
 ### M3 多语言扩展点（调研结论，2026-06-24）
 

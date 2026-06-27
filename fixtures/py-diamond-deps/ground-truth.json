@@ -1,0 +1,32 @@
+{
+  "description": "Python 菱形依赖 + 继承: base <- auth, base <- user, app -> auth+user；覆盖 extends 边（Python ABC 继承统一为 extends，无 implements 区分）",
+  "nodes": [
+    { "id": "file:src/base.py", "type": "File" },
+    { "id": "file:src/auth.py", "type": "File" },
+    { "id": "file:src/user.py", "type": "File" },
+    { "id": "file:src/app.py", "type": "File" },
+    { "id": "class:src/base.py:Serializable", "type": "Class", "is_exported": true },
+    { "id": "class:src/auth.py:AuthService", "type": "Class", "is_exported": false },
+    { "id": "class:src/user.py:UserModel", "type": "Class", "is_exported": false },
+    { "id": "function:src/auth.py:AuthService.serialize", "type": "Function", "is_exported": false },
+    { "id": "function:src/user.py:UserModel.serialize", "type": "Function", "is_exported": false },
+    { "id": "function:src/app.py:build", "type": "Function", "is_exported": false }
+  ],
+  "edges": [
+    { "source": "file:src/auth.py", "target": "file:src/base.py", "type": "imports" },
+    { "source": "file:src/user.py", "target": "file:src/base.py", "type": "imports" },
+    { "source": "file:src/app.py", "target": "file:src/auth.py", "type": "imports" },
+    { "source": "file:src/app.py", "target": "file:src/user.py", "type": "imports" },
+    { "source": "class:src/auth.py:AuthService", "target": "class:src/base.py:Serializable", "type": "extends" },
+    { "source": "class:src/user.py:UserModel", "target": "class:src/base.py:Serializable", "type": "extends" },
+    { "source": "file:src/base.py", "target": "class:src/base.py:Serializable", "type": "exports" },
+    { "source": "file:src/app.py", "target": "class:src/auth.py:AuthService", "type": "calls", "sub_kind": "Constructor" },
+    { "source": "file:src/app.py", "target": "class:src/user.py:UserModel", "type": "calls", "sub_kind": "Constructor" }
+  ],
+  "topo_order_constraints": [
+    ["file:src/base.py", "file:src/auth.py"],
+    ["file:src/base.py", "file:src/user.py"],
+    ["file:src/auth.py", "file:src/app.py"],
+    ["file:src/user.py", "file:src/app.py"]
+  ]
+}
