@@ -264,6 +264,33 @@ fn smoke_graph_build_full_flag() {
     });
 }
 
+/// Python 源（py-linear-deps）未显式 `--full` 时：经 `detect_language` 路由到
+/// Python adapter，强制全量并输出降级警告（status 降级为 warning），图非空。
+/// 覆盖 `cmd_graph_build` 新增的语言探测 + 降级分支（否则该路径无回归保护）。
+#[test]
+fn smoke_graph_build_python_detects_and_degrades() {
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("py-linear-deps"), tmp.path());
+    with_cwd(tmp.path(), || {
+        // 不 init：走纯 detect_language 探测路径。
+        let (code, json) = run(&["graph", "build", "--root", "src"]);
+        assert_eq!(code, 0, "Python graph build 应成功: {json}");
+        assert_eq!(json["status"], "warning", "降级应使 status=warning: {json}");
+        assert_eq!(json["data"]["full"], true, "Python 应强制全量: {json}");
+        assert!(
+            json["data"]["node_count"].as_u64().unwrap_or(0) > 0,
+            "Python 图应非空: {json}"
+        );
+        let warns = json["warnings"].as_array().expect("应有 warnings 数组");
+        assert!(
+            warns
+                .iter()
+                .any(|w| w.as_str().unwrap_or_default().contains("降级为全量构建")),
+            "warnings 应含增量降级提示: {json}"
+        );
+    });
+}
+
 #[test]
 fn smoke_graph_stats() {
     let project = temp_linear_project();

@@ -1,0 +1,27 @@
+{
+  "description": "Python 循环依赖: a <-> b 互相导入构成环；shared 被两者依赖但不依赖任何模块，不应出现在环中。nodes/edges 为完整集合（双向严格校验）。",
+  "nodes": [
+    { "id": "file:src/a.py", "type": "File", "is_exported": false, "is_async": false },
+    { "id": "file:src/b.py", "type": "File", "is_exported": false, "is_async": false },
+    { "id": "file:src/shared.py", "type": "File", "is_exported": false, "is_async": false },
+    { "id": "function:src/a.py:a_func", "type": "Function", "is_exported": false, "is_async": false },
+    { "id": "function:src/b.py:b_func", "type": "Function", "is_exported": false, "is_async": false },
+    { "id": "function:src/b.py:b_other", "type": "Function", "is_exported": false, "is_async": false },
+    { "id": "function:src/shared.py:helper", "type": "Function", "is_exported": true, "is_async": false }
+  ],
+  "edges": [
+    { "source": "file:src/a.py", "target": "file:src/b.py", "type": "imports" },
+    { "source": "file:src/b.py", "target": "file:src/a.py", "type": "imports" },
+    { "source": "file:src/a.py", "target": "file:src/shared.py", "type": "imports" },
+    { "source": "file:src/b.py", "target": "file:src/shared.py", "type": "imports" },
+    { "source": "file:src/a.py", "target": "function:src/b.py:b_func", "type": "calls" },
+    { "source": "file:src/b.py", "target": "function:src/a.py:a_func", "type": "calls" },
+    { "source": "file:src/a.py", "target": "function:src/shared.py:helper", "type": "calls" },
+    { "source": "file:src/b.py", "target": "function:src/shared.py:helper", "type": "calls" },
+    { "source": "file:src/shared.py", "target": "function:src/shared.py:helper", "type": "exports" }
+  ],
+  "topo_sort": {
+    "expect_error": true,
+    "cycle_contains": ["a.py", "b.py"]
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "description": "Python 线性依赖: utils -> service -> index；覆盖相对导入、__all__ 导出、async、跨文件 calls、构造调用。nodes/edges 为完整集合（测试做双向严格校验）。",
+  "nodes": [
+    { "id": "file:src/utils.py", "type": "File", "is_exported": false, "is_async": false },
+    { "id": "file:src/service.py", "type": "File", "is_exported": false, "is_async": false },
+    { "id": "file:src/index.py", "type": "File", "is_exported": false, "is_async": false },
+    { "id": "function:src/utils.py:clamp", "type": "Function", "is_exported": true, "is_async": false },
+    { "id": "function:src/utils.py:fetch_data", "type": "Function", "is_exported": true, "is_async": true },
+    { "id": "class:src/utils.py:Range", "type": "Class", "is_exported": true, "is_async": false },
+    { "id": "function:src/utils.py:Range.__init__", "type": "Function", "is_exported": false, "is_async": false },
+    { "id": "class:src/service.py:NumberService", "type": "Class", "is_exported": false, "is_async": false },
+    { "id": "function:src/service.py:NumberService.__init__", "type": "Function", "is_exported": false, "is_async": false },
+    { "id": "function:src/service.py:NumberService.normalize", "type": "Function", "is_exported": false, "is_async": false },
+    { "id": "function:src/service.py:NumberService.load", "type": "Function", "is_exported": false, "is_async": true },
+    { "id": "function:src/index.py:main", "type": "Function", "is_exported": false, "is_async": false }
+  ],
+  "edges": [
+    { "source": "file:src/service.py", "target": "file:src/utils.py", "type": "imports" },
+    { "source": "file:src/index.py", "target": "file:src/service.py", "type": "imports" },
+    { "source": "file:src/index.py", "target": "file:src/utils.py", "type": "imports" },
+    { "source": "file:src/utils.py", "target": "function:src/utils.py:clamp", "type": "exports" },
+    { "source": "file:src/utils.py", "target": "function:src/utils.py:fetch_data", "type": "exports" },
+    { "source": "file:src/utils.py", "target": "class:src/utils.py:Range", "type": "exports" },
+    { "source": "class:src/utils.py:Range", "target": "function:src/utils.py:Range.__init__", "type": "contains" },
+    { "source": "class:src/service.py:NumberService", "target": "function:src/service.py:NumberService.__init__", "type": "contains" },
+    { "source": "class:src/service.py:NumberService", "target": "function:src/service.py:NumberService.normalize", "type": "contains" },
+    { "source": "class:src/service.py:NumberService", "target": "function:src/service.py:NumberService.load", "type": "contains" },
+    { "source": "file:src/service.py", "target": "function:src/utils.py:clamp", "type": "calls" },
+    { "source": "file:src/service.py", "target": "function:src/utils.py:fetch_data", "type": "calls" },
+    { "source": "file:src/service.py", "target": "function:src/service.py:NumberService.normalize", "type": "calls" },
+    { "source": "file:src/index.py", "target": "class:src/service.py:NumberService", "type": "calls", "sub_kind": "Constructor" },
+    { "source": "file:src/index.py", "target": "class:src/utils.py:Range", "type": "calls", "sub_kind": "Constructor" }
+  ],
+  "topo_order_constraints": [
+    ["file:src/utils.py", "file:src/service.py"],
+    ["file:src/service.py", "file:src/index.py"]
+  ]
+}
