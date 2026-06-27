@@ -42,6 +42,14 @@ tools: Bash, Read, Grep, Glob
 - 检测不到的框架、无法静态判定的动态行为，明确标 `unknown`，**禁止猜测**。
 - 不要把"语法错误/空文件/纯类型文件"误判为可迁移模块——如实归类。
 
+### R6 源语言特化分析（多语言）
+- `source_language` 已由 `rustmigrate graph build` 检测（config 优先，未配置才探测）；画像如实输出该字段，不重新推断。下面按语言补充分析重点：
+- **TypeScript**：框架识别走 `package.json` 依赖 + import 特征；type-only import（`import type`）已由 graph build 区分。
+- **Python**：
+  - **框架识别**：从 `imports` 边 + 依赖清单（`requirements.txt` / `pyproject.toml` / `setup.py`）判断 django / flask / fastapi / pydantic / sqlalchemy 等，写入 `frameworks`。
+  - **动态特性扫描（迁移高风险点）**：`getattr`/`setattr`/`__getattr__`、`eval`/`exec`、metaclass、monkey patching、`importlib` 动态导入、`*args`/`**kwargs` 透传——这些**静态不可判定**，graph build 的 calls/uses_type 边无法捕获。逐处记入 `gaps.dynamic_features`（每条为 `"<源文件>: <简述>"` 字符串，与 `missing_calls` 同形），**不猜测其运行时行为**。这是 translator 留 `TODO(port)` 与人工决策的输入，也是 tier 复核信号（动态特性密集的模块倾向升档）。
+  - **type-only import**：Python 无 TS 的 `import type` 语法关键字，但 `if TYPE_CHECKING:` 块是惯用的仅类型导入，graph build 已将其标为 `StaticType`（区别于运行时值导入）。不要据「无 `import type` 语法」误判这类导入不存在，或把含 `TYPE_CHECKING` 块的文件错判为纯类型文件。
+
 ## 输出格式
 
 向调用方（SKILL.md 主上下文）返回项目画像摘要 JSON：
@@ -59,7 +67,7 @@ tools: Bash, Read, Grep, Glob
     "tier_distribution": { "trivial": 0, "standard": 0, "full": 0 },
     "tier_overrides": [],
     "calls_edge_count": 0,
-    "gaps": { "missing_calls": ["..."], "missing_uses_type": ["..."] },
+    "gaps": { "missing_calls": ["..."], "missing_uses_type": ["..."], "dynamic_features": ["..."] },
     "suggested_order": ["..."]
   },
   "warnings": []
