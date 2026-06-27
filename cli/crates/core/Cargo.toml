@@ -10,6 +10,7 @@ petgraph.workspace = true
 rusqlite.workspace = true
 tree-sitter.workspace = true
 tree-sitter-typescript.workspace = true
+tree-sitter-python.workspace = true
 tokei.workspace = true
 strum.workspace = true
 serde.workspace = true
@@ -26,6 +27,7 @@ wait-timeout.workspace = true
 insta.workspace = true
 tempfile.workspace = true
 proptest.workspace = true
-# ast_contract 测试直接建 parser 验证 typescript.rs 依赖的 AST 契约
+# ast_contract 测试直接建 parser 验证 adapter 依赖的 AST 契约
 tree-sitter.workspace = true
 tree-sitter-typescript.workspace = true
+tree-sitter-python.workspace = true
