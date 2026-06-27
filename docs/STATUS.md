@@ -5,10 +5,10 @@
 ## 当前位置
 
 - **Milestone**: M1 ✅ → M2 ✅ → **M3 多语言支持（Python 优先）**
-- **阶段**: M3 Sprint B（Python Adapter Core）→ PR-B1 ✅ / PR-B2 ✅ / **PR-B3 验收层完成待 PR**
-- **测试基线**: 471 测试（+24 Python 集成 +1 CLI e2e Python）/ clippy -D / deny / fmt / shellcheck 全绿
+- **阶段**: M3 Sprint B ✅（PR-B1/B2/B3 全合并）→ **Sprint C（Plugin Python 适配）进行中**
+- **测试基线**: 471 测试 / clippy -D / deny / fmt / shellcheck 全绿
 - **CI 覆盖率**: 待更新
-- **最新 PR**: [#36](https://github.com/snowzhaozhj/rewriteInRust/pull/36)（PR-B2 Core Analysis）
+- **最新 PR**: [#37](https://github.com/snowzhaozhj/rewriteInRust/pull/37)（PR-B3 Python 验收层，已合并）
 
 ### M2 遗留（Sprint A 已全部关闭）
 
@@ -65,6 +65,28 @@ PY-01 ─┬→ PY-02 → PY-03 ─────┐
 - `cli_e2e.rs` 新增 Python graph build 端到端用例（探测→降级→status=warning）
 - `cargo run -- graph build --root fixtures/py-linear-deps` 输出 node=12/edge=15 ✓
 - **审查**：4 视角全跑（主审/设计契约/专项/异构交叉）；6 项测试保真+CLI 健壮性问题已修，无遗留 important
+
+### 当前工作：Sprint C（Plugin Python 适配）
+
+**目标**：Plugin 层支持 Python 项目迁移分析和翻译（PLG-01~06）。
+
+**PR 拆解（修正 PLAN-M3 偏离后）**：
+
+| PR | 任务 | 说明 |
+|----|------|------|
+| **PR-C1** | PLG-01修正 + PLG-02 | Python adapter 资产：`analysis-tools.json` + `porting-template.md` |
+| **PR-C2** | PLG-03 + PLG-04 | translator.md / analyzer.md / verifier.md 多语言分支 |
+| **PR-C3** | PLG-05 + PLG-06 | degrade_skip 降级报告增强 + Plugin Python 端到端验证 |
+
+> **PLG-01 偏离修正**：PLAN-M3 字面要求建 `adapter.json` + `detect.sh`，但实际架构中
+> TS adapter 目录仅 `analysis-tools.json` + `porting-template.md`——语言检测在 `analyze.md`
+> Step 2（读特征文件）、依赖分析由 CLI `graph build`（tree-sitter）完成，设计文档 06 §11.2
+> 的 shell 脚本模式从未落地。Python adapter 对齐 TS 实际结构，不建 adapter.json/detect.sh。
+
+**进度**：
+- [x] PR-C1：Python adapter 资产（commit 54158b0，审查中）
+- [ ] PR-C2：提示词多语言分支
+- [ ] PR-C3：降级报告 + 端到端验证
 
 ### M3 多语言扩展点（调研结论，2026-06-24）
 

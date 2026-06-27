@@ -106,7 +106,7 @@ Step 3: PR-B3 (Validation)     → PY-07 + PY-08         [~2.5d]
 
 | 任务 ID | 内容 | 预估 | 依赖 |
 |---------|------|------|------|
-| M3-PLG-01 | **`adapters/python/` 目录**：`adapter.json` + `detect.sh`（检测 `pyproject.toml`/`setup.py`/`requirements.txt`）+ `analysis-tools.json` | 1d | — |
+| M3-PLG-01 | **`adapters/python/` 目录**：~~`adapter.json` + `detect.sh`~~ + `analysis-tools.json` + `porting-template.md`（**修正见 MDR-009**：shell 脚本模式从未落地，语言检测在 analyze.md Step2、提取由 CLI tree-sitter 完成；adapter 目录契约 = analysis-tools.json + porting-template.md，与 TS 对齐，不建 adapter.json/detect.sh） | 1d | — |
 | M3-PLG-02 | **Python porting-template.md**：Python → Rust 类型映射规则（`str→String`, `int→i64`, `float→f64`, `list→Vec`, `dict→HashMap`, `Optional→Option`, `dataclass→struct`, `abc.ABC→trait`）+ 惯用法差异（GIL/动态类型/duck typing/decorator/metaclass） | 2d | — |
 | M3-PLG-03 | **translator.md 多语言分支**：类型映射表按 `source_language` 条件化；Phase A Python 特有规则（`self` 参数转换 / `__init__.py` 处理 / 无 type-only import 区分） | 1d | PLG-02 |
 | M3-PLG-04 | **analyzer.md + verifier.md 适配**：Python 项目分析指令 + 验证规则 | 1d | PY-09 |
@@ -114,7 +114,7 @@ Step 3: PR-B3 (Validation)     → PY-07 + PY-08         [~2.5d]
 | M3-PLG-06 | **Plugin 端到端验证**：`/migrate analyze` + `run` 对 Python fixture live 跑通 | 1d | PLG-01~05 |
 
 **验收标准**：
-- [ ] `adapters/python/adapter.json` 符合 06 §11.2 JSON Schema 契约
+- [x] ~~`adapters/python/adapter.json` 符合 06 §11.2 JSON Schema 契约~~（**作废，MDR-009**）→ `adapters/python/` 含 `analysis-tools.json`（格式匹配 `AnalysisTool`）+ `porting-template.md`（frontmatter 与 TS 对齐）
 - [ ] `/migrate analyze` 产出 `migration-state.json`（Python 项目正确填充模块状态）
 - [ ] `/migrate run` 对 Python fixture headless 跑通，至少 1 模块状态推进到 `translating`
 - [ ] translator 可根据 `source_language` 切换类型映射表
