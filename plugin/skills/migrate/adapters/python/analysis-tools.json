@@ -1,0 +1,9 @@
+[
+  {
+    "tool_id": "pytest",
+    "display_name": "pytest",
+    "min_version": "7.0.0",
+    "install_hint": "pip install pytest",
+    "required": false
+  }
+]
