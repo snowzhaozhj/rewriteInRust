@@ -32,7 +32,8 @@ use rustmigrate_core::stats::{compare_structure, count_loc};
 use rustmigrate_core::types::common::{NodeId, Timestamp};
 use rustmigrate_core::types::graph::{EdgeType, NodeType};
 use rustmigrate_core::types::state::{
-    humanize_module_key, ModuleState, ModuleStatus, ModuleTier, ProjectState, SprintState,
+    humanize_module_key, CompositeKind, ModuleState, ModuleStatus, ModuleTier, ProjectState,
+    SprintState,
 };
 use rustmigrate_core::validate::{
     auto_unblock_modules, check_blocked_modules, detect_blocked_cycles, validate_state,
@@ -1640,6 +1641,10 @@ fn cmd_state_populate_modules(root: Option<&Path>, single_sprint: bool) -> CmdRe
             None
         };
 
+        // composite 类型：多成员组即循环依赖组（Cycle）；单文件为 None（M3-DEC-01）。
+        // PR-1 不产出 active 合批组（Batch 仅出现在 dry-run 报告，见 decomposition-redesign §7 B1）。
+        let composite_kind = member_files.as_ref().map(|_| CompositeKind::Cycle);
+
         // 先用引用派生 JSON entry，再把 member_files move 进 ModuleState（省一次 clone）。
         let mut entry = json!({
             "id": key.to_string(),
@@ -1648,6 +1653,7 @@ fn cmd_state_populate_modules(root: Option<&Path>, single_sprint: bool) -> CmdRe
         });
         if let Some(mf) = &member_files {
             entry["member_files"] = json!(mf);
+            entry["composite_kind"] = json!(composite_kind.map(|k| k.to_string()));
         }
         modules.push(entry);
 
@@ -1667,6 +1673,9 @@ fn cmd_state_populate_modules(root: Option<&Path>, single_sprint: bool) -> CmdRe
                 blocked_by: None,
                 pre_blocked_status: None,
                 member_files,
+                composite_kind,
+                decomposition_snapshot: None,
+                decomposition_frozen: false,
             },
         );
     }

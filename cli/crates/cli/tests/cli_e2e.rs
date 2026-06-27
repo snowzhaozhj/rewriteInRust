@@ -1129,6 +1129,11 @@ fn smoke_populate_folds_cycles() {
                 && members.iter().any(|s| s.contains("emitter")),
             "composite 组应含环成员: {members:?}"
         );
+        // M3-DEC-01：循环 composite 应显式标记 composite_kind=cycle（区别于机械合批组）。
+        assert_eq!(
+            composite["composite_kind"], "cycle",
+            "循环 composite 应标记 composite_kind=cycle: {composite}"
+        );
         // 折叠后 state 应合法。
         let (code, json) = run(&["validate", "state"]);
         assert_eq!(code, 0, "折叠后 state 应合法: {json}");

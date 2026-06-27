@@ -524,7 +524,9 @@ fn collect_ts_danger(root: Node, source: &str, danger: &mut BTreeSet<DangerCateg
                     danger.insert(DangerCategory::DynamicReflection);
                 }
             }
-            "function_declaration" | "method_definition" | "arrow_function"
+            "function_declaration"
+            | "method_definition"
+            | "arrow_function"
             | "function_expression" => {
                 if cur.child_by_field_name("async").is_some()
                     || ts_node_text(cur, source).starts_with("async ")

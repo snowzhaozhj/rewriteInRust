@@ -72,7 +72,10 @@
 
 ### 6. Phase A 忠实翻译（translator）
 
-**先判模块形态**：读 `modules[target].member_files`。为空（单文件模块）走下面「单文件 Phase A」；非空（SCC 模块组）走「SCC 组 Phase A（契约门 → 逐文件填空）」。
+**先判模块形态**：读 `modules[target].member_files` 与 `composite_kind`（M3-DEC-01）。
+- `composite_kind=batch`（机械合批组）→ **显式报错并停**：「机械合批轻量路径尚未启用（PR-2），请勿 dispatch 该组」，置 `paused` + `requires_manual_review`，**不得静默走 SCC 契约重路径**。PR-1 阶段拆解引擎不产出 active 合批组（仅出现在 dry-run 报告），此为防御性守门，见 `docs/decomposition-redesign.md` §7 B1。
+- `member_files` 为空（单文件模块）→ 下面「单文件 Phase A」。
+- `member_files` 非空且 `composite_kind=cycle`（或缺省的循环组）→「SCC 组 Phase A（契约门 → 逐文件填空）」。
 
 #### 单文件 Phase A
 调 translator（**前/后记 subagent_call**，step_index=6）产出 Phase A 翻译。根据模块 tier 分两种模式：
