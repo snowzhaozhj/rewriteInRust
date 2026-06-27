@@ -295,6 +295,260 @@ fn is_convex(set: &BTreeSet<usize>, reach: &[BTreeSet<usize>], n: usize) -> bool
     true
 }
 
+// === 验收度量（M3-DEC-01 §8 验收门）===
+
+/// 内聚质量（MQ）报告（§8 内聚维度，硬门）。
+#[derive(Debug, Clone, Serialize)]
+pub struct CohesionMq {
+    /// 实际加权 MQ（各 batch 内部/(内部+外部) 按边数加权平均）。
+    pub actual: f64,
+    /// 随机基线 MQ（固定 seed、保持各 batch 大小重排成员，N 次均值）。
+    pub baseline: f64,
+    /// actual / baseline；要求 ≥1.5（首版阈值）。
+    pub ratio: f64,
+    /// 参与统计的合批文件数。
+    pub batched_files: usize,
+}
+
+/// 拆解正确性不变量报告（§8 硬门 100%）。
+#[derive(Debug, Clone, Serialize)]
+pub struct Invariants {
+    /// 每文件恰好归属一个单元（无重复、无遗漏）。
+    pub partition_ok: bool,
+    /// 单元级依赖图无环（凸性 + 环隔离的后验）。
+    pub dag_acyclic: bool,
+    /// 超预算转人工单元数。
+    pub over_budget_count: usize,
+    /// 拆解计划 canonical hash（两次运行应一致）。
+    pub plan_hash: String,
+}
+
+/// 极简种子 PRNG（xorshift64*），用于内聚随机基线——无外部依赖、确定可复现。
+struct XorShift64(u64);
+
+impl XorShift64 {
+    fn new(seed: u64) -> Self {
+        Self(if seed == 0 {
+            0x9E37_79B9_7F4A_7C15
+        } else {
+            seed
+        })
+    }
+    fn next_u64(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+    fn below(&mut self, n: usize) -> usize {
+        (self.next_u64() % n as u64) as usize
+    }
+}
+
+/// 计算给定「文件→batch 编号」分配下的全局加权 MQ。
+fn weighted_mq(assign: &HashMap<String, usize>, graph: &SourceGraph) -> f64 {
+    use std::collections::BTreeMap;
+    let mut internal: BTreeMap<usize, u64> = BTreeMap::new();
+    let mut external: BTreeMap<usize, u64> = BTreeMap::new();
+    for dep in graph.edges() {
+        if dep.edge_type != EdgeType::Imports {
+            continue;
+        }
+        let Some(&bu) = assign.get(dep.source.as_str()) else {
+            continue;
+        };
+        match assign.get(dep.target.as_str()) {
+            Some(&bv) if bv == bu => *internal.entry(bu).or_insert(0) += 1,
+            _ => *external.entry(bu).or_insert(0) += 1,
+        }
+    }
+    // 各 batch 内聚 = 内部/(内部+外部)，按 batch 边数(内部+外部)加权平均
+    // = Σ内部 / Σ(内部+外部)（边数加权的代数化简）。
+    let mut total_internal = 0.0;
+    let mut total_edges = 0.0;
+    let batches: BTreeSet<usize> = assign.values().copied().collect();
+    for b in batches {
+        let i = *internal.get(&b).unwrap_or(&0) as f64;
+        let e = *external.get(&b).unwrap_or(&0) as f64;
+        total_internal += i;
+        total_edges += i + e;
+    }
+    if total_edges > 0.0 {
+        total_internal / total_edges
+    } else {
+        0.0
+    }
+}
+
+/// 内聚 MQ：实际 vs 随机基线（§8 硬门，Codex N-2 固定参数）。
+///
+/// 随机基线：保持各 batch 大小不变，固定 seed 把全部合批文件随机重排进同样大小的桶，
+/// 算同一加权 MQ，取 `samples` 次均值。无合批组时返回中性 ratio=1.0（门不适用）。
+pub fn cohesion_mq(
+    plan: &DecompositionPlan,
+    graph: &SourceGraph,
+    seed: u64,
+    samples: usize,
+) -> CohesionMq {
+    // 收集合批文件 → batch 编号 + 各 batch 大小。
+    let mut assign: HashMap<String, usize> = HashMap::new();
+    let mut sizes: Vec<usize> = Vec::new();
+    for u in &plan.units {
+        if u.kind == UnitKind::Batch {
+            let bid = sizes.len();
+            for m in &u.members {
+                assign.insert(m.clone(), bid);
+            }
+            sizes.push(u.members.len());
+        }
+    }
+    let batched_files = assign.len();
+    if batched_files == 0 {
+        return CohesionMq {
+            actual: 0.0,
+            baseline: 0.0,
+            ratio: 1.0,
+            batched_files: 0,
+        };
+    }
+
+    let actual = weighted_mq(&assign, graph);
+
+    // 全部合批文件（确定序），随机重排进同样大小的桶。
+    let mut files: Vec<String> = assign.keys().cloned().collect();
+    files.sort();
+    let mut rng = XorShift64::new(seed);
+    let mut acc = 0.0;
+    let samples = samples.max(1);
+    for _ in 0..samples {
+        // Fisher-Yates 重排。
+        let mut perm = files.clone();
+        for i in (1..perm.len()).rev() {
+            let j = rng.below(i + 1);
+            perm.swap(i, j);
+        }
+        // 按各 batch 大小切片重新分配。
+        let mut shuffled: HashMap<String, usize> = HashMap::new();
+        let mut idx = 0;
+        for (bid, &sz) in sizes.iter().enumerate() {
+            for _ in 0..sz {
+                shuffled.insert(perm[idx].clone(), bid);
+                idx += 1;
+            }
+        }
+        acc += weighted_mq(&shuffled, graph);
+    }
+    let baseline = acc / samples as f64;
+    let ratio = if baseline > 0.0 {
+        actual / baseline
+    } else if actual > 0.0 {
+        f64::INFINITY
+    } else {
+        1.0
+    };
+    CohesionMq {
+        actual,
+        baseline,
+        ratio,
+        batched_files,
+    }
+}
+
+/// 校验拆解正确性不变量（§8 硬门）。`expected_files` = 图中 File 节点总数。
+pub fn verify_invariants(
+    plan: &DecompositionPlan,
+    graph: &SourceGraph,
+    expected_files: usize,
+) -> Invariants {
+    // 分区：成员展开后无重复且总数 == 文件数。
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut total = 0usize;
+    let mut dup = false;
+    for u in &plan.units {
+        for m in &u.members {
+            total += 1;
+            if !seen.insert(m.as_str()) {
+                dup = true;
+            }
+        }
+    }
+    let partition_ok = !dup && total == expected_files && seen.len() == expected_files;
+
+    let dag_acyclic = unit_graph_acyclic(plan, graph);
+    let over_budget_count = plan
+        .units
+        .iter()
+        .filter(|u| u.kind == UnitKind::ManualOverBudget)
+        .count();
+
+    Invariants {
+        partition_ok,
+        dag_acyclic,
+        over_budget_count,
+        plan_hash: plan.canonical_hash(),
+    }
+}
+
+/// 单元级依赖图无环检测（按文件→单元映射归并 Imports 边后 DFS 查环）。
+fn unit_graph_acyclic(plan: &DecompositionPlan, graph: &SourceGraph) -> bool {
+    let mut unit_of: HashMap<&str, usize> = HashMap::new();
+    for (ui, u) in plan.units.iter().enumerate() {
+        for m in &u.members {
+            unit_of.insert(m.as_str(), ui);
+        }
+    }
+    let n = plan.units.len();
+    let mut succ: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
+    for dep in graph.edges() {
+        if dep.edge_type != EdgeType::Imports {
+            continue;
+        }
+        if let (Some(&su), Some(&tu)) = (
+            unit_of.get(dep.source.as_str()),
+            unit_of.get(dep.target.as_str()),
+        ) {
+            if su != tu {
+                succ[su].insert(tu);
+            }
+        }
+    }
+    // DFS 三色查环。
+    #[derive(Clone, Copy, PartialEq)]
+    enum Color {
+        White,
+        Gray,
+        Black,
+    }
+    let mut color = vec![Color::White; n];
+    for start in 0..n {
+        if color[start] != Color::White {
+            continue;
+        }
+        let mut stack: Vec<(usize, bool)> = vec![(start, false)];
+        while let Some((node, exiting)) = stack.pop() {
+            if exiting {
+                color[node] = Color::Black;
+                continue;
+            }
+            if color[node] == Color::Gray {
+                continue;
+            }
+            color[node] = Color::Gray;
+            stack.push((node, true));
+            for &nx in &succ[node] {
+                match color[nx] {
+                    Color::Gray => return false, // 回边 → 有环
+                    Color::White => stack.push((nx, false)),
+                    Color::Black => {}
+                }
+            }
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,6 +686,55 @@ mod tests {
         );
         assert!(plan.units.iter().all(|u| u.kind == UnitKind::Single));
         assert_eq!(plan.units.len(), 2);
+    }
+
+    #[test]
+    fn cohesion_mq_single_cohesive_batch() {
+        // a→b→c 合成单 batch，内部边 a→b、b→c，无外部 → actual MQ = 1.0。
+        let g = graph_from(&["a", "b", "c"], &[("a", "b"), ("b", "c")]);
+        let seq = migration_sequence(&g);
+        let plan = plan_decomposition(
+            &g,
+            &seq,
+            &fp(&[("a", 10), ("b", 10), ("c", 10)]),
+            &mech(&["a", "b", "c"]),
+            100,
+        );
+        let mq = cohesion_mq(&plan, &g, 42, 50);
+        assert_eq!(mq.batched_files, 3);
+        assert!(
+            (mq.actual - 1.0).abs() < 1e-9,
+            "纯内部 batch MQ 应为 1.0: {mq:?}"
+        );
+    }
+
+    #[test]
+    fn cohesion_mq_no_batch_is_neutral() {
+        let g = graph_from(&["a", "b"], &[("a", "b")]);
+        let seq = migration_sequence(&g);
+        // b 非机械 → 全 Single，无 batch。
+        let plan = plan_decomposition(&g, &seq, &fp(&[("a", 10), ("b", 10)]), &mech(&["a"]), 100);
+        let mq = cohesion_mq(&plan, &g, 1, 10);
+        assert_eq!(mq.batched_files, 0);
+        assert_eq!(mq.ratio, 1.0);
+    }
+
+    #[test]
+    fn invariants_partition_and_acyclic() {
+        let g = graph_from(&["a", "b", "c"], &[("a", "b"), ("b", "c")]);
+        let seq = migration_sequence(&g);
+        let plan = plan_decomposition(
+            &g,
+            &seq,
+            &fp(&[("a", 10), ("b", 10), ("c", 10)]),
+            &mech(&["a", "b", "c"]),
+            100,
+        );
+        let inv = verify_invariants(&plan, &g, 3);
+        assert!(inv.partition_ok, "每文件恰好一个单元");
+        assert!(inv.dag_acyclic, "单元图应无环");
+        assert_eq!(inv.over_budget_count, 0);
+        assert!(!inv.plan_hash.is_empty());
     }
 
     #[test]
