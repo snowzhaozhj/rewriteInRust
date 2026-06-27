@@ -213,9 +213,34 @@ tools: Bash, Read, Write, Grep, Glob
 2. **取消安全**：补齐 Rust 的取消/超时/Drop 语义。
 3. **局部性能**：消除明显冗余分配/拷贝（不改算法复杂度语义）。
 
-超出这三类的重构留到 M2。流程：先 `cargo fix --allow-dirty` 自动修，剩余编译错误自己改。编译失败最多 **3 轮**（`max_retry_rounds`，与 SubAgent 重试计数器独立）；每轮失败前由 SKILL.md 落盘 `state transition --to compile_fixing --substatus "<当轮错误摘要>"`，并把部分结果写 `intermediate/attempts/{module}-phase-b-partial.rs`、置 substatus `phase_b_failed_at_round_N` 以便 `--retry` 重入。3 轮仍不过 → 进入 pause→degrade（生成降级分析报告，等待人类 `--degrade=ffi` 决策），不要强行输出能编译但语义可疑的代码。
+超出这三类的重构留到 M2。流程：先 `cargo fix --allow-dirty` 自动修，剩余编译错误自己改。编译失败最多 **3 轮**（`max_retry_rounds`，与 SubAgent 重试计数器独立）；每轮失败前由 SKILL.md 落盘 `state transition --to compile_fixing --substatus "<当轮错误摘要>"`，并把部分结果写 `intermediate/attempts/{module}-phase-b-partial.rs`、置 substatus `phase_b_failed_at_round_N` 以便 `--retry` 重入。3 轮仍不过 → 进入 pause→degrade（生成降级分析报告，等待人类 `--degrade=ffi|manual|skip` 决策），不要强行输出能编译但语义可疑的代码。报告产出契约见下「降级分析报告」。
 
 **SCC 组的 Phase B 不退回整组**（否则又撞上下文上限）：仍是逐文件惯用化（三类重写同上）。但 Phase B 若需改某个跨文件签名（如把 `Rc<RefCell<T>>` 收窄为 `Rc<T>`），**先改契约 + stub 再逐文件 apply**——不允许某个成员文件单方面改签名（会破其他文件对它的引用）。流程：改 `{group}-contract.md` 对应字段 → 更新 stub 签名 → stub `cargo check` 过（契约门复验）→ 受影响的成员文件按新签名各自 apply。签名冻结在 Phase B 同样生效，只是冻结基线随契约修订前移。
+
+### 降级分析报告（3 轮失败触发）
+
+进入 pause→degrade 时产出 `intermediate/{module}-degrade-report.json`，供编排器在 `paused` 态渲染为三选一表格、并在依赖此模块的上游模块翻译时复用。结构：
+
+```json
+{
+  "module": "<模块 key>",
+  "failure_category": "compilation_error | type_complexity | dependency_resolution | semantic_gap",
+  "error_snippets": [{"file": "...", "line": 0, "code": "...", "error_message": "..."}],
+  "attempted_fixes": ["本轮试过的修复策略"],
+  "degrade_options": {
+    "ffi": {"effort": "low|medium|high", "description": "...", "downstream_impact": "..."},
+    "manual": {"effort": "...", "description": "...", "downstream_impact": "..."},
+    "skip": {"effort": "...", "description": "...", "downstream_impact": "..."}
+  },
+  "recommended_alternatives": [{"crate_name": "<crates.io 包名>", "rationale": "该 crate 如何覆盖被裁剪模块的能力"}]
+}
+```
+
+**`recommended_alternatives` 是 skip 路径的关键产物**（degrade_skip 为唯一无人值守降级路径）：模块被裁剪后，依赖它的上游模块若留空会编译失败，故须给出 Rust 生态等价 crate 供上游替换。填写要点：
+- **按失败分类给推荐**：`dependency_resolution`（缺等价库）/ `semantic_gap`（源语言特性无 Rust 等价）通常能定位替代 crate（如源模块是 HTTP 客户端 → `reqwest`，是日期解析 → `chrono`）；`compilation_error` / `type_complexity` 多为翻译实现问题而非缺库，可留空。
+- **理由具体到能力**：rationale 写清该 crate 覆盖被裁剪模块的哪项职责，不写空泛「功能强大」。
+- **无合适替代则留空数组**，不硬凑——上游会改为 `TODO(port)` 标记人工处理。
+- 复用你产出的 `dependency-mapping.md`（源依赖→Rust crate 映射）思路定位候选。
 
 ## 并行翻译 porting 规则约束（M2-SCALE-02）
 

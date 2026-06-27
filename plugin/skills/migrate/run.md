@@ -17,7 +17,7 @@
 
 ### 0. 复杂度分档路由（M2-TIER-01c）
 
-读 `modules[target].tier` 决定翻译循环路径（`tier` 由 `populate-modules` 的 AST 检测自动填充，见 03 §4.3.2）：
+读 `modules[target].tier` 决定翻译循环路径（`tier` 由 `populate-modules` 的 AST 检测自动填充）：
 
 | tier | 循环路径 | 跳过步骤 |
 |------|---------|---------|
@@ -61,6 +61,8 @@
 > `unresolved` 非空（依赖未登记为模块，state 与 source-graph 不同步）只发 warning、**不计入 blocking**——避免把缺失 key 填进 `blocked_by` 触发 check-blocked 永久非终态死锁。出现时应重新 `graph build` + `populate-modules` 同步状态，而非据此 block。
 
 > 勿用 `graph deps`（纯图、文件级）做此门禁：折叠后组内非代表成员（如 `types.ts`）不在 `modules` 表，逐个查 status 会静默落空。`state deps` 已处理 member→组代表映射。
+
+**裁剪依赖 context 注入（degrade_skip 上游处理，见 MDR-007 `blocked_by_skip`）**：`dependencies` 中 `status=degrade_skip` 的依赖是终态、算「就绪」不阻塞，但其能力已从迁移范围裁剪——目标模块若照常 `use` 它会编译失败。故筛出这些被裁剪依赖，读各自 `intermediate/{dep}-degrade-report.json` 的 `recommended_alternatives`，组装「裁剪依赖清单」（每项：被裁剪模块 key + 推荐替代 crate + 理由），在第 4 步意图摘要与第 6 步 Phase A 派发 translator 时一并注入。translator 据此把对被裁剪依赖的调用改写为推荐 crate；无推荐（清单项 `recommended_alternatives` 空）则留 `TODO(port): 依赖 <dep> 已裁剪，需人工选型替代` 标记，不留悬空引用。degrade-report.json 缺失（早期 skip 未落报告）按无推荐处理。
 
 ### 4. 意图摘要（translator）
 调 translator（**前/后记 subagent_call**，见 SKILL.md「SubAgent 编排」，step_index=4）生成 `.rust-migration/intermediate/{module}-intent.md`。**L2 校验**：9 个 required 属性全非空、`interfaces` ≥1（Schema 见 [translator.md](../../agents/translator.md)）。缺字段视为不完整，按失败恢复重试。
@@ -134,8 +136,9 @@ headless 下 translator 遇到无法判定的 `any`/`unknown`/动态行为时，
 
 ### 自动 degrade（paused → degrade_skip）
 headless 下模块进入 `paused`（3 轮失败）时，**不等人工确认**，自动执行：
-1. `state transition --module <M> --to degrade_skip --substatus "headless_auto_degrade" --reason "headless: 3轮失败自动降级"`
-2. 继续处理同 sprint 其余模块
+1. 确保 translator 已产出 `intermediate/{M}-degrade-report.json`（含 `recommended_alternatives`，见 [translator.md](../../agents/translator.md)「降级分析报告」）——供依赖 `<M>` 的上游模块在第 3 步「裁剪依赖 context 注入」时复用推荐替代 crate。
+2. `state transition --module <M> --to degrade_skip --substatus "headless_auto_degrade" --reason "headless: 3轮失败自动降级"`
+3. 继续处理同 sprint 其余模块
 
 自动 degrade 选择 `degrade_skip` 而非 `degrade_ffi`（FFI 生成需人工决策 binding 接口），保证 headless 不挂起。
 
