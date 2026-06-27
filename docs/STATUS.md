@@ -33,9 +33,30 @@
 | FFI-CLOSE | ✅ | ffi.rs deprecated + MDR-007 |
 | DEV-01 DEVIATION MDR | ✅ | MDR-008 补录 4 项偏差 |
 
-### 下一步
+### 当前工作：Sprint B（Python Adapter Core）
 
-**新会话从这里开始** → 读 `docs/PLAN-M3.md` → Sprint B（Python Adapter Core）。
+**目标**：实现 `PythonAdapter`，可解析 Python 源码、构建依赖图、检测复杂度分档。
+
+**PR 拆解（3 步走）**：
+
+| PR | 任务 | 预估 | 并行策略 |
+|----|------|------|---------|
+| **PR-B1 Foundation** | PY-01 + PY-09 | ~1d | 串行，所有后续前置 |
+| **PR-B2 Core Analysis** | PY-02 + PY-03 + PY-04 + PY-05 + PY-06 | ~5d | 内部双线并行：Track A (import→resolve) ∥ Track B (symbol→call+signature) |
+| **PR-B3 Validation** | PY-07 + PY-08 | ~2.5d | 串行，验收层 |
+
+**依赖图**：
+```
+PY-01 ─┬→ PY-02 → PY-03 ─────┐
+        ├→ PY-04 → PY-05/06 ──┼→ PY-08
+        └→ PY-09               │
+                    PY-07 ─────┘
+```
+
+**进度**：
+- [x] PR-B1：PY-01 adapter 骨架 + PY-09 注册/契约
+- [ ] PR-B2：PY-02 import 解析 + PY-03 resolve + PY-04 符号 + PY-05 调用 + PY-06 签名
+- [ ] PR-B3：PY-07 fixture + PY-08 集成测试
 
 ### M3 多语言扩展点（调研结论，2026-06-24）
 

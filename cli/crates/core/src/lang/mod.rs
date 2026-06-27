@@ -4,6 +4,7 @@
 //! 文件识别、单文件分析（节点+边+导入信息）。
 //! 各语言（TypeScript/Python/C/Go）实现此 trait 即可接入。
 
+pub mod python;
 pub mod registry;
 pub mod typescript;
 
