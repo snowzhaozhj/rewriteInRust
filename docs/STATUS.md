@@ -5,7 +5,8 @@
 ## 当前位置
 
 - **Milestone**: M1 ✅ → M2 ✅ → **M3 多语言支持（Python 优先）**
-- **阶段**: M3 Sprint B ✅（PR-B1/B2/B3 全合并）→ **Sprint C（Plugin Python 适配）进行中**
+- **阶段**: M3 Sprint B ✅ → Sprint C（Plugin Python 适配）→ **新增 Sprint E（模块拆解粒度重设计，计划已定稿）**
+- **Sprint E**: 治"小而机械文件被过度处理"（<10 行翻半小时）。方案权威 = [decomposition-redesign.md](./decomposition-redesign.md)（grilling + 两轮 Codex 审查定稿）。下一步 = M3-DEC-01 拆解引擎（CLI），完成后 M3-DEC-GATE 真实项目验收（硬前置），过门后 M3-DEC-02 轻量翻译路径。任务见 [PLAN-M3.md](./PLAN-M3.md) Sprint E。
 - **测试基线**: 471 测试 / clippy -D / deny / fmt / shellcheck 全绿
 - **CI 覆盖率**: 待更新
 - **最新 PR**: [#37](https://github.com/snowzhaozhj/rewriteInRust/pull/37)（PR-B3 Python 验收层，已合并）
