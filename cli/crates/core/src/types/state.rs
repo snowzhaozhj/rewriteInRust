@@ -256,13 +256,20 @@ pub struct ModuleState {
     /// run 据此分流：遇 `Batch` 而轻量路径未就绪时显式报错，不静默走 SCC 契约路径。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub composite_kind: Option<CompositeKind>,
-    /// 冻结拆解计划的 content hash（M3-DEC-01）。非空表示该模块的拆解归属已冻结，
-    /// `populate-modules` 以冻结计划为准、不重算（断点续传确定性）。
+    /// 冻结拆解计划的 content hash（M3-DEC-01，**PR-1 仅预留 schema，PR-2 接线**）。
+    /// 目标语义：非空表示该模块拆解归属已冻结，`populate-modules` 以冻结计划为准、不重算
+    /// （断点续传确定性，方案 §7）。PR-1 阶段 populate 恒置 `None`、`graph decompose` 是
+    /// 纯 dry-run 不落 state；冻结读写在 PR-2（机械合批进 active dispatch 时）落地。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub decomposition_snapshot: Option<String>,
-    /// 拆解计划是否已冻结（M3-DEC-01）。冻结后重跑 populate 不改变模块归属。
-    #[serde(default)]
+    /// 拆解计划是否已冻结（M3-DEC-01，**PR-1 仅预留 schema，PR-2 接线**，恒 `false`）。
+    #[serde(default, skip_serializing_if = "is_false")]
     pub decomposition_frozen: bool,
+}
+
+/// serde 跳过条件：值为 `false` 时不序列化（与本结构其余 Option 字段的 skip 约定一致）。
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// 从内部 module key 派生「人类友好显示名」（纯函数，不改变内部 key）。

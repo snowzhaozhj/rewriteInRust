@@ -57,16 +57,17 @@ impl DecompositionPlan {
     /// 不依赖 `HashMap`/`serde_json::to_string_pretty` 的键序——基于已稳定排序的 units +
     /// 各成员有序列表手工拼装 canonical 串后取 SHA256，保证"跑两次字节级一致"。
     pub fn canonical_hash(&self) -> String {
+        // 长度前缀编码（`<len>:<value>;`），避免成员路径含分隔符时不同 plan 碰撞同串（Codex nit）。
         let mut s = String::new();
         for u in &self.units {
-            // kind|footprint|sprint|m1,m2,...  —— units 已按首成员排序、members 已排序。
-            s.push_str(&format!(
-                "{}|{}|{}|{}\n",
-                unit_kind_key(u.kind),
-                u.footprint,
-                u.sprint,
-                u.members.join(",")
-            ));
+            push_field(&mut s, unit_kind_key(u.kind));
+            push_field(&mut s, &u.footprint.to_string());
+            push_field(&mut s, &u.sprint.to_string());
+            push_field(&mut s, &u.members.len().to_string());
+            for m in &u.members {
+                push_field(&mut s, m);
+            }
+            s.push('\n');
         }
         fingerprint::content_hash(&s)
     }
@@ -76,8 +77,7 @@ impl DecompositionPlan {
         self.units.len()
     }
 
-    /// 残留机械单文件模块数（应≈0）：kind=Single 且成员单一且属于机械集合的单元数。
-    /// 由调用方传入机械集合判定（此处仅提供按 Single+单成员的候选计数辅助见报告层）。
+    /// 被合批文件总数（§8「被合批文件占比」的分子）：所有 Batch 单元成员数之和。
     pub fn batched_file_count(&self) -> usize {
         self.units
             .iter()
@@ -85,6 +85,14 @@ impl DecompositionPlan {
             .map(|u| u.members.len())
             .sum()
     }
+}
+
+/// canonical_hash 用：把字段以 `<len>:<value>;` 追加，长度前缀消除分隔符歧义。
+fn push_field(s: &mut String, field: &str) {
+    s.push_str(&field.len().to_string());
+    s.push(':');
+    s.push_str(field);
+    s.push(';');
 }
 
 fn unit_kind_key(k: UnitKind) -> &'static str {
@@ -356,12 +364,19 @@ fn weighted_mq(assign: &HashMap<String, usize>, graph: &SourceGraph) -> f64 {
         if dep.edge_type != EdgeType::Imports {
             continue;
         }
-        let Some(&bu) = assign.get(dep.source.as_str()) else {
-            continue;
-        };
-        match assign.get(dep.target.as_str()) {
-            Some(&bv) if bv == bu => *internal.entry(bu).or_insert(0) += 1,
-            _ => *external.entry(bu).or_insert(0) += 1,
+        // 统计任一端在 batch 内的边（Codex：原版只看 source 在 batch，漏掉外部→batch 的入边）。
+        let bu = assign.get(dep.source.as_str()).copied();
+        let bv = assign.get(dep.target.as_str()).copied();
+        match (bu, bv) {
+            (Some(a), Some(b)) if a == b => *internal.entry(a).or_insert(0) += 1,
+            // 跨 batch 边：对两端各算一次外部边（出边离开 a、入边进入 b）。
+            (Some(a), Some(b)) => {
+                *external.entry(a).or_insert(0) += 1;
+                *external.entry(b).or_insert(0) += 1;
+            }
+            (Some(a), None) => *external.entry(a).or_insert(0) += 1,
+            (None, Some(b)) => *external.entry(b).or_insert(0) += 1,
+            (None, None) => {}
         }
     }
     // 各 batch 内聚 = 内部/(内部+外部)，按 batch 边数(内部+外部)加权平均
@@ -441,10 +456,13 @@ pub fn cohesion_mq(
         acc += weighted_mq(&shuffled, graph);
     }
     let baseline = acc / samples as f64;
+    // baseline=0 且 actual>0 = 随机基线退化为零内聚、实际有内聚 → 视作远超阈值；用有限哨兵
+    // RATIO_SENTINEL_MAX 而非 f64::INFINITY，避免 serde_json 把非有限浮点序列化为 null（多审查交叉确认）。
+    const RATIO_SENTINEL_MAX: f64 = 999.0;
     let ratio = if baseline > 0.0 {
         actual / baseline
     } else if actual > 0.0 {
-        f64::INFINITY
+        RATIO_SENTINEL_MAX
     } else {
         1.0
     };
@@ -532,7 +550,8 @@ fn unit_graph_acyclic(plan: &DecompositionPlan, graph: &SourceGraph) -> bool {
                 color[node] = Color::Black;
                 continue;
             }
-            if color[node] == Color::Gray {
+            // 已访问（Gray 在栈中 / Black 已完成）的节点直接跳过，避免 Black 节点被重染重扫（Codex nit）。
+            if color[node] != Color::White {
                 continue;
             }
             color[node] = Color::Gray;

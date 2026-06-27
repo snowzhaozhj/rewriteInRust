@@ -506,15 +506,9 @@ fn collect_ts_danger(root: Node, source: &str, danger: &mut BTreeSet<DangerCateg
                     danger.insert(DangerCategory::IoSideEffect);
                 }
             }
-            "conditional_type" => {
-                danger.insert(DangerCategory::DynamicReflection);
-            }
-            "predefined_type" => {
-                let text = ts_node_text(cur, source);
-                if text == "never" || text == "unknown" || text == "any" {
-                    danger.insert(DangerCategory::DynamicReflection);
-                }
-            }
+            // 注：conditional_type / 裸 never|unknown|any 类型标注是**纯类型层**（无运行时行为），
+            // 不计危险信号——否则会把"最安全的合批对象"纯类型文件踢出合批、反噬核心目标
+            // （方案 §9；design-checker 交叉确认）。仅保留运行时反射 / 运行时逃逸两类。
             "typeof_expression" | "instanceof_expression" => {
                 danger.insert(DangerCategory::DynamicReflection);
             }

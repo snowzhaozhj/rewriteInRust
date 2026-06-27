@@ -929,8 +929,12 @@ fn add_cross_file_edges(
                     target_rel.clone()
                 };
 
-                // 被用符号累加：Named 记原名（可裁剪）；default/namespace 记 use-all。
-                if sym.kind == SymbolKind::Named {
+                // 被用符号累加（M3-DEC-01）：仅当 Named **且 dest 未经 re-export 透传**
+                // （dest==target_rel，sym.name 即 target 的真实导出名）才记原名可裁剪。
+                // 经 barrel 透传到 origin（dest!=target_rel）时，`export {X as Y}` 可能改名，
+                // origin 的导出名与 sym.name 不符——保守记 use-all，避免按错名裁掉真正用到的符号
+                // （多审查交叉确认的别名错位）。default/namespace 同样 use-all。
+                if sym.kind == SymbolKind::Named && dest == target_rel {
                     add_dep_symbol(&mut dest_usage, dest.clone(), sym.name.clone());
                 } else {
                     mark_dep_all(&mut dest_usage, dest.clone());
@@ -1557,6 +1561,43 @@ mod tests {
             edge.and_then(|e| e.used_symbols),
             None,
             "namespace 导入不可裁剪，used_symbols 应为 None（use-all）"
+        );
+    }
+
+    #[test]
+    fn reexport_aliased_import_is_use_all() {
+        // barrel `export { foo as bar }`，使用方 `import { bar }`：边透传到 origin（定义 foo），
+        // 但导入端记的是 "bar"。origin 导出名是 "foo"，按 "bar" 裁剪会丢符号 → 保守 use-all。
+        let dir = std::env::temp_dir().join("rustmigrate_reexport_alias");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("origin.ts"), "export function foo(): void {}\n").unwrap();
+        std::fs::write(
+            dir.join("barrel.ts"),
+            "export { foo as bar } from './origin';\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("main.ts"),
+            "import { bar } from './barrel';\nbar();\n",
+        )
+        .unwrap();
+
+        let graph = build_graph_ts(&dir).unwrap();
+        // 透传后 main → origin 的 Imports 边应为 use-all（used_symbols=None），不可按 "bar" 裁剪。
+        let edge = graph
+            .edges()
+            .find(|e| {
+                e.edge_type == EdgeType::Imports
+                    && e.source.as_str() == "file:main.ts"
+                    && e.target.as_str() == "file:origin.ts"
+            })
+            .cloned();
+        let _ = std::fs::remove_dir_all(&dir);
+        let edge = edge.expect("main→origin 透传 Imports 边应存在");
+        assert_eq!(
+            edge.used_symbols, None,
+            "经 re-export 别名透传的依赖应记 use-all，避免按错名裁剪"
         );
     }
 

@@ -1203,6 +1203,7 @@ fn cmd_graph_decompose(root: Option<&Path>, budget: usize) -> CmdResult {
     let mut mechanical: HashSet<NodeId> = HashSet::new();
     let mut kind_counts: HashMap<&'static str, usize> = HashMap::new();
     let mut danger_files = 0usize;
+    let mut read_failures = 0usize;
     let file_nodes: Vec<NodeId> = graph
         .nodes_by_type(NodeType::File)
         .into_iter()
@@ -1228,13 +1229,23 @@ fn cmd_graph_decompose(root: Option<&Path>, budget: usize) -> CmdResult {
                 *kind_counts.entry(key).or_insert(0) += 1;
                 src.len().div_ceil(4)
             }
-            Err(e) => {
-                warnings.push(format!("读取 {rel} 失败，footprint 自身规模按 0：{e}"));
+            Err(_) => {
+                // 读失败：按非机械 Normal 保守计数（保持 by_file_kind 与文件总数对账），自身规模按 0。
+                read_failures += 1;
+                *kind_counts.entry("unreadable").or_insert(0) += 1;
                 0
             }
         };
         let fp = self_tokens + graph.dependency_signature_tokens(id);
         footprints.insert(id.clone(), fp);
+    }
+    // 大面积读失败几乎必是 --root 与 graph build 的根不一致——醒目告警，避免误读为「拆解无收益」。
+    if read_failures > 0 {
+        warnings.push(format!(
+            "{read_failures}/{} 个源文件读取失败（footprint/机械判定按 0/非机械保守处理）；\
+             若占比偏高，多半是 --root 与 graph build 时的源码根不一致，请用 --root 指定一致路径",
+            file_nodes.len()
+        ));
     }
 
     let plan = plan_decomposition(&graph, &seq, &footprints, &mechanical, budget);
@@ -1247,6 +1258,12 @@ fn cmd_graph_decompose(root: Option<&Path>, budget: usize) -> CmdResult {
     let batched_files = plan.batched_file_count();
     let reduction_rate = if modules_before > 0 {
         1.0 - (modules_after as f64 / modules_before as f64)
+    } else {
+        0.0
+    };
+    // §8「被合批文件占比」。
+    let batched_ratio = if modules_before > 0 {
+        batched_files as f64 / modules_before as f64
     } else {
         0.0
     };
@@ -1295,6 +1312,7 @@ fn cmd_graph_decompose(root: Option<&Path>, budget: usize) -> CmdResult {
             "modules_after": modules_after,
             "reduction_rate": reduction_rate,
             "batched_files": batched_files,
+            "batched_ratio": batched_ratio,
             "residual_mechanical_single": residual_mechanical_single,
         },
         "invariants": {

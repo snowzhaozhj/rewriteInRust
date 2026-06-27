@@ -21,7 +21,15 @@ use crate::types::graph::{
 
 use super::SourceGraph;
 
-/// 幂等补列：为旧库的 `edges` 表补 `used_symbols` 列（M3-DEC-01）。
+/// 只读探测 `edges` 表是否已有 `used_symbols` 列（不写库，供读路径用）。
+///
+/// `prepare` 引用该列：列不存在 → 准备失败 → false；存在 → true。`LIMIT 0` 不执行、零成本。
+fn edges_has_used_symbols(conn: &Connection) -> bool {
+    conn.prepare("SELECT used_symbols FROM edges LIMIT 0")
+        .is_ok()
+}
+
+/// 幂等补列：为旧库的 `edges` 表补 `used_symbols` 列（M3-DEC-01，仅写路径调用）。
 ///
 /// `CREATE TABLE IF NOT EXISTS` 对已存在的表是 no-op，不会补新列；SQLite 又无
 /// `ADD COLUMN IF NOT EXISTS`。故对旧库显式 `ALTER TABLE`，忽略列已存在
@@ -79,7 +87,9 @@ pub fn load_from_db(db_path: &Path) -> Result<SourceGraph> {
 
     let conn = Connection::open(db_path)?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-    ensure_edge_columns(&conn)?;
+    // 读路径**不**做 ALTER（会让只读 DB/只读 FS/被占用 DB 加载失败）——改为只读探测列是否存在，
+    // 缺列则 SELECT 用 `NULL as used_symbols` 占位（旧库照常加载，used_symbols 全 None）。
+    let has_used_symbols = edges_has_used_symbols(&conn);
     let mut graph = SourceGraph::new();
 
     // 加载节点
@@ -160,9 +170,13 @@ pub fn load_from_db(db_path: &Path) -> Result<SourceGraph> {
 
     // 加载边
     {
-        let mut stmt = conn.prepare(
-            "SELECT source, target, edge_type, provenance, weight, sub_kind, mapping_notes, used_symbols FROM edges",
-        )?;
+        // 缺 used_symbols 列时用 NULL 占位，保持列序号 7 不变（row.get(7) → None）。
+        let sql = if has_used_symbols {
+            "SELECT source, target, edge_type, provenance, weight, sub_kind, mapping_notes, used_symbols FROM edges"
+        } else {
+            "SELECT source, target, edge_type, provenance, weight, sub_kind, mapping_notes, NULL as used_symbols FROM edges"
+        };
+        let mut stmt = conn.prepare(sql)?;
 
         let rows = stmt.query_map([], |row| {
             Ok(EdgeRow {
