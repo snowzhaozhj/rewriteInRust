@@ -127,6 +127,11 @@ impl LanguageAdapter for PythonAdapter {
         let remainder = &specifier[dot_count..];
 
         let current_dir = Path::new(current_file).parent().unwrap_or(Path::new(""));
+        let depth = current_dir.components().count();
+        if dot_count - 1 > depth {
+            return None;
+        }
+
         let mut base = current_dir.to_path_buf();
         for _ in 0..(dot_count - 1) {
             base = base.parent().unwrap_or(Path::new("")).to_path_buf();
@@ -587,11 +592,17 @@ fn handle_if_type_checking(node: Node, ctx: &mut PyAnalysisContext, already_in: 
         }
     }
 
-    // 遍历 else 分支（alternative）中的非 TYPE_CHECKING 部分
+    // 遍历 else/elif 分支
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        if child.kind() == "else_clause" || child.kind() == "elif_clause" {
-            walk_py_ast(child, ctx, already_in);
+        if child.kind() == "else_clause" {
+            if let Some(body) = child.child_by_field_name("body") {
+                walk_py_ast(body, ctx, already_in);
+            }
+        } else if child.kind() == "elif_clause" {
+            if let Some(consequence) = child.child_by_field_name("consequence") {
+                walk_py_ast(consequence, ctx, already_in);
+            }
         }
     }
 }
