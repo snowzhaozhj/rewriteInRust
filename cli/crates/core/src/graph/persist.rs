@@ -21,33 +21,6 @@ use crate::types::graph::{
 
 use super::SourceGraph;
 
-/// 只读探测 `edges` 表是否已有 `used_symbols` 列（不写库，供读路径用）。
-///
-/// `prepare` 引用该列：列不存在 → 准备失败 → false；存在 → true。`LIMIT 0` 不执行、零成本。
-fn edges_has_used_symbols(conn: &Connection) -> bool {
-    conn.prepare("SELECT used_symbols FROM edges LIMIT 0")
-        .is_ok()
-}
-
-/// 幂等补列：为旧库的 `edges` 表补 `used_symbols` 列（M3-DEC-01，仅写路径调用）。
-///
-/// `CREATE TABLE IF NOT EXISTS` 对已存在的表是 no-op，不会补新列；SQLite 又无
-/// `ADD COLUMN IF NOT EXISTS`。故对旧库显式 `ALTER TABLE`，忽略列已存在
-/// （新库由 schema.sql 直接建出该列）/ 表不存在（空库，SELECT 自会处理）两类错误。
-fn ensure_edge_columns(conn: &Connection) -> Result<()> {
-    match conn.execute("ALTER TABLE edges ADD COLUMN used_symbols TEXT", []) {
-        Ok(_) => Ok(()),
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("duplicate column name") || msg.contains("no such table") {
-                Ok(())
-            } else {
-                Err(e.into())
-            }
-        }
-    }
-}
-
 /// 将图写入 SQLite 数据库。
 ///
 /// 使用 `schema.sql` 建表，先清空旧数据再插入，全程事务保护。
@@ -57,7 +30,6 @@ pub fn save_to_db(graph: &SourceGraph, db_path: &Path) -> Result<()> {
 
     // 建表（IF NOT EXISTS，幂等）
     conn.execute_batch(include_str!("../schema.sql"))?;
-    ensure_edge_columns(&conn)?;
 
     let tx = conn.transaction()?;
 
@@ -87,9 +59,6 @@ pub fn load_from_db(db_path: &Path) -> Result<SourceGraph> {
 
     let conn = Connection::open(db_path)?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-    // 读路径**不**做 ALTER（会让只读 DB/只读 FS/被占用 DB 加载失败）——改为只读探测列是否存在，
-    // 缺列则 SELECT 用 `NULL as used_symbols` 占位（旧库照常加载，used_symbols 全 None）。
-    let has_used_symbols = edges_has_used_symbols(&conn);
     let mut graph = SourceGraph::new();
 
     // 加载节点
@@ -170,13 +139,9 @@ pub fn load_from_db(db_path: &Path) -> Result<SourceGraph> {
 
     // 加载边
     {
-        // 缺 used_symbols 列时用 NULL 占位，保持列序号 7 不变（row.get(7) → None）。
-        let sql = if has_used_symbols {
-            "SELECT source, target, edge_type, provenance, weight, sub_kind, mapping_notes, used_symbols FROM edges"
-        } else {
-            "SELECT source, target, edge_type, provenance, weight, sub_kind, mapping_notes, NULL as used_symbols FROM edges"
-        };
-        let mut stmt = conn.prepare(sql)?;
+        let mut stmt = conn.prepare(
+            "SELECT source, target, edge_type, provenance, weight, sub_kind, mapping_notes, used_symbols FROM edges",
+        )?;
 
         let rows = stmt.query_map([], |row| {
             Ok(EdgeRow {
@@ -323,7 +288,6 @@ pub fn save_incremental(
     let mut conn = Connection::open(db_path)?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
     conn.execute_batch(include_str!("../schema.sql"))?;
-    ensure_edge_columns(&conn)?;
 
     let tx = conn.transaction()?;
 
@@ -675,21 +639,6 @@ mod tests {
             Some(vec!["bar".to_string(), "foo".to_string()]),
             "used_symbols 应在 SQLite 往返后保留"
         );
-    }
-
-    #[test]
-    fn load_legacy_db_without_used_symbols_column() {
-        // 模拟旧库：建当前 schema 后删掉 used_symbols 列，load 应靠 ensure_edge_columns 补列而不报错。
-        let db_path = temp_db_path("legacy_no_used_symbols");
-        {
-            let conn = Connection::open(&db_path).unwrap();
-            conn.execute_batch(include_str!("../schema.sql")).unwrap();
-            conn.execute("ALTER TABLE edges DROP COLUMN used_symbols", [])
-                .unwrap();
-        }
-        let loaded = load_from_db(&db_path).expect("旧库（缺 used_symbols 列）应能加载");
-        let _ = std::fs::remove_file(&db_path);
-        assert_eq!(loaded.edge_count(), 0);
     }
 
     #[test]
