@@ -1884,6 +1884,7 @@ fn cmd_state_populate_modules(
         let mut self_sizes: HashMap<NodeId, usize> = HashMap::new();
         let mut footprints: HashMap<NodeId, usize> = HashMap::new();
         let mut file_kinds: HashMap<String, FileKind> = HashMap::new();
+        let mut read_failures = 0usize;
         for id in &file_nodes {
             let rel = id.file_path().unwrap_or_default();
             let self_tokens = match std::fs::read_to_string(source_root.join(rel)) {
@@ -1893,6 +1894,7 @@ fn cmd_state_populate_modules(
                     src.len().div_ceil(4)
                 }
                 Err(_) => {
+                    read_failures += 1;
                     file_kinds.insert(id.to_string(), FileKind::Normal);
                     0
                 }
@@ -1902,6 +1904,13 @@ fn cmd_state_populate_modules(
                 id.clone(),
                 self_tokens + graph.dependency_signature_tokens(id),
             );
+        }
+        if read_failures > 0 {
+            warnings.push(format!(
+                "{read_failures}/{} 个源文件读取失败（自身源码规模按 0 保守处理）；\
+                 若占比偏高，多半是 --root 与 graph build 时的源码根不一致",
+                file_nodes.len()
+            ));
         }
 
         let plan = plan_decomposition(&graph, &sequence, &self_sizes, &footprints, budget);
