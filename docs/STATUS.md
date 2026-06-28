@@ -6,7 +6,7 @@
 
 - **Milestone**: M1 ✅ → M2 ✅ → **M3 多语言支持（Python 优先）**
 - **阶段**: Sprint A ✅ → Sprint B ✅ → Sprint C（PR-C1 ✅ / PR-C2 ✅ / PLG-05 ✅；**PR-C3 仅剩 PLG-06 端到端验证未做**）→ Sprint E：M3-DEC-01 拆解引擎 ✅ + DEC-GATE ✅ → **拆解算法重设计 MDR-011 ✅ 实现+验收（2026-06-28，待 PR）** → 下一步 **M3-DEC-02 轻量翻译路径**
-- **🔴 拆解算法重设计（MDR-011，2026-06-28）**：DEC-GATE"过门"的旧设计在真实项目上**近零优化**（toolz 31→29、funcy 16→16），根因=机械门+预算太小（2000 token）+零耦合不合并。用户裁决推翻"一文件一模块/机械装箱"，改 **目录优先两阶段凝聚合并**（阶段1 同目录归并含零耦合、阶段2 跨目录按调用簇耦合并），丢机械门，预算门改"自身源码 token"(默认 12000)。权威 = [MDR-011](./decisions/011-coupling-agglomerative-decomposition.md)（understand-anything/abcoder 调研 + codex 两轮设计审查通过）。**10 真实项目实测均值 ~76% 缩减（rich 85%/funcy 82.9%），不变量+确定性+内聚硬门全过**（见 MDR-011 §7.1）。原 [decomposition-redesign.md](./decomposition-redesign.md) §5/6/7/9/12 作废。
+- **🔴 拆解算法重设计（MDR-011，2026-06-28，PR [#45](https://github.com/snowzhaozhj/rewriteInRust/pull/45) 待审）**：DEC-GATE"过门"的旧设计在真实项目上**近零优化**（toolz 31→29、funcy 16→16），根因=机械门+预算太小（2000 token）+零耦合不合并。用户裁决推翻"一文件一模块/机械装箱"，改 **目录优先两阶段凝聚合并**（阶段1 同目录归并含零耦合、阶段2 跨目录按调用簇耦合并），丢机械门，预算门改"自身源码 token"(默认 12000)。权威 = [MDR-011](./decisions/011-coupling-agglomerative-decomposition.md)（understand-anything/abcoder 调研 + codex 两轮设计审查通过）。**10 真实项目实测均值 ~76% 缩减（rich 85%/funcy 82.9%），不变量+确定性+内聚硬门全过**（见 MDR-011 §7.1）。4 视角审查：主审/设计契约/专项收敛(唯一 important=U>800 warning 已修)，codex 两轮设计审查通过+实现异构审查。原 [decomposition-redesign.md](./decomposition-redesign.md) §5/6/7/9/12 作废。
 - **Sprint E（旧）**: 治"小而机械文件被过度处理"。~~方案权威 = decomposition-redesign.md~~（核心分组算法已被 MDR-011 取代）。
   - **M3-DEC-01 拆解引擎 4 波已合并**（PR #43）。
   - **M3-DEC-GATE ✅ 已过门（2026-06-28，分支 `fix/m3-dec01-python-classifier`，待 PR）**：自选 3 真实项目（attrs/toolz/funcy）跑 dry-run，四维度全过——验收记录见 [dec-gate-acceptance.md](./dec-gate-acceptance.md)。
