@@ -80,38 +80,41 @@
 
 #### Batch 组轻量路径（机械合批）
 
-机械合批组（`composite_kind=batch`）的成员全为可证明机械文件（纯类型/常量/barrel），无环、footprint 受控。**不走 SCC 契约重路径**，改走简化流程：一次翻完 + 一次编译 + 一次签批。状态机复用单文件模块同款简单流（`translating → done`），无 SCC substatus、无 `{group}-progress.json`、无成员级断点。
+机械合批组（`composite_kind=batch`）的成员全为可证明机械文件（纯类型/常量/barrel），无环、footprint 受控。**不走 SCC 契约重路径**，改走简化流程：一次翻完 + 一次编译 + 一次签批。状态机兼容现有转换矩阵（`translating→testing→reviewing→done` 三步快进），无 SCC substatus、无 `{group}-progress.json`、无成员级断点。
 
-> 设计权威：`docs/decomposition-redesign.md` §7（轻量路径规范 + 状态机接入）。
+> **前置条件（TODO(CLI)）**：batch 组进入 active dispatch 需要 `populate-modules` 支持将 `graph decompose` 产出的 `UnitKind::Batch` 单元写入 `migration-state.json`（设 `composite_kind=batch` + `member_files`），且拆解计划已冻结（`decomposition_frozen=true`）。当前 `populate-modules` 仅产出 `cycle` 类型的 composite——batch active 接入待后续 CLI PR 实现。本节定义的是 batch 就绪后的翻译流程规范。
+
+> 设计权威：`docs/decomposition-redesign.md` 第 90-100 行（轻量路径规范 + 状态机接入，该区段仍有效；§7 标题"机械连续装箱"已被 MDR-011 替代但轻量路径描述保留）+ [MDR-011](../../docs/decisions/011-coupling-agglomerative-decomposition.md)。
 
 **流程**：
 
-1. **Content-hash 跳过检测**（恢复优化）：读各成员源文件当前 content-hash（`rustmigrate graph fingerprint <file>`），对比 `intermediate/{batch}-source-hashes.json`（上次翻译时快照）。跳过需**全部满足**：
+6.1. **Content-hash 跳过检测**（恢复优化）：计算各成员源文件 SHA-256 hash（读文件内容直接计算），对比 `intermediate/{batch}-source-hashes.json`（上次翻译时快照）。跳过需**全部满足**：
    - 全部成员 Rust 产出文件已存在于 `rust_root/`
    - 源码 hash 全部未变（与快照一致）
    - `cargo check` 通过
    - 导出符号/签名校验通过（各成员 `.rs` 的 `pub` 导出覆盖源文件 exported symbols）
    
-   全部满足 → **跳过翻译，直接进签批（步骤 5）**。任一条件不满足 → 整批重新翻译（步骤 2）。
+   全部满足 → **跳过翻译，直接进本节签批（6.5）**。任一条件不满足 → 整批重新翻译（6.2）。
+   > `source-hashes.json` 不存在或 JSON 解析失败视为"条件不满足"，直接走 6.2 重译——首次翻译天然走此路径。不报错、不 pause。
    > 这是原子恢复的唯一优化入口——因为是"一次翻完"的原子操作，成本本就低，不值得做成员级断点；content-hash + 签名校验保证产出物完整且源码未变时不重复工作。
 
-2. **翻译（translator，一次翻完整批）**：调 translator（**前/后记 subagent_call**，step_index=6）。输入：
-   - 全部成员源文件（按逆拓扑序排列，`rustmigrate graph topo --members <batch-key> --reverse`）
-   - 外部依赖 interfaces（`rustmigrate graph interfaces --deps-of <batch-key>`，仅 batch 外部依赖）
+6.2. **翻译（translator，一次翻完整批）**：调 translator（**前/后记 subagent_call**，step_index=6）。输入：
+   - 全部成员源文件（按逆拓扑序排列；排序由编排器从 source-graph 读取 batch 成员间依赖关系确定，**TODO(CLI)**: 待 `graph topo-sort` 补 `--members`/`--reverse` 参数后可直接 CLI 取）
+   - 外部依赖 interfaces（`rustmigrate graph interfaces <batch-key> --deps-of <batch-key>`，仅 batch 外部依赖）
    - 适用的 porting rules（同单文件 Phase A）
    - 裁剪依赖清单（若有，同步骤 3「裁剪依赖 context 注入」）
 
    产出：每个成员对应的 `.rs` 文件写入 `rust_root/` + `intermediate/{batch}-source-hashes.json`（各成员源文件 content-hash 快照，供后续恢复比对）。translator 指令详见 [translator.md](../../agents/translator.md)「Batch 组翻译」。
 
-3. **L1 校验**：全部成员 `.rs` 文件存在于 `rust_root/`、非空、无 `todo!()` 残留。缺文件或含 `todo!()` 视为翻译不完整，按失败恢复重试。
+6.3. **L1 校验**：全部成员 `.rs` 文件存在于 `rust_root/`、非空、无 `todo!()` 残留。缺文件或含 `todo!()` 视为翻译不完整，按失败恢复重试。
 
-4. **整组编译**：`cargo check`。失败 → 重试 translator（≤2 次，`max_retries_per_step`）；仍失败 → `paused` + `requires_manual_review`（同单文件模块失败升级）。回滚清理：删 `rust_root/` 下本 batch 成员的 `.rs` 文件，保留 `intermediate/` 产物。
+6.4. **整组编译**：`cargo check`。失败 → 重试 translator（≤2 次，`max_retries_per_step`）；仍失败 → `state transition --to compile_fixing`，然后 `state transition --to paused --reason "batch 编译 2 轮失败"`（兼容状态矩阵 `translating→compile_fixing→paused`）。回滚清理：删 `rust_root/` 下本 batch 成员的 `.rs` 文件，保留 `intermediate/` 产物。
 
-5. **签批**（确定性检查，无需 verifier subagent）：
+6.5. **签批**（确定性检查，无需 verifier subagent）：
    - `TODO(port)` 计数 = 0（grep 全部成员 `.rs`）
-   - `cargo check` 通过（步骤 4 已保证）
-   - 导出符号一致性：各成员 `.rs` 的 `pub` 导出覆盖源文件的 exported symbols（`rustmigrate stats compare --batch <batch-key>` 或人工核对）
-   - 全部通过 → `state transition --module <M> --to done`
+   - `cargo check` 通过（6.4 已保证）
+   - 导出符号一致性：各成员 `.rs` 的 `pub` 导出覆盖源文件的 exported symbols（编排器逐文件核对 pub 符号集合）
+   - 全部通过 → `state transition --module <M> --to testing`，然后因机械文件无行为可测，立即 `state transition --module <M> --to reviewing`，最后 `state transition --module <M> --to done`（三步快进，兼容状态转换矩阵 `translating→testing→reviewing→done`）
 
 **跳过的步骤**：意图摘要(4) / 意图确认(5) / 多候选(7a) / 对抗审查(7b) / 结构门(8) / Phase B(9) / 测试生成(10)——机械文件无行为可测，编译即门禁。
 
