@@ -406,7 +406,16 @@ fn py_is_type_expr(node: Node, source: &str) -> bool {
 /// RHS 是否为不可变字面量（int/float/str/bool/None/可选取负数 + 全不可变元素的 tuple）。
 fn py_is_immutable_literal(node: Node) -> bool {
     match node.kind() {
-        "integer" | "float" | "string" | "concatenated_string" | "true" | "false" | "none" => true,
+        "integer" | "float" | "concatenated_string" | "true" | "false" | "none" => true,
+        // f-string 的节点 kind 仍是 `string`，但含 `interpolation` 子节点——内插表达式可含
+        // 副作用调用（`f"{compute()}"`），非不可变常量，须排除（否则有副作用的文件误判机械）。
+        "string" => {
+            let mut cursor = node.walk();
+            let has_interp = node
+                .children(&mut cursor)
+                .any(|c| c.kind() == "interpolation");
+            !has_interp
+        }
         "unary_operator" => node
             .child_by_field_name("argument")
             .is_some_and(py_is_immutable_literal),
@@ -578,7 +587,9 @@ fn classify_module_root(module: &str, danger: &mut BTreeSet<DangerCategory>) {
         "importlib" | "inspect" => {
             danger.insert(DangerCategory::DynamicReflection);
         }
-        "decimal" | "fractions" => {
+        // math 走 import 级识别——别名(`import math as m`)/from(`from math import sqrt`) 下
+        // 调用文本不含 `math.` 前缀，仅靠 collect_py_call_danger 会漏判（主审 finder#1）。
+        "math" | "decimal" | "fractions" | "cmath" | "statistics" => {
             danger.insert(DangerCategory::NumericPrecision);
         }
         _ => {}
@@ -1982,6 +1993,38 @@ class PublicClass:
             "多导入第二项 threading 应命中并发: {:?}",
             c.danger
         );
+    }
+
+    #[test]
+    fn classify_aliased_math_import_hits_numeric() {
+        // `import math as m` / `from math import sqrt`：调用文本无 `math.` 前缀，靠 import 级识别（finder#1）。
+        let c1 = classify("import math as m\ndef f(x):\n    return m.sqrt(x)\n");
+        assert!(
+            c1.danger.contains(&DangerCategory::NumericPrecision),
+            "import math as m 应命中数值: {:?}",
+            c1.danger
+        );
+        let c2 = classify("from math import sqrt\ndef f(x):\n    return sqrt(x)\n");
+        assert!(c2.danger.contains(&DangerCategory::NumericPrecision));
+    }
+
+    #[test]
+    fn classify_fstring_with_call_is_not_pure_constant() {
+        // f-string 含副作用内插（`f"{compute()}"`）→ 非不可变常量、非机械（finder#1）。
+        let c = classify("URL = f\"{compute()}/api\"\n");
+        assert_ne!(c.file_kind, FileKind::PureConstant);
+        assert!(
+            !c.is_mechanical(),
+            "含副作用内插的 f-string 不应判机械: {c:?}"
+        );
+    }
+
+    #[test]
+    fn classify_plain_string_constant_still_pure() {
+        // 普通字符串常量（无内插）仍为不可变 → PureConstant。
+        let c = classify("NAME = \"hello\"\nGREETING = 'hi'\n");
+        assert_eq!(c.file_kind, FileKind::PureConstant);
+        assert!(c.is_mechanical());
     }
 
     #[test]
