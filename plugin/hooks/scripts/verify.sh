@@ -44,5 +44,10 @@ else
 fi
 export CLIPPY_CONF_DIR
 
-cargo nextest run --lib
-cargo clippy -- -D warnings
+# 全量测试（含 tests/ 集成测试）：done 门的行为等价证据在 golden harness
+# （tests/golden_*.rs 集成测试），`--lib` 会整体漏跑，导致模块可在 golden 等价
+# 从未实跑的情况下被签批 done（M3-VAL-03 实测教训）。故跑全量，不限 --lib。
+cargo nextest run
+# --all-targets 连测试码一并 lint：golden harness 等测试文件的 dead_code/告警
+# 同样应纳入 -D warnings 门，避免仅 lib 干净而测试码潜伏问题。
+cargo clippy --all-targets -- -D warnings

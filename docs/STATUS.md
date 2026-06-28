@@ -5,9 +5,16 @@
 ## 当前位置
 
 - **Milestone**: M1 ✅ → M2 ✅ → **M3 多语言支持（Python 优先）**
-- **阶段**: Sprint A ✅ → Sprint B ✅ → Sprint C ✅（PR-C1/C2/PLG-05 ✅；**PLG-06 = populate-modules 接入 decompose + Python E2E 验证，进行中 2026-06-28**）→ Sprint E ✅（DEC-01 + DEC-GATE + DEC-02 全部合并）
+- **阶段**: Sprint A ✅ → Sprint B ✅ → Sprint C ✅ → Sprint E ✅ → **Sprint D 端到端验收 ✅（M3-VAL-01~08 全达标，2026-06-29，分支 `feat/m3-val-d-acceptance` 待 PR）**
+- **🟢 Sprint D 端到端验收 ✅**：2 真实 Python 项目各 ≥1 模块迁移到 done（按 §6 headless 规范）。
+  - **VAL-02 jmespath**：2 模块全 done（coupled_batch 7 文件 + visitor.py），**902 黄金集 901 等价 + 1 豁免（D-10）**，端到端 `search()` 全链；独立复核 cargo test/clippy --all-targets 全绿。
+  - **VAL-03 textdistance**：base.py 组（编辑距离算法）done，golden_edit_seq 70/70 等价；vector_based 草稿态忠实保留 unimplemented!()。
+  - **VAL-04 差异测试**：golden 套件落地（源引擎录制→Rust 逐条断言），两项目实证。
+  - **VAL-06 graduate**：jmespath 毕业成功 + textdistance 正确拒绝未完成。**VAL-08**：just ci 全绿。
+  - **暴露并修复 4 项真实工具缺口**：① stats compare 支持 Python 源（补完 deferred M3）② scaffolder golden harness present-null 区分 ③ translator 加 Edit 工具防 Phase B Write 截断 ④ verify.sh done 门补全量集成测试 + --all-targets clippy。详见 `docs/sprint-d-acceptance.md`。
+  - TODO 落账：ffi.rs 测试 deprecated 无 allow（pre-existing 潜伏）；analyzer source_root 推断加固（textdistance 漏修 src→textdistance）。
 - **🟢 M3-DEC-02 轻量翻译路径 ✅**（PR [#46](https://github.com/snowzhaozhj/rewriteInRust/pull/46)，2026-06-28 已合并）：run.md 机械合批组轻量路径实现。
-- **🟢 M3-DEC coupled_batch 分流修复（2026-06-28，分支 `feat/m3-coupled-batch`，待审查/PR）**：修复 populate 把非机械 batch 展开成独立模块、推翻 decompose 分组的接口断裂（与 MDR-011 §6 矛盾）。grilling + codex 双审收敛后实施：
+- **🟢 M3-DEC coupled_batch 分流修复 ✅**（PR [#48](https://github.com/snowzhaozhj/rewriteInRust/pull/48)，2026-06-28 已合并）：修复 populate 把非机械 batch 展开成独立模块、推翻 decompose 分组的接口断裂（与 MDR-011 §6 矛盾）。grilling + codex 双审收敛后实施：
   - **新增 `CompositeKind::CoupledBatch`**：`Batch` 收窄为全机械（轻量路径，编译即门禁）；`CoupledBatch`=含逻辑耦合簇（完整组路径：翻译→结构门→Phase B→行为测试→审查）。populate 保留 `classify_file` 按成员机械性分流（读失败保守落 CoupledBatch）。
   - Plugin 文档：run.md 新增「CoupledBatch 组完整路径」+ 形态/路由分支；translator.md 新增「CoupledBatch 组翻译」；workflow.md 修正「多文件=SCC」分派为按 `composite_kind` 分流（codex 标的真风险）；analyze.md 同步三类 composite 说明。
   - 测试：衔接测试改断言 coupled_batch + 组感知 `state deps`；新增 py-pkg-deps 混合簇保留为 1 个 coupled_batch 回归测试；orphan/active-progress 测试 pin `--no-decompose`（保留旧路径回归）。
@@ -15,13 +22,24 @@
   - 计划文档：`docs/plan-populate-batch-unify.md`（含 grilling 决策记录 + codex 8 条补充）。
   - 审查：4 视角全跑（主审/设计契约/专项 4 agent/异构交叉）。本次引入项全修：枚举头注释「两种→三种」、09-schema 补 `coupled_batch`、补全机械 Batch 回归测试（新增 `fixtures/ts-mechanical-batch` + `e2e_populate_all_mechanical_cluster_is_batch`）、MDR-011 §8 偏离回链、member_files/decomposition_frozen 注释更新、`all_mechanical` debug_assert、`--human` 覆盖回补、deps 断言强化。
   - TODO 落账（pre-existing，独立 PR）：① danger→RULE/定向测试注入（跨路径既有缺口）；② `graph topo-sort --members --reverse`；③ `read_failures` 缺阈值硬门禁——全/高比例读失败时静默产出退化 plan（PLG-06 既有，CoupledBatch 路由会放大影响）；④ `state transition` 不做非代表成员 key 组归一（与 `state deps` 不对称）；⑤ 默认 decompose 路径下「组缩小/整组消失」的孤儿清理无回归覆盖。
-- **🟡 PLG-06 populate-modules 接入 decompose（2026-06-28）**：`populate-modules` 消费 `plan_decomposition` 产出，写 `migration-state.json`（`composite_kind` + `member_files` + `decomposition_frozen`）。新增 `--budget`/`--no-decompose` 参数。（注：原「含 non-mechanical 成员展开为独立模块」行为已由上方 M3-DEC coupled_batch 修复推翻。）
+- **🟢 PLG-06 populate-modules 接入 decompose ✅**（PR [#47](https://github.com/snowzhaozhj/rewriteInRust/pull/47)，2026-06-28 已合并）：`populate-modules` 消费 `plan_decomposition` 产出，写 `migration-state.json`（`composite_kind` + `member_files` + `decomposition_frozen`）。新增 `--budget`/`--no-decompose` 参数。（注：原「含 non-mechanical 成员展开为独立模块」行为已由上方 M3-DEC coupled_batch 修复推翻。）
 - **MDR-011 ✅ 已合并（PR [#45](https://github.com/snowzhaozhj/rewriteInRust/pull/45)，2026-06-28）**：目录优先两阶段凝聚合并。10 真实项目均值 ~76% 缩减。
 - **Sprint E ✅ 全部完成**：DEC-01（PR #43）+ DEC-GATE（Python 分类器修复）+ DEC-02（PR #46）。
 - **测试基线**: 528 测试 / clippy -D / deny / fmt / shellcheck 全绿
 - **CI 覆盖率**: 待更新
-- **最新合并 PR**: [#46](https://github.com/snowzhaozhj/rewriteInRust/pull/46)（DEC-02 轻量翻译路径）；[#45](https://github.com/snowzhaozhj/rewriteInRust/pull/45)（MDR-011 凝聚合并）；[#43](https://github.com/snowzhaozhj/rewriteInRust/pull/43)（DEC-01 拆解引擎）
-- **开放 PR**: [#42](https://github.com/snowzhaozhj/rewriteInRust/pull/42)（M3-VAL-07 设计文档 §11.2 两文件契约同步 + verifier 死链清理，纯文档待合并）
+- **最新合并 PR**: [#48](https://github.com/snowzhaozhj/rewriteInRust/pull/48)（CoupledBatch 分流修复）；[#47](https://github.com/snowzhaozhj/rewriteInRust/pull/47)（PLG-06 populate 接入 decompose）；[#46](https://github.com/snowzhaozhj/rewriteInRust/pull/46)（DEC-02 轻量翻译路径）；[#45](https://github.com/snowzhaozhj/rewriteInRust/pull/45)（MDR-011 凝聚合并）；[#43](https://github.com/snowzhaozhj/rewriteInRust/pull/43)（DEC-01 拆解引擎）；[#42](https://github.com/snowzhaozhj/rewriteInRust/pull/42)（M3-VAL-07 §11.2 两文件契约同步）
+- **开放 PR**: 无
+
+### 下一步：Sprint D 端到端验收（M3-VAL-01~08）
+
+Sprint A/B/C/E 全部合并，工具链（CLI 拆解引擎 + Python adapter + Plugin Python 适配）就绪。Sprint D 在 2 个真实 Python 项目上验证端到端迁移。
+
+- **M3-VAL-01 真实项目选型（前置，需用户定）**：选 2 个 <3K 行开源 Python 项目（纯计算/数据处理类，避免 I/O 密集/框架绑定），要求有 pytest 覆盖。**这是 DEC-GATE 同款硬前置——验收必须跑真实目标，不能用工具自测冒充。**
+- M3-VAL-02/03：项目 A/B 端到端迁移，各 ≥1 模块 done（cargo check+test+clippy 过）
+- M3-VAL-04：差异测试框架（pytest 行为录制 JSON fixture → Rust 对比）
+- M3-VAL-05/06：性能回归（TS ±10%）+ graduate Python 路径验证
+- M3-VAL-07 ✅ 已由 PR #42 完成（设计文档同步）
+- M3-VAL-08：全量回归 + 覆盖率 ≥70%
 
 ### M2 遗留（Sprint A 已全部关闭）
 
