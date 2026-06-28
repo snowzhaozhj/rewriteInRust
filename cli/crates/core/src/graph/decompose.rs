@@ -219,8 +219,12 @@ pub fn plan_decomposition(
         }
 
         if !is_mech {
-            // 非机械单文件：封口合批，单独成 Single。
-            flush(&mut open, &mut open_fp, &mut units);
+            // 非机械单文件：单独成 Single，但**不**封口当前合批——允许"跨非机械跳跃"合并
+            // 真正独立（无依赖路径相隔）的机械文件。凸性约束保证：若该非机械组横亘在批内
+            // 成员的依赖路径上，后续机械组的 is_convex 检查会自动拒绝（不会跨真实依赖合批，
+            // 不成环）。仅 cycle / over-budget 这类强拓扑边界才封口（见上）。
+            // 触发依据：DEC-GATE 真实项目数据——机械 barrel 在拓扑序里被逻辑文件隔开、
+            // 严格"连续装箱"永不合批、残留机械单文件 >0（MDR-010）。
             units.push(DecompUnit {
                 members: vec![groups[gi].members[0].to_string()],
                 kind: UnitKind::Single,
@@ -316,6 +320,9 @@ pub struct CohesionMq {
     pub ratio: f64,
     /// 参与统计的合批文件数。
     pub batched_files: usize,
+    /// 与合批文件相关的耦合边总数（内部+外部）。为 0 = 批内文件零耦合（空/孤立文件），
+    /// 此时 ratio 测试退化、无低内聚风险 → 内聚门真空满足（不强求 ≥1.5×）。
+    pub coupling_edges: u64,
 }
 
 /// 拆解正确性不变量报告（§8 硬门 100%）。
@@ -356,7 +363,8 @@ impl XorShift64 {
 }
 
 /// 计算给定「文件→batch 编号」分配下的全局加权 MQ。
-fn weighted_mq(assign: &HashMap<String, usize>, graph: &SourceGraph) -> f64 {
+/// 返回 (加权 MQ, 与合批文件相关的耦合边总数)。耦合边数用于内聚门退化判定。
+fn weighted_mq(assign: &HashMap<String, usize>, graph: &SourceGraph) -> (f64, u64) {
     use std::collections::BTreeMap;
     let mut internal: BTreeMap<usize, u64> = BTreeMap::new();
     let mut external: BTreeMap<usize, u64> = BTreeMap::new();
@@ -390,11 +398,12 @@ fn weighted_mq(assign: &HashMap<String, usize>, graph: &SourceGraph) -> f64 {
         total_internal += i;
         total_edges += i + e;
     }
-    if total_edges > 0.0 {
+    let mq = if total_edges > 0.0 {
         total_internal / total_edges
     } else {
         0.0
-    }
+    };
+    (mq, total_edges as u64)
 }
 
 /// 内聚 MQ：实际 vs 随机基线（§8 硬门，Codex N-2 固定参数）。
@@ -426,10 +435,11 @@ pub fn cohesion_mq(
             baseline: 0.0,
             ratio: 1.0,
             batched_files: 0,
+            coupling_edges: 0,
         };
     }
 
-    let actual = weighted_mq(&assign, graph);
+    let (actual, coupling_edges) = weighted_mq(&assign, graph);
 
     // 全部合批文件（确定序），随机重排进同样大小的桶。
     let mut files: Vec<String> = assign.keys().cloned().collect();
@@ -453,7 +463,7 @@ pub fn cohesion_mq(
                 idx += 1;
             }
         }
-        acc += weighted_mq(&shuffled, graph);
+        acc += weighted_mq(&shuffled, graph).0;
     }
     let baseline = acc / samples as f64;
     // baseline=0 且 actual>0 = 随机基线退化为零内聚、实际有内聚 → 视作远超阈值；用有限哨兵
@@ -471,6 +481,7 @@ pub fn cohesion_mq(
         baseline,
         ratio,
         batched_files,
+        coupling_edges,
     }
 }
 
@@ -708,6 +719,51 @@ mod tests {
     }
 
     #[test]
+    fn independent_mechanicals_batch_across_nonmech_gap() {
+        // MDR-010：a、c 机械且互相独立，b 非机械横在拓扑序中间（但不在 a、c 依赖路径上）。
+        // 放宽后"跨非机械跳跃"应合批 {a,c}；b 仍单独 Single。凸性安全（无 a→…→c 依赖）。
+        let g = graph_from(&["a", "b", "c"], &[]); // 三者全独立、无边
+        let seq = migration_sequence(&g);
+        let plan = plan_decomposition(
+            &g,
+            &seq,
+            &fp(&[("a", 10), ("b", 10), ("c", 10)]),
+            &mech(&["a", "c"]), // b 非机械
+            100,
+        );
+        let batch = unit_for(&plan, "file:a");
+        assert_eq!(
+            batch.kind,
+            UnitKind::Batch,
+            "独立机械应跨非机械合批: {:?}",
+            plan.units
+        );
+        assert_eq!(batch.members, vec!["file:a", "file:c"]);
+        let b = unit_for(&plan, "file:b");
+        assert_eq!(b.kind, UnitKind::Single);
+    }
+
+    #[test]
+    fn dependency_separated_mechanicals_stay_unbatched() {
+        // 对照：a→b→c，b 非机械且在 a、c 依赖路径上 → 凸性必须阻断 {a,c} 合批（不退化为 MDR-010 误并）。
+        let g = graph_from(&["a", "b", "c"], &[("a", "b"), ("b", "c")]);
+        let seq = migration_sequence(&g);
+        let plan = plan_decomposition(
+            &g,
+            &seq,
+            &fp(&[("a", 10), ("b", 10), ("c", 10)]),
+            &mech(&["a", "c"]),
+            100,
+        );
+        assert!(
+            plan.units.iter().all(|u| u.kind == UnitKind::Single),
+            "依赖隔开的机械文件不得合批: {:?}",
+            plan.units
+        );
+        assert_eq!(plan.units.len(), 3);
+    }
+
+    #[test]
     fn cohesion_mq_single_cohesive_batch() {
         // a→b→c 合成单 batch，内部边 a→b、b→c，无外部 → actual MQ = 1.0。
         let g = graph_from(&["a", "b", "c"], &[("a", "b"), ("b", "c")]);
@@ -736,6 +792,25 @@ mod tests {
         let mq = cohesion_mq(&plan, &g, 1, 10);
         assert_eq!(mq.batched_files, 0);
         assert_eq!(mq.ratio, 1.0);
+    }
+
+    #[test]
+    fn cohesion_mq_zero_coupling_batch_is_neutral() {
+        // 两个无任何边的孤立机械文件合批 → coupling_edges=0（内聚门据此真空满足，不强求 1.5×）。
+        let g = graph_from(&["a", "b"], &[]); // 无边
+        let seq = migration_sequence(&g);
+        let plan = plan_decomposition(
+            &g,
+            &seq,
+            &fp(&[("a", 0), ("b", 0)]),
+            &mech(&["a", "b"]),
+            100,
+        );
+        let batch = unit_for(&plan, "file:a");
+        assert_eq!(batch.kind, UnitKind::Batch);
+        let mq = cohesion_mq(&plan, &g, 1, 10);
+        assert_eq!(mq.batched_files, 2);
+        assert_eq!(mq.coupling_edges, 0, "孤立文件批耦合边应为 0: {mq:?}");
     }
 
     #[test]

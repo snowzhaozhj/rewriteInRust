@@ -4,7 +4,7 @@
 //! - PY-01: 结构体 + language/can_handle/detect_tier
 //! - PY-02~06: analyze_file / resolve_import
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use tree_sitter::{Node, Parser};
@@ -15,7 +15,8 @@ use crate::types::graph::{Dependency, EdgeType, NodeType, SourceNode};
 use crate::types::state::ModuleTier;
 
 use super::{
-    CallInfo, FileAnalysis, ImportInfo, ImportKind, ImportedSymbol, LanguageAdapter, SymbolKind,
+    CallInfo, DangerCategory, FileAnalysis, FileClassification, FileKind, ImportInfo, ImportKind,
+    ImportedSymbol, LanguageAdapter, SymbolKind,
 };
 
 /// Python 语言适配器（基于 tree-sitter-python）。
@@ -181,6 +182,379 @@ impl LanguageAdapter for PythonAdapter {
         } else {
             ModuleTier::Trivial
         }
+    }
+
+    fn classify_file(&mut self, source: &str) -> FileClassification {
+        // 解析失败/含语法错误 → 保守 Normal（绝不会被判机械合批）。
+        let tree = match self.parser.parse(source, None) {
+            Some(t) => t,
+            None => return FileClassification::conservative(),
+        };
+        let root = tree.root_node();
+        if root.has_error() {
+            return FileClassification::conservative();
+        }
+        classify_py(root, source)
+    }
+}
+
+// === 机械/危险分类（M3-DEC-01；与 TS classify_ts 对齐）===
+
+/// 顶层文件类型判定的累积标志。
+#[derive(Default)]
+struct PyKindFlags {
+    /// 含函数/类(带方法)/控制流/可变全局/副作用表达式 → Normal。
+    saw_logic: bool,
+    /// 含纯常量字面量绑定（int/str/float/bool/None/tuple-of-immutables）。
+    saw_const: bool,
+    /// 含纯类型声明（类型别名/TypeVar/NewType/纯数据类即只有注解的 class）。
+    saw_type: bool,
+}
+
+/// Python 文件机械/危险分类：file_kind（顶层结构）+ danger（全树扫描，6 类）。
+///
+/// 与 TS `classify_ts` 同构，但按 Python 惯用法判定：
+/// - **Barrel**：仅 `import`/`from import`/`__all__`/docstring/空 → 纯转发壳（`__init__.py` 主力）。
+/// - **PureType**：仅类型别名 / `TypeVar`·`NewType` / 仅注解无方法的 class（Protocol/TypedDict/Enum 常量）。
+/// - **PureConstant**：仅不可变字面量绑定（`MAX = 100`）。
+/// - **Normal**：其余（函数 / 带方法的 class / 控制流 / 可变全局 / 副作用）。
+///
+/// 危险信号独立于 file_kind 全树扫描；控制流本身**不**进 danger（"10 行带 if 不进重型"锚点）。
+fn classify_py(root: Node, source: &str) -> FileClassification {
+    let mut danger: BTreeSet<DangerCategory> = BTreeSet::new();
+    collect_py_danger(root, source, &mut danger);
+
+    let mut flags = PyKindFlags::default();
+    let mut cursor = root.walk();
+    for child in root.children(&mut cursor) {
+        py_update_kind_flags(child, source, &mut flags, &mut danger);
+    }
+
+    let file_kind = if flags.saw_logic {
+        FileKind::Normal
+    } else if flags.saw_const {
+        FileKind::PureConstant
+    } else if flags.saw_type {
+        FileKind::PureType
+    } else {
+        // 仅 import / __all__ / docstring / 空：无自身定义的转发壳 → Barrel（机械）。
+        FileKind::Barrel
+    };
+
+    FileClassification {
+        file_kind,
+        danger: danger.into_iter().collect(),
+    }
+}
+
+/// 按单个顶层节点更新 file_kind 标志（顶层可变全局/`global` 顺带记 SharedMutableGlobal 危险）。
+fn py_update_kind_flags(
+    node: Node,
+    source: &str,
+    flags: &mut PyKindFlags,
+    danger: &mut BTreeSet<DangerCategory>,
+) {
+    match node.kind() {
+        // 转发/元数据/注释/空：不影响 file_kind（保持 Barrel 资格）。
+        "import_statement" | "import_from_statement" | "comment" => {}
+        "function_definition" => flags.saw_logic = true,
+        "class_definition" => {
+            if py_class_has_method(node) {
+                flags.saw_logic = true;
+            } else {
+                // 仅注解/常量/pass/docstring 的 class（Enum/TypedDict/Protocol/纯 dataclass）→ 类型。
+                flags.saw_type = true;
+            }
+        }
+        "decorated_definition" => {
+            // 跟随内层定义判定；装饰器自身的副作用由 danger 扫描兜底。
+            if let Some(inner) = py_decorated_inner(node) {
+                py_update_kind_flags(inner, source, flags, danger);
+            } else {
+                flags.saw_logic = true;
+            }
+        }
+        // 控制流 → Normal（非机械），但 `if TYPE_CHECKING:` 是纯类型导入守卫，保持机械资格。
+        "if_statement" => {
+            if !py_is_type_checking_guard(node, source) {
+                flags.saw_logic = true;
+            }
+        }
+        "global_statement" | "nonlocal_statement" => {
+            flags.saw_logic = true;
+            danger.insert(DangerCategory::SharedMutableGlobal);
+        }
+        "for_statement" | "while_statement" | "with_statement" | "try_statement"
+        | "match_statement" => {
+            flags.saw_logic = true;
+        }
+        "expression_statement" => {
+            // 模块 docstring（裸 string）= 中性；其余裸表达式（如 `print(...)`）= 副作用 → Normal。
+            match node.child(0).map(|n| n.kind()) {
+                Some("string") | None => {}
+                Some("assignment") => {
+                    py_classify_assignment(node.child(0).unwrap(), source, flags, danger)
+                }
+                _ => flags.saw_logic = true,
+            }
+        }
+        _ => flags.saw_logic = true,
+    }
+}
+
+/// 顶层赋值的 file_kind 归类（区分类型别名 / 不可变常量 / 可变全局）。
+fn py_classify_assignment(
+    assign: Node,
+    source: &str,
+    flags: &mut PyKindFlags,
+    danger: &mut BTreeSet<DangerCategory>,
+) {
+    // `__all__`/dunder 元数据赋值不影响 file_kind（保持 Barrel 资格）。
+    if let Some(left) = assign.child_by_field_name("left") {
+        let name = py_node_text(left, source);
+        if name == "__all__" || (name.starts_with("__") && name.ends_with("__")) {
+            return;
+        }
+    }
+    // 带 `: TypeAlias`/类型注解但无值的纯声明 → 类型。
+    let has_type_annot = assign.child_by_field_name("type").is_some();
+    match assign.child_by_field_name("right") {
+        None => {
+            // `x: int`（仅注解，无值）= 类型声明。
+            flags.saw_type = true;
+        }
+        Some(right) => {
+            if py_is_type_expr(right, source) {
+                flags.saw_type = true;
+            } else if py_is_immutable_literal(right) {
+                flags.saw_const = true;
+            } else {
+                // 可变字面量（list/dict/set）或 call/其它 → 共享可变全局 / 副作用 → Normal。
+                flags.saw_logic = true;
+                let _ = has_type_annot;
+                if py_is_mutable_container_literal(right) {
+                    danger.insert(DangerCategory::SharedMutableGlobal);
+                }
+            }
+        }
+    }
+}
+
+/// class 体内是否含方法定义（含被装饰方法）。
+fn py_class_has_method(class_node: Node) -> bool {
+    let Some(body) = class_node.child_by_field_name("body") else {
+        return false;
+    };
+    let mut cursor = body.walk();
+    let has_method = body.children(&mut cursor).any(|c| match c.kind() {
+        "function_definition" => true,
+        "decorated_definition" => {
+            py_decorated_inner(c).is_some_and(|inner| inner.kind() == "function_definition")
+        }
+        _ => false,
+    });
+    has_method
+}
+
+/// decorated_definition 的被装饰定义（function/class）。
+fn py_decorated_inner(node: Node) -> Option<Node> {
+    let mut cursor = node.walk();
+    let inner = node
+        .children(&mut cursor)
+        .find(|c| matches!(c.kind(), "function_definition" | "class_definition"));
+    inner
+}
+
+/// `if TYPE_CHECKING:` / `if typing.TYPE_CHECKING:` 守卫（条件文本以 `TYPE_CHECKING` 结尾）。
+fn py_is_type_checking_guard(if_node: Node, source: &str) -> bool {
+    if_node
+        .child_by_field_name("condition")
+        .map(|c| py_node_text(c, source))
+        .is_some_and(|t| t == "TYPE_CHECKING" || t.ends_with(".TYPE_CHECKING"))
+}
+
+/// RHS 是否为类型表达式（泛型下标 `list[int]` / `TypeVar`·`NewType`·`TypeAlias` 构造）。
+fn py_is_type_expr(node: Node, source: &str) -> bool {
+    match node.kind() {
+        "subscript" => true, // list[int] / Dict[str, int] / Optional[X]
+        "call" => node
+            .child_by_field_name("function")
+            .map(|f| py_node_text(f, source))
+            .is_some_and(|name| {
+                matches!(name, "TypeVar" | "NewType" | "ParamSpec" | "TypeVarTuple")
+            }),
+        _ => false,
+    }
+}
+
+/// RHS 是否为不可变字面量（int/float/str/bool/None/可选取负数 + 全不可变元素的 tuple）。
+fn py_is_immutable_literal(node: Node) -> bool {
+    match node.kind() {
+        "integer" | "float" | "string" | "concatenated_string" | "true" | "false" | "none" => true,
+        "unary_operator" => node
+            .child_by_field_name("argument")
+            .is_some_and(py_is_immutable_literal),
+        "tuple" => {
+            let mut cursor = node.walk();
+            let all_immut = node
+                .named_children(&mut cursor)
+                .all(py_is_immutable_literal);
+            all_immut
+        }
+        _ => false,
+    }
+}
+
+/// RHS 是否为可变容器字面量（list/dict/set 及其推导式）——模块级即共享可变全局。
+fn py_is_mutable_container_literal(node: Node) -> bool {
+    matches!(
+        node.kind(),
+        "list"
+            | "dictionary"
+            | "set"
+            | "list_comprehension"
+            | "dictionary_comprehension"
+            | "set_comprehension"
+    )
+}
+
+/// 全树扫描 6 类危险信号（控制流不在内——见锚点）。
+fn collect_py_danger(root: Node, source: &str, danger: &mut BTreeSet<DangerCategory>) {
+    let mut stack = vec![root];
+    while let Some(cur) = stack.pop() {
+        match cur.kind() {
+            // 并发：async/await。
+            "async" | "await" => {
+                danger.insert(DangerCategory::Concurrency);
+            }
+            // 动态属性协议方法。
+            "function_definition" => {
+                if let Some(name_node) = cur.child_by_field_name("name") {
+                    if matches!(
+                        py_node_text(name_node, source),
+                        "__getattr__" | "__setattr__" | "__delattr__" | "__getattribute__"
+                    ) {
+                        danger.insert(DangerCategory::DynamicReflection);
+                    }
+                }
+            }
+            // metaclass= 关键字参数。
+            "keyword_argument" => {
+                if cur
+                    .child_by_field_name("name")
+                    .is_some_and(|n| py_node_text(n, source) == "metaclass")
+                {
+                    danger.insert(DangerCategory::DynamicReflection);
+                }
+            }
+            "call" => collect_py_call_danger(cur, source, danger),
+            // import 模块名分类（io / 并发 / 动态 / FFI / 数值）。
+            "import_statement" | "import_from_statement" => {
+                collect_py_import_danger(cur, source, danger);
+            }
+            // math.* 属性访问（即便未直接 call，如 math.pi）→ 数值精度。
+            "attribute" => {
+                if let Some(obj) = cur.child_by_field_name("object") {
+                    if py_node_text(obj, source) == "math" {
+                        danger.insert(DangerCategory::NumericPrecision);
+                    }
+                }
+            }
+            _ => {}
+        }
+        let mut cursor = cur.walk();
+        for child in cur.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+}
+
+/// call 节点的危险信号（按被调名归类）。
+fn collect_py_call_danger(call: Node, source: &str, danger: &mut BTreeSet<DangerCategory>) {
+    let Some(func) = call.child_by_field_name("function") else {
+        return;
+    };
+    let name = py_node_text(func, source);
+    // 动态/反射执行。
+    if matches!(
+        name,
+        "eval"
+            | "exec"
+            | "compile"
+            | "__import__"
+            | "getattr"
+            | "setattr"
+            | "delattr"
+            | "globals"
+            | "locals"
+            | "vars"
+    ) {
+        danger.insert(DangerCategory::DynamicReflection);
+    }
+    // IO 副作用。
+    if name == "open" || name == "input" || name.starts_with("subprocess.") {
+        danger.insert(DangerCategory::IoSideEffect);
+    }
+    // 数值精度（math./浮点构造）。
+    if name.starts_with("math.") || matches!(name, "float" | "complex" | "Decimal" | "Fraction") {
+        danger.insert(DangerCategory::NumericPrecision);
+    }
+    // 并发原语。
+    if name.starts_with("threading.")
+        || name.starts_with("asyncio.")
+        || name.starts_with("multiprocessing.")
+        || name.starts_with("concurrent.")
+        || matches!(name, "Thread" | "Lock" | "RLock" | "Pool")
+    {
+        danger.insert(DangerCategory::Concurrency);
+    }
+    // FFI。
+    if name.starts_with("ctypes.") || name.starts_with("cffi.") || name == "CDLL" {
+        danger.insert(DangerCategory::Ffi);
+    }
+}
+
+/// import 模块名 → 危险类别（覆盖 `import x` 与 `from x import y` 两种）。
+fn collect_py_import_danger(node: Node, source: &str, danger: &mut BTreeSet<DangerCategory>) {
+    // 取模块根名（第一个点分段）。
+    let module = match node.kind() {
+        "import_from_statement" => node
+            .child_by_field_name("module_name")
+            .map(|m| py_node_text(m, source).to_string()),
+        _ => {
+            // `import a.b.c` / `import x as y`：首个 dotted_name/aliased_import。
+            let mut cursor = node.walk();
+            let found = node
+                .named_children(&mut cursor)
+                .find(|c| matches!(c.kind(), "dotted_name" | "aliased_import" | "import_prefix"))
+                .map(|c| py_node_text(c, source).to_string());
+            found
+        }
+    };
+    let Some(module) = module else { return };
+    let root_mod = module
+        .trim_start_matches('.')
+        .split('.')
+        .next()
+        .unwrap_or("");
+    match root_mod {
+        "os" | "sys" | "subprocess" | "socket" | "shutil" | "io" | "pathlib" | "requests"
+        | "urllib" | "http" | "aiohttp" | "tempfile" | "fileinput" => {
+            danger.insert(DangerCategory::IoSideEffect);
+        }
+        "asyncio" | "threading" | "multiprocessing" | "concurrent" | "queue" | "_thread" => {
+            danger.insert(DangerCategory::Concurrency);
+        }
+        "ctypes" | "cffi" => {
+            danger.insert(DangerCategory::Ffi);
+        }
+        "importlib" | "inspect" => {
+            danger.insert(DangerCategory::DynamicReflection);
+        }
+        "decimal" | "fractions" => {
+            danger.insert(DangerCategory::NumericPrecision);
+        }
+        _ => {}
     }
 }
 
@@ -1464,5 +1838,161 @@ class PublicClass:
             adapter.resolve_import("numpy.array", "test.py", &exists),
             None
         );
+    }
+
+    // === classify_file（M3-DEC-01 机械/危险分类）===
+
+    fn classify(src: &str) -> FileClassification {
+        PythonAdapter::new().unwrap().classify_file(src)
+    }
+
+    #[test]
+    fn classify_barrel_init_is_mechanical() {
+        // 典型 __init__.py：纯 re-export + __all__ → Barrel（机械）。
+        let c = classify(
+            "from .base import Base\nfrom .impl import Impl\n__all__ = ['Base', 'Impl']\n",
+        );
+        assert_eq!(c.file_kind, FileKind::Barrel);
+        assert!(c.danger.is_empty());
+        assert!(c.is_mechanical());
+    }
+
+    #[test]
+    fn classify_pure_type_alias_is_mechanical() {
+        let c = classify("from typing import TypeVar\nVector = list[float]\nT = TypeVar('T')\n");
+        assert_eq!(c.file_kind, FileKind::PureType);
+        assert!(c.is_mechanical());
+    }
+
+    #[test]
+    fn classify_annotation_only_class_is_pure_type() {
+        // 仅注解无方法的 class（TypedDict/Protocol/纯 dataclass）→ PureType。
+        let c = classify("class Point:\n    x: int\n    y: int\n");
+        assert_eq!(c.file_kind, FileKind::PureType);
+        assert!(c.is_mechanical());
+    }
+
+    #[test]
+    fn classify_pure_constant_is_mechanical() {
+        let c = classify("MAX = 100\nNAME = 'x'\nPI = 3.14\nFLAGS = (1, 2, 3)\n");
+        assert_eq!(c.file_kind, FileKind::PureConstant);
+        assert!(c.is_mechanical());
+    }
+
+    #[test]
+    fn classify_function_def_is_normal() {
+        let c = classify("def inc(x):\n    return x + 1\n");
+        assert_eq!(c.file_kind, FileKind::Normal);
+        assert!(!c.is_mechanical());
+    }
+
+    #[test]
+    fn classify_class_with_method_is_normal() {
+        let c = classify("class Svc:\n    def run(self):\n        return 1\n");
+        assert_eq!(c.file_kind, FileKind::Normal);
+        assert!(!c.is_mechanical());
+    }
+
+    #[test]
+    fn classify_plain_if_is_not_danger() {
+        // 锚点（decomposition-redesign §8）：10 行带 if 不因 if 进重型——
+        // if 使文件 Normal（非机械），但**不**进 danger。
+        let c = classify("def pick(x):\n    if x > 0:\n        return x\n    return 0\n");
+        assert_eq!(c.file_kind, FileKind::Normal);
+        assert!(
+            c.danger.is_empty(),
+            "纯 if 控制流不应命中危险信号: {:?}",
+            c.danger
+        );
+        assert!(!c.is_mechanical());
+    }
+
+    #[test]
+    fn classify_math_hits_numeric_precision() {
+        // 锚点：带 math/浮点的小函数命中数值精度危险信号。
+        let c = classify("import math\ndef dist(a, b):\n    return math.sqrt(a * a + b * b)\n");
+        assert_eq!(c.file_kind, FileKind::Normal);
+        assert!(c.danger.contains(&DangerCategory::NumericPrecision));
+        assert!(!c.is_mechanical());
+    }
+
+    #[test]
+    fn classify_python_clamp_min_max_is_not_numeric_danger() {
+        // 对照锚点：Python clamp 用内建 min/max（精确，无精度风险）→ 不命中数值危险。
+        let c = classify("def clamp(v, lo, hi):\n    return min(max(v, lo), hi)\n");
+        assert_eq!(c.file_kind, FileKind::Normal);
+        assert!(
+            !c.danger.contains(&DangerCategory::NumericPrecision),
+            "min/max clamp 不应命中数值精度: {:?}",
+            c.danger
+        );
+    }
+
+    #[test]
+    fn classify_async_hits_concurrency() {
+        let c = classify("async def load():\n    await go()\n");
+        assert!(c.danger.contains(&DangerCategory::Concurrency));
+        assert!(!c.is_mechanical());
+    }
+
+    #[test]
+    fn classify_module_mutable_dict_is_shared_global_normal() {
+        // 模块级可变容器 = 共享可变全局 → Normal（非机械）。
+        let c = classify("_cache = {}\n");
+        assert_eq!(c.file_kind, FileKind::Normal);
+        assert!(c.danger.contains(&DangerCategory::SharedMutableGlobal));
+        assert!(!c.is_mechanical());
+    }
+
+    #[test]
+    fn classify_eval_hits_dynamic_reflection() {
+        let c = classify("def run(s):\n    return eval(s)\n");
+        assert!(c.danger.contains(&DangerCategory::DynamicReflection));
+    }
+
+    #[test]
+    fn classify_ctypes_import_hits_ffi() {
+        let c = classify("import ctypes\nlib = ctypes.CDLL('libm.so')\n");
+        assert!(c.danger.contains(&DangerCategory::Ffi));
+    }
+
+    #[test]
+    fn classify_io_import_hits_io_side_effect() {
+        let c = classify("import os\ndef p():\n    return os.getcwd()\n");
+        assert!(c.danger.contains(&DangerCategory::IoSideEffect));
+    }
+
+    #[test]
+    fn classify_type_checking_guard_keeps_barrel() {
+        // `if TYPE_CHECKING:` 是纯类型导入守卫，不使文件变 Normal（保持机械资格）。
+        let c = classify(
+            "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    from .x import Y\n__all__ = []\n",
+        );
+        assert!(
+            matches!(c.file_kind, FileKind::Barrel | FileKind::PureType),
+            "TYPE_CHECKING 守卫不应令文件变 Normal: {:?}",
+            c.file_kind
+        );
+        assert!(c.is_mechanical());
+    }
+
+    #[test]
+    fn classify_metaclass_hits_dynamic_reflection() {
+        let c = classify("class Meta(type):\n    pass\nclass A(metaclass=Meta):\n    x: int\n");
+        assert!(c.danger.contains(&DangerCategory::DynamicReflection));
+    }
+
+    #[test]
+    fn classify_dunder_all_does_not_make_normal() {
+        // __all__（list 字面量）是导出元数据，不应判为可变全局/Normal。
+        let c = classify("from .a import A\n__all__ = ['A']\n");
+        assert_eq!(c.file_kind, FileKind::Barrel);
+        assert!(c.is_mechanical());
+    }
+
+    #[test]
+    fn classify_unparseable_is_conservative() {
+        let c = classify("def broken( :::\n");
+        assert_eq!(c, FileClassification::conservative());
     }
 }

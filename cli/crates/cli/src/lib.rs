@@ -1189,10 +1189,18 @@ fn cmd_graph_decompose(root: Option<&Path>, budget: usize) -> CmdResult {
     let source_root = root
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from(&cfg.project.source_root));
-    let lang = cfg
-        .project
-        .source_language
-        .unwrap_or(SourceLang::TypeScript);
+    // 源语言：优先配置；未配置则按 --root 探测（对齐 graph build，避免静默用 TS 适配器
+    // 分类 Python 源码——会把 .py 当 TS 解析、产出垃圾 file_kind/danger）；探测失败显式告警回退 TS。
+    let lang = match cfg.project.source_language {
+        Some(l) => l,
+        None => match rustmigrate_core::profile::detect_language(&source_root) {
+            Ok(l) => l,
+            Err(e) => {
+                warnings.push(format!("源语言探测失败，回退 TypeScript：{e}"));
+                SourceLang::TypeScript
+            }
+        },
+    };
 
     let graph = load_graph()?;
     let seq = migration_sequence(&graph);
@@ -1280,6 +1288,9 @@ fn cmd_graph_decompose(root: Option<&Path>, budget: usize) -> CmdResult {
 
     // 验收门告警（任一不满足 → status 降级 warning）。
     const COHESION_THRESHOLD: f64 = 1.5;
+    // 绝对内聚地板：随机基线退化（单批次/批数太少 → 重排无法改变划分 → baseline≡actual、ratio 恒 1.0）
+    // 时的主判据。actual = 内部/(内部+外部)，≥0.5 即多数耦合留在批内 = 客观高内聚（MDR-010）。
+    const COHESION_ABS_FLOOR: f64 = 0.5;
     if !invariants.partition_ok {
         warnings.push("不变量违反：存在文件未恰好归属一个单元".into());
     }
@@ -1297,11 +1308,17 @@ fn cmd_graph_decompose(root: Option<&Path>, budget: usize) -> CmdResult {
             "{residual_mechanical_single} 个机械文件未能合批、仍为独立模块（目标应≈0）"
         ));
     }
-    let cohesion_pass = batched_files == 0 || cohesion.ratio >= COHESION_THRESHOLD;
+    // 内聚门：无合批 → N/A；批内文件零耦合边（空/孤立文件）→ ratio 测试退化、无低内聚风险，
+    // 真空满足；actual ≥ 0.5 绝对高内聚（覆盖单批次 baseline 退化）；否则按 ratio ≥ 1.5× 判定。
+    // 真泄漏（耦合>0、actual 低、ratio 不显著）才失败——区分"无害/高内聚批"与"机械凑数低内聚"。
+    let cohesion_pass = batched_files == 0
+        || cohesion.coupling_edges == 0
+        || cohesion.actual >= COHESION_ABS_FLOOR
+        || cohesion.ratio >= COHESION_THRESHOLD;
     if !cohesion_pass {
         warnings.push(format!(
-            "内聚 MQ ratio={:.2} < {COHESION_THRESHOLD}（合批内聚未显著优于随机基线）",
-            cohesion.ratio
+            "内聚 MQ actual={:.2}（<{COHESION_ABS_FLOOR}）且 ratio={:.2}（<{COHESION_THRESHOLD}×基线）：合批内聚不足",
+            cohesion.actual, cohesion.ratio
         ));
     }
 
@@ -1327,6 +1344,7 @@ fn cmd_graph_decompose(root: Option<&Path>, budget: usize) -> CmdResult {
             "ratio": cohesion.ratio,
             "threshold": COHESION_THRESHOLD,
             "batched_files": cohesion.batched_files,
+            "coupling_edges": cohesion.coupling_edges,
             "pass": cohesion_pass,
         },
         "classification": {
