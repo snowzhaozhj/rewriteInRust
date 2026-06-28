@@ -72,7 +72,34 @@ tools: Bash, Read, Write, Grep, Glob
 
 > **定位源文件**：模块标识是图节点 ID `file:<rel>`。路径基准是 `.rustmigrate.toml` 的 `project.source_root`（如 `src/`），不是你的 CWD（项目根）。源文件绝对路径 = `<source_root>/<rel>`（去掉 `file:` 前缀得 `<rel>`；若 `<rel>` 已含 source_root 前缀则不重复拼接）。直接用 `<rel>` 去 CWD 读会 file-not-found——是基准不一致，不是源真的缺失。
 
-> **一个模块未必只有一个源文件**：单文件模块 `member_files` 为 None；SCC 模块组的 `member_files` 列出组内全部互引源文件。判断模块形态后再决定翻译单元（见下「SCC 模块组翻译」）。
+> **一个模块未必只有一个源文件**：单文件模块 `member_files` 为 None；SCC 模块组（`composite_kind=cycle`）和机械合批组（`composite_kind=batch`）的 `member_files` 列出组内全部源文件。判断模块形态后再决定翻译单元（见下「Batch 组翻译」或「SCC 模块组翻译」）。
+
+### Batch 组翻译（机械合批：一次翻完）
+
+机械合批组（`composite_kind=batch`）的成员全为可证明机械文件（纯类型/常量/barrel re-export），无循环依赖、footprint 受控（≤预算门）。与 SCC 组的"契约→stub→逐文件填空"不同，batch 组**一次翻完整批**——因为成员简单且无环，不需要契约/stub 的跨文件一致性保障。
+
+**触发**：模块 `composite_kind=batch`（`member_files` 含 ≥2 个文件）。**不要**走 SCC 契约路径，也不要各成员独立跑完整流水线。
+
+**输入**：
+- 全部成员源文件（按逆拓扑序排列——先翻被依赖的，再翻依赖者）
+- 外部依赖 interfaces（batch 外部模块的已译签名，`rustmigrate graph interfaces --deps-of <batch-key>`）
+- 适用的 porting rules
+- 裁剪依赖清单（若有 `degrade_skip` 上游）
+
+**产出**：
+- 每个成员对应的 `.rs` 文件写入 `rust_root/`（按成员文件路径映射，同单文件模块的 rust_root 写入规则）
+- `intermediate/{batch}-source-hashes.json`：各成员源文件 content-hash 快照（供断点恢复比对）
+
+**翻译要求**：
+- **逆拓扑序逐文件翻译**：在同一次调用内按逆拓扑序依次翻译每个成员。先翻被依赖的类型/常量文件，后翻引用它们的 barrel/re-export 文件。
+- **成员间引用直接 `use`**：batch 内成员之间的导入关系直接转为 Rust `use crate::...`。因为先翻被依赖者，后续文件可直接引用已产出的符号——无需 stub/todo!() 占位。
+- **忠实翻译原则同 Phase A**：逐结构对应、类型映射按 RULE-2/3/7、不确定项标 `TODO(port)`。
+- **无签名锁**：batch 组没有预冻结的契约，成员间接口由翻译产出自然确定。但仍须保证成员间 `pub` 导出类型**与源码语义一致**（不擅自重构）。
+- **source-hashes 快照**：翻译完成后写 `intermediate/{batch}-source-hashes.json`，格式 `{"<member-file>": "<sha256-hex>", ...}`，记录每个成员源文件的 content-hash。
+
+**不走**：意图摘要 / 多候选 / 对抗审查 / Phase B 惯用化——机械文件无行为可优化、编译即门禁。
+
+**`TODO(port)` 禁止**：batch 成员是经分类器确认的纯机械文件（类型/常量/barrel），翻译应无不确定项。如果你在翻译某个成员时发现需要标 `TODO(port)`（含不确定语义），说明该文件**被误分类为机械**——停下回报编排器「成员 `<file>` 非机械，需重分类」，由编排器决定是否拆出该成员走重型路径。不要在 batch 产出中留 `TODO(port)`。
 
 ### SCC 模块组翻译（循环依赖：契约 → stub → 逐文件填空 → 整组门）
 
@@ -80,7 +107,7 @@ tools: Bash, Read, Write, Grep, Glob
 
 逐文件独立翻译的难题：各文件对跨引用符号必须用**一致的 Rust 类型表示**（含所有权 `Rc`/`Weak`/`RefCell`）。解法不靠「文档约定大家自觉」，而靠**编译器强制**——先产一份可编译的契约 + stub 骨架，逐文件 agent 只填空、禁改签名。机制三步：
 
-- **触发**：模块 `member_files` 非空（含多个文件）。**不要**当成单文件模块走普通 Phase A，按下面三步走。
+- **触发**：模块 `composite_kind=cycle`（或历史 state 中 `member_files` 非空且 `composite_kind` 缺省——按循环组处理）。**不要**当成单文件模块走普通 Phase A，按下面三步走。注意：`composite_kind=batch` 已由上方「Batch 组翻译」处理，不进入本节。
 - **契约步（组级一次，详见下「契约步」小节）**：读全组导出签名 → 产 `intermediate/{group}-contract.md`（6 字段）+ `rust_root/` 可编译 stub 骨架（签名齐全、所有权类型已定、body 全 `todo!()`）。**契约门**：stub `cargo check` 通过才算 valid——跨文件签名一致、`Rc`/`Weak`/`RefCell` 所有权类型可解析，全由编译器保证，不靠 agent 自觉。
 - **填空步（文件级并行）**：每个成员文件一个翻译任务，输入=该文件源码 + 契约 + stub，产出=把对应 `mod` 的 `todo!()` 填成实现。**签名锁定**：不许改 struct 字段/fn 签名/mod 声明/`Cargo.toml`/共享 Error enum（这些在契约步已冻结）。从「自觉遵守文档」降为「填空，禁改签名」。这一步即本组的 Phase A 忠实翻译（见下「步骤二：Phase A」的 SCC 分支）。
 - **实现门（整组 check）**：全部填完后整组 `cargo check`/`test`（=并行编排的「真门」）→ compile_fixing → done。
