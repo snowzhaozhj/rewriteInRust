@@ -94,6 +94,7 @@ scope: M0-S0 / M1-CLI-03 / M1-PLG-01 等（引用 PLAN.md 任务 ID）
 - 状态机定义 → `docs/design/02-architecture.md § 3.4` + `09-appendix-schemas.md`
 - 实施计划 → `docs/PLAN.md`
 - 当前状态 → `docs/STATUS.md`
+- 端到端迁移验证 → `docs/learnings/agent-skill-prompt-guide.md §6`
 
 ## Fixture 与测试
 
