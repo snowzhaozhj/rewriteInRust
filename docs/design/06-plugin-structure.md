@@ -113,6 +113,7 @@ Plugin 中的确定性计算由独立的 Rust CLI 工具 `rustmigrate` 承担，
 | `rustmigrate graph deps <module>` | 查询模块的正向依赖树 |
 | `rustmigrate graph interfaces <module>` | 输出模块的导出接口签名文本（查询 source-graph.db 中 `is_exported=true` 节点，按 `line_range` 从 source-ref/ 提取）；`--deps-of <target>` 批量输出 target 的直接依赖模块（imports 边的 1-hop 邻居）的导出接口签名（区别于 `graph deps` 的 BFS 传递闭包）；含每条签名的 token 估算（bytes/4） |
 | `rustmigrate graph stats` | 图统计信息（节点/边计数、度分布） |
+| `rustmigrate graph decompose` | 拆解 dry-run（M3-DEC-01）：在 SCC 缩点 DAG 上做凸性拓扑 first-fit 装箱，把机械小文件按 footprint 预算（`--budget`，token≈bytes/4）合批，输出拆解计划 + §8 验收四维度报告（目标缩减 / 正确性不变量 / 内聚 MQ vs 随机基线 / 机械·危险分类分布）。**只读：不写 state、不产 active 合批组、不派翻译**，供 DEC-GATE 判定（方案权威 [decomposition-redesign.md](../decomposition-redesign.md)） |
 | `rustmigrate validate state` | 校验 `migration-state.json` 的合法性（JSON Schema + 状态机约束） |
 | `rustmigrate state get` | 查询指定模块的当前迁移状态 |
 | `rustmigrate state transition` | 执行状态转换（带状态机合法性前置条件检查：校验当前状态→目标状态为合法转换路径）。`--module` 为模块级 ModuleStatus 转换；省略则为项目级 ProjectState 转换（`/migrate analyze` 把 state 从 `init` 推进到 `sprint_loop` 的接入点） |

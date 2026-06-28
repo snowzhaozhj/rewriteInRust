@@ -18,10 +18,12 @@ use serde_json::json;
 use rustmigrate_core::detect::detect_tier;
 use rustmigrate_core::error::MigrateError;
 use rustmigrate_core::graph::build::{build_graph_full, build_graph_ts_incremental};
+use rustmigrate_core::graph::decompose::{cohesion_mq, plan_decomposition, verify_invariants};
 use rustmigrate_core::graph::export::{export_dot, export_json, export_mermaid};
 use rustmigrate_core::graph::persist::{load_from_db, save_to_db};
 use rustmigrate_core::graph::topo::{detect_cycles, migration_sequence, topological_sort};
 use rustmigrate_core::graph::SourceGraph;
+use rustmigrate_core::lang::registry::create_adapter;
 use rustmigrate_core::profile::{
     check_adapter_tools, check_cargo_nextest, load_analysis_tools, profile_project, ToolStatus,
 };
@@ -30,9 +32,10 @@ use rustmigrate_core::scaffold::scaffold_project;
 use rustmigrate_core::state::{MigrationStateMachine, SprintAdvanceResult};
 use rustmigrate_core::stats::{compare_structure, count_loc};
 use rustmigrate_core::types::common::{NodeId, Timestamp};
-use rustmigrate_core::types::graph::{EdgeType, NodeType, SourceNode};
+use rustmigrate_core::types::graph::{EdgeType, NodeType};
 use rustmigrate_core::types::state::{
-    humanize_module_key, ModuleState, ModuleStatus, ModuleTier, ProjectState, SprintState,
+    humanize_module_key, CompositeKind, ModuleState, ModuleStatus, ModuleTier, ProjectState,
+    SprintState,
 };
 use rustmigrate_core::validate::{
     auto_unblock_modules, check_blocked_modules, detect_blocked_cycles, validate_state,
@@ -146,6 +149,15 @@ pub enum GraphCommands {
         /// 导出格式（json/dot/mermaid，默认 json）。
         #[arg(long, default_value = "json")]
         format: String,
+    },
+    /// 拆解 dry-run：凸性合批计划 + §8 验收判据报告（M3-DEC-01，不写状态、不派翻译）。
+    Decompose {
+        /// 源码根目录（读文件算 footprint 自身规模；默认取配置 source_root）。
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// footprint 预算 B（token≈bytes/4，超此值的单文件转人工；默认 2000）。
+        #[arg(long, default_value_t = 2000)]
+        budget: usize,
     },
 }
 
@@ -395,6 +407,9 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
             GraphCommands::Stats => emit(writer, cmd_graph_stats()),
             GraphCommands::Cycles => emit(writer, cmd_graph_cycles()),
             GraphCommands::Export { format } => emit(writer, cmd_graph_export(format)),
+            GraphCommands::Decompose { root, budget } => {
+                emit(writer, cmd_graph_decompose(root.as_deref(), *budget))
+            }
         },
         Commands::Validate { action } => match action {
             ValidateCommands::State {
@@ -970,9 +985,9 @@ fn cmd_graph_interfaces(module: &str, deps_of: Option<&str>, members: bool) -> C
         return cmd_graph_interfaces_deps_of(&graph, target);
     }
 
-    // 单模块模式：输出指定模块自身的导出接口。
+    // 单模块模式：输出指定模块自身的导出接口（不裁剪）。
     let file_path = resolve_module_file_path(&graph, module)?;
-    let collected = collect_exported_interfaces(&graph, &file_path);
+    let collected = collect_exported_interfaces(&graph, &file_path, None);
 
     Ok((
         json!({
@@ -1014,7 +1029,7 @@ fn cmd_graph_interfaces_members(
         .iter()
         .filter_map(|id| id.file_path().map(|p| p.to_owned()))
         .map(|path| {
-            let collected = collect_exported_interfaces(graph, &path);
+            let collected = collect_exported_interfaces(graph, &path, None);
             sig_tokens_total += collected.sig_tokens;
             export_count += collected.interfaces.len();
             json!({
@@ -1059,30 +1074,18 @@ fn cmd_graph_interfaces_deps_of(
             file: target.to_owned(),
         })?;
 
-    // 取 imports 边的 1-hop 出边邻居（仅 File 节点）。
-    let dep_nodes: Vec<&SourceNode> = graph
-        .outgoing_edges(&target_node)
-        .into_iter()
-        .filter(|(_, edge_type)| *edge_type == EdgeType::Imports)
-        .map(|(node, _)| node)
-        .filter(|node| node.node_type == NodeType::File)
-        .collect();
+    // 聚合 1-hop imports 依赖的被用符号（dep 路径 → Some(集)|None=use-all），BTreeMap 有序。
+    let dep_usage = graph.imported_symbols_by_dep(&target_node);
 
-    // 去重并排序（BTreeSet 保证有序迭代，确定性输出）。
-    let dep_paths: Vec<String> = dep_nodes
+    // 对每个依赖模块收集导出接口（按被用符号裁剪，M3-DEC-01）。
+    let dependencies: Vec<serde_json::Value> = dep_usage
         .iter()
-        .map(|n| n.file_path.clone())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect();
-
-    // 对每个依赖模块收集导出接口。
-    let dependencies: Vec<serde_json::Value> = dep_paths
-        .iter()
-        .map(|path| {
-            let collected = collect_exported_interfaces(graph, path);
+        .map(|(path, usage)| {
+            let collected = collect_exported_interfaces(graph, path, usage.as_ref());
             json!({
                 "module": path,
+                "used_symbols": usage,           // null = use-all（不可裁剪）
+                "signature_tokens": collected.sig_tokens,
                 "exports": collected.interfaces,
             })
         })
@@ -1092,6 +1095,8 @@ fn cmd_graph_interfaces_deps_of(
         json!({
             "target": target_path,
             "dependencies": dependencies,
+            // footprint 的依赖签名部分（token≈bytes/4）；自身源码规模由上层相加。
+            "dependency_signature_tokens": graph.dependency_signature_tokens(&target_node),
         }),
         Vec::new(),
     ))
@@ -1128,6 +1133,7 @@ struct InterfaceCollection {
 fn collect_exported_interfaces(
     graph: &rustmigrate_core::graph::SourceGraph,
     file_path: &str,
+    used: Option<&std::collections::BTreeSet<String>>,
 ) -> InterfaceCollection {
     let mut sig_tokens = 0usize;
 
@@ -1135,6 +1141,9 @@ fn collect_exported_interfaces(
         .symbols_in_file(file_path)
         .into_iter()
         .filter(|n| n.is_exported)
+        // used=Some(set)：仅保留 target 实际用到的具名符号（按符号裁剪，M3-DEC-01）；
+        // used=None：use-all（namespace/default/side-effect/re-export 或旧库），返回全量。
+        .filter(|n| used.map_or(true, |set| set.contains(&n.name)))
         .map(|n| {
             let sig_tok = n
                 .signature
@@ -1166,6 +1175,169 @@ fn collect_exported_interfaces(
 }
 
 /// `graph stats`：图统计信息。
+/// `graph decompose`：拆解 dry-run，输出凸性合批计划 + §8 验收四维度报告。
+///
+/// 只读：从 db 载图、读源文件算 footprint、用 adapter 判机械，产出可量化报告供 DEC-GATE
+/// 判定。**不写 state、不产 active 合批组、不派任何翻译 subagent**（方案 §8）。
+fn cmd_graph_decompose(root: Option<&Path>, budget: usize) -> CmdResult {
+    use rustmigrate_core::lang::FileKind;
+    use rustmigrate_core::types::common::SourceLang;
+    use std::collections::{HashMap, HashSet};
+
+    let mut warnings: Vec<String> = Vec::new();
+    let cfg = load_config_or_default(&mut warnings);
+    let source_root = root
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(&cfg.project.source_root));
+    let lang = cfg
+        .project
+        .source_language
+        .unwrap_or(SourceLang::TypeScript);
+
+    let graph = load_graph()?;
+    let seq = migration_sequence(&graph);
+    let mut adapter = create_adapter(lang)?;
+
+    // 逐文件：footprint = 自身源码(bytes/4) + 被用依赖签名；机械判定 via classify_file。
+    let mut footprints: HashMap<NodeId, usize> = HashMap::new();
+    let mut mechanical: HashSet<NodeId> = HashSet::new();
+    let mut kind_counts: HashMap<&'static str, usize> = HashMap::new();
+    let mut danger_files = 0usize;
+    let mut read_failures = 0usize;
+    let file_nodes: Vec<NodeId> = graph
+        .nodes_by_type(NodeType::File)
+        .into_iter()
+        .map(|n| n.id.clone())
+        .collect();
+    for id in &file_nodes {
+        let rel = id.file_path().unwrap_or_default();
+        let self_tokens = match std::fs::read_to_string(source_root.join(rel)) {
+            Ok(src) => {
+                let cls = adapter.classify_file(&src);
+                if cls.is_mechanical() {
+                    mechanical.insert(id.clone());
+                }
+                if !cls.danger.is_empty() {
+                    danger_files += 1;
+                }
+                let key = match cls.file_kind {
+                    FileKind::Barrel => "barrel",
+                    FileKind::PureType => "pure_type",
+                    FileKind::PureConstant => "pure_constant",
+                    FileKind::Normal => "normal",
+                };
+                *kind_counts.entry(key).or_insert(0) += 1;
+                src.len().div_ceil(4)
+            }
+            Err(_) => {
+                // 读失败：按非机械 Normal 保守计数（保持 by_file_kind 与文件总数对账），自身规模按 0。
+                read_failures += 1;
+                *kind_counts.entry("unreadable").or_insert(0) += 1;
+                0
+            }
+        };
+        let fp = self_tokens + graph.dependency_signature_tokens(id);
+        footprints.insert(id.clone(), fp);
+    }
+    // 大面积读失败几乎必是 --root 与 graph build 的根不一致——醒目告警，避免误读为「拆解无收益」。
+    if read_failures > 0 {
+        warnings.push(format!(
+            "{read_failures}/{} 个源文件读取失败（footprint/机械判定按 0/非机械保守处理）；\
+             若占比偏高，多半是 --root 与 graph build 时的源码根不一致，请用 --root 指定一致路径",
+            file_nodes.len()
+        ));
+    }
+
+    let plan = plan_decomposition(&graph, &seq, &footprints, &mechanical, budget);
+    let cohesion = cohesion_mq(&plan, &graph, 0x00FF_EE15, 100);
+    let invariants = verify_invariants(&plan, &graph, file_nodes.len());
+
+    // 维度 a：目标达成。
+    let modules_before = file_nodes.len();
+    let modules_after = plan.module_count_after();
+    let batched_files = plan.batched_file_count();
+    let reduction_rate = if modules_before > 0 {
+        1.0 - (modules_after as f64 / modules_before as f64)
+    } else {
+        0.0
+    };
+    // §8「被合批文件占比」。
+    let batched_ratio = if modules_before > 0 {
+        batched_files as f64 / modules_before as f64
+    } else {
+        0.0
+    };
+    // 残留机械单文件模块（应≈0）：Single 单成员且属机械集合。
+    let residual_mechanical_single = plan
+        .units
+        .iter()
+        .filter(|u| {
+            u.kind == rustmigrate_core::graph::decompose::UnitKind::Single
+                && u.members.len() == 1
+                && mechanical.contains(&NodeId::new(u.members[0].clone()))
+        })
+        .count();
+
+    // 验收门告警（任一不满足 → status 降级 warning）。
+    const COHESION_THRESHOLD: f64 = 1.5;
+    if !invariants.partition_ok {
+        warnings.push("不变量违反：存在文件未恰好归属一个单元".into());
+    }
+    if !invariants.dag_acyclic {
+        warnings.push("不变量违反：单元级依赖图存在环".into());
+    }
+    if invariants.over_budget_count > 0 {
+        warnings.push(format!(
+            "{} 个单文件超 footprint 预算，已标记转人工",
+            invariants.over_budget_count
+        ));
+    }
+    if residual_mechanical_single > 0 {
+        warnings.push(format!(
+            "{residual_mechanical_single} 个机械文件未能合批、仍为独立模块（目标应≈0）"
+        ));
+    }
+    let cohesion_pass = batched_files == 0 || cohesion.ratio >= COHESION_THRESHOLD;
+    if !cohesion_pass {
+        warnings.push(format!(
+            "内聚 MQ ratio={:.2} < {COHESION_THRESHOLD}（合批内聚未显著优于随机基线）",
+            cohesion.ratio
+        ));
+    }
+
+    let data = json!({
+        "budget": budget,
+        "target": {
+            "modules_before": modules_before,
+            "modules_after": modules_after,
+            "reduction_rate": reduction_rate,
+            "batched_files": batched_files,
+            "batched_ratio": batched_ratio,
+            "residual_mechanical_single": residual_mechanical_single,
+        },
+        "invariants": {
+            "partition_ok": invariants.partition_ok,
+            "dag_acyclic": invariants.dag_acyclic,
+            "over_budget_count": invariants.over_budget_count,
+            "plan_hash": invariants.plan_hash,
+        },
+        "cohesion": {
+            "actual": cohesion.actual,
+            "baseline": cohesion.baseline,
+            "ratio": cohesion.ratio,
+            "threshold": COHESION_THRESHOLD,
+            "batched_files": cohesion.batched_files,
+            "pass": cohesion_pass,
+        },
+        "classification": {
+            "by_file_kind": kind_counts,
+            "danger_files": danger_files,
+        },
+        "units": plan.units,
+    });
+    Ok((data, warnings))
+}
+
 fn cmd_graph_stats() -> CmdResult {
     let graph = load_graph()?;
     let stats = graph.stats();
@@ -1646,6 +1818,10 @@ fn cmd_state_populate_modules(root: Option<&Path>, single_sprint: bool) -> CmdRe
             None
         };
 
+        // composite 类型：多成员组即循环依赖组（Cycle）；单文件为 None（M3-DEC-01）。
+        // PR-1 不产出 active 合批组（Batch 仅出现在 dry-run 报告，见 decomposition-redesign §7 B1）。
+        let composite_kind = member_files.as_ref().map(|_| CompositeKind::Cycle);
+
         // 先用引用派生 JSON entry，再把 member_files move 进 ModuleState（省一次 clone）。
         let mut entry = json!({
             "id": key.to_string(),
@@ -1654,6 +1830,7 @@ fn cmd_state_populate_modules(root: Option<&Path>, single_sprint: bool) -> CmdRe
         });
         if let Some(mf) = &member_files {
             entry["member_files"] = json!(mf);
+            entry["composite_kind"] = json!(composite_kind.map(|k| k.to_string()));
         }
         modules.push(entry);
 
@@ -1673,6 +1850,9 @@ fn cmd_state_populate_modules(root: Option<&Path>, single_sprint: bool) -> CmdRe
                 blocked_by: None,
                 pre_blocked_status: None,
                 member_files,
+                composite_kind,
+                decomposition_snapshot: None,
+                decomposition_frozen: false,
             },
         );
     }

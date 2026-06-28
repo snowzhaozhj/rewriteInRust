@@ -1129,6 +1129,11 @@ fn smoke_populate_folds_cycles() {
                 && members.iter().any(|s| s.contains("emitter")),
             "composite 组应含环成员: {members:?}"
         );
+        // M3-DEC-01：循环 composite 应显式标记 composite_kind=cycle（区别于机械合批组）。
+        assert_eq!(
+            composite["composite_kind"], "cycle",
+            "循环 composite 应标记 composite_kind=cycle: {composite}"
+        );
         // 折叠后 state 应合法。
         let (code, json) = run(&["validate", "state"]);
         assert_eq!(code, 0, "折叠后 state 应合法: {json}");
@@ -1497,6 +1502,79 @@ fn smoke_graph_interfaces_deps_of_exports_content() {
                 "导出接口应含 token_estimate"
             );
         }
+
+        // 按符号裁剪（M3-DEC-01）：service.ts 仅 import { clamp, Range, fetchData }，
+        // 未被使用的 Predicate 应从 deps-of 输出裁掉。
+        assert!(
+            !export_names.contains(&"Predicate"),
+            "未被 import 的 Predicate 应被裁剪: {export_names:?}"
+        );
+        let used: Vec<&str> = utils_dep["used_symbols"]
+            .as_array()
+            .expect("纯具名依赖应有 used_symbols 数组")
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            used,
+            vec!["Range", "clamp", "fetchData"],
+            "used_symbols 应为被用具名符号（排序）: {used:?}"
+        );
+        // footprint 的依赖签名规模应为正数。
+        assert!(
+            json["data"]["dependency_signature_tokens"]
+                .as_u64()
+                .is_some_and(|t| t > 0),
+            "应输出正的 dependency_signature_tokens: {json}"
+        );
+    });
+}
+
+// === graph decompose 拆解 dry-run（M3-DEC-01 §8 验收报告）===
+
+#[test]
+fn smoke_graph_decompose_dry_run() {
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        build_graph_for_query();
+        let (code, json) = run(&["graph", "decompose", "--root", "src", "--budget", "2000"]);
+        assert_eq!(code, 0, "decompose 应成功: {json}");
+
+        let data = &json["data"];
+        // 四维度齐全。
+        assert!(data["target"].is_object(), "应有 target 维度");
+        assert!(data["invariants"].is_object(), "应有 invariants 维度");
+        assert!(data["cohesion"].is_object(), "应有 cohesion 维度");
+        assert!(
+            data["classification"].is_object(),
+            "应有 classification 维度"
+        );
+
+        // 硬不变量：每文件恰好一个单元 + 单元图无环。
+        assert_eq!(data["invariants"]["partition_ok"], true);
+        assert_eq!(data["invariants"]["dag_acyclic"], true);
+
+        // 单元覆盖全部文件（modules_before == 文件数；linear-deps 有 3 文件）。
+        let before = data["target"]["modules_before"].as_u64().unwrap();
+        assert_eq!(before, 3, "linear-deps 应有 3 个源文件");
+        let units = data["units"].as_array().unwrap();
+        let total_members: usize = units
+            .iter()
+            .map(|u| u["members"].as_array().unwrap().len())
+            .sum();
+        assert_eq!(total_members as u64, before, "单元成员应恰好覆盖全部文件");
+
+        // 确定性：plan_hash 两次一致（§8「跑两次字节级一致」）。
+        let hash1 = data["invariants"]["plan_hash"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let (_, json2) = run(&["graph", "decompose", "--root", "src", "--budget", "2000"]);
+        assert_eq!(
+            json2["data"]["invariants"]["plan_hash"].as_str().unwrap(),
+            hash1,
+            "拆解计划应确定可复现"
+        );
     });
 }
 

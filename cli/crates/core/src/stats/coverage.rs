@@ -87,6 +87,9 @@ mod tests {
             blocked_by: None,
             pre_blocked_status: None,
             member_files: None,
+            composite_kind: None,
+            decomposition_snapshot: None,
+            decomposition_frozen: false,
         }
     }
 

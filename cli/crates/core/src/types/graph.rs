@@ -198,6 +198,13 @@ pub struct Dependency {
     pub sub_kind: Option<EdgeSubKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mapping_notes: Option<String>,
+    /// Imports 边专用：target 实际用到的依赖符号名（已排序去重）。
+    ///
+    /// `Some(names)` 仅当本依赖全部为具名导入（可裁剪）；含 namespace/default/
+    /// side-effect/re-export 任一形式时为 `None`，语义="用到全部导出"（保守）。
+    /// 供 footprint 估算与 `deps-of` 按符号裁剪使用（M3-DEC-01）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_symbols: Option<Vec<String>>,
 }
 
 impl Dependency {
@@ -211,6 +218,7 @@ impl Dependency {
             weight: 1.0,
             sub_kind: None,
             mapping_notes: None,
+            used_symbols: None,
         }
     }
 

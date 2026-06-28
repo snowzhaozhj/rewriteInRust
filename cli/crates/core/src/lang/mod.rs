@@ -32,6 +32,97 @@ pub struct FileAnalysis {
     pub instance_type_bindings: HashMap<String, String>,
 }
 
+/// 文件的机械属性分类（M3-DEC-01 决策②）。
+///
+/// 只有 `Barrel`/`PureType`/`PureConstant` 三类**且无危险信号且 footprint 小**才"可证明
+/// 机械"（走轻量路径合批）；`Normal`（含函数/类/控制流）永不机械。`Normal` 是保守默认。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileKind {
+    /// 纯 re-export 转发（barrel，如 `export * from`/`export {X} from`），无自身定义。
+    Barrel,
+    /// 纯类型声明（interface/type/enum），无值定义。
+    PureType,
+    /// 纯常量（`const` 字面量绑定），无函数/类/控制流。
+    PureConstant,
+    /// 其余（含函数/类/可变变量/控制流/表达式语句）——非机械。
+    Normal,
+}
+
+/// 危险信号类别（M3-DEC-01 决策②(b)）。
+///
+/// 命中任一 → 该文件即"非机械"（走重流程）+ 应注入对应 porting 规则 + 加定向测试。
+/// 与"流程深浅"是两件事：重流程本身不抓陷阱，规则注入才是针对性的一刀。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DangerCategory {
+    /// 数值精度（Math./浮点/Number/parseInt/NaN/Infinity）。
+    NumericPrecision,
+    /// 并发（async/await/Promise.all/定时器）。
+    Concurrency,
+    /// 动态/反射（eval/typeof/instanceof/as any/getattr/metaclass）。
+    DynamicReflection,
+    /// IO 副作用（fs/net/process 等 import 或顶层表达式语句）。
+    IoSideEffect,
+    /// FFI / 跨语言边界（如 napi、ctypes、cgo——主要供非 TS 语言）。
+    Ffi,
+    /// 跨文件共享可变全局（顶层 `let`/`var` 可变绑定）。
+    SharedMutableGlobal,
+}
+
+impl DangerCategory {
+    /// 该陷阱的人读说明，供翻译上下文注入 / dry-run 报告展示。
+    ///
+    /// 不在此硬编码具体 RULE-NN（除已核实的 RULE-22 异步原语）——规则注入由 translator
+    /// 依完整规则目录决定，避免在核心层固化可能漂移的规则映射。
+    pub fn concern(&self) -> &'static str {
+        match self {
+            DangerCategory::NumericPrecision => {
+                "数值精度：JS number 为 f64，整数运算/取整与 Rust i64/f64 语义不同，需对边界值定向测试"
+            }
+            DangerCategory::Concurrency => {
+                "并发：async/Promise 语义需映射到 tokio（RULE-22 异步原语），注意执行顺序与取消语义"
+            }
+            DangerCategory::DynamicReflection => {
+                "动态/反射：typeof/instanceof/any 等运行时类型操作无法静态翻译，需显式建模"
+            }
+            DangerCategory::IoSideEffect => {
+                "IO 副作用：文件/网络/进程调用，需隔离副作用并对错误路径定向测试"
+            }
+            DangerCategory::Ffi => "FFI：跨语言边界，按 degrade_skip 评估或选 Rust 替代 crate",
+            DangerCategory::SharedMutableGlobal => {
+                "跨文件共享可变全局（顶层 let/var）：Rust 需 OnceLock/Mutex 等显式同步"
+            }
+        }
+    }
+}
+
+/// 单文件的机械/危险分类结果（M3-DEC-01）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct FileClassification {
+    /// 文件机械属性。
+    pub file_kind: FileKind,
+    /// 命中的危险信号类别（排序去重）。
+    pub danger: Vec<DangerCategory>,
+}
+
+impl FileClassification {
+    /// 保守默认：`Normal` + 无危险（未实现分类的语言用此，绝不会被判机械）。
+    pub fn conservative() -> Self {
+        Self {
+            file_kind: FileKind::Normal,
+            danger: Vec::new(),
+        }
+    }
+
+    /// "可证明机械"判定（不含 footprint 大小——大小约束在合批阶段用 footprint 施加）。
+    ///
+    /// = 文件类型属于 Barrel/PureType/PureConstant **且**无任何危险信号。
+    pub fn is_mechanical(&self) -> bool {
+        self.danger.is_empty() && !matches!(self.file_kind, FileKind::Normal)
+    }
+}
+
 /// 导入的种类（互斥，枚举消除原 `is_type_only`/`is_side_effect`/`is_dynamic`
 /// 三个布尔字段的非法组合，如「同时是 side-effect 又是 dynamic」）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,4 +239,13 @@ pub trait LanguageAdapter: Send {
     /// Python: metaclass/dynamic_attr），由各 adapter 内部决定。
     /// 解析失败时返回 Full（保守不降档）。
     fn detect_tier(&mut self, source: &str) -> crate::types::state::ModuleTier;
+
+    /// 机械/危险分类（M3-DEC-01 拆解引擎用）。
+    ///
+    /// 区别于 `detect_tier`（流程档位）：此方法判"是否可证明机械"（可合批走轻量路径）
+    /// 与"命中哪些危险信号类别"（规则注入 + 定向测试）。两者正交。
+    /// 默认返回保守的 `Normal`+无危险——未实现分类的语言绝不会被合批，安全。
+    fn classify_file(&mut self, _source: &str) -> FileClassification {
+        FileClassification::conservative()
+    }
 }

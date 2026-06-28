@@ -109,7 +109,8 @@
         "file:src/events/emitter.ts",
         "file:src/events/event-bus.ts",
         "file:src/events/handler.ts"
-      ]
+      ],
+      "composite_kind": "cycle"
     }
   },
   "config_ref": ".rustmigrate.toml"
