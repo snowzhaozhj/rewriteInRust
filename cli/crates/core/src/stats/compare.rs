@@ -612,6 +612,32 @@ fn real() {
     }
 
     #[test]
+    fn python_nesting_elif_try_dont_overcount() {
+        // 审查关注点：elif/else 是 if_statement 的子句（非嵌套 if），不应加深度；
+        // try/except 计一层（except_clause 非控制流节点）；空文件 → 0。
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("a.py"),
+            "def h(x):\n    if x == 1:\n        pass\n    elif x == 2:\n        pass\n    else:\n        pass\n    try:\n        pass\n    except Exception:\n        pass\n    for i in x:\n        with open(i) as fp:\n            pass\n",
+        )
+        .unwrap();
+        assert_eq!(
+            source_max_nesting(dir.path(), SourceLang::Python).unwrap(),
+            2,
+            "for>with=2；elif/else 不应把 if 计成多层、try/except 仅一层"
+        );
+
+        // 空 Python 文件：无控制流，嵌套 0（解析成功但无控制流节点）。
+        let empty = tempfile::tempdir().unwrap();
+        fs::write(empty.path().join("e.py"), "").unwrap();
+        assert_eq!(
+            source_max_nesting(empty.path(), SourceLang::Python).unwrap(),
+            0,
+            "空 Python 文件嵌套 0"
+        );
+    }
+
+    #[test]
     fn compare_excludes_test_files_consistently() {
         // 回归：函数计数（走 build_graph→adapter.can_handle）与嵌套深度
         // （走 collect_source_files）必须用同一份文件集——测试/声明文件两侧都排除。

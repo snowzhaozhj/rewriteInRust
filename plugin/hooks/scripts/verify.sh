@@ -44,9 +44,10 @@ else
 fi
 export CLIPPY_CONF_DIR
 
-# 全量测试（含 tests/ 集成测试）：done 门的行为等价证据在 golden harness
-# （tests/golden_*.rs 集成测试），`--lib` 会整体漏跑，导致模块可在 golden 等价
-# 从未实跑的情况下被签批 done（M3-VAL-03 实测教训）。故跑全量，不限 --lib。
+# 全量测试（含 tests/ 集成测试）：done 门的行为等价证据是 verifier 在迁移项目
+# tests/ 下生成的行为等价/golden 差异 harness（集成测试，文件名不固定）；`--lib`
+# 会整体漏跑这些集成测试，导致模块可在等价从未实跑时被签批 done（M3-VAL-03 实测
+# 教训）。故跑全量，不限 --lib。
 cargo nextest run
 # --all-targets 连测试码一并 lint：golden harness 等测试文件的 dead_code/告警
 # 同样应纳入 -D warnings 门，避免仅 lib 干净而测试码潜伏问题。

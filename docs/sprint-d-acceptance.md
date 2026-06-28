@@ -70,6 +70,17 @@
 - **VAL-08 全量回归** ✅：`just ci` 全绿（fmt-check + lint + test 531 + deny + shellcheck）。
 - **VAL-05 性能（TS ±10%）**：本 PR 改动不触及 TS 路径热点（stats compare 仅新增 Python 分支、TS 分支不变；verify.sh 仅扩测试范围）；TS 全量回归（531 测试）无退化。专项性能基线沿用 M2 ADV-04，未新增退化点。
 
+## PR #49 四视角审查（全跑）
+
+| 视角 | 结论 | 处理 |
+|------|------|------|
+| 主审（/code-review high） | 无确认正确性 bug；1 低优 UX（C/Go 删报错后退化为通用 warning） | 留账（优雅降级可接受，M2-ADV-06 保护仍在） |
+| 设计契约（design-checker） | 1 **important**：`03-execution-model.md:150-152` 仍声明 stats compare TS-only「非 TS 报错」 | ✅ 已修：更新为「按 source_language 分派，Python 已支持，C/Go 优雅降级 warning」 |
+| 专项（pr-review-toolkit） | 无 important；N1 `06-plugin-structure.md:466` verify.sh 命令过时、N2 verify.sh 注释举例易误解、N3 空 py 未测 | ✅ N1/N2/N3 全修（06 §466 同步 + 注释泛化 + 补空文件断言） |
+| 异构交叉（codex） | 无实质问题；建议补 elif/except/async 边界证据 | ✅ 补 `python_nesting_elif_try_dont_overcount` 测试，实测 elif/else 不过计、try/except 计 1 层、空文件 0 |
+
+审查暴露的设计文档不同步（03 §150 + 06 §466）已修，CLI 行为与 docs/design/ 重新一致。`just ci` 全绿（532 测试）。
+
 ## 验收结论
 
 2 个真实 Python 项目各 ≥1 模块迁移到 `done`，迁移产物 `cargo check`+`test`+`clippy --all-targets -D` 全过；差异测试以源引擎录制的 golden 套件落地并实证（jmespath 901/902、textdistance edit_seq 70/70）；graduate Python 路径验证正确；TS 路径无回归。**Sprint D 验收达标。** 验收过程暴露并修复 4 项真实工具缺口（见上表 #1/#2/#4/#6），2 项记 TODO（#5/#7 注意点）。

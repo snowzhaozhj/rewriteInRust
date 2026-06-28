@@ -148,8 +148,11 @@ Work Unit（一个 Claude Code 会话）:
       **主依据**。输出 JSON 以 `method` 字段（`tree-sitter` / `lexical-scan`）透明标注每侧计数手段供判读。
       要让函数/嵌套比达到精确可比，需 Rust 侧改走 AST（引 `tree-sitter-rust` + 统一控制流节点映射），
       推迟到 M3 多语言前端时一并评估。
-    - **源语言限制**：`stats compare` 源侧解析强绑 TypeScript，非 TS 项目（`source_language != typescript`）
-      显式报错而非静默半残；Python/C/Go 在 M3 按 `source_language` 分派解析器。
+    - **源语言分派**（M3-VAL-02 更新）：`stats compare` 源侧解析按 `source_language` 分派——TypeScript 与
+      **Python 已支持**（Python 走 `tree_sitter_python` + `is_py_control_flow`，控制流节点集
+      `if/for/while/with/try/match`，与 `lang/python.rs` 机械性判定一致）。C/Go 尚未实现，
+      `source_max_nesting` 返回 `NotImplemented`，由 CLI 层冒泡兜底**优雅降级为 warning + `data:null`**
+      （不报错、不静默半残 0 比值，M2-ADV-06 保护仍在）。
 
   Step 5: Phase B — 编译修正 + 惯用化优化
     - 基于审查报告修正语义偏差
