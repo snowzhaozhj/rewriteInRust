@@ -25,6 +25,7 @@ tools: Bash, Read, Write, Grep, Glob
 ### R2 黄金文件测试集
 - 为每个待迁移模块的导出接口（`rustmigrate graph interfaces <module>`）准备黄金输入/输出夹具，放 `test-fixtures/golden/`。
 - 黄金数据来自源项目真实行为样本，**不要凭空编造期望值**；无法取得真实样本时标 `TODO(port): need golden sample`。
+- **present-null ≠ absent（黄金 harness 反序列化必修）**：期望值字段（如 `result`）若用 `Option<T>` 承接，默认 serde 会把 JSON `"result": null` 反序列化为 `None`，与字段缺失混淆——而表达式求值为 `null` 是合法 value 结果（如 jmespath `foo.bar.baz.bad`）。生成的 harness 必须区分二者：value 用例用 `#[serde(default, deserialize_with = "deserialize_some")]`（present→`Some`含 null，absent→`None`），不要仅靠 `#[serde(default)]` + `is_some()` 判存在，否则黄金一致性检查会对 null 结果误报「缺 result」。
 
 ### R3 FFI 桥接的条件触发
 - 仅当 analyzer 标记某纯函数 `purity_confidence=high` 时，才在 `test-fixtures/ffi-bridge/` 搭建源语言↔Rust round-trip 校验。
