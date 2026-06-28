@@ -5,7 +5,7 @@
 ## 当前位置
 
 - **Milestone**: M1 ✅ → M2 ✅ → **M3 多语言支持（Python 优先）**
-- **阶段**: Sprint A ✅ → Sprint B ✅ → Sprint C ✅ → Sprint E ✅ → **Sprint D 端到端验收 ✅（M3-VAL-01~08 全达标，2026-06-29，分支 `feat/m3-val-d-acceptance` 待 PR）**
+- **阶段**: Sprint A ✅ → Sprint B ✅ → Sprint C ✅ → Sprint E ✅ → **Sprint D 端到端验收 ✅（M3-VAL-01~08 全达标，2026-06-29，PR [#49](https://github.com/snowzhaozhj/rewriteInRust/pull/49) 待合并——4 视角审查全跑、1 important（设计文档同步）+ 4 nit 全落实、just ci 532 绿）**
 - **🟢 Sprint D 端到端验收 ✅**：2 真实 Python 项目各 ≥1 模块迁移到 done（按 §6 headless 规范）。
   - **VAL-02 jmespath**：2 模块全 done（coupled_batch 7 文件 + visitor.py），**902 黄金集 901 等价 + 1 豁免（D-10）**，端到端 `search()` 全链；独立复核 cargo test/clippy --all-targets 全绿。
   - **VAL-03 textdistance**：base.py 组（编辑距离算法）done，golden_edit_seq 70/70 等价；vector_based 草稿态忠实保留 unimplemented!()。
