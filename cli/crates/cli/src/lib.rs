@@ -230,6 +230,13 @@ pub enum StateCommands {
         /// 省略时按 SCC 缩点 DAG 拓扑层级分配 sprint 号（叶组→sprint 1，依赖更深的组递增）。
         #[arg(long)]
         single_sprint: bool,
+        /// decompose 预算（tokens≈bytes/4），默认 12000。
+        /// 控制合批组的最大自身源码规模。
+        #[arg(long, default_value_t = 12000)]
+        budget: usize,
+        /// 跳过 decompose，走旧的 SCC-only 路径（后向兼容）。
+        #[arg(long)]
+        no_decompose: bool,
     },
     /// 组感知的依赖就绪门禁查询（破环 M2-SCALE-SCC）。
     ///
@@ -439,9 +446,11 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
             StateCommands::PopulateModules {
                 root,
                 single_sprint,
+                budget,
+                no_decompose,
             } => emit(
                 writer,
-                cmd_state_populate_modules(root.as_deref(), *single_sprint),
+                cmd_state_populate_modules(root.as_deref(), *single_sprint, *budget, *no_decompose),
             ),
             StateCommands::Deps { module } => emit(writer, cmd_state_deps(module)),
             StateCommands::RecordSubagentCall {
@@ -1748,7 +1757,17 @@ fn cmd_state_transition_project(
 /// "孤儿"（状态中存在但源码图已无对应节点）。重填只新增/覆盖序列内节点，故先用
 /// [`MigrationStateMachine::retain_modules`] 剔除孤儿，保持 `modules` 与当前迁移序列一致，
 /// 避免不存在的模块被 `state report` / 依赖门禁误计入进度；被清理的 key 经 warning 告知用户。
-fn cmd_state_populate_modules(root: Option<&Path>, single_sprint: bool) -> CmdResult {
+fn cmd_state_populate_modules(
+    root: Option<&Path>,
+    single_sprint: bool,
+    budget: usize,
+    no_decompose: bool,
+) -> CmdResult {
+    use rustmigrate_core::graph::decompose::UnitKind;
+    use rustmigrate_core::lang::FileKind;
+    use rustmigrate_core::types::common::SourceLang;
+    use std::collections::HashMap;
+
     let graph = load_graph()?;
     let sequence = migration_sequence(&graph);
 
@@ -1777,44 +1796,20 @@ fn cmd_state_populate_modules(root: Option<&Path>, single_sprint: bool) -> CmdRe
         ));
     }
 
-    let groups = &sequence.scc_groups;
-
-    if groups.is_empty() {
-        // 空源码图：跳过孤儿清理，避免误执行一次空 graph build 后把已登记的 pending 模块整表清空。
+    if sequence.scc_groups.is_empty() {
         warnings.push("源码图无文件模块，填充结果为空（请确认已运行 graph build）".to_owned());
-    } else {
-        // 孤儿 pending 清理：live_keys = 各 SCC 组代表（首成员），剔除不在本轮迁移序列的残留模块。
-        let live_keys: std::collections::HashSet<String> = groups
-            .iter()
-            .filter_map(|g| g.members.first())
-            .map(|id| id.to_string())
-            .collect();
-        let orphans = machine.retain_modules(&live_keys);
-        if !orphans.is_empty() {
-            warnings.push(format!(
-                "已清理 {} 个孤儿 pending 模块（源码图已无对应节点）: {:?}",
-                orphans.len(),
-                orphans
-            ));
-        }
+        machine.set_sprint(SprintState {
+            current: 1,
+            history: Vec::new(),
+        });
+        machine.save(&path)?;
+        return Ok((
+            json!({ "module_count": 0, "modules": [], "total_sprints": 1 }),
+            warnings,
+        ));
     }
 
-    // 复杂度分档（M2-TIER-01a）：对全部成员文件检测 tier。
-    let all_files: Vec<NodeId> = groups
-        .iter()
-        .flat_map(|g| g.members.iter().cloned())
-        .collect();
-    let tier_map = detect_tiers_for_modules(&all_files, root, &mut warnings);
-
-    // Sprint 分配（M2-SCALE-P）：按缩点 DAG 拓扑层级（SccGroup.sprint）。
-    // --single-sprint 模式下所有模块统一 sprint=1（M1 兼容）。
-    let total_sprints = if single_sprint {
-        1
-    } else {
-        groups.iter().map(|g| g.sprint).max().unwrap_or(1)
-    };
-
-    // composite 模块组的 tier 取组内最高档（整组按最复杂策略翻译）。
+    // composite 模块组的 tier 取组内最高档。
     fn tier_rank(t: ModuleTier) -> u8 {
         match t {
             ModuleTier::Trivial => 0,
@@ -1823,43 +1818,207 @@ fn cmd_state_populate_modules(root: Option<&Path>, single_sprint: bool) -> CmdRe
         }
     }
 
-    let mut modules: Vec<serde_json::Value> = Vec::with_capacity(groups.len());
-    for g in groups {
-        let key = match g.members.first() {
-            Some(k) => k,
-            None => continue,
+    // 复杂度分档（M2-TIER-01a）：对全部成员文件检测 tier。
+    let all_files: Vec<NodeId> = sequence
+        .scc_groups
+        .iter()
+        .flat_map(|g| g.members.iter().cloned())
+        .collect();
+    let tier_map = detect_tiers_for_modules(&all_files, root, &mut warnings);
+
+    // --- decompose 集成 vs SCC-only 旧路径 ---
+    // MigrationUnit：统一抽象，让 decompose 和 SCC-only 两路径产出同构数据。
+    struct MigrationUnit {
+        key: String,
+        members: Vec<String>,
+        sprint: u32,
+        composite_kind: Option<CompositeKind>,
+    }
+
+    let (units, decomposition_snapshot) = if no_decompose {
+        // 旧路径：SCC-only，多成员组一律 Cycle。
+        let units: Vec<MigrationUnit> = sequence
+            .scc_groups
+            .iter()
+            .filter_map(|g| {
+                let key = g.members.first()?.to_string();
+                let members: Vec<String> = g.members.iter().map(|m| m.to_string()).collect();
+                let composite_kind = if members.len() > 1 {
+                    Some(CompositeKind::Cycle)
+                } else {
+                    None
+                };
+                Some(MigrationUnit {
+                    key,
+                    members,
+                    sprint: g.sprint,
+                    composite_kind,
+                })
+            })
+            .collect();
+        (units, None)
+    } else {
+        // 新路径：decompose 凝聚合并。
+        let cfg = load_config_or_default(&mut warnings);
+        let source_root = root
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(&cfg.project.source_root));
+        let lang = match cfg.project.source_language {
+            Some(l) => l,
+            None => match rustmigrate_core::profile::detect_language(&source_root) {
+                Ok(l) => l,
+                Err(e) => {
+                    warnings.push(format!("源语言探测失败，回退 TypeScript：{e}"));
+                    SourceLang::TypeScript
+                }
+            },
         };
-        let sprint = if single_sprint { 1 } else { g.sprint };
-        let tier = g
+        let mut adapter = create_adapter(lang)?;
+
+        // 逐文件计算 self_sizes/footprints + 分类（复用 cmd_graph_decompose 逻辑）。
+        let file_nodes: Vec<NodeId> = graph
+            .nodes_by_type(NodeType::File)
+            .into_iter()
+            .map(|n| n.id.clone())
+            .collect();
+        let mut self_sizes: HashMap<NodeId, usize> = HashMap::new();
+        let mut footprints: HashMap<NodeId, usize> = HashMap::new();
+        let mut file_kinds: HashMap<String, FileKind> = HashMap::new();
+        let mut read_failures = 0usize;
+        for id in &file_nodes {
+            let rel = id.file_path().unwrap_or_default();
+            let self_tokens = match std::fs::read_to_string(source_root.join(rel)) {
+                Ok(src) => {
+                    let cls = adapter.classify_file(&src);
+                    file_kinds.insert(id.to_string(), cls.file_kind);
+                    src.len().div_ceil(4)
+                }
+                Err(_) => {
+                    read_failures += 1;
+                    file_kinds.insert(id.to_string(), FileKind::Normal);
+                    0
+                }
+            };
+            self_sizes.insert(id.clone(), self_tokens);
+            footprints.insert(
+                id.clone(),
+                self_tokens + graph.dependency_signature_tokens(id),
+            );
+        }
+        if read_failures > 0 {
+            warnings.push(format!(
+                "{read_failures}/{} 个源文件读取失败（自身源码规模按 0 保守处理）；\
+                 若占比偏高，多半是 --root 与 graph build 时的源码根不一致",
+                file_nodes.len()
+            ));
+        }
+
+        let plan = plan_decomposition(&graph, &sequence, &self_sizes, &footprints, budget);
+        let snapshot = plan.canonical_hash();
+
+        let mut units: Vec<MigrationUnit> = Vec::with_capacity(plan.units.len());
+        for u in &plan.units {
+            match u.kind {
+                UnitKind::Cycle => {
+                    units.push(MigrationUnit {
+                        key: u.members.first().cloned().unwrap_or_default(),
+                        members: u.members.clone(),
+                        sprint: u.sprint,
+                        composite_kind: Some(CompositeKind::Cycle),
+                    });
+                }
+                UnitKind::Batch => {
+                    // 仅全部成员均为 mechanical 时走 batch 轻量路径。
+                    let all_mechanical = u.members.iter().all(|m| {
+                        matches!(
+                            file_kinds.get(m),
+                            Some(FileKind::Barrel | FileKind::PureType | FileKind::PureConstant)
+                        )
+                    });
+                    if all_mechanical {
+                        units.push(MigrationUnit {
+                            key: u.members.first().cloned().unwrap_or_default(),
+                            members: u.members.clone(),
+                            sprint: u.sprint,
+                            composite_kind: Some(CompositeKind::Batch),
+                        });
+                    } else {
+                        // 含 non-mechanical 成员：展开为独立单文件模块。
+                        for m in &u.members {
+                            units.push(MigrationUnit {
+                                key: m.clone(),
+                                members: vec![m.clone()],
+                                sprint: u.sprint,
+                                composite_kind: None,
+                            });
+                        }
+                    }
+                }
+                UnitKind::Single | UnitKind::ManualOverBudget => {
+                    if u.kind == UnitKind::ManualOverBudget {
+                        warnings.push(format!(
+                            "文件 {} 超自身源码预算（{budget} tokens），已标为单文件模块",
+                            u.members.first().unwrap_or(&String::new())
+                        ));
+                    }
+                    units.push(MigrationUnit {
+                        key: u.members.first().cloned().unwrap_or_default(),
+                        members: u.members.clone(),
+                        sprint: u.sprint,
+                        composite_kind: None,
+                    });
+                }
+            }
+        }
+
+        (units, Some(snapshot))
+    };
+
+    // 孤儿 pending 清理。
+    let live_keys: std::collections::HashSet<String> =
+        units.iter().map(|u| u.key.clone()).collect();
+    let orphans = machine.retain_modules(&live_keys);
+    if !orphans.is_empty() {
+        warnings.push(format!(
+            "已清理 {} 个孤儿 pending 模块（源码图已无对应节点）: {:?}",
+            orphans.len(),
+            orphans
+        ));
+    }
+
+    let total_sprints = if single_sprint {
+        1
+    } else {
+        units.iter().map(|u| u.sprint).max().unwrap_or(1)
+    };
+
+    let mut modules_json: Vec<serde_json::Value> = Vec::with_capacity(units.len());
+    for u in units {
+        let sprint = if single_sprint { 1 } else { u.sprint };
+        let tier = u
             .members
             .iter()
             .filter_map(|m| tier_map.get(m.as_str()).copied().flatten())
             .max_by_key(|t| tier_rank(*t));
-        // 仅多文件组写 member_files（单文件模块保持 None，向后兼容）。
-        let member_files: Option<Vec<String>> = if g.members.len() > 1 {
-            Some(g.members.iter().map(|m| m.to_string()).collect())
+        let member_files: Option<Vec<String>> = if u.members.len() > 1 {
+            Some(u.members.clone())
         } else {
             None
         };
 
-        // composite 类型：多成员组即循环依赖组（Cycle）；单文件为 None（M3-DEC-01）。
-        // PR-1 不产出 active 合批组（Batch 仅出现在 dry-run 报告，见 decomposition-redesign §7 B1）。
-        let composite_kind = member_files.as_ref().map(|_| CompositeKind::Cycle);
-
-        // 先用引用派生 JSON entry，再把 member_files move 进 ModuleState（省一次 clone）。
         let mut entry = json!({
-            "id": key.to_string(),
+            "id": u.key,
             "tier": tier.map(|t| t.to_string()),
             "sprint": sprint,
         });
         if let Some(mf) = &member_files {
             entry["member_files"] = json!(mf);
-            entry["composite_kind"] = json!(composite_kind.map(|k| k.to_string()));
+            entry["composite_kind"] = json!(u.composite_kind.as_ref().map(|k| k.to_string()));
         }
-        modules.push(entry);
+        modules_json.push(entry);
 
         machine.update_module(
-            key.as_str(),
+            &u.key,
             ModuleState {
                 status: ModuleStatus::Pending,
                 substatus: None,
@@ -1874,9 +2033,9 @@ fn cmd_state_populate_modules(root: Option<&Path>, single_sprint: bool) -> CmdRe
                 blocked_by: None,
                 pre_blocked_status: None,
                 member_files,
-                composite_kind,
-                decomposition_snapshot: None,
-                decomposition_frozen: false,
+                composite_kind: u.composite_kind,
+                decomposition_snapshot: decomposition_snapshot.clone(),
+                decomposition_frozen: decomposition_snapshot.is_some(),
             },
         );
     }
@@ -1889,8 +2048,8 @@ fn cmd_state_populate_modules(root: Option<&Path>, single_sprint: bool) -> CmdRe
 
     Ok((
         json!({
-            "module_count": modules.len(),
-            "modules": modules,
+            "module_count": modules_json.len(),
+            "modules": modules_json,
             "total_sprints": total_sprints,
         }),
         warnings,

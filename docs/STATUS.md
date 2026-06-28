@@ -5,22 +5,15 @@
 ## 当前位置
 
 - **Milestone**: M1 ✅ → M2 ✅ → **M3 多语言支持（Python 优先）**
-- **阶段**: Sprint A ✅ → Sprint B ✅ → Sprint C（PR-C1 ✅ / PR-C2 ✅ / PLG-05 ✅；**PR-C3 仅剩 PLG-06 端到端验证未做**）→ Sprint E：M3-DEC-01 拆解引擎 ✅ + DEC-GATE ✅ → MDR-011 ✅（PR #45 已合并）→ **M3-DEC-02 轻量翻译路径（进行中，2026-06-28）**
-- **🟡 M3-DEC-02 轻量翻译路径（2026-06-28，分支 `feat/m3-dec-02-lightweight-path`）**：run.md 机械合批组轻量路径实现。将 step 6 的 batch 守门替换为完整流程：content-hash 跳过检测 + 一次翻译（translator，逆拓扑序翻整批）+ 整组编译 + 签批（确定性检查→done）。状态机复用单文件简单流（`translating → done`），无 SCC substatus/成员级断点。断点路由表已加 batch 独立行。translator.md 补 Batch 组翻译小节。Codex 设计审查 3 项 important 已修（签名校验条件补全 / 路由表 batch 独立行 / SCC 触发条件缩窄排除 batch）。
+- **阶段**: Sprint A ✅ → Sprint B ✅ → Sprint C ✅（PR-C1/C2/PLG-05 ✅；**PLG-06 = populate-modules 接入 decompose + Python E2E 验证，进行中 2026-06-28**）→ Sprint E ✅（DEC-01 + DEC-GATE + DEC-02 全部合并）
+- **🟢 M3-DEC-02 轻量翻译路径 ✅**（PR [#46](https://github.com/snowzhaozhj/rewriteInRust/pull/46)，2026-06-28 已合并）：run.md 机械合批组轻量路径实现。
+- **🟡 PLG-06 populate-modules 接入 decompose（进行中，2026-06-28）**：`populate-modules` 消费 `plan_decomposition` 产出，将全成员 mechanical 的 `UnitKind::Batch` 写入 `migration-state.json`（`composite_kind=batch` + `member_files` + `decomposition_frozen=true`）。新增 `--budget`/`--no-decompose` 参数。含 non-mechanical 成员的 batch 展开为独立单文件模块。Python fixture E2E 验证 batch 产出正确。
+  - E2E 验证结果：3 个 mechanical Python 文件（barrel + pure_type + pure_constant）→ 1 个 batch 组；mixed batch（py-pkg-deps 含 normal 文件）→ 正确展开为 5 个单文件模块；`--no-decompose` 旧路径不回归。
 - **MDR-011 ✅ 已合并（PR [#45](https://github.com/snowzhaozhj/rewriteInRust/pull/45)，2026-06-28）**：目录优先两阶段凝聚合并。10 真实项目均值 ~76% 缩减。
-- **Sprint E（旧）**: 治"小而机械文件被过度处理"。~~方案权威 = decomposition-redesign.md~~（核心分组算法已被 MDR-011 取代）。
-  - **M3-DEC-01 拆解引擎 4 波已合并**（PR #43）。
-  - **M3-DEC-GATE ✅ 已过门（2026-06-28，分支 `fix/m3-dec01-python-classifier`，待 PR）**：自选 3 真实项目（attrs/toolz/funcy）跑 dry-run，四维度全过——验收记录见 [dec-gate-acceptance.md](./dec-gate-acceptance.md)。
-    - **验收揭穿致命缺陷**：DEC-01 的 `classify_file` 只实现了 TS，M3 目标语言 Python 完全缺失 → 引擎在真实目标语言上零合批/零危险信号（假阴性）。补 Python 分类器 + 跨非机械凸性合批放宽 + 内聚门退化处理（MDR-010）后过门。印证"验收≠工具自测"。
-    - attrs 6 barrel→1 批、内聚 actual=1.0（非空验证内聚硬门）；不变量+确定性 100%；锚点 21 测 + 人工抽检 96.7%/100%。
-  - **下一步 = M3-DEC-02 轻量翻译路径（已解锁）**：run.md 机械合批组轻量路径。任务见 [PLAN-M3.md](./PLAN-M3.md) Sprint E。
-  - DEC-01 四波（commit）：Wave1 图基建（被用符号持久化+deps-of 裁剪+footprint 原语 `2321f10`）/ Wave2 机械判定 predicate+危险分类 `4746c7f` / Wave3 凸性合批+composite_kind+冻结字段+run 守门 `992ea32` / Wave4 dry-run 报告+§8 四维度判据 `afc08da`
-  - 计划已落实 Codex 计划审查 4 项 important（I-1 composite_kind 持久化 / I-2 超预算转人工 / I-3 边 metadata 查询 API / I-4 canonical hash 确定性）
-  - 验收入口：`rustmigrate graph decompose --root <src> --budget <N>`（dry-run，只读，输出四维度报告）
-- **决策（2026-06-27）**：跳过 Sprint D 单独验收，直接做 Sprint E；DEC-GATE 在真实项目上验收拆解，顺带覆盖 Sprint D「真实 Python 项目」价值，且避免 PLG-06 被 DEC-02 重塑返工。PLG-06 暂挂。
-- **测试基线**: 471 测试 / clippy -D / deny / fmt / shellcheck 全绿
+- **Sprint E ✅ 全部完成**：DEC-01（PR #43）+ DEC-GATE（Python 分类器修复）+ DEC-02（PR #46）。
+- **测试基线**: 528 测试 / clippy -D / deny / fmt / shellcheck 全绿
 - **CI 覆盖率**: 待更新
-- **最新合并 PR**: [#45](https://github.com/snowzhaozhj/rewriteInRust/pull/45)（MDR-011 目录优先凝聚合并）；[#43](https://github.com/snowzhaozhj/rewriteInRust/pull/43)（DEC-01 拆解引擎）；[#41](https://github.com/snowzhaozhj/rewriteInRust/pull/41)（decomposition 重设计方案）
+- **最新合并 PR**: [#46](https://github.com/snowzhaozhj/rewriteInRust/pull/46)（DEC-02 轻量翻译路径）；[#45](https://github.com/snowzhaozhj/rewriteInRust/pull/45)（MDR-011 凝聚合并）；[#43](https://github.com/snowzhaozhj/rewriteInRust/pull/43)（DEC-01 拆解引擎）
 - **开放 PR**: [#42](https://github.com/snowzhaozhj/rewriteInRust/pull/42)（M3-VAL-07 设计文档 §11.2 两文件契约同步 + verifier 死链清理，纯文档待合并）
 
 ### M2 遗留（Sprint A 已全部关闭）
@@ -109,7 +102,7 @@ PY-01 ─┬→ PY-02 → PY-03 ─────┐
     - important（主审查证 python.rs StaticType，design-checker 漏判）：「Python 无 type-only import」表述错误 → 改为「无 `import type` 语法关键字，但 `TYPE_CHECKING` 块是惯用仅类型导入，图层已标 StaticType」（translator + analyzer）
     - nit：dynamic_features 条目格式点明为 `"file: 简述"` 字符串；translator 语言基线补「无适配器模板语言降级回退 TS + TODO(port)」
     - nit 未采纳：self 段指针化（保留结构映射防 run 阶段丢失，专项亦认可可接受）
-- [ ] PR-C3：degrade_skip 降级报告增强 + 端到端验证（PLG-05 + PLG-06）
+- [x] PR-C3：degrade_skip 降级报告增强 + 端到端验证（PLG-05 ✅ + PLG-06 进行中）
 
 > **遗留待办**：✅ 已由 PR [#42](https://github.com/snowzhaozhj/rewriteInRust/pull/42) 处理（M3-VAL-07）——① 设计文档 06 §11.2 按 MDR-009 改写为两文件契约；② verifier.md 第 58/87 行 `权威来源：05 §6.x` 死链已清理。待合并。
 

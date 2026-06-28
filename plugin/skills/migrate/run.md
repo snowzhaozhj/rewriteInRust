@@ -82,7 +82,7 @@
 
 机械合批组（`composite_kind=batch`）的成员全为可证明机械文件（纯类型/常量/barrel），无环、footprint 受控。**不走 SCC 契约重路径**，改走简化流程：一次翻完 + 一次编译 + 一次签批。状态机兼容现有转换矩阵（`translating→testing→reviewing→done` 三步快进），无 SCC substatus、无 `{group}-progress.json`、无成员级断点。
 
-> **前置条件（TODO(CLI)）**：batch 组进入 active dispatch 需要 `populate-modules` 支持将 `graph decompose` 产出的 `UnitKind::Batch` 单元写入 `migration-state.json`（设 `composite_kind=batch` + `member_files`），且拆解计划已冻结（`decomposition_frozen=true`）。当前 `populate-modules` 仅产出 `cycle` 类型的 composite——batch active 接入待后续 CLI PR 实现。本节定义的是 batch 就绪后的翻译流程规范。
+> **前置条件**：`populate-modules` 消费 `graph decompose` 产出的 `DecompositionPlan`，将全成员 mechanical 的 `UnitKind::Batch` 单元写入 `migration-state.json`（设 `composite_kind=batch` + `member_files`），且 `decomposition_frozen=true`。`populate-modules` 默认启用 decompose（`--no-decompose` 跳过走旧路径）。
 
 > 设计权威：`docs/decomposition-redesign.md` 第 90-100 行（轻量路径规范 + 状态机接入，该区段仍有效；§7 标题"机械连续装箱"已被 MDR-011 替代但轻量路径描述保留）+ [MDR-011](../../docs/decisions/011-coupling-agglomerative-decomposition.md)。
 
