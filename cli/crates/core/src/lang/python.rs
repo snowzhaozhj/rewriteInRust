@@ -259,11 +259,12 @@ fn py_update_kind_flags(
         "import_statement" | "import_from_statement" | "comment" => {}
         "function_definition" => flags.saw_logic = true,
         "class_definition" => {
-            if py_class_has_method(node) {
-                flags.saw_logic = true;
-            } else {
+            if py_class_is_pure_type(node, source) {
                 // 仅注解/常量/pass/docstring 的 class（Enum/TypedDict/Protocol/纯 dataclass）→ 类型。
                 flags.saw_type = true;
+            } else {
+                // 含方法 / 控制流 / 副作用调用赋值 / 裸表达式 → 逻辑。
+                flags.saw_logic = true;
             }
         }
         "decorated_definition" => {
@@ -316,8 +317,6 @@ fn py_classify_assignment(
             return;
         }
     }
-    // 带 `: TypeAlias`/类型注解但无值的纯声明 → 类型。
-    let has_type_annot = assign.child_by_field_name("type").is_some();
     match assign.child_by_field_name("right") {
         None => {
             // `x: int`（仅注解，无值）= 类型声明。
@@ -331,7 +330,6 @@ fn py_classify_assignment(
             } else {
                 // 可变字面量（list/dict/set）或 call/其它 → 共享可变全局 / 副作用 → Normal。
                 flags.saw_logic = true;
-                let _ = has_type_annot;
                 if py_is_mutable_container_literal(right) {
                     danger.insert(DangerCategory::SharedMutableGlobal);
                 }
@@ -340,20 +338,38 @@ fn py_classify_assignment(
     }
 }
 
-/// class 体内是否含方法定义（含被装饰方法）。
-fn py_class_has_method(class_node: Node) -> bool {
+/// class 体是否为"纯类型/数据容器"（仅注解 / 不可变常量 / pass / docstring / comment，无方法、
+/// 无控制流、无副作用调用赋值）。任一逻辑特征 → 非纯类型（→ Normal）。
+fn py_class_is_pure_type(class_node: Node, source: &str) -> bool {
     let Some(body) = class_node.child_by_field_name("body") else {
-        return false;
+        return true; // 无体（理论上不出现）→ 保守视作纯声明。
     };
     let mut cursor = body.walk();
-    let has_method = body.children(&mut cursor).any(|c| match c.kind() {
-        "function_definition" => true,
-        "decorated_definition" => {
-            py_decorated_inner(c).is_some_and(|inner| inner.kind() == "function_definition")
+    for stmt in body.named_children(&mut cursor) {
+        match stmt.kind() {
+            "comment" | "pass_statement" => {}
+            "expression_statement" => match stmt.child(0).map(|n| n.kind()) {
+                // docstring（裸 string）/ `x: int`（仅注解 assignment 无 right）→ 纯类型。
+                Some("string") | None => {}
+                Some("assignment") => {
+                    let assign = stmt.child(0).unwrap();
+                    // `x: int` 仅注解（无 right）/ `x = <不可变常量|类型表达式>` 可接受；
+                    // 其余（call/可变容器）→ 逻辑。
+                    match assign.child_by_field_name("right") {
+                        None => {}
+                        Some(right)
+                            if py_is_immutable_literal(right) || py_is_type_expr(right, source) => {
+                        }
+                        Some(_) => return false,
+                    }
+                }
+                _ => return false,
+            },
+            // 方法 / 控制流 / 其它语句 → 含逻辑。
+            _ => return false,
         }
-        _ => false,
-    });
-    has_method
+    }
+    true
 }
 
 /// decorated_definition 的被装饰定义（function/class）。
@@ -514,24 +530,35 @@ fn collect_py_call_danger(call: Node, source: &str, danger: &mut BTreeSet<Danger
     }
 }
 
-/// import 模块名 → 危险类别（覆盖 `import x` 与 `from x import y` 两种）。
+/// import 模块名 → 危险类别（覆盖 `import x` / `import a.b as c` / `import a, b` / `from x import y`）。
 fn collect_py_import_danger(node: Node, source: &str, danger: &mut BTreeSet<DangerCategory>) {
-    // 取模块根名（第一个点分段）。
-    let module = match node.kind() {
-        "import_from_statement" => node
-            .child_by_field_name("module_name")
-            .map(|m| py_node_text(m, source).to_string()),
-        _ => {
-            // `import a.b.c` / `import x as y`：首个 dotted_name/aliased_import。
-            let mut cursor = node.walk();
-            let found = node
-                .named_children(&mut cursor)
-                .find(|c| matches!(c.kind(), "dotted_name" | "aliased_import" | "import_prefix"))
-                .map(|c| py_node_text(c, source).to_string());
-            found
+    match node.kind() {
+        "import_from_statement" => {
+            if let Some(m) = node.child_by_field_name("module_name") {
+                classify_module_root(py_node_text(m, source), danger);
+            }
         }
-    };
-    let Some(module) = module else { return };
+        _ => {
+            // `import a.b.c` / `import x as y` / `import a, b`：逐个 import 名（含别名）分类。
+            // 别名导入 `import x as y` 是 `aliased_import` 节点，模块名在其 `name` 字段（dotted_name）；
+            // 同行多导入 `import a, b` 有多个并列 dotted_name——都要遍历（否则危险信号漏判）。
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                let module_node = match child.kind() {
+                    "dotted_name" => Some(child),
+                    "aliased_import" => child.child_by_field_name("name"),
+                    _ => None,
+                };
+                if let Some(mn) = module_node {
+                    classify_module_root(py_node_text(mn, source), danger);
+                }
+            }
+        }
+    }
+}
+
+/// 模块点分路径的根名 → 危险类别。
+fn classify_module_root(module: &str, danger: &mut BTreeSet<DangerCategory>) {
     let root_mod = module
         .trim_start_matches('.')
         .split('.')
@@ -1933,6 +1960,36 @@ class PublicClass:
         let c = classify("async def load():\n    await go()\n");
         assert!(c.danger.contains(&DangerCategory::Concurrency));
         assert!(!c.is_mechanical());
+    }
+
+    #[test]
+    fn classify_aliased_import_hits_danger() {
+        // 别名导入 `import x as y` 不得漏判危险（专项审查 important）。
+        let c = classify("import multiprocessing as mp\ndef f():\n    return mp.Pool()\n");
+        assert!(
+            c.danger.contains(&DangerCategory::Concurrency),
+            "import as 别名应命中并发: {:?}",
+            c.danger
+        );
+    }
+
+    #[test]
+    fn classify_multi_import_hits_all_dangers() {
+        // 同行多导入 `import a, b` 每个都要分类（专项审查 important）。
+        let c = classify("import json, threading\ndef f():\n    pass\n");
+        assert!(
+            c.danger.contains(&DangerCategory::Concurrency),
+            "多导入第二项 threading 应命中并发: {:?}",
+            c.danger
+        );
+    }
+
+    #[test]
+    fn classify_class_with_call_assignment_is_normal() {
+        // 无方法但类体含副作用调用赋值 → 非纯类型（专项审查 nit）。
+        let c = classify("class C:\n    value = compute()\n");
+        assert_eq!(c.file_kind, FileKind::Normal);
+        assert!(!c.is_mechanical(), "类体副作用赋值不应判机械");
     }
 
     #[test]

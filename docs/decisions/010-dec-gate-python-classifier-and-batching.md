@@ -42,7 +42,8 @@ DEC-GATE 在真实 Python 项目（toolz / funcy）上跑 `graph decompose` dry-
 ### D-4：内聚门退化处理 → 零耦合真空满足 + 绝对内聚地板
 
 `CohesionMq` 新增 `coupling_edges`（批内文件相关的耦合边总数 = 内部+外部）。内聚门判定改为：
-`batched_files==0 || coupling_edges==0 || actual≥0.5 || ratio≥1.5`。
+`batched_files==0 || coupling_edges==0 || (baseline_退化 && actual≥0.5) || ratio≥1.5`，
+其中 `baseline_退化 = |actual-baseline|<ε`（重排无法改变划分 → ratio 无判别力）。**绝对地板仅在 baseline 退化时兜底**——避免多批次场景下"actual≥0.5 但劣于随机基线(ratio<1.5)"被地板误放（design-checker nit）。
 
 两类退化均被覆盖：
 1. **零耦合批**（空/孤立文件，如两个空 `__init__.py`）：`coupling_edges==0`，无 ratio 可测、无泄漏风险 → 真空满足。

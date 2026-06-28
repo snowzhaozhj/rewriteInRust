@@ -1308,12 +1308,16 @@ fn cmd_graph_decompose(root: Option<&Path>, budget: usize) -> CmdResult {
             "{residual_mechanical_single} 个机械文件未能合批、仍为独立模块（目标应≈0）"
         ));
     }
-    // 内聚门：无合批 → N/A；批内文件零耦合边（空/孤立文件）→ ratio 测试退化、无低内聚风险，
-    // 真空满足；actual ≥ 0.5 绝对高内聚（覆盖单批次 baseline 退化）；否则按 ratio ≥ 1.5× 判定。
-    // 真泄漏（耦合>0、actual 低、ratio 不显著）才失败——区分"无害/高内聚批"与"机械凑数低内聚"。
+    // 内聚门（判据互斥三档，优先级见下）：
+    //   ① 无合批 / 零耦合边（空·孤立文件）→ ratio 无意义、无低内聚风险 → 真空满足。
+    //   ② baseline 退化（重排无法改变划分，如单批次 → baseline≡actual、ratio 恒 1.0 永达不到 1.5×）
+    //      → 用绝对内聚地板 actual≥0.5（多数耦合留批内）判定。**仅退化时兜底**，避免多批次场景下
+    //      "actual≥0.5 但劣于随机基线（ratio<1.5）"被地板误放（design-checker nit）。
+    //   ③ 其余（baseline 有对比力）→ 按 ratio ≥ 1.5× 随机基线判定。
+    let baseline_degenerate = (cohesion.actual - cohesion.baseline).abs() < 1e-9;
     let cohesion_pass = batched_files == 0
         || cohesion.coupling_edges == 0
-        || cohesion.actual >= COHESION_ABS_FLOOR
+        || (baseline_degenerate && cohesion.actual >= COHESION_ABS_FLOOR)
         || cohesion.ratio >= COHESION_THRESHOLD;
     if !cohesion_pass {
         warnings.push(format!(
