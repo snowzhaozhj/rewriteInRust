@@ -1251,9 +1251,17 @@ fn cmd_graph_decompose(root: Option<&Path>, budget: usize) -> CmdResult {
     // 大面积读失败几乎必是 --root 与 graph build 的根不一致——醒目告警，避免误读为「拆解无收益」。
     if read_failures > 0 {
         warnings.push(format!(
-            "{read_failures}/{} 个源文件读取失败（footprint/机械判定按 0/非机械保守处理）；\
+            "{read_failures}/{} 个源文件读取失败（自身源码规模按 0 保守处理）；\
              若占比偏高，多半是 --root 与 graph build 时的源码根不一致，请用 --root 指定一致路径",
             file_nodes.len()
+        ));
+    }
+    // 规模兜底（MDR-011 §4.2）：凝聚合并对每步全量重算可达 O(U²·(U+E))，U≈缩点组数。
+    // U>800 仍正确（始终全图验凸），但可能较慢——发提示，不改行为；增量优化为 TODO。
+    let initial_units = seq.scc_groups.len();
+    if initial_units > 800 {
+        warnings.push(format!(
+            "单元数 {initial_units} 较大（>800），拆解凝聚可能较慢（正确性不受影响）"
         ));
     }
 

@@ -1537,7 +1537,8 @@ fn smoke_graph_decompose_dry_run() {
     let project = temp_linear_project();
     with_cwd(project.path(), || {
         build_graph_for_query();
-        let (code, json) = run(&["graph", "decompose", "--root", "src", "--budget", "2000"]);
+        // 用默认 budget（12000，MDR-011）跑，覆盖新默认路径。
+        let (code, json) = run(&["graph", "decompose", "--root", "src"]);
         assert_eq!(code, 0, "decompose 应成功: {json}");
 
         let data = &json["data"];
@@ -1548,6 +1549,19 @@ fn smoke_graph_decompose_dry_run() {
         assert!(
             data["classification"].is_object(),
             "应有 classification 维度"
+        );
+        // MDR-011 字段：residual_single_file（替代旧 residual_mechanical_single）+ cohesion.coupling_edges/pass。
+        assert!(
+            data["target"]["residual_single_file"].is_u64(),
+            "应有 residual_single_file 字段"
+        );
+        assert!(
+            data["cohesion"]["coupling_edges"].is_u64(),
+            "应有 cohesion.coupling_edges 字段"
+        );
+        assert!(
+            data["cohesion"]["pass"].is_boolean(),
+            "应有 cohesion.pass 判定"
         );
 
         // 硬不变量：每文件恰好一个单元 + 单元图无环。
@@ -1569,7 +1583,7 @@ fn smoke_graph_decompose_dry_run() {
             .as_str()
             .unwrap()
             .to_string();
-        let (_, json2) = run(&["graph", "decompose", "--root", "src", "--budget", "2000"]);
+        let (_, json2) = run(&["graph", "decompose", "--root", "src"]);
         assert_eq!(
             json2["data"]["invariants"]["plan_hash"].as_str().unwrap(),
             hash1,

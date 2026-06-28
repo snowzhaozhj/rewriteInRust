@@ -407,15 +407,20 @@ fn agglomerate(
         let b_self = units[ub].self_size;
         let b_fp = units[ub].footprint;
         let b_sprint = units[ub].sprint;
+        let b_dir = units[ub].dir.take();
         units[ub].alive = false;
         units[ua].gset.extend(bset);
         units[ua].self_size += b_self;
         units[ua].footprint += b_fp;
         units[ua].sprint = units[ua].sprint.min(b_sprint);
+        // dir 增量 O(1)：两侧同目录则保留，否则 None（等价于对全成员重算 unit_dir，免去 O(n) 重分配）。
+        units[ua].dir = match (units[ua].dir.take(), b_dir) {
+            (Some(x), Some(y)) if x == y => Some(x),
+            _ => None,
+        };
         units[ua].members.extend(b_members);
         units[ua].members.sort();
         units[ua].key = units[ua].members.join("\n");
-        units[ua].dir = unit_dir(&units[ua].members);
     }
 }
 
@@ -932,5 +937,33 @@ mod tests {
         let h1 = plan(&g, &sizes, 100).canonical_hash();
         let h2 = plan(&g, &sizes, 100).canonical_hash();
         assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn empty_graph_yields_no_units() {
+        let g = graph_from(&[], &[]);
+        let p = plan(&g, &fp(&[]), 100);
+        assert!(p.units.is_empty());
+        let inv = verify_invariants(&p, &g, 0);
+        assert!(inv.partition_ok);
+        assert!(inv.dag_acyclic);
+    }
+
+    #[test]
+    fn directory_first_resolves_phase_order_sensitivity() {
+        // codex[7] 反例：pkg/a 跨目录耦合 other/b，pkg/c 同目录但零耦合。
+        // 目录优先两阶段保证 pkg/c 不被遗弃（阶段1 先并 pkg/{a,c}，阶段2 再并 other/b）。
+        let g = graph_from(&["pkg/a", "other/b", "pkg/c"], &[("pkg/a", "other/b")]);
+        let p = plan(
+            &g,
+            &fp(&[("pkg/a", 10), ("other/b", 10), ("pkg/c", 10)]),
+            100,
+        );
+        assert_eq!(p.units.len(), 1, "应全并、pkg/c 不残留: {:?}", p.units);
+        assert_eq!(p.units[0].kind, UnitKind::Batch);
+        assert_eq!(
+            p.units[0].members,
+            vec!["file:other/b", "file:pkg/a", "file:pkg/c"]
+        );
     }
 }
