@@ -5,8 +5,13 @@
 ## 当前位置
 
 - **Milestone**: M1 ✅ → M2 ✅ → **M3 多语言支持（Python 优先）**
-- **阶段**: Sprint A ✅ → Sprint B ✅ → Sprint C（PR-C1 ✅ / PR-C2 ✅ / PLG-05 ✅；**PR-C3 仅剩 PLG-06 端到端验证未做**）→ **进行中：Sprint E M3-DEC-01 拆解引擎**
-- **Sprint E**: 治"小而机械文件被过度处理"（<10 行翻半小时）。方案权威 = [decomposition-redesign.md](./decomposition-redesign.md)（grilling + 两轮 Codex 审查定稿）。**M3-DEC-01 拆解引擎 4 波已实现完成（分支 `feat/m3-dec01-decompose-engine`，待 PR 审查/合并）**；下一步 = M3-DEC-GATE 真实项目验收（硬前置，需用户给 1-2 个真实 Python 目标项目），过门后 M3-DEC-02 轻量翻译路径。任务见 [PLAN-M3.md](./PLAN-M3.md) Sprint E。
+- **阶段**: Sprint A ✅ → Sprint B ✅ → Sprint C（PR-C1 ✅ / PR-C2 ✅ / PLG-05 ✅；**PR-C3 仅剩 PLG-06 端到端验证未做**）→ Sprint E：M3-DEC-01 拆解引擎 ✅ + **M3-DEC-GATE ✅ 已过门**（2026-06-28）→ 下一步 **M3-DEC-02 轻量翻译路径（已解锁）**
+- **Sprint E**: 治"小而机械文件被过度处理"（<10 行翻半小时）。方案权威 = [decomposition-redesign.md](./decomposition-redesign.md)（grilling + 两轮 Codex 审查定稿）。
+  - **M3-DEC-01 拆解引擎 4 波已合并**（PR #43）。
+  - **M3-DEC-GATE ✅ 已过门（2026-06-28，分支 `fix/m3-dec01-python-classifier`，待 PR）**：自选 3 真实项目（attrs/toolz/funcy）跑 dry-run，四维度全过——验收记录见 [dec-gate-acceptance.md](./dec-gate-acceptance.md)。
+    - **验收揭穿致命缺陷**：DEC-01 的 `classify_file` 只实现了 TS，M3 目标语言 Python 完全缺失 → 引擎在真实目标语言上零合批/零危险信号（假阴性）。补 Python 分类器 + 跨非机械凸性合批放宽 + 内聚门退化处理（MDR-010）后过门。印证"验收≠工具自测"。
+    - attrs 6 barrel→1 批、内聚 actual=1.0（非空验证内聚硬门）；不变量+确定性 100%；锚点 21 测 + 人工抽检 96.7%/100%。
+  - **下一步 = M3-DEC-02 轻量翻译路径（已解锁）**：run.md 机械合批组轻量路径。任务见 [PLAN-M3.md](./PLAN-M3.md) Sprint E。
   - DEC-01 四波（commit）：Wave1 图基建（被用符号持久化+deps-of 裁剪+footprint 原语 `2321f10`）/ Wave2 机械判定 predicate+危险分类 `4746c7f` / Wave3 凸性合批+composite_kind+冻结字段+run 守门 `992ea32` / Wave4 dry-run 报告+§8 四维度判据 `afc08da`
   - 计划已落实 Codex 计划审查 4 项 important（I-1 composite_kind 持久化 / I-2 超预算转人工 / I-3 边 metadata 查询 API / I-4 canonical hash 确定性）
   - 验收入口：`rustmigrate graph decompose --root <src> --budget <N>`（dry-run，只读，输出四维度报告）
