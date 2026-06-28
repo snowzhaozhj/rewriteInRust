@@ -150,13 +150,13 @@ pub enum GraphCommands {
         #[arg(long, default_value = "json")]
         format: String,
     },
-    /// 拆解 dry-run：凸性合批计划 + §8 验收判据报告（M3-DEC-01，不写状态、不派翻译）。
+    /// 拆解 dry-run：目录优先两阶段凝聚计划 + §8 验收判据报告（MDR-011，不写状态、不派翻译）。
     Decompose {
-        /// 源码根目录（读文件算 footprint 自身规模；默认取配置 source_root）。
+        /// 源码根目录（读文件算自身源码规模；默认取配置 source_root）。
         #[arg(long)]
         root: Option<PathBuf>,
-        /// footprint 预算 B（token≈bytes/4，超此值的单文件转人工；默认 2000）。
-        #[arg(long, default_value_t = 2000)]
+        /// 自身源码预算 B（token≈bytes/4；单元成员 self_size 之和上限，单文件超此值转人工；默认 12000≈1000 行）。
+        #[arg(long, default_value_t = 12000)]
         budget: usize,
     },
 }
@@ -1182,25 +1182,34 @@ fn collect_exported_interfaces(
 fn cmd_graph_decompose(root: Option<&Path>, budget: usize) -> CmdResult {
     use rustmigrate_core::lang::FileKind;
     use rustmigrate_core::types::common::SourceLang;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
 
     let mut warnings: Vec<String> = Vec::new();
     let cfg = load_config_or_default(&mut warnings);
     let source_root = root
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from(&cfg.project.source_root));
-    let lang = cfg
-        .project
-        .source_language
-        .unwrap_or(SourceLang::TypeScript);
+    // 源语言：优先配置；未配置则按 --root 探测（对齐 graph build，避免静默用 TS 适配器
+    // 分类 Python 源码——会把 .py 当 TS 解析、产出垃圾 file_kind/danger）；探测失败显式告警回退 TS。
+    let lang = match cfg.project.source_language {
+        Some(l) => l,
+        None => match rustmigrate_core::profile::detect_language(&source_root) {
+            Ok(l) => l,
+            Err(e) => {
+                warnings.push(format!("源语言探测失败，回退 TypeScript：{e}"));
+                SourceLang::TypeScript
+            }
+        },
+    };
 
     let graph = load_graph()?;
     let seq = migration_sequence(&graph);
     let mut adapter = create_adapter(lang)?;
 
-    // 逐文件：footprint = 自身源码(bytes/4) + 被用依赖签名；机械判定 via classify_file。
+    // 逐文件：self_size = 自身源码(bytes/4)（预算门控）；footprint = self + 被用依赖签名（仅报告）。
+    // danger/file_kind 仍由 classify_file 出（供 PR-2 规则注入与分类合理性报告）。
+    let mut self_sizes: HashMap<NodeId, usize> = HashMap::new();
     let mut footprints: HashMap<NodeId, usize> = HashMap::new();
-    let mut mechanical: HashSet<NodeId> = HashSet::new();
     let mut kind_counts: HashMap<&'static str, usize> = HashMap::new();
     let mut danger_files = 0usize;
     let mut read_failures = 0usize;
@@ -1214,9 +1223,6 @@ fn cmd_graph_decompose(root: Option<&Path>, budget: usize) -> CmdResult {
         let self_tokens = match std::fs::read_to_string(source_root.join(rel)) {
             Ok(src) => {
                 let cls = adapter.classify_file(&src);
-                if cls.is_mechanical() {
-                    mechanical.insert(id.clone());
-                }
                 if !cls.danger.is_empty() {
                     danger_files += 1;
                 }
@@ -1230,25 +1236,36 @@ fn cmd_graph_decompose(root: Option<&Path>, budget: usize) -> CmdResult {
                 src.len().div_ceil(4)
             }
             Err(_) => {
-                // 读失败：按非机械 Normal 保守计数（保持 by_file_kind 与文件总数对账），自身规模按 0。
+                // 读失败：按 Normal 保守计数（保持 by_file_kind 与文件总数对账），自身规模按 0。
                 read_failures += 1;
                 *kind_counts.entry("unreadable").or_insert(0) += 1;
                 0
             }
         };
-        let fp = self_tokens + graph.dependency_signature_tokens(id);
-        footprints.insert(id.clone(), fp);
+        self_sizes.insert(id.clone(), self_tokens);
+        footprints.insert(
+            id.clone(),
+            self_tokens + graph.dependency_signature_tokens(id),
+        );
     }
     // 大面积读失败几乎必是 --root 与 graph build 的根不一致——醒目告警，避免误读为「拆解无收益」。
     if read_failures > 0 {
         warnings.push(format!(
-            "{read_failures}/{} 个源文件读取失败（footprint/机械判定按 0/非机械保守处理）；\
+            "{read_failures}/{} 个源文件读取失败（自身源码规模按 0 保守处理）；\
              若占比偏高，多半是 --root 与 graph build 时的源码根不一致，请用 --root 指定一致路径",
             file_nodes.len()
         ));
     }
+    // 规模兜底（MDR-011 §4.2）：凝聚合并对每步全量重算可达 O(U²·(U+E))，U≈缩点组数。
+    // U>800 仍正确（始终全图验凸），但可能较慢——发提示，不改行为；增量优化为 TODO。
+    let initial_units = seq.scc_groups.len();
+    if initial_units > 800 {
+        warnings.push(format!(
+            "单元数 {initial_units} 较大（>800），拆解凝聚可能较慢（正确性不受影响）"
+        ));
+    }
 
-    let plan = plan_decomposition(&graph, &seq, &footprints, &mechanical, budget);
+    let plan = plan_decomposition(&graph, &seq, &self_sizes, &footprints, budget);
     let cohesion = cohesion_mq(&plan, &graph, 0x00FF_EE15, 100);
     let invariants = verify_invariants(&plan, &graph, file_nodes.len());
 
@@ -1267,19 +1284,20 @@ fn cmd_graph_decompose(root: Option<&Path>, budget: usize) -> CmdResult {
     } else {
         0.0
     };
-    // 残留机械单文件模块（应≈0）：Single 单成员且属机械集合。
-    let residual_mechanical_single = plan
+    // 残留独立单文件模块（目标尽量小，非硬零；高 + 缩减率低 → 人工区分"没合动"vs"本就独立"）。
+    let residual_single_file = plan
         .units
         .iter()
         .filter(|u| {
-            u.kind == rustmigrate_core::graph::decompose::UnitKind::Single
-                && u.members.len() == 1
-                && mechanical.contains(&NodeId::new(u.members[0].clone()))
+            u.kind == rustmigrate_core::graph::decompose::UnitKind::Single && u.members.len() == 1
         })
         .count();
 
     // 验收门告警（任一不满足 → status 降级 warning）。
     const COHESION_THRESHOLD: f64 = 1.5;
+    // 绝对内聚地板：随机基线退化（单批次/批数太少 → 重排无法改变划分 → baseline≡actual、ratio 恒 1.0）
+    // 时的主判据。actual = 内部/(内部+外部)，≥0.5 即多数耦合留在批内 = 客观高内聚（MDR-010）。
+    const COHESION_ABS_FLOOR: f64 = 0.5;
     if !invariants.partition_ok {
         warnings.push("不变量违反：存在文件未恰好归属一个单元".into());
     }
@@ -1288,20 +1306,25 @@ fn cmd_graph_decompose(root: Option<&Path>, budget: usize) -> CmdResult {
     }
     if invariants.over_budget_count > 0 {
         warnings.push(format!(
-            "{} 个单文件超 footprint 预算，已标记转人工",
+            "{} 个单文件超自身源码预算，已标记转人工",
             invariants.over_budget_count
         ));
     }
-    if residual_mechanical_single > 0 {
-        warnings.push(format!(
-            "{residual_mechanical_single} 个机械文件未能合批、仍为独立模块（目标应≈0）"
-        ));
-    }
-    let cohesion_pass = batched_files == 0 || cohesion.ratio >= COHESION_THRESHOLD;
+    // 内聚门（判据互斥三档，优先级见下）：
+    //   ① 无合批 / 零耦合边（空·孤立文件）→ ratio 无意义、无低内聚风险 → 真空满足。
+    //   ② baseline 退化（重排无法改变划分，如单批次 → baseline≡actual、ratio 恒 1.0 永达不到 1.5×）
+    //      → 用绝对内聚地板 actual≥0.5（多数耦合留批内）判定。**仅退化时兜底**，避免多批次场景下
+    //      "actual≥0.5 但劣于随机基线（ratio<1.5）"被地板误放（design-checker nit）。
+    //   ③ 其余（baseline 有对比力）→ 按 ratio ≥ 1.5× 随机基线判定。
+    let baseline_degenerate = (cohesion.actual - cohesion.baseline).abs() < 1e-9;
+    let cohesion_pass = batched_files == 0
+        || cohesion.coupling_edges == 0
+        || (baseline_degenerate && cohesion.actual >= COHESION_ABS_FLOOR)
+        || cohesion.ratio >= COHESION_THRESHOLD;
     if !cohesion_pass {
         warnings.push(format!(
-            "内聚 MQ ratio={:.2} < {COHESION_THRESHOLD}（合批内聚未显著优于随机基线）",
-            cohesion.ratio
+            "内聚 MQ actual={:.2}（<{COHESION_ABS_FLOOR}）且 ratio={:.2}（<{COHESION_THRESHOLD}×基线）：合批内聚不足",
+            cohesion.actual, cohesion.ratio
         ));
     }
 
@@ -1313,7 +1336,7 @@ fn cmd_graph_decompose(root: Option<&Path>, budget: usize) -> CmdResult {
             "reduction_rate": reduction_rate,
             "batched_files": batched_files,
             "batched_ratio": batched_ratio,
-            "residual_mechanical_single": residual_mechanical_single,
+            "residual_single_file": residual_single_file,
         },
         "invariants": {
             "partition_ok": invariants.partition_ok,
@@ -1327,6 +1350,7 @@ fn cmd_graph_decompose(root: Option<&Path>, budget: usize) -> CmdResult {
             "ratio": cohesion.ratio,
             "threshold": COHESION_THRESHOLD,
             "batched_files": cohesion.batched_files,
+            "coupling_edges": cohesion.coupling_edges,
             "pass": cohesion_pass,
         },
         "classification": {

@@ -115,9 +115,11 @@ impl FileClassification {
         }
     }
 
-    /// "可证明机械"判定（不含 footprint 大小——大小约束在合批阶段用 footprint 施加）。
+    /// "可证明机械"判定 = 文件类型属于 Barrel/PureType/PureConstant **且**无任何危险信号。
     ///
-    /// = 文件类型属于 Barrel/PureType/PureConstant **且**无任何危险信号。
+    /// 注：MDR-011 拆解已**不再**用机械门做合批/流程分流（改目录+耦合凝聚，见
+    /// `graph/decompose.rs`）。本判定**保留供 PR-2 轻量翻译路径**对纯机械簇做更省的处理选型，
+    /// 当前仅单测引用——勿当死代码删除。
     pub fn is_mechanical(&self) -> bool {
         self.danger.is_empty() && !matches!(self.file_kind, FileKind::Normal)
     }
