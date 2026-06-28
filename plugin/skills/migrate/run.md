@@ -49,6 +49,7 @@
 | `testing` | 跳第 10 步 |
 | `reviewing` | 跳第 11 步 |
 | `pending` / `translating`(substatus=null) + `composite_kind=batch` | 跑步骤 2-3（blocked 解除 + 依赖就绪门禁），然后**直接进入步骤 6「Batch 组轻量路径」**（跳过步骤 4/5 意图摘要/确认）；content-hash 决定跳过翻译或整批重派 |
+| `pending` / `translating`(substatus=null) + `composite_kind=coupled_batch` | 跑步骤 2-3，然后进入**步骤 4 意图摘要 → 5 意图确认 → 步骤 6「CoupledBatch 组完整路径」**（完整门禁，不跳步骤） |
 | `pending` / `translating`(substatus=null) | 正常从第 2 步开始（非 batch 组的默认路由） |
 
 ### 2. 解除 blocked + 循环依赖检测
@@ -74,13 +75,16 @@
 ### 6. Phase A 忠实翻译（translator）
 
 **先判模块形态**：读 `modules[target].member_files` 与 `composite_kind`（M3-DEC-01）。
-- `composite_kind=batch`（机械合批组）→ 下面「Batch 组轻量路径」。
+- `composite_kind=batch`（全机械合批组）→ 下面「Batch 组轻量路径」。
+- `composite_kind=coupled_batch`（含逻辑耦合簇）→ 下面「CoupledBatch 组完整路径」。
 - `member_files` 为空（单文件模块）→ 下面「单文件 Phase A」。
 - `member_files` 非空且 `composite_kind=cycle`（或缺省的循环组）→「SCC 组 Phase A（契约门 → 逐文件填空）」。
 
-#### Batch 组轻量路径（机械合批）
+#### Batch 组轻量路径（全机械合批）
 
-机械合批组（`composite_kind=batch`）的成员全为可证明机械文件（纯类型/常量/barrel），无环、footprint 受控。**不走 SCC 契约重路径**，改走简化流程：一次翻完 + 一次编译 + 一次签批。状态机兼容现有转换矩阵（`translating→testing→reviewing→done` 三步快进），无 SCC substatus、无 `{group}-progress.json`、无成员级断点。
+> 本节仅适用 `composite_kind=batch`（全机械成员）。含逻辑成员的耦合簇是 `composite_kind=coupled_batch`，走下面「CoupledBatch 组完整路径」（有行为测试），不要走本轻量路径。
+
+全机械合批组（`composite_kind=batch`）的成员全为可证明机械文件（纯类型/常量/barrel），无环、footprint 受控。**不走 SCC 契约重路径**，改走简化流程：一次翻完 + 一次编译 + 一次签批。状态机兼容现有转换矩阵（`translating→testing→reviewing→done` 三步快进），无 SCC substatus、无 `{group}-progress.json`、无成员级断点。
 
 > **前置条件**：`populate-modules` 消费 `graph decompose` 产出的 `DecompositionPlan`，将全成员 mechanical 的 `UnitKind::Batch` 单元写入 `migration-state.json`（设 `composite_kind=batch` + `member_files`），且 `decomposition_frozen=true`。`populate-modules` 默认启用 decompose（`--no-decompose` 跳过走旧路径）。
 
@@ -121,6 +125,24 @@
 **失败恢复**：同 SKILL.md 三步。重试耗尽 → `paused`，等用户 `--degrade` 确认。`intermediate/attempts/{batch}-*.rs` 始终保留。
 
 **断点恢复路由**：batch 组不使用 SCC 专属 substatus（`contract_ready` / `phase_a_in_progress` / `contract_revision`）。中断后按 `translating`(substatus=null) 路由，进入本节时 content-hash 跳过检测自动处理"已完成但未标 done"的情况。
+
+#### CoupledBatch 组完整路径（耦合逻辑簇）
+
+耦合逻辑簇（`composite_kind=coupled_batch`）的成员由 decompose 按耦合/目录分组，**含运行时行为、必须验证等价性**，故走**完整门禁**——不是机械 batch 的「编译即门禁」。无环、self_size 之和受 budget 门约束（≤12000 token），故同 batch 一样**一次翻完整批**，但翻译后跑结构门 + Phase B + 行为测试 + 审查。**不复用 SCC 契约+stub 重路径**（无环，单次调用即可保跨文件一致）。
+
+**流程**（已先经步骤 4 整组意图摘要 + 步骤 5 意图确认）：
+
+1. **整组翻译**（translator，一次翻完整批，step_index=6）：输入=全部成员源文件（逆拓扑序呈现）+ 外部依赖 interfaces（`rustmigrate graph interfaces <batch-key> --deps-of <batch-key>`）+ porting rules + 裁剪依赖清单（若有）。tier=成员 max tier（已算入 `modules[key].tier`），据此走单候选（`trivial`）或多候选（`standard`/`full`，产 2 候选）。产出各成员 `.rs` 写 `rust_root/` + `intermediate/{batch}-source-hashes.json`。详见 [translator.md](../../agents/translator.md)「CoupledBatch 组翻译」。
+2. **L1 校验**：全成员 `.rs` 存在、非空；多候选模式下各候选编译通过。
+3. **候选选优（7a，仅 standard/full）+ 对抗审查（7b）**：同单文件路径的步骤 7，对整组产出做 verifier 选优 + 对抗审查。
+4. **结构门（步骤 8）**：`rustmigrate stats compare` 校验整组 Phase A 1:1 结构。越界→忠实重做。
+5. **Phase B（步骤 9）**：整组惯用化 + 编译修正（同单文件步骤 9）。
+6. **行为测试（步骤 10）**：verifier 对整组公共 API 生成测试并跑 `verify.sh`。done 前置硬条件同单文件（通过率 ≥ 预期、clippy 无 warning、`TODO(port)`=0、无未确认 `bug_replica`）。
+7. **最终签批（步骤 11）**：`state transition --to done`。
+
+**状态机**：沿用 `translating→testing→reviewing→done` 转换矩阵（与单文件路径同，无新 substatus）。
+
+**error/retry/skip 与失败恢复**：完全复用单文件路径——断点路由的 `degrade_*`+`--force`、编译/测试失败 `→paused→degrade_*`、测试/审查不达标停 testing/reviewing 标 incomplete、`blocked` 恢复，均与单文件一致。content-hash 跳过检测（同 Batch 6.1）可复用（整组原子）。
 
 #### 单文件 Phase A
 调 translator（**前/后记 subagent_call**，step_index=6）产出 Phase A 翻译。根据模块 tier 分两种模式：

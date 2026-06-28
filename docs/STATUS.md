@@ -7,8 +7,14 @@
 - **Milestone**: M1 ✅ → M2 ✅ → **M3 多语言支持（Python 优先）**
 - **阶段**: Sprint A ✅ → Sprint B ✅ → Sprint C ✅（PR-C1/C2/PLG-05 ✅；**PLG-06 = populate-modules 接入 decompose + Python E2E 验证，进行中 2026-06-28**）→ Sprint E ✅（DEC-01 + DEC-GATE + DEC-02 全部合并）
 - **🟢 M3-DEC-02 轻量翻译路径 ✅**（PR [#46](https://github.com/snowzhaozhj/rewriteInRust/pull/46)，2026-06-28 已合并）：run.md 机械合批组轻量路径实现。
-- **🟡 PLG-06 populate-modules 接入 decompose（进行中，2026-06-28）**：`populate-modules` 消费 `plan_decomposition` 产出，将全成员 mechanical 的 `UnitKind::Batch` 写入 `migration-state.json`（`composite_kind=batch` + `member_files` + `decomposition_frozen=true`）。新增 `--budget`/`--no-decompose` 参数。含 non-mechanical 成员的 batch 展开为独立单文件模块。Python fixture E2E 验证 batch 产出正确。
-  - E2E 验证结果：3 个 mechanical Python 文件（barrel + pure_type + pure_constant）→ 1 个 batch 组；mixed batch（py-pkg-deps 含 normal 文件）→ 正确展开为 5 个单文件模块；`--no-decompose` 旧路径不回归。
+- **🟢 M3-DEC coupled_batch 分流修复（2026-06-28，分支 `feat/m3-coupled-batch`，待审查/PR）**：修复 populate 把非机械 batch 展开成独立模块、推翻 decompose 分组的接口断裂（与 MDR-011 §6 矛盾）。grilling + codex 双审收敛后实施：
+  - **新增 `CompositeKind::CoupledBatch`**：`Batch` 收窄为全机械（轻量路径，编译即门禁）；`CoupledBatch`=含逻辑耦合簇（完整组路径：翻译→结构门→Phase B→行为测试→审查）。populate 保留 `classify_file` 按成员机械性分流（读失败保守落 CoupledBatch）。
+  - Plugin 文档：run.md 新增「CoupledBatch 组完整路径」+ 形态/路由分支；translator.md 新增「CoupledBatch 组翻译」；workflow.md 修正「多文件=SCC」分派为按 `composite_kind` 分流（codex 标的真风险）；analyze.md 同步三类 composite 说明。
+  - 测试：衔接测试改断言 coupled_batch + 组感知 `state deps`；新增 py-pkg-deps 混合簇保留为 1 个 coupled_batch 回归测试；orphan/active-progress 测试 pin `--no-decompose`（保留旧路径回归）。
+  - 验证：`just ci` 全绿；jmespath 真实场景 8 文件→2 模块（1 coupled_batch[7]+1 single），符合预期。
+  - 计划文档：`docs/plan-populate-batch-unify.md`（含 grilling 决策记录 + codex 8 条补充）。
+  - TODO 落账：danger→RULE/定向测试注入（跨路径既有缺口，独立 PR）；`graph topo-sort --members --reverse`。
+- **🟡 PLG-06 populate-modules 接入 decompose（2026-06-28）**：`populate-modules` 消费 `plan_decomposition` 产出，写 `migration-state.json`（`composite_kind` + `member_files` + `decomposition_frozen`）。新增 `--budget`/`--no-decompose` 参数。（注：原「含 non-mechanical 成员展开为独立模块」行为已由上方 M3-DEC coupled_batch 修复推翻。）
 - **MDR-011 ✅ 已合并（PR [#45](https://github.com/snowzhaozhj/rewriteInRust/pull/45)，2026-06-28）**：目录优先两阶段凝聚合并。10 真实项目均值 ~76% 缩减。
 - **Sprint E ✅ 全部完成**：DEC-01（PR #43）+ DEC-GATE（Python 分类器修复）+ DEC-02（PR #46）。
 - **测试基线**: 528 测试 / clippy -D / deny / fmt / shellcheck 全绿

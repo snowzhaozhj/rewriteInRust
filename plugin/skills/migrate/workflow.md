@@ -60,11 +60,15 @@ rustmigrate state get modules
    - `dependency_interfaces`：`rustmigrate graph interfaces <module> --deps-of <dep>` 收集已完成依赖的接口。**SCC 组只收跨组依赖**——组内成员互引的签名已在 `{group}-contract.md` 的 `cross_file_calls` 里冻结，不再走 `dependency_interfaces`（重复且可能与契约不一致）。
    - `porting_rules`：`.rust-migration/porting/` 下适用规则
 
-3. **派发 SubAgent**（使用 Agent tool，`isolation: "worktree"`）。按模块形态分两种派发：
+3. **派发 SubAgent**（使用 Agent tool，`isolation: "worktree"`）。**按 `composite_kind` 分派，不要按「`member_files` 多文件」判形态**——SCC 组、机械 batch、耦合逻辑簇都是多文件，必须靠 `composite_kind` 区分：
 
-   **单文件模块**：派一个 SubAgent，在独立 worktree 内执行完整翻译循环（run.md 步骤 2-11：translate → cargo check → compile_fix → test）。完成后 worktree 内 `git add -A && git commit`。
+   **单文件模块**（`member_files` 为空）：派一个 SubAgent，在独立 worktree 内执行完整翻译循环（run.md 步骤 2-11：translate → cargo check → compile_fix → test）。完成后 worktree 内 `git add -A && git commit`。
 
-   **SCC 模块组**（`member_files` 多文件）：在**同一个 worktree** 内执行该组的完整 run.md 步骤 2-11，**仅步骤 6（Phase A）展开为两波**（6a/6b），其余步骤（7 审查/8 结构门/9 Phase B/10 测试）照单模块流程组级各跑一次——SCC 组绕过这些门会让等价审查/测试失守：
+   **机械 batch 组**（`composite_kind=batch`）：在同一 worktree 内走 run.md「Batch 组轻量路径」（一次翻完 + 编译即门禁，跳意图摘要/测试/Phase B）。完成后整组一次提交。
+
+   **耦合逻辑簇**（`composite_kind=coupled_batch`）：在同一 worktree 内走 run.md「CoupledBatch 组完整路径」——**一次翻完整批**（不展开成员、不走契约/stub），翻译后照单模块流程组级各跑一次结构门/Phase B/测试/审查。完成后整组一次提交。
+
+   **SCC 模块组**（`composite_kind=cycle`）：在**同一个 worktree** 内执行该组的完整 run.md 步骤 2-11，**仅步骤 6（Phase A）展开为两波**（6a/6b），其余步骤（7 审查/8 结构门/9 Phase B/10 测试）照单模块流程组级各跑一次——SCC 组绕过这些门会让等价审查/测试失守：
    - **步骤 6a 先派 1 个契约 agent**（translator）：产 `{group}-contract.md` + stub 骨架，过**契约门**（stub `cargo check`）。契约门不过不进下一波。
    - **步骤 6b 再派 N 个成员 agent 并行**（每成员文件一个 translator，同 worktree）：各自填对应 mod 的 `todo!()`，签名锁定、零共享写（共享写面已在契约步冻结，故同 worktree 并行无冲突）。N > `max_concurrent` 时分批。
    - **步骤 7-10**：6b 全部填完后，照 run.md 对整组跑一次对抗审查/结构门/Phase B/测试（候选选优步对 SCC 跳过，理由见 run.md 步骤 7a）。
