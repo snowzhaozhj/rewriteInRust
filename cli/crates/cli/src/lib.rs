@@ -150,13 +150,13 @@ pub enum GraphCommands {
         #[arg(long, default_value = "json")]
         format: String,
     },
-    /// 拆解 dry-run：凸性合批计划 + §8 验收判据报告（M3-DEC-01，不写状态、不派翻译）。
+    /// 拆解 dry-run：目录优先两阶段凝聚计划 + §8 验收判据报告（MDR-011，不写状态、不派翻译）。
     Decompose {
-        /// 源码根目录（读文件算 footprint 自身规模；默认取配置 source_root）。
+        /// 源码根目录（读文件算自身源码规模；默认取配置 source_root）。
         #[arg(long)]
         root: Option<PathBuf>,
-        /// footprint 预算 B（token≈bytes/4，超此值的单文件转人工；默认 2000）。
-        #[arg(long, default_value_t = 2000)]
+        /// 自身源码预算 B（token≈bytes/4；单元成员 self_size 之和上限，单文件超此值转人工；默认 12000≈1000 行）。
+        #[arg(long, default_value_t = 12000)]
         budget: usize,
     },
 }
@@ -1182,7 +1182,7 @@ fn collect_exported_interfaces(
 fn cmd_graph_decompose(root: Option<&Path>, budget: usize) -> CmdResult {
     use rustmigrate_core::lang::FileKind;
     use rustmigrate_core::types::common::SourceLang;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
 
     let mut warnings: Vec<String> = Vec::new();
     let cfg = load_config_or_default(&mut warnings);
@@ -1206,9 +1206,10 @@ fn cmd_graph_decompose(root: Option<&Path>, budget: usize) -> CmdResult {
     let seq = migration_sequence(&graph);
     let mut adapter = create_adapter(lang)?;
 
-    // 逐文件：footprint = 自身源码(bytes/4) + 被用依赖签名；机械判定 via classify_file。
+    // 逐文件：self_size = 自身源码(bytes/4)（预算门控）；footprint = self + 被用依赖签名（仅报告）。
+    // danger/file_kind 仍由 classify_file 出（供 PR-2 规则注入与分类合理性报告）。
+    let mut self_sizes: HashMap<NodeId, usize> = HashMap::new();
     let mut footprints: HashMap<NodeId, usize> = HashMap::new();
-    let mut mechanical: HashSet<NodeId> = HashSet::new();
     let mut kind_counts: HashMap<&'static str, usize> = HashMap::new();
     let mut danger_files = 0usize;
     let mut read_failures = 0usize;
@@ -1222,9 +1223,6 @@ fn cmd_graph_decompose(root: Option<&Path>, budget: usize) -> CmdResult {
         let self_tokens = match std::fs::read_to_string(source_root.join(rel)) {
             Ok(src) => {
                 let cls = adapter.classify_file(&src);
-                if cls.is_mechanical() {
-                    mechanical.insert(id.clone());
-                }
                 if !cls.danger.is_empty() {
                     danger_files += 1;
                 }
@@ -1238,14 +1236,17 @@ fn cmd_graph_decompose(root: Option<&Path>, budget: usize) -> CmdResult {
                 src.len().div_ceil(4)
             }
             Err(_) => {
-                // 读失败：按非机械 Normal 保守计数（保持 by_file_kind 与文件总数对账），自身规模按 0。
+                // 读失败：按 Normal 保守计数（保持 by_file_kind 与文件总数对账），自身规模按 0。
                 read_failures += 1;
                 *kind_counts.entry("unreadable").or_insert(0) += 1;
                 0
             }
         };
-        let fp = self_tokens + graph.dependency_signature_tokens(id);
-        footprints.insert(id.clone(), fp);
+        self_sizes.insert(id.clone(), self_tokens);
+        footprints.insert(
+            id.clone(),
+            self_tokens + graph.dependency_signature_tokens(id),
+        );
     }
     // 大面积读失败几乎必是 --root 与 graph build 的根不一致——醒目告警，避免误读为「拆解无收益」。
     if read_failures > 0 {
@@ -1256,7 +1257,7 @@ fn cmd_graph_decompose(root: Option<&Path>, budget: usize) -> CmdResult {
         ));
     }
 
-    let plan = plan_decomposition(&graph, &seq, &footprints, &mechanical, budget);
+    let plan = plan_decomposition(&graph, &seq, &self_sizes, &footprints, budget);
     let cohesion = cohesion_mq(&plan, &graph, 0x00FF_EE15, 100);
     let invariants = verify_invariants(&plan, &graph, file_nodes.len());
 
@@ -1275,14 +1276,12 @@ fn cmd_graph_decompose(root: Option<&Path>, budget: usize) -> CmdResult {
     } else {
         0.0
     };
-    // 残留机械单文件模块（应≈0）：Single 单成员且属机械集合。
-    let residual_mechanical_single = plan
+    // 残留独立单文件模块（目标尽量小，非硬零；高 + 缩减率低 → 人工区分"没合动"vs"本就独立"）。
+    let residual_single_file = plan
         .units
         .iter()
         .filter(|u| {
-            u.kind == rustmigrate_core::graph::decompose::UnitKind::Single
-                && u.members.len() == 1
-                && mechanical.contains(&NodeId::new(u.members[0].clone()))
+            u.kind == rustmigrate_core::graph::decompose::UnitKind::Single && u.members.len() == 1
         })
         .count();
 
@@ -1299,13 +1298,8 @@ fn cmd_graph_decompose(root: Option<&Path>, budget: usize) -> CmdResult {
     }
     if invariants.over_budget_count > 0 {
         warnings.push(format!(
-            "{} 个单文件超 footprint 预算，已标记转人工",
+            "{} 个单文件超自身源码预算，已标记转人工",
             invariants.over_budget_count
-        ));
-    }
-    if residual_mechanical_single > 0 {
-        warnings.push(format!(
-            "{residual_mechanical_single} 个机械文件未能合批、仍为独立模块（目标应≈0）"
         ));
     }
     // 内聚门（判据互斥三档，优先级见下）：
@@ -1334,7 +1328,7 @@ fn cmd_graph_decompose(root: Option<&Path>, budget: usize) -> CmdResult {
             "reduction_rate": reduction_rate,
             "batched_files": batched_files,
             "batched_ratio": batched_ratio,
-            "residual_mechanical_single": residual_mechanical_single,
+            "residual_single_file": residual_single_file,
         },
         "invariants": {
             "partition_ok": invariants.partition_ok,

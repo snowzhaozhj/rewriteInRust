@@ -1,12 +1,13 @@
-//! 模块拆解引擎（M3-DEC-01）：在 SCC 缩点 DAG 上做凸性拓扑 first-fit 装箱。
+//! 模块拆解引擎（MDR-011）：在 SCC 缩点 DAG 上做"目录优先两阶段凝聚合并"。
 //!
-//! 把"每文件=一个翻译单元"改为"机械小文件按 footprint 预算合批"，治理小而机械文件被
-//! 过度处理（方案权威见 `docs/decomposition-redesign.md`）。本模块是**纯算法**：footprint
-//! 与机械判定由调用方（CLI）计算后传入，便于单测；不读文件系统、不依赖 adapter。
+//! 把"每文件=一个翻译单元"改为"沿目录/调用簇双轴、在 DAG 约束下凝聚成耦合内聚的翻译单元"，
+//! 治理一文件一模块的过度碎片化（推翻原"机械小文件 footprint 装箱"，方案权威见
+//! `docs/decisions/011-coupling-agglomerative-decomposition.md`）。本模块是**纯算法**：self_size
+//! 与 footprint 由调用方（CLI）计算后传入，便于单测；不读文件系统、不依赖 adapter。
 //!
-//! 产出 [`DecompositionPlan`] 供 dry-run 报告消费（PR-1 不进 active dispatch，见方案 §7 B1）。
+//! 产出 [`DecompositionPlan`] 供 dry-run 报告消费（不进 active dispatch）。
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 
 use serde::Serialize;
 
@@ -21,13 +22,13 @@ use super::SourceGraph;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnitKind {
-    /// 单文件模块（落预算带内、非机械，或机械但无法合批）。
+    /// 单文件模块（无同目录可并对、又无耦合可并，或预算/凸性受限无法合并）。
     Single,
-    /// 机械合批组（≥2 个机械小文件，凸性 first-fit 装箱）。
+    /// 凝聚簇（≥2 文件，目录优先两阶段按耦合/目录合并，DAG 约束保凸）。
     Batch,
-    /// 循环依赖组（多成员 SCC 或自环）——走现有契约重路径。
+    /// 循环依赖组（多成员 SCC 或自环）——走现有契约重路径，冻结不参与合并。
     Cycle,
-    /// 超 footprint 预算的单文件——标记转人工，不进自动 dispatch。
+    /// 超自身源码预算的单文件——标记转人工，不进自动 dispatch。
     ManualOverBudget,
 }
 
@@ -104,157 +105,124 @@ fn unit_kind_key(k: UnitKind) -> &'static str {
     }
 }
 
-/// 在 SCC 缩点 DAG 上做凸性拓扑 first-fit 装箱，产出拆解计划。
+/// 在 SCC 缩点 DAG 上做"目录优先两阶段凝聚合并"，产出拆解计划（MDR-011）。
 ///
 /// - `seq`：迁移序列（提供 SCC 组、确定性顺序、is_cycle）。
-/// - `footprints`：每个**文件** NodeId 的 footprint（自身源码 + 被用依赖签名，token≈bytes/4）。
-///   缺失的文件按 0 处理（保守：倾向合批，但同时受凸性约束）。
-/// - `mechanical`：机械文件 NodeId 集合（CLI 用 `classify_file` 判定）。
-/// - `budget`：footprint 预算 B。
+/// - `self_sizes`：每个**文件** NodeId 的自身源码 token（≈bytes/4）——**预算门控对象**。
+///   缺失按 0（保守：倾向合并，仍受凸性约束）。
+/// - `footprints`：每个文件 NodeId 的 footprint（自身+依赖签名）——仅供单元体积报告。
+/// - `budget`：自身源码预算 B（单元成员 self_size 之和上限；单文件超此值 → ManualOverBudget）。
 ///
-/// 规则：① 循环组 → `Cycle`；② 单文件超预算 → `ManualOverBudget`；③ 单文件机械且不超预算
-/// → 进 first-fit 合批（满预算或破凸性即封口）；④ 其余单文件 → `Single`。合批组 size==1
-/// 退化为 `Single`。凸性 = 合并不得制造跨外部组的回边。
+/// 算法：① 循环组 → `Cycle`（冻结、不合并，但参与 quotient 拓扑）；② 阶段 1 在同目录内按
+/// 耦合权重凝聚（含零耦合同目录对）；③ 阶段 2 跨目录按耦合权重(>0)凝聚；每步约束 self_size
+/// 之和 ≤ budget 且当前 quotient 仍凸（`is_convex`，不成环）；④ 收尾分类。凸性/DAG 仅按
+/// Imports 边（与 `unit_graph_acyclic` 一致）；耦合权重计 Imports+Calls+Extends+UsesType。
 pub fn plan_decomposition(
     graph: &SourceGraph,
     seq: &MigrationSequence,
+    self_sizes: &HashMap<NodeId, usize>,
     footprints: &HashMap<NodeId, usize>,
-    mechanical: &HashSet<NodeId>,
     budget: usize,
 ) -> DecompositionPlan {
     let groups = &seq.scc_groups;
     let n = groups.len();
 
-    // 文件 NodeId → 组索引。
-    let mut group_of: HashMap<&NodeId, usize> = HashMap::new();
+    // 文件路径 → 缩点组索引（符号节点的 file_path 也落到其所属文件的组）。
+    let mut group_of_path: HashMap<&str, usize> = HashMap::new();
     for (gi, g) in groups.iter().enumerate() {
         for m in &g.members {
-            group_of.insert(m, gi);
-        }
-    }
-
-    // 缩点 DAG 出边邻接（去自环）。
-    let mut succ: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
-    for dep in graph.edges() {
-        if dep.edge_type != EdgeType::Imports {
-            continue;
-        }
-        if let (Some(&si), Some(&ti)) = (group_of.get(&dep.source), group_of.get(&dep.target)) {
-            if si != ti {
-                succ[si].insert(ti);
+            if let Some(p) = m.file_path() {
+                group_of_path.insert(p, gi);
             }
         }
     }
-    let reach = transitive_reachability(&succ);
 
-    // 组 footprint = 成员 footprint 之和。
-    let group_footprint = |g: &super::topo::SccGroup| -> usize {
+    // 组级 Imports 邻接（凸性/DAG 专用，与 unit_graph_acyclic 同源；缩点保证此图无环）。
+    let mut gsucc: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
+    // 组级耦合权重（无向，Imports+Calls+Extends+UsesType 计数；仅作合并优先级打分）。
+    let mut gcoup: HashMap<(usize, usize), u64> = HashMap::new();
+    for dep in graph.edges() {
+        let (sp, tp) = match (dep.source.file_path(), dep.target.file_path()) {
+            (Some(s), Some(t)) => (s, t),
+            _ => continue,
+        };
+        let (si, ti) = match (group_of_path.get(sp), group_of_path.get(tp)) {
+            (Some(&s), Some(&t)) => (s, t),
+            _ => continue,
+        };
+        if si == ti {
+            continue;
+        }
+        match dep.edge_type {
+            EdgeType::Imports => {
+                gsucc[si].insert(ti);
+                *gcoup.entry((si.min(ti), si.max(ti))).or_default() += 1;
+            }
+            EdgeType::Calls | EdgeType::Extends | EdgeType::UsesType => {
+                *gcoup.entry((si.min(ti), si.max(ti))).or_default() += 1;
+            }
+            _ => {}
+        }
+    }
+
+    // 每组（=单文件，循环组除外）的 self_size / footprint 之和。
+    let group_sum = |g: &super::topo::SccGroup, tab: &HashMap<NodeId, usize>| -> usize {
         g.members
             .iter()
-            .map(|m| footprints.get(m).copied().unwrap_or(0))
+            .map(|m| tab.get(m).copied().unwrap_or(0))
             .sum()
     };
 
-    let mut units: Vec<DecompUnit> = Vec::new();
-    // 当前开放的合批：组索引集 + footprint 累计 + 起始 sprint。
-    let mut open: Vec<usize> = Vec::new();
-    let mut open_fp: usize = 0;
-
-    let flush = |open: &mut Vec<usize>, open_fp: &mut usize, units: &mut Vec<DecompUnit>| {
-        if open.is_empty() {
-            return;
-        }
-        let mut members: Vec<String> = open
-            .iter()
-            .flat_map(|&gi| groups[gi].members.iter().map(|m| m.to_string()))
-            .collect();
-        members.sort();
-        let kind = if open.len() > 1 {
-            UnitKind::Batch
-        } else {
-            UnitKind::Single
-        };
-        let sprint = open.iter().map(|&gi| groups[gi].sprint).min().unwrap_or(1);
-        units.push(DecompUnit {
-            members,
-            kind,
-            footprint: *open_fp,
-            sprint,
-        });
-        open.clear();
-        *open_fp = 0;
-    };
-
-    for (gi, g) in groups.iter().enumerate() {
-        let fp = group_footprint(g);
-
-        // 循环组：封口当前合批，单独成单元。
-        if g.is_cycle {
-            flush(&mut open, &mut open_fp, &mut units);
+    // 初始化：每个缩点组一个单元（循环组冻结，不参与合并但占据 quotient 节点）。
+    let mut units: Vec<Unit> = groups
+        .iter()
+        .enumerate()
+        .map(|(gi, g)| {
             let mut members: Vec<String> = g.members.iter().map(|m| m.to_string()).collect();
             members.sort();
-            units.push(DecompUnit {
+            Unit {
+                gset: BTreeSet::from([gi]),
+                alive: true,
+                frozen: g.is_cycle,
+                self_size: group_sum(g, self_sizes),
+                footprint: group_sum(g, footprints),
+                sprint: g.sprint,
+                dir: unit_dir(&members),
+                key: members.join("\n"),
                 members,
-                kind: UnitKind::Cycle,
-                footprint: fp,
-                sprint: g.sprint,
-            });
-            continue;
-        }
+            }
+        })
+        .collect();
 
-        // 单文件组。
-        let is_mech = g.members.iter().all(|m| mechanical.contains(m));
-        if fp > budget {
-            // 超预算 → 转人工（即便机械也装不下）。
-            flush(&mut open, &mut open_fp, &mut units);
-            let mut members: Vec<String> = g.members.iter().map(|m| m.to_string()).collect();
-            members.sort();
-            units.push(DecompUnit {
-                members,
-                kind: UnitKind::ManualOverBudget,
-                footprint: fp,
-                sprint: g.sprint,
-            });
-            continue;
-        }
+    // 阶段 1：同目录凝聚（含零耦合同目录对）。阶段 2：跨目录按耦合权重凝聚。
+    agglomerate(&mut units, &gsucc, &gcoup, n, budget, MergeAxis::SameDir);
+    agglomerate(&mut units, &gsucc, &gcoup, n, budget, MergeAxis::Coupled);
 
-        if !is_mech {
-            // 非机械单文件：单独成 Single，但**不**封口当前合批——允许"跨非机械跳跃"合并
-            // 真正独立（无依赖路径相隔）的机械文件。凸性约束保证：若该非机械组横亘在批内
-            // 成员的依赖路径上，后续机械组的 is_convex 检查会自动拒绝（不会跨真实依赖合批，
-            // 不成环）。仅 cycle / over-budget 这类强拓扑边界才封口（见上）。
-            // 触发依据：DEC-GATE 真实项目数据——机械 barrel 在拓扑序里被逻辑文件隔开、
-            // 严格"连续装箱"永不合批、残留机械单文件 >0（MDR-010）。
-            units.push(DecompUnit {
-                members: vec![groups[gi].members[0].to_string()],
-                kind: UnitKind::Single,
-                footprint: fp,
-                sprint: g.sprint,
-            });
-            continue;
-        }
-
-        // 机械且不超预算 → 尝试加入当前合批。
-        let fits_budget = open_fp + fp <= budget;
-        let stays_convex = {
-            let mut candidate: BTreeSet<usize> = open.iter().copied().collect();
-            candidate.insert(gi);
-            is_convex(&candidate, &reach, n)
-        };
-        if !open.is_empty() && fits_budget && stays_convex {
-            open.push(gi);
-            open_fp += fp;
-        } else {
-            // 预算/凸性不允许并入 → 封口旧组，自身开新组。
-            flush(&mut open, &mut open_fp, &mut units);
-            open.push(gi);
-            open_fp = fp;
-        }
-    }
-    flush(&mut open, &mut open_fp, &mut units);
+    // 收尾分类。
+    let mut out: Vec<DecompUnit> = units
+        .into_iter()
+        .filter(|u| u.alive)
+        .map(|u| {
+            let kind = if u.frozen {
+                UnitKind::Cycle
+            } else if u.members.len() == 1 && u.self_size > budget {
+                UnitKind::ManualOverBudget
+            } else if u.members.len() >= 2 {
+                UnitKind::Batch
+            } else {
+                UnitKind::Single
+            };
+            DecompUnit {
+                members: u.members,
+                kind,
+                footprint: u.footprint,
+                sprint: u.sprint,
+            }
+        })
+        .collect();
 
     // 稳定排序：按首成员字典序（units 内 members 已排序）。
-    units.sort_by(|a, b| {
+    out.sort_by(|a, b| {
         a.members
             .first()
             .map(String::as_str)
@@ -262,7 +230,193 @@ pub fn plan_decomposition(
             .cmp(b.members.first().map(String::as_str).unwrap_or(""))
     });
 
-    DecompositionPlan { units }
+    DecompositionPlan { units: out }
+}
+
+/// 凝聚过程中的可变单元状态。
+struct Unit {
+    /// 成员缩点组索引集。
+    gset: BTreeSet<usize>,
+    /// 成员文件 NodeId 串（字典序），首个作 module key 代表。
+    members: Vec<String>,
+    alive: bool,
+    /// 循环组：冻结，不参与合并（但作为 quotient 节点参与凸性）。
+    frozen: bool,
+    self_size: usize,
+    footprint: usize,
+    sprint: u32,
+    /// 公共直接父目录（混目录 None）。
+    dir: Option<String>,
+    /// 成员串拼接，决定性破平。
+    key: String,
+}
+
+/// 合并轴：阶段 1 限同目录、阶段 2 限耦合>0。
+#[derive(Clone, Copy, PartialEq)]
+enum MergeAxis {
+    SameDir,
+    Coupled,
+}
+
+/// 单元成员的公共直接父目录；不一致返回 None。`members` 为 File NodeId 串。
+fn unit_dir(members: &[String]) -> Option<String> {
+    let dir_of = |s: &str| -> String {
+        // NodeId 形如 `file:path/x.py`；取 file_path 再去掉最后一段。
+        let path = NodeId::new(s.to_string());
+        let p = path.file_path().unwrap_or("");
+        match p.rfind('/') {
+            Some(i) => p[..i].to_string(),
+            None => String::new(),
+        }
+    };
+    let mut it = members.iter();
+    let first = dir_of(it.next()?);
+    for m in it {
+        if dir_of(m) != first {
+            return None;
+        }
+    }
+    Some(first)
+}
+
+/// 在当前 `units` 上按给定轴反复合并，直到无合法对。每步：选 (耦合权重 desc, pair_key asc)
+/// 首个满足 self_size 预算 + 当前 quotient 凸性 的对，合并；合并后重算 reach（正确性优先）。
+fn agglomerate(
+    units: &mut [Unit],
+    gsucc: &[BTreeSet<usize>],
+    gcoup: &HashMap<(usize, usize), u64>,
+    n_groups: usize,
+    budget: usize,
+    axis: MergeAxis,
+) {
+    loop {
+        // 存活单元 → 紧凑索引；组 → 紧凑索引。
+        let alive: Vec<usize> = (0..units.len()).filter(|&i| units[i].alive).collect();
+        let m = alive.len();
+        if m < 2 {
+            return;
+        }
+        let mut compact_of_group = vec![usize::MAX; n_groups];
+        for (ai, &ui) in alive.iter().enumerate() {
+            for &g in &units[ui].gset {
+                compact_of_group[g] = ai;
+            }
+        }
+        // 紧凑单元级 Imports 邻接 + 可达（凸性专用）。
+        let mut usucc: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); m];
+        for gi in 0..n_groups {
+            let ai = compact_of_group[gi];
+            if ai == usize::MAX {
+                continue;
+            }
+            for &gj in &gsucc[gi] {
+                let aj = compact_of_group[gj];
+                if aj != usize::MAX && ai != aj {
+                    usucc[ai].insert(aj);
+                }
+            }
+        }
+        let reach = transitive_reachability(&usucc);
+        // 紧凑单元级耦合权重。
+        let mut ucoup: HashMap<(usize, usize), u64> = HashMap::new();
+        for (&(gi, gj), &w) in gcoup {
+            let ai = compact_of_group[gi];
+            let aj = compact_of_group[gj];
+            if ai == usize::MAX || aj == usize::MAX || ai == aj {
+                continue;
+            }
+            *ucoup.entry((ai.min(aj), ai.max(aj))).or_default() += w;
+        }
+
+        // 候选对生成（紧凑索引 a<b），按轴限定域。
+        let mut cands: Vec<(usize, usize)> = Vec::new();
+        match axis {
+            MergeAxis::SameDir => {
+                // 按目录分桶，桶内全对（含零耦合）。
+                let mut buckets: HashMap<&str, Vec<usize>> = HashMap::new();
+                for (ai, &ui) in alive.iter().enumerate() {
+                    if units[ui].frozen {
+                        continue;
+                    }
+                    if let Some(d) = &units[ui].dir {
+                        buckets.entry(d.as_str()).or_default().push(ai);
+                    }
+                }
+                for ids in buckets.values() {
+                    for i in 0..ids.len() {
+                        for j in (i + 1)..ids.len() {
+                            cands.push((ids[i].min(ids[j]), ids[i].max(ids[j])));
+                        }
+                    }
+                }
+            }
+            MergeAxis::Coupled => {
+                for &(a, b) in ucoup.keys() {
+                    if !units[alive[a]].frozen && !units[alive[b]].frozen {
+                        cands.push((a, b));
+                    }
+                }
+            }
+        }
+        if cands.is_empty() {
+            return;
+        }
+
+        // 选本轮要合并的紧凑索引对：所有对 units 的不可变借用都限制在本块内，
+        // 块结束后借用释放，下面才能可变借用 units 做合并（否则借用检查冲突）。
+        let picked: Option<(usize, usize)> = {
+            // 排序：耦合权重 desc → pair_key asc（pair_key = 两侧成员串规范化对，破平到底）。
+            cands.sort_by(|&(a1, b1), &(a2, b2)| {
+                let w = |a: usize, b: usize| ucoup.get(&(a.min(b), a.max(b))).copied().unwrap_or(0);
+                let pk = |a: usize, b: usize| -> (&str, &str) {
+                    let ka = units[alive[a]].key.as_str();
+                    let kb = units[alive[b]].key.as_str();
+                    if ka <= kb {
+                        (ka, kb)
+                    } else {
+                        (kb, ka)
+                    }
+                };
+                w(a2, b2)
+                    .cmp(&w(a1, b1))
+                    .then_with(|| pk(a1, b1).cmp(&pk(a2, b2)))
+            });
+            // 取首个满足预算 + 凸性 的对。
+            let mut chosen = None;
+            for &(a, b) in &cands {
+                if units[alive[a]].self_size + units[alive[b]].self_size > budget {
+                    continue;
+                }
+                let set: BTreeSet<usize> = BTreeSet::from([a, b]);
+                if is_convex(&set, &reach, m) {
+                    chosen = Some((a, b));
+                    break;
+                }
+            }
+            chosen
+        };
+        let (a, b) = match picked {
+            Some(p) => p,
+            None => return,
+        };
+
+        // 合并 alive[b] → alive[a]。成员由两单元自身成员列表归并，无需回溯 groups。
+        let (ua, ub) = (alive[a], alive[b]);
+        let bset = std::mem::take(&mut units[ub].gset);
+        let b_members = std::mem::take(&mut units[ub].members);
+        let b_self = units[ub].self_size;
+        let b_fp = units[ub].footprint;
+        let b_sprint = units[ub].sprint;
+        units[ub].alive = false;
+        units[ua].gset.extend(bset);
+        units[ua].self_size += b_self;
+        units[ua].footprint += b_fp;
+        units[ua].sprint = units[ua].sprint.min(b_sprint);
+        units[ua].members.extend(b_members);
+        units[ua].members.sort();
+        units[ua].key = units[ua].members.join("\n");
+        units[ua].dir = unit_dir(&units[ua].members);
+    }
 }
 
 /// 缩点 DAG 的传递可达集（reach[i] = 从 i 出发可达的组，不含 i 自身）。
@@ -609,8 +763,10 @@ mod tests {
         files.iter().map(|(f, n)| (NodeId::file(f), *n)).collect()
     }
 
-    fn mech(files: &[&str]) -> HashSet<NodeId> {
-        files.iter().map(|f| NodeId::file(f)).collect()
+    /// 用同一 sizes 同时作 self_sizes 与 footprints 跑拆解（MDR-011 两阶段凝聚）。
+    fn plan(g: &SourceGraph, sizes: &HashMap<NodeId, usize>, budget: usize) -> DecompositionPlan {
+        let seq = migration_sequence(g);
+        plan_decomposition(g, &seq, sizes, sizes, budget)
     }
 
     fn unit_for<'a>(plan: &'a DecompositionPlan, first_member: &str) -> &'a DecompUnit {
@@ -621,160 +777,109 @@ mod tests {
     }
 
     #[test]
-    fn convex_chain_batches_all() {
-        // a→b→c 全机械、预算充裕 → 合成一个 Batch。
+    fn same_dir_chain_merges_all() {
+        // a→b→c 同目录(根)、预算充裕 → 阶段1 全并成单 Batch（不再依赖"机械"门）。
         let g = graph_from(&["a", "b", "c"], &[("a", "b"), ("b", "c")]);
-        let seq = migration_sequence(&g);
-        let plan = plan_decomposition(
-            &g,
-            &seq,
-            &fp(&[("a", 10), ("b", 10), ("c", 10)]),
-            &mech(&["a", "b", "c"]),
-            100,
-        );
-        assert_eq!(plan.units.len(), 1, "应合成单个 Batch: {:?}", plan.units);
+        let plan = plan(&g, &fp(&[("a", 10), ("b", 10), ("c", 10)]), 100);
+        assert_eq!(plan.units.len(), 1, "同目录应全并: {:?}", plan.units);
         assert_eq!(plan.units[0].kind, UnitKind::Batch);
         assert_eq!(plan.units[0].members, vec!["file:a", "file:b", "file:c"]);
         assert_eq!(plan.units[0].footprint, 30);
     }
 
     #[test]
-    fn convexity_blocks_merge_across_external() {
-        // a→b→c，b 非机械（外部）→ a 与 c 不能跨 b 合批（破凸性）。
-        let g = graph_from(&["a", "b", "c"], &[("a", "b"), ("b", "c")]);
-        let seq = migration_sequence(&g);
-        let plan = plan_decomposition(
-            &g,
-            &seq,
-            &fp(&[("a", 10), ("b", 10), ("c", 10)]),
-            &mech(&["a", "c"]), // b 非机械
-            100,
-        );
-        assert!(
-            plan.units.iter().all(|u| u.kind == UnitKind::Single),
-            "凸性应阻断跨外部节点合批，全为 Single: {:?}",
-            plan.units
-        );
-        assert_eq!(plan.units.len(), 3);
+    fn same_dir_independent_merges_all() {
+        // funcy 类：同目录、互不 import（零耦合）也应被阶段1 目录轴并起来。
+        let g = graph_from(&["a", "b", "c"], &[]); // 无边
+        let plan = plan(&g, &fp(&[("a", 10), ("b", 10), ("c", 10)]), 100);
+        assert_eq!(plan.units.len(), 1, "零耦合同目录应并: {:?}", plan.units);
+        assert_eq!(plan.units[0].kind, UnitKind::Batch);
+        assert_eq!(plan.units[0].members, vec!["file:a", "file:b", "file:c"]);
     }
 
     #[test]
-    fn budget_caps_batch() {
-        // a→b→c 全机械，单个 40、预算 100 → 只能两两装箱（b+c），a 溢出单独。
+    fn different_dirs_no_coupling_stay_separate() {
+        // 退化情形（codex[6]）：不同目录 + 零耦合 → 无候选，正确地保持各自独立。
+        let g = graph_from(&["x/a", "y/b"], &[]);
+        let plan = plan(&g, &fp(&[("x/a", 10), ("y/b", 10)]), 100);
+        assert_eq!(plan.units.len(), 2);
+        assert!(plan.units.iter().all(|u| u.kind == UnitKind::Single));
+    }
+
+    #[test]
+    fn cross_dir_coupling_merges_phase2() {
+        // 跨目录但有耦合边 → 阶段2 调用簇轴并起来。
+        let g = graph_from(&["pkg/a", "other/b"], &[("pkg/a", "other/b")]);
+        let plan = plan(&g, &fp(&[("pkg/a", 10), ("other/b", 10)]), 100);
+        assert_eq!(plan.units.len(), 1, "跨目录耦合应并: {:?}", plan.units);
+        assert_eq!(plan.units[0].kind, UnitKind::Batch);
+        assert_eq!(plan.units[0].members, vec!["file:other/b", "file:pkg/a"]);
+    }
+
+    #[test]
+    fn budget_caps_merge() {
+        // a→b→c 同目录、单个 40、预算 100 → (a,b) 先并(pair_key 破平)，c 因预算溢出独立。
         let g = graph_from(&["a", "b", "c"], &[("a", "b"), ("b", "c")]);
-        let seq = migration_sequence(&g);
-        let plan = plan_decomposition(
-            &g,
-            &seq,
-            &fp(&[("a", 40), ("b", 40), ("c", 40)]),
-            &mech(&["a", "b", "c"]),
-            100,
-        );
-        let batch = unit_for(&plan, "file:b");
+        let plan = plan(&g, &fp(&[("a", 40), ("b", 40), ("c", 40)]), 100);
+        let batch = unit_for(&plan, "file:a");
         assert_eq!(batch.kind, UnitKind::Batch);
-        assert_eq!(batch.members, vec!["file:b", "file:c"]);
-        let a = unit_for(&plan, "file:a");
-        assert_eq!(a.kind, UnitKind::Single);
+        assert_eq!(batch.members, vec!["file:a", "file:b"]);
+        let c = unit_for(&plan, "file:c");
+        assert_eq!(c.kind, UnitKind::Single);
+    }
+
+    #[test]
+    fn convexity_blocks_cyclic_merge() {
+        // 1→2、3→4；目录 p={1,4}、q={2,3}。阶段1 先并 {1,4}（凸），随后 {2,3} 虽同目录、
+        // 预算够（20≤25），但合并会与 {1,4} 成环 → is_convex 必须阻断，2、3 保持分离。
+        let g = graph_from(
+            &["p/n1", "q/n2", "q/n3", "p/n4"],
+            &[("p/n1", "q/n2"), ("q/n3", "p/n4")],
+        );
+        let plan = plan(
+            &g,
+            &fp(&[("p/n1", 10), ("q/n2", 10), ("q/n3", 10), ("p/n4", 10)]),
+            25,
+        );
+        let pq = unit_for(&plan, "file:p/n1");
+        assert_eq!(pq.kind, UnitKind::Batch);
+        assert_eq!(pq.members, vec!["file:p/n1", "file:p/n4"]);
+        // n2、n3 因凸性（非预算）不得并入同一单元。
+        let u2 = unit_for(&plan, "file:q/n2");
+        let u3 = unit_for(&plan, "file:q/n3");
+        assert_eq!(u2.kind, UnitKind::Single);
+        assert_eq!(u3.kind, UnitKind::Single);
+        let inv = verify_invariants(&plan, &g, 4);
+        assert!(inv.dag_acyclic, "单元图必须无环");
+        assert!(inv.partition_ok);
     }
 
     #[test]
     fn over_budget_single_is_manual() {
         let g = graph_from(&["a"], &[]);
-        let seq = migration_sequence(&g);
-        let plan = plan_decomposition(&g, &seq, &fp(&[("a", 200)]), &mech(&["a"]), 100);
+        let plan = plan(&g, &fp(&[("a", 200)]), 100);
         assert_eq!(plan.units.len(), 1);
         assert_eq!(plan.units[0].kind, UnitKind::ManualOverBudget);
     }
 
     #[test]
     fn cycle_group_is_cycle_unit() {
-        // a↔b 互引 + 独立 c（机械）。
+        // a↔b 互引（循环组冻结，不参与合并）+ 独立 c。
         let g = graph_from(&["a", "b", "c"], &[("a", "b"), ("b", "a")]);
-        let seq = migration_sequence(&g);
-        let plan = plan_decomposition(
-            &g,
-            &seq,
-            &fp(&[("a", 5), ("b", 5), ("c", 5)]),
-            &mech(&["a", "b", "c"]),
-            100,
-        );
+        let plan = plan(&g, &fp(&[("a", 5), ("b", 5), ("c", 5)]), 100);
         let cyc = unit_for(&plan, "file:a");
         assert_eq!(cyc.kind, UnitKind::Cycle);
         assert_eq!(cyc.members, vec!["file:a", "file:b"]);
-    }
-
-    #[test]
-    fn non_mechanical_single_not_batched() {
-        let g = graph_from(&["a", "b"], &[("a", "b")]);
-        let seq = migration_sequence(&g);
-        let plan = plan_decomposition(
-            &g,
-            &seq,
-            &fp(&[("a", 10), ("b", 10)]),
-            &mech(&["a"]), // b 非机械
-            100,
-        );
-        assert!(plan.units.iter().all(|u| u.kind == UnitKind::Single));
-        assert_eq!(plan.units.len(), 2);
-    }
-
-    #[test]
-    fn independent_mechanicals_batch_across_nonmech_gap() {
-        // MDR-010：a、c 机械且互相独立，b 非机械横在拓扑序中间（但不在 a、c 依赖路径上）。
-        // 放宽后"跨非机械跳跃"应合批 {a,c}；b 仍单独 Single。凸性安全（无 a→…→c 依赖）。
-        let g = graph_from(&["a", "b", "c"], &[]); // 三者全独立、无边
-        let seq = migration_sequence(&g);
-        let plan = plan_decomposition(
-            &g,
-            &seq,
-            &fp(&[("a", 10), ("b", 10), ("c", 10)]),
-            &mech(&["a", "c"]), // b 非机械
-            100,
-        );
-        let batch = unit_for(&plan, "file:a");
-        assert_eq!(
-            batch.kind,
-            UnitKind::Batch,
-            "独立机械应跨非机械合批: {:?}",
-            plan.units
-        );
-        assert_eq!(batch.members, vec!["file:a", "file:c"]);
-        let b = unit_for(&plan, "file:b");
-        assert_eq!(b.kind, UnitKind::Single);
-    }
-
-    #[test]
-    fn dependency_separated_mechanicals_stay_unbatched() {
-        // 对照：a→b→c，b 非机械且在 a、c 依赖路径上 → 凸性必须阻断 {a,c} 合批（不退化为 MDR-010 误并）。
-        let g = graph_from(&["a", "b", "c"], &[("a", "b"), ("b", "c")]);
-        let seq = migration_sequence(&g);
-        let plan = plan_decomposition(
-            &g,
-            &seq,
-            &fp(&[("a", 10), ("b", 10), ("c", 10)]),
-            &mech(&["a", "c"]),
-            100,
-        );
-        assert!(
-            plan.units.iter().all(|u| u.kind == UnitKind::Single),
-            "依赖隔开的机械文件不得合批: {:?}",
-            plan.units
-        );
-        assert_eq!(plan.units.len(), 3);
+        // c 在根目录但唯一非冻结成员 → 无同目录可并对 → 保持 Single。
+        let c = unit_for(&plan, "file:c");
+        assert_eq!(c.kind, UnitKind::Single);
     }
 
     #[test]
     fn cohesion_mq_single_cohesive_batch() {
         // a→b→c 合成单 batch，内部边 a→b、b→c，无外部 → actual MQ = 1.0。
         let g = graph_from(&["a", "b", "c"], &[("a", "b"), ("b", "c")]);
-        let seq = migration_sequence(&g);
-        let plan = plan_decomposition(
-            &g,
-            &seq,
-            &fp(&[("a", 10), ("b", 10), ("c", 10)]),
-            &mech(&["a", "b", "c"]),
-            100,
-        );
+        let plan = plan(&g, &fp(&[("a", 10), ("b", 10), ("c", 10)]), 100);
         let mq = cohesion_mq(&plan, &g, 42, 50);
         assert_eq!(mq.batched_files, 3);
         assert!(
@@ -785,10 +890,9 @@ mod tests {
 
     #[test]
     fn cohesion_mq_no_batch_is_neutral() {
-        let g = graph_from(&["a", "b"], &[("a", "b")]);
-        let seq = migration_sequence(&g);
-        // b 非机械 → 全 Single，无 batch。
-        let plan = plan_decomposition(&g, &seq, &fp(&[("a", 10), ("b", 10)]), &mech(&["a"]), 100);
+        // 不同目录 + 无边 → 无 batch。
+        let g = graph_from(&["x/a", "y/b"], &[]);
+        let plan = plan(&g, &fp(&[("x/a", 10), ("y/b", 10)]), 100);
         let mq = cohesion_mq(&plan, &g, 1, 10);
         assert_eq!(mq.batched_files, 0);
         assert_eq!(mq.ratio, 1.0);
@@ -796,16 +900,9 @@ mod tests {
 
     #[test]
     fn cohesion_mq_zero_coupling_batch_is_neutral() {
-        // 两个无任何边的孤立机械文件合批 → coupling_edges=0（内聚门据此真空满足，不强求 1.5×）。
-        let g = graph_from(&["a", "b"], &[]); // 无边
-        let seq = migration_sequence(&g);
-        let plan = plan_decomposition(
-            &g,
-            &seq,
-            &fp(&[("a", 0), ("b", 0)]),
-            &mech(&["a", "b"]),
-            100,
-        );
+        // 同目录、无边 → 阶段1 合批，但 coupling_edges=0（内聚门据此真空满足）。
+        let g = graph_from(&["a", "b"], &[]);
+        let plan = plan(&g, &fp(&[("a", 0), ("b", 0)]), 100);
         let batch = unit_for(&plan, "file:a");
         assert_eq!(batch.kind, UnitKind::Batch);
         let mq = cohesion_mq(&plan, &g, 1, 10);
@@ -816,14 +913,7 @@ mod tests {
     #[test]
     fn invariants_partition_and_acyclic() {
         let g = graph_from(&["a", "b", "c"], &[("a", "b"), ("b", "c")]);
-        let seq = migration_sequence(&g);
-        let plan = plan_decomposition(
-            &g,
-            &seq,
-            &fp(&[("a", 10), ("b", 10), ("c", 10)]),
-            &mech(&["a", "b", "c"]),
-            100,
-        );
+        let plan = plan(&g, &fp(&[("a", 10), ("b", 10), ("c", 10)]), 100);
         let inv = verify_invariants(&plan, &g, 3);
         assert!(inv.partition_ok, "每文件恰好一个单元");
         assert!(inv.dag_acyclic, "单元图应无环");
@@ -833,17 +923,14 @@ mod tests {
 
     #[test]
     fn canonical_hash_deterministic() {
-        let g = graph_from(&["a", "b", "c"], &[("a", "b"), ("b", "c")]);
-        let seq = migration_sequence(&g);
-        let mk = || {
-            plan_decomposition(
-                &g,
-                &seq,
-                &fp(&[("a", 10), ("b", 10), ("c", 10)]),
-                &mech(&["a", "b", "c"]),
-                100,
-            )
-        };
-        assert_eq!(mk().canonical_hash(), mk().canonical_hash());
+        // 含跨目录 + 多候选平局，验证两阶段凝聚确定性（跑两次字节级一致）。
+        let g = graph_from(
+            &["p/n1", "q/n2", "q/n3", "p/n4"],
+            &[("p/n1", "q/n2"), ("q/n3", "p/n4")],
+        );
+        let sizes = fp(&[("p/n1", 10), ("q/n2", 10), ("q/n3", 10), ("p/n4", 10)]);
+        let h1 = plan(&g, &sizes, 100).canonical_hash();
+        let h2 = plan(&g, &sizes, 100).canonical_hash();
+        assert_eq!(h1, h2);
     }
 }
