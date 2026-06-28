@@ -1024,9 +1024,26 @@ fn e2e_populate_modules_linear_unblocks_run() {
         assert_eq!(code, 0, "应能读取组模块: {json}");
         assert_eq!(json["data"]["status"], "pending");
         assert_eq!(json["data"]["state"]["sprint"], 1);
+        // 默认不输出 human 字段（向后兼容）。
+        assert!(
+            json["data"].get("human").is_none(),
+            "默认不应附带 human 字段: {json}"
+        );
+        // --human：附加人类友好显示名（去 file: 前缀 / src/ 根 / .ts 扩展），内部 key 不变。
+        let (code, json) = run(&["state", "get", &key, "--human"]);
+        assert_eq!(code, 0, "--human 应成功: {json}");
+        assert_eq!(json["data"]["module"], key, "内部 key 应保持不变");
+        assert!(
+            json["data"]["human"]
+                .as_str()
+                .is_some_and(|h| !h.is_empty() && !h.contains("file:") && !h.ends_with(".ts")),
+            "human 应为去前缀/扩展的友好名: {json}"
+        );
 
         // 衔接验证（codex #5）：run 阶段依赖门禁用组感知 state deps（对 coupled_batch 与 cycle/batch 一致）。
-        // 组成员互引（index→service→utils）为组内自依赖应全部剔除；组无组外依赖 → all_ready。
+        // 注：linear 三文件合成单组且无组外依赖，dependencies 必为空——本段是「coupled_batch 也能跑通
+        // state deps」的衔接 smoke，非去重逻辑验证（非空场景的组内剔除+blocking 由 smoke_state_deps_group_aware
+        // 在 circular 簇上强覆盖）。
         let (code, deps_json) = run(&["state", "deps", &key]);
         assert_eq!(code, 0, "state deps 应成功: {deps_json}");
         let deps: Vec<String> = deps_json["data"]["dependencies"]
@@ -1036,18 +1053,53 @@ fn e2e_populate_modules_linear_unblocks_run() {
             .map(|d| d["module"].as_str().unwrap().to_string())
             .collect();
         assert!(
-            !deps.iter().any(|m| members.contains(m)),
-            "组内自依赖应剔除: {deps:?}"
+            deps.is_empty(),
+            "linear 单组无组外依赖，deps 应为空: {deps:?}"
         );
         assert_eq!(
             deps_json["data"]["all_ready"], true,
             "组无组外未就绪依赖 → all_ready: {deps_json}"
         );
 
-        // 非代表成员 key 归一：传非代表成员（file:utils.ts）应归一到组代表而非报「模块不存在」。
+        // 非代表成员 key 归一：传非代表成员应归一到组代表，返回与组代表查询等价的结果（非仅不报错）。
         let non_rep = members.iter().find(|m| *m != &key).unwrap();
         let (code, j) = run(&["state", "deps", non_rep]);
         assert_eq!(code, 0, "非代表成员 key 应归一而非报错: {j}");
+        assert_eq!(
+            j["data"]["all_ready"], deps_json["data"]["all_ready"],
+            "非代表成员查询应归一到组代表、结果等价: {j}"
+        );
+    });
+}
+
+/// M3-DEC 回归：全机械合批组（成员全为 barrel/pure-type/pure-constant）应标 `composite_kind=batch`
+/// （轻量路径）。守护 `all_mechanical` 谓词——它写反或机械分类失效时本测试会变红，而 coupled_batch
+/// 测试无法发现（只要有逻辑成员就落 coupled_batch，机械分类失灵也照样通过）。
+#[test]
+fn e2e_populate_all_mechanical_cluster_is_batch() {
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("ts-mechanical-batch"), tmp.path());
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        let (code, _) = run(&["graph", "build", "--root", "src"]);
+        assert_eq!(code, 0);
+
+        let (code, json) = run(&["state", "populate-modules"]);
+        assert_eq!(code, 0, "populate 应成功: {json}");
+        assert_eq!(
+            json["data"]["module_count"], 1,
+            "3 个同目录机械文件应合成 1 个组: {json}"
+        );
+        let group = &json["data"]["modules"].as_array().unwrap()[0];
+        assert_eq!(
+            group["composite_kind"], "batch",
+            "全机械成员（barrel+pure_type+pure_constant）应标 batch 走轻量路径（非 coupled_batch）: {group}"
+        );
+        assert_eq!(
+            group["member_files"].as_array().unwrap().len(),
+            3,
+            "组应含全部 3 个机械成员: {group}"
+        );
     });
 }
 

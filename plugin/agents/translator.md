@@ -82,7 +82,7 @@ tools: Bash, Read, Write, Grep, Glob
 
 **输入**：
 - 全部成员源文件（按逆拓扑序排列——先翻被依赖的，再翻依赖者）
-- 外部依赖 interfaces（batch 外部模块的已译签名，`rustmigrate graph interfaces --deps-of <batch-key>`）
+- 外部依赖 interfaces（batch 外部模块的已译签名，`rustmigrate graph interfaces <batch-key> --deps-of <batch-key>`；`module` 为必填位置参数，`--deps-of` 模式下取依赖方签名，与 run.md 写法一致）
 - 适用的 porting rules
 - 裁剪依赖清单（若有 `degrade_skip` 上游）
 

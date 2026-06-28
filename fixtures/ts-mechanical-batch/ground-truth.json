@@ -1,0 +1,17 @@
+{
+  "description": "全机械合批：barrel(index) + pure-type(types) + pure-constant(constants)，同目录互引，populate 应合成单个 composite_kind=batch 组",
+  "nodes": [
+    { "id": "file:src/types.ts", "type": "File" },
+    { "id": "file:src/constants.ts", "type": "File" },
+    { "id": "file:src/index.ts", "type": "File" },
+    { "id": "interface:src/types.ts:Range", "type": "Interface", "is_exported": true }
+  ],
+  "edges": [
+    { "source": "file:src/index.ts", "target": "file:src/types.ts", "type": "imports" },
+    { "source": "file:src/index.ts", "target": "file:src/constants.ts", "type": "imports" }
+  ],
+  "topo_order_constraints": [
+    ["file:src/types.ts", "file:src/index.ts"],
+    ["file:src/constants.ts", "file:src/index.ts"]
+  ]
+}

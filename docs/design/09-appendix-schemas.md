@@ -128,9 +128,9 @@
 
 > **module `member_files` 字段（M2-SCALE-SCC 破环已实现，见 [MDR-004](../decisions/004-scc-fold-break-cycle.md)）**：`member_files`（`string[] | 省略`，`Option<Vec<String>>`，`#[serde(skip_serializing_if = "Option::is_none")]`）= composite 组成员文件 NodeId 列表，由 `state populate-modules` 对源码强连通分量（SCC）缩点折叠时写入。**单文件模块省略此字段**（module key 即唯一源文件）；含该字段时 module key 为组内字典序最小成员（组代表）。折叠后**翻译粒度=单文件**（SCC 是编译门禁单元≠翻译单元）：契约+stub→契约门→逐文件填空→整组编译门，见 [MDR-006](../decisions/006-scc-per-file-stub-first.md)。run 阶段依赖门禁须用 `state deps`（组感知，把组内非代表成员的文件级依赖映射回组代表 key），**不能**用 `graph deps`（纯图、文件级）。
 
-> **module 拆解字段（M3-DEC-01，见 [decomposition-redesign.md](../decomposition-redesign.md)）**：
-> - `composite_kind`（`"cycle" | "batch" | 省略`，`Option<CompositeKind>`，`skip_serializing_if`）= composite 组类型，区分循环依赖组（`cycle`，契约重路径）与机械合批组（`batch`，PR-2 轻量路径）；单文件模块省略。run 据此分流：遇 `batch` 而轻量路径未就绪显式报错，不静默走 SCC 契约路径。`populate-modules` 现仅产 `cycle`（机械合批仅出现在 `graph decompose` dry-run，不进 active state）。
-> - `decomposition_snapshot`（`string | 省略`）/ `decomposition_frozen`（`bool`，默认 `false` 省略）= 冻结拆解计划的 content hash 与冻结标记。**PR-1 仅预留 schema**（populate 恒 `None`/`false`），冻结读写在 PR-2 落地。
+> **module 拆解字段（M3-DEC-01 + MDR-011，见 [decomposition-redesign.md](../decomposition-redesign.md) / [011-coupling-agglomerative-decomposition.md](../decisions/011-coupling-agglomerative-decomposition.md) / [plan-populate-batch-unify.md](../plan-populate-batch-unify.md)）**：
+> - `composite_kind`（`"cycle" | "batch" | "coupled_batch" | 省略`，`Option<CompositeKind>`，`skip_serializing_if`）= composite 组类型，区分三类（单文件模块省略）：循环依赖组（`cycle`，契约重路径）、全机械合批组（`batch`，轻量路径——整组一次翻完 + 编译即门禁、无行为测试）、含逻辑成员的耦合凝聚簇（`coupled_batch`，完整组路径——翻译→结构门→Phase B→行为测试→审查）。run/workflow 据此分流执行路径；依赖门禁（`state deps`）对三类一视同仁、按 `member_files` 处理。`populate-modules`（默认启用 decompose）按成员机械性产 `batch`/`coupled_batch`，循环组产 `cycle`；`--no-decompose` 旧路径仅产 `cycle`。
+> - `decomposition_snapshot`（`string | 省略`）/ `decomposition_frozen`（`bool`，默认 `false` 省略）= 冻结拆解计划的 content hash 与冻结标记。decompose 启用时 populate 落真值（snapshot=`plan.canonical_hash()`、frozen=`true`）；`--no-decompose` 旧路径恒 `None`/`false`。`graph decompose` 仍是纯 dry-run 不写 state。
 
 **`metadata` 字段说明**：
 
