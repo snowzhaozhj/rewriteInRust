@@ -148,16 +148,21 @@ pub enum ModuleTier {
 
 /// composite 模块组的类型（M3-DEC-01）。
 ///
-/// 区分两种 `member_files` 非空的 composite——`is_cycle` 仅存在于拓扑结果、未持久化进
-/// `ModuleState`，run 仅凭 `member_files` 无法分辨，故显式落字段（Codex 计划审查 I-1）。
+/// 区分三种 `member_files` 非空的 composite（Cycle / Batch / CoupledBatch）——`is_cycle` 仅存在于
+/// 拓扑结果、未持久化进 `ModuleState`，且 `Batch` 与 `CoupledBatch` 靠成员机械性区分（见
+/// `populate-modules`）：三者 run 仅凭 `member_files` 无法分辨，故均显式落字段（Codex 计划审查 I-1）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Display, EnumString)]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum CompositeKind {
     /// 循环依赖组（互引文件折叠）——走现有契约+逐文件填空重路径。
     Cycle,
-    /// 机械合批组（凸性 first-fit 装箱）——走 PR-2 轻量路径；PR-2 前禁止 active dispatch。
+    /// 全机械合批组（成员全为 Barrel/PureType/PureConstant）——走轻量路径
+    /// （整组一次翻完 + 编译即门禁，无行为测试）。
     Batch,
+    /// 含逻辑成员的耦合凝聚簇（decompose 按耦合/目录分组，含任意复杂度文件）——走完整组路径
+    /// （整组翻译 → 结构门 → Phase B → 行为测试 → 审查）。run 不复用 SCC 契约重路径。
+    CoupledBatch,
 }
 
 /// 状态历史条目。
@@ -244,25 +249,27 @@ pub struct ModuleState {
     pub blocked_by: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pre_blocked_status: Option<ModuleStatus>,
-    /// SCC 模块组成员文件（破环：循环依赖折叠为一个 composite 模块组，编译门禁单元；翻译粒度=单文件，见 MDR-006）。
+    /// composite 模块组成员文件（编译门禁单元）。承载全部三类 composite 的成员：SCC 循环组（MDR-006）、
+    /// 全机械 Batch 组、含逻辑 CoupledBatch 组（MDR-011）；组形态由 `composite_kind` 区分。
     ///
     /// `None` = 单文件模块（module key 即唯一源文件）。
-    /// `Some([..])` = 该模块由一组互引文件组成（module key 为组内字典序最小者），
-    /// 整组是一个编译门禁单元，逐文件翻译为一组 Rust `mod`（同 crate 内允许 mod 间循环 `use`，无需破环；见 MDR-006）。
+    /// `Some([..])` = 该模块由一组文件组成（module key 为组内字典序最小者）。翻译粒度因形态而异：
+    /// SCC 组逐文件填空（同 crate 内允许 mod 间循环 `use`，无需破环），Batch/CoupledBatch 组整组一次翻完。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub member_files: Option<Vec<String>>,
     /// composite 组类型（M3-DEC-01，Codex I-1）。`None` = 单文件模块；
-    /// `Some(Cycle)` = 循环依赖组（重路径）；`Some(Batch)` = 机械合批组（PR-2 轻量路径）。
-    /// run 据此分流：遇 `Batch` 而轻量路径未就绪时显式报错，不静默走 SCC 契约路径。
+    /// `Some(Cycle)` = 循环依赖组（契约重路径）；`Some(Batch)` = 全机械合批组（轻量路径，编译即门禁）；
+    /// `Some(CoupledBatch)` = 含逻辑成员的耦合簇（完整组路径：翻译→结构门→Phase B→测试→审查）。
+    /// run/workflow 据 `composite_kind` 分流执行路径；依赖门禁（`state deps`）对三类一视同仁、按 `member_files` 处理。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub composite_kind: Option<CompositeKind>,
-    /// 冻结拆解计划的 content hash（M3-DEC-01，**PR-1 仅预留 schema，PR-2 接线**）。
-    /// 目标语义：非空表示该模块拆解归属已冻结，`populate-modules` 以冻结计划为准、不重算
-    /// （断点续传确定性，方案 §7）。PR-1 阶段 populate 恒置 `None`、`graph decompose` 是
-    /// 纯 dry-run 不落 state；冻结读写在 PR-2（机械合批进 active dispatch 时）落地。
+    /// 冻结拆解计划的 content hash（M3-DEC-01）。非空表示该模块拆解归属已冻结
+    /// （断点续传确定性，方案 §7）。decompose 启用时由 populate 落 `plan.canonical_hash()`；
+    /// `--no-decompose` 旧路径（SCC-only）不落、恒 `None`。`graph decompose` 仍是纯 dry-run 不写 state。
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub decomposition_snapshot: Option<String>,
-    /// 拆解计划是否已冻结（M3-DEC-01，**PR-1 仅预留 schema，PR-2 接线**，恒 `false`）。
+    /// 拆解计划是否已冻结（M3-DEC-01）。decompose 启用时为 `true`（= `decomposition_snapshot.is_some()`）；
+    /// `--no-decompose` 旧路径恒 `false`。
     #[serde(default, skip_serializing_if = "is_false")]
     pub decomposition_frozen: bool,
 }

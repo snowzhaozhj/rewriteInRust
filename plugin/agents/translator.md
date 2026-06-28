@@ -72,7 +72,7 @@ tools: Bash, Read, Write, Grep, Glob
 
 > **定位源文件**：模块标识是图节点 ID `file:<rel>`。路径基准是 `.rustmigrate.toml` 的 `project.source_root`（如 `src/`），不是你的 CWD（项目根）。源文件绝对路径 = `<source_root>/<rel>`（去掉 `file:` 前缀得 `<rel>`；若 `<rel>` 已含 source_root 前缀则不重复拼接）。直接用 `<rel>` 去 CWD 读会 file-not-found——是基准不一致，不是源真的缺失。
 
-> **一个模块未必只有一个源文件**：单文件模块 `member_files` 为 None；SCC 模块组（`composite_kind=cycle`）和机械合批组（`composite_kind=batch`）的 `member_files` 列出组内全部源文件。判断模块形态后再决定翻译单元（见下「Batch 组翻译」或「SCC 模块组翻译」）。
+> **一个模块未必只有一个源文件**：单文件模块 `member_files` 为 None；SCC 模块组（`composite_kind=cycle`）、机械合批组（`composite_kind=batch`）、耦合逻辑簇（`composite_kind=coupled_batch`）的 `member_files` 列出组内全部源文件。判断模块形态后再决定翻译单元（见下「Batch 组翻译」「CoupledBatch 组翻译」或「SCC 模块组翻译」）。
 
 ### Batch 组翻译（机械合批：一次翻完）
 
@@ -82,7 +82,7 @@ tools: Bash, Read, Write, Grep, Glob
 
 **输入**：
 - 全部成员源文件（按逆拓扑序排列——先翻被依赖的，再翻依赖者）
-- 外部依赖 interfaces（batch 外部模块的已译签名，`rustmigrate graph interfaces --deps-of <batch-key>`）
+- 外部依赖 interfaces（batch 外部模块的已译签名，`rustmigrate graph interfaces <batch-key> --deps-of <batch-key>`；`module` 为必填位置参数，`--deps-of` 模式下取依赖方签名，与 run.md 写法一致）
 - 适用的 porting rules
 - 裁剪依赖清单（若有 `degrade_skip` 上游）
 
@@ -100,6 +100,19 @@ tools: Bash, Read, Write, Grep, Glob
 **不走**：意图摘要 / 多候选 / 对抗审查 / Phase B 惯用化——机械文件无行为可优化、编译即门禁。
 
 **`TODO(port)` 禁止**：batch 成员是经分类器确认的纯机械文件（类型/常量/barrel），翻译应无不确定项。如果你在翻译某个成员时发现需要标 `TODO(port)`（含不确定语义），说明该文件**被误分类为机械**——停下回报编排器「成员 `<file>` 非机械，需重分类」，由编排器决定是否拆出该成员走重型路径。不要在 batch 产出中留 `TODO(port)`。
+
+### CoupledBatch 组翻译（耦合逻辑簇：一次翻完 + 完整门禁）
+
+耦合逻辑簇（`composite_kind=coupled_batch`）由 decompose 引擎按**耦合权重 + 目录**分组，成员可含任意复杂度的逻辑文件（函数体、控制流、算法），无循环依赖、self_size 之和受 budget 门约束（默认 ≤12000 token≈1000 行）。与机械 batch 的区别是**成员有运行时行为、必须验证等价性**；与 SCC 组的区别是**无环**——故同 batch 一样**一次翻完整批**（单次调用内 translator 看到全部成员，跨文件一致性由模型解决，不需契约/stub）。
+
+**触发**：模块 `composite_kind=coupled_batch`（`member_files` 含 ≥2 个文件）。**不要**走 SCC 契约路径。
+
+**输入 / 产出 / 成员间引用规则**：同上「Batch 组翻译」（逆拓扑序呈现、成员间直接 `use`、写 `intermediate/{batch}-source-hashes.json`）。
+
+**与机械 batch 的关键差异**：
+- **翻译深度按实际复杂度**：成员是逻辑文件，按 RULE-2/3/7 忠实翻译，与单文件 Phase A 同——含 tier 多候选（`standard`/`full` 档产 2 候选，由 verifier 选优；tier=成员 max tier，编排器已算入 `modules[key].tier`）。
+- **完整门禁，不是编译即门禁**：编排器在翻译后对整组跑结构门（Phase A 1:1 核对）→ Phase B 惯用化 → 行为测试（verifier 对整组公共 API 生成测试）→ 对抗审查签批。这些步骤由 run.md「CoupledBatch 组完整路径」驱动，translator 只负责产出忠实翻译。
+- **`TODO(port)` 允许**：逻辑文件遇不确定语义可留 `TODO(port)`（同单文件 Phase A），不要求零标记——但最终 done 前置仍要求 `TODO(port)` 计数清零（由 run 步骤 10/11 把关）。
 
 ### SCC 模块组翻译（循环依赖：契约 → stub → 逐文件填空 → 整组门）
 

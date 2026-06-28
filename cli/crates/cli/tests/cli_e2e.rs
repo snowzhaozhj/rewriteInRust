@@ -986,28 +986,42 @@ fn e2e_populate_modules_linear_unblocks_run() {
             json["data"]["total_sprints"].as_u64().unwrap() >= 1,
             "应至少有 1 个 sprint: {json}"
         );
+        // decompose 默认启用：linear 3 文件同目录且均含逻辑 → 合成 1 个 coupled_batch 组（M3-DEC）。
         let count = json["data"]["module_count"].as_u64().unwrap();
-        assert_eq!(count, 3, "linear-deps 应有 3 个文件模块: {json}");
-
-        // module key = NodeId 原值（file:src/...），与 graph deps 输出一致。
-        let modules = json["data"]["modules"].as_array().unwrap();
-        let utils = modules
-            .iter()
-            .find(|m| m["id"].as_str().unwrap_or_default().contains("utils"))
-            .expect("应含 utils 模块")["id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        assert!(
-            utils.starts_with("file:"),
-            "module key 应为 NodeId 原值: {utils}"
+        assert_eq!(
+            count, 1,
+            "linear-deps 3 文件应合成 1 个 coupled_batch 组: {json}"
         );
 
-        // 落盘校验：state 合法 + 模块 status=pending、sprint=1。
+        let modules = json["data"]["modules"].as_array().unwrap();
+        let group = &modules[0];
+        assert_eq!(
+            group["composite_kind"], "coupled_batch",
+            "含逻辑成员的耦合簇应标 coupled_batch（不展开、不走机械轻量路径）: {group}"
+        );
+        let members: Vec<String> = group["member_files"]
+            .as_array()
+            .expect("coupled_batch 应有 member_files")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            members.len(),
+            3,
+            "组应含 index/service/utils 3 个成员: {members:?}"
+        );
+        // module key = 组内字典序最小成员的 NodeId 原值。
+        let key = group["id"].as_str().unwrap().to_owned();
+        assert!(
+            key.starts_with("file:"),
+            "组代表 key 应为 NodeId 原值: {key}"
+        );
+
+        // 落盘校验：state 合法 + 组模块 status=pending、sprint=1。
         let (code, json) = run(&["validate", "state"]);
         assert_eq!(code, 0, "填充后 state 应合法: {json}");
-        let (code, json) = run(&["state", "get", &utils]);
-        assert_eq!(code, 0, "应能读取填充的模块: {json}");
+        let (code, json) = run(&["state", "get", &key]);
+        assert_eq!(code, 0, "应能读取组模块: {json}");
         assert_eq!(json["data"]["status"], "pending");
         assert_eq!(json["data"]["state"]["sprint"], 1);
         // 默认不输出 human 字段（向后兼容）。
@@ -1015,30 +1029,112 @@ fn e2e_populate_modules_linear_unblocks_run() {
             json["data"].get("human").is_none(),
             "默认不应附带 human 字段: {json}"
         );
-
         // --human：附加人类友好显示名（去 file: 前缀 / src/ 根 / .ts 扩展），内部 key 不变。
-        let (code, json) = run(&["state", "get", &utils, "--human"]);
+        let (code, json) = run(&["state", "get", &key, "--human"]);
         assert_eq!(code, 0, "--human 应成功: {json}");
-        assert_eq!(json["data"]["module"], utils, "内部 key 应保持不变");
-        assert_eq!(
-            json["data"]["human"], "utils",
-            "human 应为友好显示名: {json}"
+        assert_eq!(json["data"]["module"], key, "内部 key 应保持不变");
+        assert!(
+            json["data"]["human"]
+                .as_str()
+                .is_some_and(|h| !h.is_empty() && !h.contains("file:") && !h.ends_with(".ts")),
+            "human 应为去前缀/扩展的友好名: {json}"
         );
 
-        // 衔接验证：run 阶段依赖门禁用 graph deps 的 key 查 modules，必须一致。
-        let (code, json) = run(&["graph", "deps", &utils]);
-        assert_eq!(code, 0, "graph deps 应成功: {json}");
-        let module_ids: Vec<&str> = modules
+        // 衔接验证（codex #5）：run 阶段依赖门禁用组感知 state deps（对 coupled_batch 与 cycle/batch 一致）。
+        // 注：linear 三文件合成单组且无组外依赖，dependencies 必为空——本段是「coupled_batch 也能跑通
+        // state deps」的衔接 smoke，非去重逻辑验证（非空场景的组内剔除+blocking 由 smoke_state_deps_group_aware
+        // 在 circular 簇上强覆盖）。
+        let (code, deps_json) = run(&["state", "deps", &key]);
+        assert_eq!(code, 0, "state deps 应成功: {deps_json}");
+        let deps: Vec<String> = deps_json["data"]["dependencies"]
+            .as_array()
+            .unwrap()
             .iter()
-            .map(|m| m["id"].as_str().unwrap_or_default())
+            .map(|d| d["module"].as_str().unwrap().to_string())
             .collect();
-        for dep in json["data"]["dependencies"].as_array().unwrap() {
-            let dep_str = dep.as_str().unwrap_or_default();
-            assert!(
-                module_ids.contains(&dep_str),
-                "graph deps 输出的依赖 key {dep} 应在 modules 中（否则 run 依赖门禁失配）"
-            );
-        }
+        assert!(
+            deps.is_empty(),
+            "linear 单组无组外依赖，deps 应为空: {deps:?}"
+        );
+        assert_eq!(
+            deps_json["data"]["all_ready"], true,
+            "组无组外未就绪依赖 → all_ready: {deps_json}"
+        );
+
+        // 非代表成员 key 归一：传非代表成员应归一到组代表，返回与组代表查询等价的结果（非仅不报错）。
+        let non_rep = members.iter().find(|m| *m != &key).unwrap();
+        let (code, j) = run(&["state", "deps", non_rep]);
+        assert_eq!(code, 0, "非代表成员 key 应归一而非报错: {j}");
+        assert_eq!(
+            j["data"]["all_ready"], deps_json["data"]["all_ready"],
+            "非代表成员查询应归一到组代表、结果等价: {j}"
+        );
+    });
+}
+
+/// M3-DEC 回归：全机械合批组（成员全为 barrel/pure-type/pure-constant）应标 `composite_kind=batch`
+/// （轻量路径）。守护 `all_mechanical` 谓词——它写反或机械分类失效时本测试会变红，而 coupled_batch
+/// 测试无法发现（只要有逻辑成员就落 coupled_batch，机械分类失灵也照样通过）。
+#[test]
+fn e2e_populate_all_mechanical_cluster_is_batch() {
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("ts-mechanical-batch"), tmp.path());
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        let (code, _) = run(&["graph", "build", "--root", "src"]);
+        assert_eq!(code, 0);
+
+        let (code, json) = run(&["state", "populate-modules"]);
+        assert_eq!(code, 0, "populate 应成功: {json}");
+        assert_eq!(
+            json["data"]["module_count"], 1,
+            "3 个同目录机械文件应合成 1 个组: {json}"
+        );
+        let group = &json["data"]["modules"].as_array().unwrap()[0];
+        assert_eq!(
+            group["composite_kind"], "batch",
+            "全机械成员（barrel+pure_type+pure_constant）应标 batch 走轻量路径（非 coupled_batch）: {group}"
+        );
+        assert_eq!(
+            group["member_files"].as_array().unwrap().len(),
+            3,
+            "组应含全部 3 个机械成员: {group}"
+        );
+    });
+}
+
+/// M3-DEC 回归：含逻辑成员的耦合簇必须保留为单个 coupled_batch 组，不被展开成独立单文件模块。
+/// py-pkg-deps 是混合簇（barrel `__init__.py` + 纯类型 `types.py` + 逻辑 base/impl/main）——
+/// 修复前 populate 因「成员非全机械」把整组展开为 5 个单文件模块（推翻 decompose 分组），
+/// 修复后整组保留为 1 个 coupled_batch（走完整组路径）。这是 jmespath 场景的最小复现。
+#[test]
+fn e2e_populate_mixed_cluster_kept_as_coupled_batch() {
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("py-pkg-deps"), tmp.path());
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        let (code, _) = run(&["graph", "build", "--root", "."]);
+        assert_eq!(code, 0);
+
+        let (code, json) = run(&["state", "populate-modules", "--root", "."]);
+        assert_eq!(code, 0, "populate 应成功: {json}");
+        assert_eq!(
+            json["data"]["module_count"], 1,
+            "混合耦合簇应保留为 1 个组（而非展开为 5 个单文件模块）: {json}"
+        );
+        let group = &json["data"]["modules"].as_array().unwrap()[0];
+        assert_eq!(
+            group["composite_kind"], "coupled_batch",
+            "含逻辑成员的混合簇应标 coupled_batch（不是 batch、不展开）: {group}"
+        );
+        let members = group["member_files"].as_array().unwrap();
+        assert_eq!(
+            members.len(),
+            5,
+            "组应含全部 5 个成员（main + pkg/__init__/base/impl/types）: {group}"
+        );
+        let (code, json) = run(&["validate", "state"]);
+        assert_eq!(code, 0, "落盘后 state 应合法: {json}");
     });
 }
 
@@ -1052,8 +1148,11 @@ fn e2e_populate_cleans_orphan_pending() {
         let (code, _) = run(&["graph", "build", "--root", "src"]);
         assert_eq!(code, 0);
 
+        // 孤儿清理测试前提是「多个独立单文件模块」——用 --no-decompose 走 SCC-only 旧路径
+        // 保持 1 文件 1 模块（decompose 默认会把同目录文件合成 1 组，删单成员只是组缩小、不产孤儿）。
+        // 同时为 --no-decompose 旧路径提供回归覆盖（计划 6d）。
         // 首轮填充：linear-deps 3 个模块（index/service/utils），全部 pending。
-        let (code, json) = run(&["state", "populate-modules"]);
+        let (code, json) = run(&["state", "populate-modules", "--no-decompose"]);
         assert_eq!(code, 0, "首轮填充应成功: {json}");
         assert_eq!(json["data"]["module_count"], 3);
 
@@ -1063,7 +1162,7 @@ fn e2e_populate_cleans_orphan_pending() {
         assert_eq!(code, 0);
 
         // 重填：序列缩为 2，原 index 模块成孤儿应被清理 + warning 告知。
-        let (code, json) = run(&["state", "populate-modules"]);
+        let (code, json) = run(&["state", "populate-modules", "--no-decompose"]);
         assert_eq!(code, 0, "重填应成功: {json}");
         assert_eq!(
             json["data"]["module_count"], 2,
@@ -1264,7 +1363,10 @@ fn smoke_populate_rejects_active_progress() {
         let _ = run(&["init"]);
         let (code, _) = run(&["graph", "build", "--root", "src"]);
         assert_eq!(code, 0);
-        let (code, _) = run(&["state", "populate-modules"]);
+        // 用 --no-decompose 保 1 文件 1 模块：topo-sort order[0] 是文件 NodeId，需与 modules key 一致；
+        // decompose 默认合组后非代表成员不在 modules 表，transition 会失配。本测试验证「活跃模块拒绝重填」，
+        // 与分组无关，旧路径即可。
+        let (code, _) = run(&["state", "populate-modules", "--no-decompose"]);
         assert_eq!(code, 0);
 
         // 把某模块推进到 translating（模拟迁移进行中）。

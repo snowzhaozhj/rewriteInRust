@@ -45,7 +45,7 @@
 落盘迁移序列并推进状态机（**写状态统一走 CLI**）：
 1. `rustmigrate state transition --to profile`
 2. `rustmigrate state transition --to plan`
-3. `rustmigrate state populate-modules [--root <源码根>]`——把 SCC 缩点后每个迁移单位写成 `modules[<组代表 NodeId>] = {status:pending, sprint:<缩点 DAG 层级>, tier:auto, member_files:<仅多文件组>}`，并设 `sprint.current=1`。`tier` 由 AST 语义特征自动评估（`trivial`/`standard`/`full`，composite 组取组内最高档），传 `--root` 与 `graph build` 一致以启用分档检测。单文件模块 key 用 NodeId 原值（如 `file:src/utils.ts`），composite 组 key 用组内字典序最小成员。**run 阶段依赖门禁用 `state deps <module>`（组感知，把组内成员的文件级依赖映射回组代表），不用 `graph deps`**。
+3. `rustmigrate state populate-modules [--root <源码根>]`——经 decompose 凝聚合并后把每个迁移单位写成 `modules[<组代表 NodeId>] = {status:pending, sprint:<缩点 DAG 层级>, tier:auto, member_files:<仅多文件组>, composite_kind:<见下>}`，并设 `sprint.current=1`。composite 组分三类（均带 `member_files`）：`cycle`（循环依赖组，契约重路径）、`batch`（全机械合批，轻量路径）、`coupled_batch`（耦合逻辑簇，完整组路径）——下游 run/workflow 按 `composite_kind` 分派执行路径。`tier` 由 AST 语义特征自动评估（`trivial`/`standard`/`full`，composite 组取组内最高档），传 `--root` 与 `graph build` 一致以启用分档检测。单文件模块 key 用 NodeId 原值（如 `file:src/utils.ts`），composite 组 key 用组内字典序最小成员。**run 阶段依赖门禁统一用 `state deps <module>`（组感知，对三类 composite 一视同仁、把组内成员的文件级依赖映射回组代表），不用 `graph deps`**。
 
 **检查点**：state == `plan`、`data.module_count > 0`。
 

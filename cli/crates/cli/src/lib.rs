@@ -1928,31 +1928,32 @@ fn cmd_state_populate_modules(
                     });
                 }
                 UnitKind::Batch => {
-                    // 仅全部成员均为 mechanical 时走 batch 轻量路径。
+                    // decompose 的耦合分组一律保留为 composite（不展开），按成员机械性分流执行路径：
+                    // 全机械 → Batch（轻量路径，编译即门禁）；含任一逻辑成员 → CoupledBatch（完整组路径）。
+                    // 读失败成员保守按 FileKind::Normal（见上方循环）→ 落 CoupledBatch 走完整路径，更安全。
+                    // 不变量：file_kinds 对每个 File 节点都有条目（上方循环对 Ok/Err 两分支均 insert）。
+                    // 故 None 不可达；若未来重构破坏该全覆盖，缺失成员会被保守判为非机械 → CoupledBatch。
                     let all_mechanical = u.members.iter().all(|m| {
+                        debug_assert!(
+                            file_kinds.contains_key(m),
+                            "file_kinds 应覆盖每个组成员（缺失会被保守判为非机械）: {m}"
+                        );
                         matches!(
                             file_kinds.get(m),
                             Some(FileKind::Barrel | FileKind::PureType | FileKind::PureConstant)
                         )
                     });
-                    if all_mechanical {
-                        units.push(MigrationUnit {
-                            key: u.members.first().cloned().unwrap_or_default(),
-                            members: u.members.clone(),
-                            sprint: u.sprint,
-                            composite_kind: Some(CompositeKind::Batch),
-                        });
+                    let kind = if all_mechanical {
+                        CompositeKind::Batch
                     } else {
-                        // 含 non-mechanical 成员：展开为独立单文件模块。
-                        for m in &u.members {
-                            units.push(MigrationUnit {
-                                key: m.clone(),
-                                members: vec![m.clone()],
-                                sprint: u.sprint,
-                                composite_kind: None,
-                            });
-                        }
-                    }
+                        CompositeKind::CoupledBatch
+                    };
+                    units.push(MigrationUnit {
+                        key: u.members.first().cloned().unwrap_or_default(),
+                        members: u.members.clone(),
+                        sprint: u.sprint,
+                        composite_kind: Some(kind),
+                    });
                 }
                 UnitKind::Single | UnitKind::ManualOverBudget => {
                     if u.kind == UnitKind::ManualOverBudget {
