@@ -3,7 +3,10 @@
 pub mod detect;
 pub mod tools;
 
-pub use detect::{detect_language, profile_project, LangStats, ProjectProfile};
+pub use detect::{
+    detect_language, detect_source_root, profile_project, LangStats, ProjectProfile,
+    SourceRootDetection,
+};
 pub use tools::{
     check_adapter_tools, check_cargo_nextest, check_tool, load_analysis_tools, AnalysisTool,
     ToolStatus,
