@@ -46,3 +46,5 @@ danger 收集复用 decompose 路径已有的「逐文件读源 + `classify_file
 ## 后续 TODO（C1 审查类型设计视角，非阻塞）
 
 - **`DangerCategory` 候选上移 `types` 层以恢复编译期值域安全**：当前 `Vec<String>` 是分层约束（保持 `lang → types` 单向依赖）下的务实取舍，代价是丢失类型安全（任意字符串可塞入）。债务正解是把纯数据枚举 `DangerCategory`（已 `Serialize`）从 `lang` 上移到 `types`，让 `ModuleState.danger: Vec<DangerCategory>` 既类型安全又保持单向依赖。属跨模块搬迁，超出 C1「只补数据层透传」范围，记为后续任务，避免 stringly-typed 永久化。
+- **`io_side_effect` 无对应 RULE**（C2 暴露）：6 类 danger 中 5 类映射到既有 RULE（numeric_precision→RULE-2、concurrency→RULE-6、dynamic_reflection→RULE-20、ffi→RULE-12、shared_mutable_global→RULE-15），唯 `io_side_effect` 无专属 RULE。C2 暂按「concern 人工处理 + 意图摘要 `observable_side_effects` 登记 + verifier 维度 7 探测」兜底。若实际迁移项目 io 副作用陷阱频发，可补一条「副作用顺序/可见性」RULE（porting-template + translator 核心规则），属规则目录扩展，记后续任务。
+- **RULE-6/12/15 仅命名、M2 才完整展开**：concurrency/ffi/shared_mutable_global 命中时 translator 按映射表定向处理 + 留 PORT NOTE，但 porting-template 细则未充分展开（已写「细则不足据 RULE-20 谨慎、必要时 TODO(port)」兜底）。是否提前到 M3 展开这三条，视实际危险信号分布再定。

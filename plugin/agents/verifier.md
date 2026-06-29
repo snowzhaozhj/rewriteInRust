@@ -51,6 +51,21 @@ tools: Bash, Read, Write, Grep, Glob
 
 维度 4（时间/日期）跨语言探测点一致（时区/DST/闰秒边界），不另列。Python 动态特性（`getattr`/metaclass 等）若 analyzer 已记入画像 `gaps.dynamic_features`，在维度 9 核对 translator 是否对其留了 `TODO(port)` 而非猜测实现。
 
+### danger 信号驱动的定向探测（`ModuleState.danger` 非空时强制）
+
+run.md 注入危险信号清单时，对每个命中类别在对抗审查与测试中**额外叠加**一条定向探测（不替代常规维度，是补强）：
+
+| danger 类别 | 定向探测重点（对应维度） |
+|------------|----------------------|
+| `numeric_precision` | 维度 2/8：整数溢出（`i128`/bigint 边界）、浮点累积误差、`Decimal` 误降 `f64` |
+| `concurrency` | 维度 6：竞态、共享态一致性、执行顺序、取消/超时；必要时 loom/shuttle 插桩 |
+| `dynamic_reflection` | 维度 9：核对动态分发处留了 `TODO(port)` 而非猜测实现 |
+| `io_side_effect` | 维度 7：副作用执行顺序与可见性、错误路径与清理（`Drop`/RAII）是否还原 |
+| `ffi` | 维度 2/7：边界值跨 ABI 传递、`unsafe` 失败路径 |
+| `shared_mutable_global` | 维度 6：全局态并发访问、初始化竞态（`OnceLock`/`Mutex`） |
+
+`danger` 为空（`[]`）**不免除**常规 9 维度审查——空值语义重载（同时表示「无信号」与「`--no-decompose` 未分类」，见 run.md），不可据空推断模块安全。
+
 `{module}-review.md` 须含「## 差异列表」标题，逐条写：维度、源码行为、Rust 行为、严重度、修正建议。无差异也要显式写明"已核对维度 X，未发现差异"，不要留空。
 
 ## 一·二、等价深度判定（M2 扩展）
