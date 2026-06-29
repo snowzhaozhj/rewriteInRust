@@ -60,7 +60,7 @@
 | 2 | scaffolder 生成的 golden harness 用 `Option<T>`+`#[serde(default)]` 承接期望值，`"result": null`（present-null）被误判「缺 result」 | Plugin 缺口（golden 一致性误报） | ✅ 修：scaffolder.md R2 增 present-null 区分约束（`deserialize_with`）。提交 942da23 |
 | 3 | analyze 设 `source_root` 不可靠：jmespath 修正 `src→jmespath`，textdistance 漏修留 `src`（实际包在 `textdistance/`） | 流程缺口（src-layout vs flat-package 推断） | 🟡 验收中人工修正 config；analyzer source_root 推断待加固（记 TODO） |
 | 4 | translator Phase B 用 `Write` 截断既有 `.rs` 后凭记忆重建（险情，靠下游全量 golden 兜住） | Plugin 缺口（无 Edit 工具被迫整文件重写） | ✅ 修：translator 加 `Edit` 工具 + Phase B 强制「改既有文件用 Edit、禁 Write 重建」 |
-| 5 | ffi.rs 测试用 deprecated `generate_ffi_binding` 无 `#[allow(deprecated)]`，`clippy --all-targets` 报错 | pre-existing 潜伏（`just lint` 不带 `--all-targets` 故门禁未覆盖） | 🟡 记 TODO（非本验收引入） |
+| 5 | ffi.rs 测试用 deprecated `generate_ffi_binding` 无 `#[allow(deprecated)]`，`clippy --all-targets` 报错 | pre-existing 潜伏（`just lint` 不带 `--all-targets` 故门禁未覆盖） | ✅ 修：测试模块加 `#![allow(deprecated)]`，repo `clippy --all-targets` 清零 |
 | 6 | `verify.sh` done 门跑 `cargo nextest run --lib`，**漏跑 tests/ 集成测试**（golden 差异 harness）；clippy 不带 `--all-targets` | Plugin/hooks 缺口（模块可在 golden 等价从未实跑时被签批 done，靠 agent 手动补跑兜住） | ✅ 修：verify.sh 改 `cargo nextest run`（全量）+ `cargo clippy --all-targets -- -D warnings` |
 | 7 | headless run 调 `$PATH` 的 `rustmigrate`，用的是修复前 release 二进制 → textdistance run 的 stats compare 仍报 E012、结构门 degrade | 流程注意点（非缺陷） | 🟡 已重建 release；记：改 CLI 后须 `cargo build --release` 再跑 run。CLI 修复本身由 531 测试独立验证 |
 
