@@ -788,6 +788,7 @@ mod tests {
             composite_kind: None,
             decomposition_snapshot: None,
             decomposition_frozen: false,
+            danger: Vec::new(),
         }
     }
 

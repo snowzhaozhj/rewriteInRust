@@ -1878,6 +1878,9 @@ fn cmd_state_populate_modules(
         members: Vec<String>,
         sprint: u32,
         composite_kind: Option<CompositeKind>,
+        /// 组内各成员危险信号类别的并集（snake_case，去重 + 字典序；MDR-013）。
+        /// decompose 路径填真值；`--no-decompose` 旧路径恒空（不读源、不分类）。
+        danger: Vec<String>,
     }
 
     let (units, decomposition_snapshot) = if no_decompose {
@@ -1898,6 +1901,8 @@ fn cmd_state_populate_modules(
                     members,
                     sprint: g.sprint,
                     composite_kind,
+                    // 旧路径不读源、不分类，danger 留空（MDR-013：透传仅在 decompose 路径）。
+                    danger: Vec::new(),
                 })
             })
             .collect();
@@ -1929,6 +1934,8 @@ fn cmd_state_populate_modules(
         let mut self_sizes: HashMap<NodeId, usize> = HashMap::new();
         let mut footprints: HashMap<NodeId, usize> = HashMap::new();
         let mut file_kinds: HashMap<String, FileKind> = HashMap::new();
+        // 每文件危险信号类别（snake_case）；组并集在装配 unit 时计算（MDR-013）。
+        let mut danger_map: HashMap<String, Vec<String>> = HashMap::new();
         let mut read_failures = 0usize;
         let mut first_failure: Option<String> = None;
         for id in &file_nodes {
@@ -1937,6 +1944,12 @@ fn cmd_state_populate_modules(
                 Ok(src) => {
                     let cls = adapter.classify_file(&src);
                     file_kinds.insert(id.to_string(), cls.file_kind);
+                    if !cls.danger.is_empty() {
+                        danger_map.insert(
+                            id.to_string(),
+                            cls.danger.iter().map(|d| d.as_str().to_string()).collect(),
+                        );
+                    }
                     src.len().div_ceil(4)
                 }
                 Err(_) => {
@@ -1945,6 +1958,7 @@ fn cmd_state_populate_modules(
                         first_failure = Some(source_root.join(rel).display().to_string());
                     }
                     file_kinds.insert(id.to_string(), FileKind::Normal);
+                    // 读失败：danger 保守视为空（MDR-013），不写 danger_map。
                     0
                 }
             };
@@ -1977,6 +1991,17 @@ fn cmd_state_populate_modules(
         let plan = plan_decomposition(&graph, &sequence, &self_sizes, &footprints, budget);
         let snapshot = plan.canonical_hash();
 
+        // 组危险信号 = 各成员 danger 的并集（去重 + 字典序；MDR-013）。
+        let union_danger = |members: &[String]| -> Vec<String> {
+            let mut set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            for m in members {
+                if let Some(ds) = danger_map.get(m) {
+                    set.extend(ds.iter().cloned());
+                }
+            }
+            set.into_iter().collect()
+        };
+
         let mut units: Vec<MigrationUnit> = Vec::with_capacity(plan.units.len());
         for u in &plan.units {
             match u.kind {
@@ -1986,6 +2011,7 @@ fn cmd_state_populate_modules(
                         members: u.members.clone(),
                         sprint: u.sprint,
                         composite_kind: Some(CompositeKind::Cycle),
+                        danger: union_danger(&u.members),
                     });
                 }
                 UnitKind::Batch => {
@@ -2014,6 +2040,7 @@ fn cmd_state_populate_modules(
                         members: u.members.clone(),
                         sprint: u.sprint,
                         composite_kind: Some(kind),
+                        danger: union_danger(&u.members),
                     });
                 }
                 UnitKind::Single | UnitKind::ManualOverBudget => {
@@ -2028,6 +2055,7 @@ fn cmd_state_populate_modules(
                         members: u.members.clone(),
                         sprint: u.sprint,
                         composite_kind: None,
+                        danger: union_danger(&u.members),
                     });
                 }
             }
@@ -2077,6 +2105,9 @@ fn cmd_state_populate_modules(
             entry["member_files"] = json!(mf);
             entry["composite_kind"] = json!(u.composite_kind.as_ref().map(|k| k.to_string()));
         }
+        if !u.danger.is_empty() {
+            entry["danger"] = json!(u.danger);
+        }
         modules_json.push(entry);
 
         machine.update_module(
@@ -2098,6 +2129,7 @@ fn cmd_state_populate_modules(
                 composite_kind: u.composite_kind,
                 decomposition_snapshot: decomposition_snapshot.clone(),
                 decomposition_frozen: decomposition_snapshot.is_some(),
+                danger: u.danger,
             },
         );
     }

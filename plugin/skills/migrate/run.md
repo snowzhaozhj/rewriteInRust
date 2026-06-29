@@ -66,6 +66,8 @@
 
 **裁剪依赖 context 注入（degrade_skip 上游处理，见 MDR-007 `blocked_by_skip`）**：`dependencies` 中 `status=degrade_skip` 的依赖是终态、算「就绪」不阻塞，但其能力已从迁移范围裁剪——目标模块若照常 `use` 它会编译失败。故筛出这些被裁剪依赖，读各自 `intermediate/{dep}-degrade-report.json` 的 `recommended_alternatives`，组装「裁剪依赖清单」（每项：被裁剪模块 key + 推荐替代 crate + 理由），在第 4 步意图摘要与第 6 步 Phase A 派发 translator 时一并注入。translator 据此把对被裁剪依赖的调用改写为推荐 crate；无推荐（清单项 `recommended_alternatives` 空）则留 `TODO(port): 依赖 <dep> 已裁剪，需人工选型替代` 标记，不留悬空引用。degrade-report.json 缺失（早期 skip 未落报告）按无推荐处理。
 
+**危险信号 context 注入（danger 驱动定向翻译，见 MDR-013）**：读 `modules[target].danger`（`string[]`，6 类 snake_case：`numeric_precision`/`concurrency`/`dynamic_reflection`/`io_side_effect`/`ffi`/`shared_mutable_global`，由 `populate-modules` 从分类器透传，组并集去重）。非空则组装「危险信号清单」（每项：危险类别 + 提示「翻译时注入对应 RULE 定向规则 + 留定向测试覆盖该类别」），在**第 4 步意图摘要**与**第 6 步 Phase A 派发 translator** 时一并注入 context（与裁剪依赖清单同一注入点）。translator 据 translator.md「危险信号定向规则」把命中类别映射到对应 RULE、强制留 `// PORT NOTE`；verifier 据 verifier.md「danger 信号驱动的定向探测」对该类别补定向 review/测试。`danger` 为空（`[]`）**不注入**——但**空值语义重载**：`[]` 同时表示「无危险信号」与「`--no-decompose` 未分类」，**不可据空推断模块安全**，常规 9 维度审查不因 danger 空而免除。
+
 ### 4. 意图摘要（translator）
 调 translator（**前/后记 subagent_call**，见 SKILL.md「SubAgent 编排」，step_index=4）生成 `.rust-migration/intermediate/{module}-intent.md`。**L2 校验**：9 个 required 属性全非空、`interfaces` ≥1（Schema 见 [translator.md](../../agents/translator.md)）。缺字段视为不完整，按失败恢复重试。
 
@@ -132,7 +134,7 @@
 
 **流程**（已先经步骤 4 整组意图摘要 + 步骤 5 意图确认）：
 
-1. **整组翻译**（translator，一次翻完整批，step_index=6）：输入=全部成员源文件（逆拓扑序呈现）+ 外部依赖 interfaces（`rustmigrate graph interfaces <batch-key> --deps-of <batch-key>`）+ porting rules + 裁剪依赖清单（若有）。tier=成员 max tier（已算入 `modules[key].tier`），据此走单候选（`trivial`）或多候选（`standard`/`full`，产 2 候选）。产出各成员 `.rs` 写 `rust_root/` + `intermediate/{batch}-source-hashes.json`。详见 [translator.md](../../agents/translator.md)「CoupledBatch 组翻译」。
+1. **整组翻译**（translator，一次翻完整批，step_index=6）：输入=全部成员源文件（逆拓扑序呈现）+ 外部依赖 interfaces（`rustmigrate graph interfaces <batch-key> --deps-of <batch-key>`）+ porting rules + 裁剪依赖清单（若有）+ 危险信号清单（若有，同步骤 3「危险信号 context 注入」，组 danger=成员并集）。tier=成员 max tier（已算入 `modules[key].tier`），据此走单候选（`trivial`）或多候选（`standard`/`full`，产 2 候选）。产出各成员 `.rs` 写 `rust_root/` + `intermediate/{batch}-source-hashes.json`。详见 [translator.md](../../agents/translator.md)「CoupledBatch 组翻译」。
 2. **L1 校验**：全成员 `.rs` 存在、非空；多候选模式下各候选编译通过。
 3. **候选选优（7a，仅 standard/full）+ 对抗审查（7b）**：同单文件路径的步骤 7，对整组产出做 verifier 选优 + 对抗审查。
 4. **结构门（步骤 8）**：`rustmigrate stats compare` 校验整组 Phase A 1:1 结构。越界→忠实重做。

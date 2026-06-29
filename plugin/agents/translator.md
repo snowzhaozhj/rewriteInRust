@@ -58,6 +58,21 @@ tools: Bash, Read, Edit, Write, Grep, Glob
 - 宁可显式标注未完成，也不输出貌似合理但语义错误的代码。
 - **Headless safe-default（M2-ADV-07）**：`.rustmigrate.toml` 设 `headless=true` 时，不留 `TODO(port)` 阻塞——按 safe-default 自动替代：`any` → `Box<dyn std::any::Any>`，`unknown` → 泛型/`serde_json::Value`，不可判定行为 → `Error::Other(String)` 逃生口。每次 safe-default 决策必须附 `// ADV-07: safe-default` 注释标注。
 
+### 危险信号定向规则（danger 命中即强制 PORT NOTE）
+
+调用方（run.md「危险信号 context 注入」）注入「危险信号清单」时，每个类别来自源码分类器（`ModuleState.danger`，6 类 snake_case，组并集）。命中某类别即**强制**按下表注入对应 RULE 的定向处理，并在代码留 `// PORT NOTE: RULE-N <说明>`（无既有 RULE 的类别留 `// PORT NOTE: danger=<类别> <concern>` 并据 RULE-20 谨慎处理）。清单为空不代表安全——空值语义重载（同时表示「无信号」与「未分类」，见 run.md），仅表示无显式信号。
+
+| danger 类别 | 对应 RULE | 定向处理 |
+|------------|----------|---------|
+| `numeric_precision` | RULE-2 类型映射（已落） | 数值类型按取值范围/精度选型，避免 `number`/`int`→`f64` 丢精度（Python `int` 任意精度→`i64`/`i128`/`num-bigint`；`Decimal` 不得降 `f64`）；溢出点用 `checked_*`。留 PORT NOTE + 定向测试覆盖边界/溢出。 |
+| `concurrency` | RULE-6 异步（已命名，M2 展开） | 共享可变态补 `Arc<Mutex>`/原子/channel；源语言「单线程/GIL 下无锁即原子」假设被打破处显式同步。当前由 Phase B「并发模式」承接重写；留 PORT NOTE。 |
+| `dynamic_reflection` | RULE-20 不确定性（已落，硬规则） | `getattr`/`setattr`/`__getattr__`/`isinstance` 动态分发→`enum`+match 或 `dyn Trait`；不可判定一律 `TODO(port)`，**禁猜测**。 |
+| `io_side_effect` | 无既有 RULE，按 concern 人工处理 | 无专属 RULE：在意图摘要 `observable_side_effects` 如实登记，保留副作用的执行顺序/可见性；`try/finally` 清理→`Drop`/RAII。留 `// PORT NOTE: danger=io_side_effect` 提示人工核对。 |
+| `ffi` | RULE-12 unsafe（已命名，M2 展开） | 跨语言边界涉 `unsafe`/原始指针/ABI：最小化 unsafe 面、注明安全前提；无法安全表达则回报编排器走 `--degrade=ffi` 路径。留 PORT NOTE。 |
+| `shared_mutable_global` | RULE-15 全局状态（已命名，M2 展开） | 全局可变态→`OnceLock`/`LazyLock`/`Mutex` 包裹，避免 `static mut`；显式同步并注明初始化时机。留 PORT NOTE。 |
+
+> RULE-6/12/15 是规则目录已命名的编号（TS 模板 `adapters/typescript/porting-template.md` 已提及，Python 模板尚未列出），完整展开推迟 M2——命中时仍按上表定向处理 + 留 PORT NOTE；规则细则不足处（尤其 Python 模块按指针查不到时）据 RULE-20 谨慎处理、必要时 `TODO(port)`，**不要虚构未定义的规则细节**。
+
 ## 规则生成输出格式
 
 向 `.rust-migration/porting/` 写入规则文件，至少包含：

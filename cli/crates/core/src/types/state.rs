@@ -272,6 +272,20 @@ pub struct ModuleState {
     /// `--no-decompose` 旧路径恒 `false`。
     #[serde(default, skip_serializing_if = "is_false")]
     pub decomposition_frozen: bool,
+    /// 命中的危险信号类别（snake_case，如 `"numeric_precision"`/`"concurrency"`；MDR-013）。
+    ///
+    /// 由 `state populate-modules`（decompose 路径）从各成员 `classify_file().danger` 取**并集**
+    /// （去重 + 字典序），透传 `lang::DangerCategory::as_str()` 的原始类别名。state 层只落原始类别，
+    /// **不**落 concern 文案、**不**做 RULE 映射——那是 plugin/translator 的职责（避免在核心层固化
+    /// 可能漂移的映射，对齐 `DangerCategory::concern` 注释立场）。单文件模块 = 自身 danger；
+    /// 读失败的文件保守按空 danger 处理。`--no-decompose` 旧路径恒为空。
+    ///
+    /// **不变量守门人**：合法值域（6 类 snake_case）/ 去重 / 字典序仅由 `populate` 写入路径
+    /// 逻辑保证（`as_str()` 限值域 + `BTreeSet` 去重有序），类型层与 serde 反序列化**不**强制；
+    /// 新增写入点须自行维持。**空值语义重载**：`[]` 同时表示「无危险信号」与「`--no-decompose`
+    /// 未分类」，消费方（C2 plugin）不可据空值推断「安全」。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub danger: Vec<String>,
 }
 
 /// serde 跳过条件：值为 `false` 时不序列化（与本结构其余 Option 字段的 skip 约定一致）。

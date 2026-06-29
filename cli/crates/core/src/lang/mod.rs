@@ -71,9 +71,24 @@ pub enum DangerCategory {
 }
 
 impl DangerCategory {
+    /// 稳定的 snake_case 标识符（与 `#[serde(rename_all = "snake_case")]` 序列化一致）。
+    ///
+    /// 供 CLI 把危险类别**原样**落入 `migration-state.json` 的 `ModuleState.danger`
+    /// （MDR-013）：state 层只存原始类别名，concern 文案与 RULE 映射留给 plugin/translator。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DangerCategory::NumericPrecision => "numeric_precision",
+            DangerCategory::Concurrency => "concurrency",
+            DangerCategory::DynamicReflection => "dynamic_reflection",
+            DangerCategory::IoSideEffect => "io_side_effect",
+            DangerCategory::Ffi => "ffi",
+            DangerCategory::SharedMutableGlobal => "shared_mutable_global",
+        }
+    }
+
     /// 该陷阱的人读说明，供翻译上下文注入 / dry-run 报告展示。
     ///
-    /// 不在此硬编码具体 RULE-NN（除已核实的 RULE-22 异步原语）——规则注入由 translator
+    /// 不在此硬编码具体 RULE-NN（除已核实的 RULE-6 异步原语）——规则注入由 translator
     /// 依完整规则目录决定，避免在核心层固化可能漂移的规则映射。
     pub fn concern(&self) -> &'static str {
         match self {
@@ -81,7 +96,7 @@ impl DangerCategory {
                 "数值精度：JS number 为 f64，整数运算/取整与 Rust i64/f64 语义不同，需对边界值定向测试"
             }
             DangerCategory::Concurrency => {
-                "并发：async/Promise 语义需映射到 tokio（RULE-22 异步原语），注意执行顺序与取消语义"
+                "并发：async/Promise 语义需映射到 tokio（RULE-6 异步原语），注意执行顺序与取消语义"
             }
             DangerCategory::DynamicReflection => {
                 "动态/反射：typeof/instanceof/any 等运行时类型操作无法静态翻译，需显式建模"
@@ -293,4 +308,29 @@ fn dir_has_source_files(dir: &Path, extensions: &[&str], depth: u32) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod danger_category_tests {
+    use super::DangerCategory;
+
+    /// `as_str()` 与 `#[serde(rename_all = "snake_case")]` 是两处独立的 snake_case 映射，
+    /// 此测试锁死二者一致性——防未来新增/重命名变体时静默漂移（C1 审查三视角共识 nit）。
+    #[test]
+    fn as_str_matches_serde_snake_case() {
+        for cat in [
+            DangerCategory::NumericPrecision,
+            DangerCategory::Concurrency,
+            DangerCategory::DynamicReflection,
+            DangerCategory::IoSideEffect,
+            DangerCategory::Ffi,
+            DangerCategory::SharedMutableGlobal,
+        ] {
+            assert_eq!(
+                serde_json::to_value(cat).unwrap(),
+                serde_json::json!(cat.as_str()),
+                "as_str() 与 serde 序列化应一致: {cat:?}"
+            );
+        }
+    }
 }

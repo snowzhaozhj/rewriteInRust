@@ -1243,6 +1243,54 @@ fn e2e_populate_mixed_cluster_kept_as_coupled_batch() {
     });
 }
 
+/// MDR-013：`classify_file` 产出的 danger 类别须透传进 `migration-state.json`。
+/// 构造两个耦合文件——leaf.py 触发 `numeric_precision`（`import math`），app.py 触发
+/// `concurrency`（async/await）——decompose 凝聚为 1 个 coupled_batch 组，组 danger = 成员
+/// 危险信号并集（去重 + 字典序）。同时校验落盘 `ModuleState.danger` 经 serde 往返一致。
+#[test]
+fn e2e_populate_danger_signals_into_state() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("leaf.py"),
+        "import math\n\n\ndef dist(a, b):\n    return math.sqrt(a * a + b * b)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        src.join("app.py"),
+        "from .leaf import dist\n\n\nasync def run():\n    return await load()\n\n\nasync def load():\n    return dist(3, 4)\n",
+    )
+    .unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        assert_eq!(run(&["graph", "build", "--root", "src"]).0, 0);
+
+        let (code, json) = run(&["state", "populate-modules", "--root", "src"]);
+        assert_eq!(code, 0, "populate 应成功: {json}");
+        let modules = json["data"]["modules"].as_array().unwrap();
+        assert_eq!(modules.len(), 1, "两个耦合文件应凝聚为 1 组: {json}");
+        let group = &modules[0];
+        assert_eq!(group["composite_kind"], "coupled_batch", "{group}");
+        // 组 danger = 成员并集：concurrency（app.py）+ numeric_precision（leaf.py），去重 + 字典序。
+        assert_eq!(
+            group["danger"],
+            serde_json::json!(["concurrency", "numeric_precision"]),
+            "组 danger 应为成员危险信号并集（去重 + 字典序）: {group}"
+        );
+
+        // 落盘校验：state get 反序列化的 ModuleState.danger 透传一致（serde 往返）。
+        let (code, json) = run(&["state", "get", "file:app.py"]);
+        assert_eq!(code, 0, "state get 应成功: {json}");
+        assert_eq!(
+            json["data"]["state"]["danger"],
+            serde_json::json!(["concurrency", "numeric_precision"]),
+            "落盘 ModuleState.danger 应含并集: {json}"
+        );
+        assert_eq!(run(&["validate", "state"]).0, 0, "落盘后 state 应合法");
+    });
+}
+
 #[test]
 fn e2e_populate_cleans_orphan_pending() {
     // 源码图删文件后重填：上一轮登记、本轮序列已不含的 pending 模块应被清理为孤儿，
