@@ -71,6 +71,21 @@ pub enum DangerCategory {
 }
 
 impl DangerCategory {
+    /// 稳定的 snake_case 标识符（与 `#[serde(rename_all = "snake_case")]` 序列化一致）。
+    ///
+    /// 供 CLI 把危险类别**原样**落入 `migration-state.json` 的 `ModuleState.danger`
+    /// （MDR-013）：state 层只存原始类别名，concern 文案与 RULE 映射留给 plugin/translator。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DangerCategory::NumericPrecision => "numeric_precision",
+            DangerCategory::Concurrency => "concurrency",
+            DangerCategory::DynamicReflection => "dynamic_reflection",
+            DangerCategory::IoSideEffect => "io_side_effect",
+            DangerCategory::Ffi => "ffi",
+            DangerCategory::SharedMutableGlobal => "shared_mutable_global",
+        }
+    }
+
     /// 该陷阱的人读说明，供翻译上下文注入 / dry-run 报告展示。
     ///
     /// 不在此硬编码具体 RULE-NN（除已核实的 RULE-22 异步原语）——规则注入由 translator
