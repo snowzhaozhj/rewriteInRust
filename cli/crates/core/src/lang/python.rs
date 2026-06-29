@@ -45,7 +45,35 @@ impl LanguageAdapter for PythonAdapter {
     }
 
     fn resolve_extensions(&self) -> &[&str] {
-        SourceLang::Python.source_extensions()
+        &["py"]
+    }
+
+    fn detect_source_root(&self, project_root: &Path) -> Option<String> {
+        // 优先走默认的 src/ 检查
+        let src_dir = project_root.join("src");
+        if src_dir.is_dir() && super::dir_has_source_files(&src_dir, self.resolve_extensions(), 5) {
+            return Some("src".to_string());
+        }
+        // Python flat-package：唯一顶层含 __init__.py 的包目录
+        let Ok(entries) = std::fs::read_dir(project_root) else {
+            return None;
+        };
+        let packages: Vec<String> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_ok_and(|ft| ft.is_dir()))
+            .filter(|e| {
+                let name = e.file_name();
+                let n = name.to_string_lossy();
+                !n.starts_with('.')
+                    && !crate::types::common::EXCLUDED_DIRS.contains(&n.as_ref())
+                    && e.path().join("__init__.py").exists()
+            })
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        if packages.len() == 1 {
+            return Some(packages.into_iter().next().unwrap());
+        }
+        None
     }
 
     fn analyze_file(&mut self, source: &str, rel_path: &str) -> Result<FileAnalysis> {
@@ -2094,5 +2122,80 @@ class PublicClass:
     fn classify_unparseable_is_conservative() {
         let c = classify("def broken( :::\n");
         assert_eq!(c, FileClassification::conservative());
+    }
+
+    // === detect_source_root 测试 ===
+
+    fn write_file(dir: &std::path::Path, name: &str, content: &str) {
+        let path = dir.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn source_root_flat_package() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_file(tmp.path(), "mypackage/__init__.py", "");
+        write_file(tmp.path(), "mypackage/core.py", "x = 1");
+        let adapter = PythonAdapter::new().unwrap();
+        assert_eq!(
+            adapter.detect_source_root(tmp.path()),
+            Some("mypackage".to_string())
+        );
+    }
+
+    #[test]
+    fn source_root_src_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_file(tmp.path(), "src/mypackage/__init__.py", "");
+        write_file(tmp.path(), "src/mypackage/core.py", "x = 1");
+        let adapter = PythonAdapter::new().unwrap();
+        assert_eq!(
+            adapter.detect_source_root(tmp.path()),
+            Some("src".to_string())
+        );
+    }
+
+    #[test]
+    fn source_root_multiple_packages_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_file(tmp.path(), "pkg_a/__init__.py", "");
+        write_file(tmp.path(), "pkg_a/a.py", "x = 1");
+        write_file(tmp.path(), "pkg_b/__init__.py", "");
+        write_file(tmp.path(), "pkg_b/b.py", "y = 2");
+        let adapter = PythonAdapter::new().unwrap();
+        assert_eq!(adapter.detect_source_root(tmp.path()), None);
+    }
+
+    #[test]
+    fn source_root_no_init_py_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_file(tmp.path(), "scripts/run.py", "print('hello')");
+        let adapter = PythonAdapter::new().unwrap();
+        assert_eq!(adapter.detect_source_root(tmp.path()), None);
+    }
+
+    #[test]
+    fn source_root_with_tests_package_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_file(tmp.path(), "mypackage/__init__.py", "");
+        write_file(tmp.path(), "mypackage/core.py", "x = 1");
+        write_file(tmp.path(), "tests/__init__.py", "");
+        write_file(tmp.path(), "tests/test_core.py", "def test_x(): pass");
+        let adapter = PythonAdapter::new().unwrap();
+        // 两个含 __init__.py 的顶层目录 → 多包，保守回退 None
+        assert_eq!(adapter.detect_source_root(tmp.path()), None);
+    }
+
+    #[test]
+    fn source_root_excludes_venv() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_file(tmp.path(), ".venv/__init__.py", "");
+        write_file(tmp.path(), ".venv/lib.py", "x = 1");
+        write_file(tmp.path(), "main.py", "print('hello')");
+        let adapter = PythonAdapter::new().unwrap();
+        assert_eq!(adapter.detect_source_root(tmp.path()), None);
     }
 }

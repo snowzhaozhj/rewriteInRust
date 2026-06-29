@@ -135,18 +135,6 @@ pub enum SourceLang {
     Go,
 }
 
-impl SourceLang {
-    /// 该语言的源文件扩展名（不含点）。唯一权威——adapter `resolve_extensions` 应与之一致。
-    pub fn source_extensions(self) -> &'static [&'static str] {
-        match self {
-            Self::TypeScript => &["ts", "tsx"],
-            Self::Python => &["py"],
-            Self::C => &["c", "h"],
-            Self::Go => &["go"],
-        }
-    }
-}
-
 /// 复杂度等级（由 profile 模块评估）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Display, EnumString)]
 #[serde(rename_all = "snake_case")]

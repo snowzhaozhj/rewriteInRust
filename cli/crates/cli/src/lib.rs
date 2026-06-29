@@ -615,13 +615,17 @@ fn cmd_init() -> CmdResult {
         let mut cfg = rustmigrate_core::types::config::MigrateConfig::default();
         cfg.project.name = project_name();
         cfg.project.source_language = Some(lang);
-        let detection = rustmigrate_core::profile::detect_source_root(Path::new("."), lang);
-        cfg.project.source_root = detection.source_root.clone();
-        if detection.source_root == "." {
-            warnings.push(format!(
-                "source_root 回退为 \".\"（{}），建议在 .rustmigrate.toml 中手动确认",
-                detection.reason
-            ));
+        let source_root = create_adapter(lang)
+            .ok()
+            .and_then(|a| a.detect_source_root(Path::new(".")));
+        match source_root {
+            Some(root) => cfg.project.source_root = root,
+            None => {
+                cfg.project.source_root = ".".to_string();
+                warnings.push(
+                    "source_root 回退为 \".\"（未探测到 src/ 或语言特定包目录），建议在 .rustmigrate.toml 中手动确认".to_string(),
+                );
+            }
         }
         let toml_str = toml::to_string(&cfg)?;
         std::fs::write(&config, toml_str)?;
