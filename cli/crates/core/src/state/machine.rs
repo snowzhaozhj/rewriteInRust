@@ -281,7 +281,8 @@ impl MigrationStateMachine {
     ///   时间序列），`result` 形如 `transition:from→to reason=r`，供状态报告/排查回溯。
     /// - `force`：仅对 `degrade_* → translating` 恢复有意义（设计 `--force`），其余转换忽略。
     ///
-    /// 模块不存在返回 `MigrateError::Config`。
+    /// `name` 归一：容忍传入 composite 组的非代表成员（反查 `member_files` 映射回组代表），
+    /// 与 `state deps` 的组感知一致。归一后仍找不到则返回 `MigrateError::Config`。
     pub fn transition_module(
         &mut self,
         name: &str,
@@ -290,11 +291,25 @@ impl MigrationStateMachine {
         reason: Option<&str>,
         force: bool,
     ) -> Result<()> {
+        // 归一 module key：调用方通常传组代表 key，但 run 阶段也可能对折叠组的非代表成员
+        // （如 `file:types.ts`）发 transition——反查其所属组代表后按组转换，避免硬失败破坏
+        // composite 组状态推进（与 `cmd_state_deps` 的归一逻辑对称）。
+        let canonical: String = if self.state_file.modules.contains_key(name) {
+            name.to_string()
+        } else if let Some((key, _)) = self.state_file.modules.iter().find(|(_, m)| {
+            m.member_files
+                .as_ref()
+                .is_some_and(|mf| mf.iter().any(|f| f == name))
+        }) {
+            key.clone()
+        } else {
+            return Err(MigrateError::Config(format!("模块不存在: {name}")));
+        };
         let module = self
             .state_file
             .modules
-            .get_mut(name)
-            .ok_or_else(|| MigrateError::Config(format!("模块不存在: {name}")))?;
+            .get_mut(&canonical)
+            .expect("canonical 已校验存在");
         let from = module.status;
 
         if let Some(target) = to {
@@ -917,6 +932,33 @@ mod tests {
             .transition_module("ghost", Some(ModuleStatus::Translating), None, None, false)
             .unwrap_err();
         assert!(matches!(err, MigrateError::Config(_)));
+    }
+
+    #[test]
+    fn test_transition_module_normalizes_non_representative_member() {
+        // composite 组以代表 key 持状态；对折叠组的非代表成员发 transition 应归一到组代表
+        // （与 cmd_state_deps 的组感知对称），而非报「模块不存在」破坏组状态推进。
+        let mut m = new_machine();
+        let mut grp = module_with_status(ModuleStatus::Pending);
+        grp.member_files = Some(vec!["grp".to_string(), "file:helper.ts".to_string()]);
+        m.update_module("grp", grp);
+
+        // 传非代表成员 key：应归一到组代表 "grp"。
+        assert!(m
+            .transition_module(
+                "file:helper.ts",
+                Some(ModuleStatus::Translating),
+                None,
+                None,
+                false
+            )
+            .is_ok());
+        // 组代表状态被推进，且未意外创建独立的成员模块。
+        assert_eq!(
+            m.state_file().modules["grp"].status,
+            ModuleStatus::Translating
+        );
+        assert!(!m.state_file().modules.contains_key("file:helper.ts"));
     }
 
     #[test]

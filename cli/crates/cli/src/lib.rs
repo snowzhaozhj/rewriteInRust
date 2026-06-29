@@ -125,7 +125,16 @@ pub enum GraphCommands {
         profile: bool,
     },
     /// 对依赖图执行拓扑排序，输出迁移顺序；检测到环非零退出。
-    TopoSort,
+    TopoSort {
+        /// 组感知：按 SCC 组（破环折叠覆盖全部 File 节点）输出迁移单位序列
+        /// （`{key 代表, members, sprint, is_cycle}`），而非展平的文件序；组模式天然
+        /// 破环，有环不再非零退出。供 run 编排按组消费迁移顺序。
+        #[arg(long)]
+        members: bool,
+        /// 逆序输出（依赖在前、叶子在后）；默认叶子优先（先迁移无依赖文件）。
+        #[arg(long)]
+        reverse: bool,
+    },
     /// 查询模块的正向依赖（imports 边的传递闭包）。
     Deps { module: String },
     /// 查询模块的反向依赖（imports 入边的传递闭包）。
@@ -400,7 +409,9 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
                 profile,
             } => emit(writer, cmd_graph_build(root, *full, *profile)),
             // topo-sort 有环时需非零退出，单独处理退出码。
-            GraphCommands::TopoSort => cmd_graph_topo_sort(writer),
+            GraphCommands::TopoSort { members, reverse } => {
+                cmd_graph_topo_sort(writer, *members, *reverse)
+            }
             GraphCommands::Deps { module } => emit(writer, cmd_graph_deps(module)),
             GraphCommands::Rdeps { module } => emit(writer, cmd_graph_rdeps(module)),
             GraphCommands::Interfaces {
@@ -509,6 +520,11 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
 
 /// 命令结果：成功数据（JSON value + 警告）或错误。
 type CmdResult = Result<(serde_json::Value, Vec<String>), MigrateError>;
+
+/// 源文件读取失败占比超此阈值即硬阻断（decompose/populate）：高比例读失败几乎必是
+/// `--root` 与 graph build 时的源码根不一致，放行会产出全 0-size 退化 plan 污染后续
+/// 所有 Sprint 规划。低于阈值仍按 warn 放行（个别文件可能确被删/改名）。
+const READ_FAILURE_ABORT_RATIO: f64 = 0.5;
 
 /// 将命令结果序列化为统一 JSON 响应并写入 writer，返回退出码（0 成功 / 1 错误）。
 fn emit<W: Write>(writer: &mut W, result: CmdResult) -> i32 {
@@ -878,16 +894,44 @@ fn mark_graph_built(warnings: &mut Vec<String>) {
 
 /// `graph topo-sort`：拓扑排序输出迁移顺序；有环则非零退出（退出码 2）并列出环。
 ///
-/// 单独处理退出码：成功 0，环 2，其他错误 1。
-fn cmd_graph_topo_sort<W: Write>(writer: &mut W) -> i32 {
+/// `--members`：组感知模式，按 SCC 组（破环折叠）输出迁移单位序列，永不因环退出。
+/// `--reverse`：逆序输出。单独处理退出码：成功 0，环 2（仅非组模式），其他错误 1。
+fn cmd_graph_topo_sort<W: Write>(writer: &mut W, members: bool, reverse: bool) -> i32 {
     let graph = match load_graph() {
         Ok(g) => g,
         Err(err) => return emit(writer, Err(err)),
     };
 
+    // 组感知模式：migration_sequence 缩点为 SCC 组（破环覆盖全部 File 节点），输出每组
+    // {key=代表, members, sprint, is_cycle}。组模式天然破环 → 不因环非零退出。
+    if members {
+        let mut groups: Vec<serde_json::Value> = migration_sequence(&graph)
+            .scc_groups
+            .iter()
+            .map(|g| {
+                let ms: Vec<String> = g.members.iter().map(|id| id.to_string()).collect();
+                json!({
+                    "key": ms.first().cloned().unwrap_or_default(),
+                    "members": ms,
+                    "sprint": g.sprint,
+                    "is_cycle": g.is_cycle,
+                })
+            })
+            .collect();
+        if reverse {
+            groups.reverse();
+        }
+        let resp = Response::ok(json!({ "groups": groups }));
+        write_json(writer, &resp);
+        return 0;
+    }
+
     match topological_sort(&graph) {
         Ok(order) => {
-            let order_strs: Vec<String> = order.iter().map(|id| id.to_string()).collect();
+            let mut order_strs: Vec<String> = order.iter().map(|id| id.to_string()).collect();
+            if reverse {
+                order_strs.reverse();
+            }
             let resp = Response::ok(json!({ "order": order_strs }));
             write_json(writer, &resp);
             0
@@ -1268,12 +1312,20 @@ fn cmd_graph_decompose(root: Option<&Path>, budget: usize) -> CmdResult {
             self_tokens + graph.dependency_signature_tokens(id),
         );
     }
-    // 大面积读失败几乎必是 --root 与 graph build 的根不一致——醒目告警，避免误读为「拆解无收益」。
+    // 大面积读失败几乎必是 --root 与 graph build 的根不一致：高占比硬阻断（避免产出全 0-size
+    // 退化 plan 污染后续规划），低占比仅醒目告警。
     if read_failures > 0 {
+        let total = file_nodes.len();
+        if total > 0 && read_failures as f64 / total as f64 > READ_FAILURE_ABORT_RATIO {
+            return Err(MigrateError::Config(format!(
+                "{read_failures}/{total} 个源文件读取失败（占比 >{:.0}%），已中止拆解：\
+                 几乎必是 --root 与 graph build 时的源码根不一致，请用 --root 指定一致路径",
+                READ_FAILURE_ABORT_RATIO * 100.0
+            )));
+        }
         warnings.push(format!(
-            "{read_failures}/{} 个源文件读取失败（自身源码规模按 0 保守处理）；\
-             若占比偏高，多半是 --root 与 graph build 时的源码根不一致，请用 --root 指定一致路径",
-            file_nodes.len()
+            "{read_failures}/{total} 个源文件读取失败（自身源码规模按 0 保守处理）；\
+             若占比偏高，多半是 --root 与 graph build 时的源码根不一致，请用 --root 指定一致路径"
         ));
     }
     // 规模兜底（MDR-011 §4.2）：凝聚合并对每步全量重算可达 O(U²·(U+E))，U≈缩点组数。
@@ -1917,10 +1969,17 @@ fn cmd_state_populate_modules(
             );
         }
         if read_failures > 0 {
+            let total = file_nodes.len();
+            if total > 0 && read_failures as f64 / total as f64 > READ_FAILURE_ABORT_RATIO {
+                return Err(MigrateError::Config(format!(
+                    "{read_failures}/{total} 个源文件读取失败（占比 >{:.0}%），已中止 populate：\
+                     几乎必是 --root 与 graph build 时的源码根不一致，请用 --root 指定一致路径",
+                    READ_FAILURE_ABORT_RATIO * 100.0
+                )));
+            }
             warnings.push(format!(
-                "{read_failures}/{} 个源文件读取失败（自身源码规模按 0 保守处理）；\
-                 若占比偏高，多半是 --root 与 graph build 时的源码根不一致",
-                file_nodes.len()
+                "{read_failures}/{total} 个源文件读取失败（自身源码规模按 0 保守处理）；\
+                 若占比偏高，多半是 --root 与 graph build 时的源码根不一致"
             ));
         }
 
