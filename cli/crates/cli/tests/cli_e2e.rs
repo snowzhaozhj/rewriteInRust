@@ -1253,9 +1253,9 @@ fn e2e_populate_cleans_orphan_pending() {
         let (code, _) = run(&["graph", "build", "--root", "src"]);
         assert_eq!(code, 0);
 
-        // 孤儿清理测试前提是「多个独立单文件模块」——用 --no-decompose 走 SCC-only 旧路径
-        // 保持 1 文件 1 模块（decompose 默认会把同目录文件合成 1 组，删单成员只是组缩小、不产孤儿）。
-        // 同时为 --no-decompose 旧路径提供回归覆盖（计划 6d）。
+        // 本测试覆盖 --no-decompose 旧路径（每文件单模块，删文件即整模块消失成孤儿）。
+        // decompose 默认路径下删非代表成员只是组缩小、不产孤儿，但删代表成员会触发代表
+        // 漂移孤儿——该场景由 e2e_populate_cleans_orphan_decompose_default 钉住。
         // 首轮填充：linear-deps 3 个模块（index/service/utils），全部 pending。
         let (code, json) = run(&["state", "populate-modules", "--no-decompose"]);
         assert_eq!(code, 0, "首轮填充应成功: {json}");
@@ -1292,6 +1292,81 @@ fn e2e_populate_cleans_orphan_pending() {
         );
         let (code, json) = run(&["validate", "state"]);
         assert_eq!(code, 0, "清理后 state 应合法: {json}");
+    });
+}
+
+#[test]
+fn e2e_populate_cleans_orphan_decompose_default() {
+    // 默认 decompose 路径特有的孤儿：组「缩小 + 代表漂移」——删掉组内字典序最小成员
+    // （= 组代表 key），组未消失但代表 key 改变，旧 key 必须被清理为孤儿。--no-decompose
+    // 旧路径（每文件单模块）无此场景（见上 e2e_populate_cleans_orphan_pending），故由本
+    // 测试钉住默认 decompose 路径的孤儿清理回归。
+    // 注：「整组消失」与本场景共享 retain_modules 的 live_keys 集合差路径，存活组场景已由
+    // e2e_populate_cleans_orphan_pending 覆盖，无需单独用例。
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        let _ = run(&["init"]);
+        assert_eq!(run(&["graph", "build", "--root", "src"]).0, 0);
+
+        // 首轮（默认 decompose）：linear-deps 3 文件凝聚为 1 个 coupled_batch 组，
+        // 代表 = 字典序最小成员 file:index.ts。
+        let (code, json) = run(&["state", "populate-modules"]);
+        assert_eq!(code, 0, "首轮填充应成功: {json}");
+        assert_eq!(json["data"]["module_count"], 1, "应凝聚为 1 组: {json}");
+        assert_eq!(
+            json["data"]["modules"][0]["id"], "file:index.ts",
+            "首轮组代表应为 file:index.ts: {json}"
+        );
+
+        // 删组代表 index.ts（顶层文件，无人 import）后重建源码图。
+        std::fs::remove_file("src/index.ts").unwrap();
+        assert_eq!(run(&["graph", "build", "--root", "src"]).0, 0);
+
+        // 重填：组缩小为 {service,utils}（仍是同一个凝聚组，不展开为 2 个单文件模块），
+        // 代表漂移到 file:service.ts；旧 key file:index.ts 成孤儿被清理 + warning 告知。
+        let (code, json) = run(&["state", "populate-modules"]);
+        assert_eq!(code, 0, "重填应成功: {json}");
+        assert_eq!(
+            json["status"], "warning",
+            "代表漂移清理孤儿应降级 warning: {json}"
+        );
+
+        // 仍是 1 个凝聚组（钉住「组缩小 ≠ 误展开为 2 个单文件模块」）。
+        assert_eq!(
+            json["data"]["module_count"], 1,
+            "组缩小后应仍是 1 个凝聚组，而非展开成单文件模块: {json}"
+        );
+        let m = &json["data"]["modules"][0];
+        assert_eq!(
+            m["id"], "file:service.ts",
+            "新组代表应漂移为 service: {json}"
+        );
+        // 组仍含 service+utils（区分「缩小」与「重组」；member_files 按字典序）。
+        assert_eq!(
+            m["member_files"],
+            serde_json::json!(["file:service.ts", "file:utils.ts"]),
+            "缩小后组成员应恰为 service+utils: {json}"
+        );
+
+        // 孤儿恰为旧代表 file:index.ts，且未误删/误报存活组成员。
+        let warnings = json["warnings"].as_array().expect("应有 warnings 数组");
+        assert!(
+            warnings.iter().any(|w| {
+                let s = w.as_str().unwrap_or_default();
+                s.contains("孤儿") && s.contains("file:index.ts")
+            }),
+            "应有含 file:index.ts 的孤儿清理 warning: {json}"
+        );
+        assert!(
+            !warnings.iter().any(|w| {
+                let s = w.as_str().unwrap_or_default();
+                s.contains("孤儿") && (s.contains("service") || s.contains("utils"))
+            }),
+            "存活组成员不应被误报为孤儿: {json}"
+        );
+
+        // 清理后 state 仍合法（孤儿移除不破坏 schema/依赖约束）。
+        assert_eq!(run(&["validate", "state"]).0, 0, "清理后 state 应合法");
     });
 }
 
