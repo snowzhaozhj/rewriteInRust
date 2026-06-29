@@ -63,7 +63,7 @@ impl LanguageAdapter for TypeScriptAdapter {
     }
 
     fn resolve_extensions(&self) -> &[&str] {
-        &["ts", "tsx"]
+        SourceLang::TypeScript.source_extensions()
     }
 
     fn import_specifier_extensions(&self) -> &[&str] {

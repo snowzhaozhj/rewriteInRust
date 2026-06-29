@@ -45,7 +45,7 @@ impl LanguageAdapter for PythonAdapter {
     }
 
     fn resolve_extensions(&self) -> &[&str] {
-        &["py"]
+        SourceLang::Python.source_extensions()
     }
 
     fn analyze_file(&mut self, source: &str, rel_path: &str) -> Result<FileAnalysis> {

@@ -133,19 +133,9 @@ pub struct SourceRootDetection {
     pub reason: &'static str,
 }
 
-/// 源文件扩展名（不含点）。
-fn source_extensions(lang: SourceLang) -> &'static [&'static str] {
-    match lang {
-        SourceLang::TypeScript => &["ts", "tsx"],
-        SourceLang::Python => &["py"],
-        SourceLang::C => &["c", "h"],
-        SourceLang::Go => &["go"],
-    }
-}
-
 /// 目录下是否含有指定语言的源文件（非递归，仅直接子文件）。
 fn dir_has_source_files(dir: &Path, lang: SourceLang) -> bool {
-    let exts = source_extensions(lang);
+    let exts = lang.source_extensions();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return false;
     };
