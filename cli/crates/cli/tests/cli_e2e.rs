@@ -1253,9 +1253,9 @@ fn e2e_populate_cleans_orphan_pending() {
         let (code, _) = run(&["graph", "build", "--root", "src"]);
         assert_eq!(code, 0);
 
-        // 孤儿清理测试前提是「多个独立单文件模块」——用 --no-decompose 走 SCC-only 旧路径
-        // 保持 1 文件 1 模块（decompose 默认会把同目录文件合成 1 组，删单成员只是组缩小、不产孤儿）。
-        // 同时为 --no-decompose 旧路径提供回归覆盖（计划 6d）。
+        // 本测试覆盖 --no-decompose 旧路径（每文件单模块，删文件即整模块消失成孤儿）。
+        // decompose 默认路径下删非代表成员只是组缩小、不产孤儿，但删代表成员会触发代表
+        // 漂移孤儿——该场景由 e2e_populate_cleans_orphan_decompose_default 钉住。
         // 首轮填充：linear-deps 3 个模块（index/service/utils），全部 pending。
         let (code, json) = run(&["state", "populate-modules", "--no-decompose"]);
         assert_eq!(code, 0, "首轮填充应成功: {json}");
@@ -1292,6 +1292,74 @@ fn e2e_populate_cleans_orphan_pending() {
         );
         let (code, json) = run(&["validate", "state"]);
         assert_eq!(code, 0, "清理后 state 应合法: {json}");
+    });
+}
+
+#[test]
+fn e2e_populate_cleans_orphan_decompose_default() {
+    // 默认 decompose 路径特有的孤儿：组「缩小 + 代表漂移」——删掉组内字典序最小成员
+    // （= 组代表 key），组未消失但代表 key 改变，旧 key 必须被清理为孤儿。--no-decompose
+    // 旧路径（每文件单模块）无此场景（见上 e2e_populate_cleans_orphan_pending），故由本
+    // 测试钉住默认 decompose 路径的孤儿清理回归。
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        let _ = run(&["init"]);
+        assert_eq!(run(&["graph", "build", "--root", "src"]).0, 0);
+
+        // 首轮（默认 decompose）：linear-deps 3 文件凝聚为 1 个 coupled_batch 组，
+        // 代表 = 字典序最小成员 file:index.ts。
+        let (code, json) = run(&["state", "populate-modules"]);
+        assert_eq!(code, 0, "首轮填充应成功: {json}");
+        assert_eq!(json["data"]["module_count"], 1, "应凝聚为 1 组: {json}");
+        let ids: Vec<String> = json["data"]["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert!(
+            ids.iter().any(|id| id.contains("index")),
+            "首轮组代表应为 index: {json}"
+        );
+
+        // 删组代表 index.ts（顶层文件，无人 import）后重建源码图。
+        std::fs::remove_file("src/index.ts").unwrap();
+        assert_eq!(run(&["graph", "build", "--root", "src"]).0, 0);
+
+        // 重填：组缩小为 {service,utils}，代表漂移到 file:service.ts；旧 key
+        // file:index.ts 成孤儿被清理 + warning 告知。
+        let (code, json) = run(&["state", "populate-modules"]);
+        assert_eq!(code, 0, "重填应成功: {json}");
+        assert_eq!(
+            json["status"], "warning",
+            "代表漂移清理孤儿应降级 warning: {json}"
+        );
+        let warnings = json["warnings"].as_array().expect("应有 warnings 数组");
+        assert!(
+            warnings.iter().any(|w| {
+                let s = w.as_str().unwrap_or_default();
+                s.contains("孤儿") && s.contains("index")
+            }),
+            "应有含 index 的孤儿清理 warning: {json}"
+        );
+        // 新代表为 service，旧 index key 已清除。
+        let ids: Vec<String> = json["data"]["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert!(
+            !ids.iter().any(|id| id.contains("index")),
+            "孤儿 index 应被清理: {json}"
+        );
+        assert!(
+            ids.iter().any(|id| id.contains("service")),
+            "新组代表应为 service: {json}"
+        );
+
+        // 清理后 state 仍合法（孤儿移除不破坏 schema/依赖约束）。
+        assert_eq!(run(&["validate", "state"]).0, 0, "清理后 state 应合法");
     });
 }
 
