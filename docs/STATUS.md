@@ -12,7 +12,7 @@
   - **VAL-04 差异测试**：golden 套件落地（源引擎录制→Rust 逐条断言），两项目实证。
   - **VAL-06 graduate**：jmespath 毕业成功 + textdistance 正确拒绝未完成。**VAL-08**：just ci 全绿。
   - **暴露并修复 4 项真实工具缺口**：① stats compare 支持 Python 源（补完 deferred M3）② scaffolder golden harness present-null 区分 ③ translator 加 Edit 工具防 Phase B Write 截断 ④ verify.sh done 门补全量集成测试 + --all-targets clippy。详见 `docs/sprint-d-acceptance.md`。
-  - TODO 落账：ffi.rs 测试 deprecated 无 allow（pre-existing 潜伏）；analyzer source_root 推断加固（textdistance 漏修 src→textdistance）。
+  - TODO 落账：ffi.rs 测试 deprecated（✅ 已修，PR #49）；analyzer source_root 推断加固 → [issue #50](https://github.com/snowzhaozhj/rewriteInRust/issues/50)；VAL-05 性能实测 → [issue #51](https://github.com/snowzhaozhj/rewriteInRust/issues/51)。
 - **🟢 M3-DEC-02 轻量翻译路径 ✅**（PR [#46](https://github.com/snowzhaozhj/rewriteInRust/pull/46)，2026-06-28 已合并）：run.md 机械合批组轻量路径实现。
 - **🟢 M3-DEC coupled_batch 分流修复 ✅**（PR [#48](https://github.com/snowzhaozhj/rewriteInRust/pull/48)，2026-06-28 已合并）：修复 populate 把非机械 batch 展开成独立模块、推翻 decompose 分组的接口断裂（与 MDR-011 §6 矛盾）。grilling + codex 双审收敛后实施：
   - **新增 `CompositeKind::CoupledBatch`**：`Batch` 收窄为全机械（轻量路径，编译即门禁）；`CoupledBatch`=含逻辑耦合簇（完整组路径：翻译→结构门→Phase B→行为测试→审查）。populate 保留 `classify_file` 按成员机械性分流（读失败保守落 CoupledBatch）。

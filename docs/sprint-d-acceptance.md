@@ -58,7 +58,7 @@
 |---|------|------|------|
 | 1 | `stats compare` 结构门硬编码 TypeScript，非 TS 源直接报错「M3 实现」→ Python run.md 步骤 8 结构门只能 degrade | CLI 缺口（deferred M3 项未补完） | ✅ 修：`compare_structure` 增 `source_lang` 参数 + `source_max_nesting` 补 Python arm（tree-sitter-python + `is_py_control_flow`）+ CLI 传 config 语言；新增单元 + e2e 测试。提交 942da23 |
 | 2 | scaffolder 生成的 golden harness 用 `Option<T>`+`#[serde(default)]` 承接期望值，`"result": null`（present-null）被误判「缺 result」 | Plugin 缺口（golden 一致性误报） | ✅ 修：scaffolder.md R2 增 present-null 区分约束（`deserialize_with`）。提交 942da23 |
-| 3 | analyze 设 `source_root` 不可靠：jmespath 修正 `src→jmespath`，textdistance 漏修留 `src`（实际包在 `textdistance/`） | 流程缺口（src-layout vs flat-package 推断） | 🟡 验收中人工修正 config；analyzer source_root 推断待加固（记 TODO） |
+| 3 | analyze 设 `source_root` 不可靠：jmespath 修正 `src→jmespath`，textdistance 漏修留 `src`（实际包在 `textdistance/`） | 流程缺口（src-layout vs flat-package 推断） | 🟡 验收中人工修正 config；analyzer source_root 推断待加固 → [issue #50](https://github.com/snowzhaozhj/rewriteInRust/issues/50) |
 | 4 | translator Phase B 用 `Write` 截断既有 `.rs` 后凭记忆重建（险情，靠下游全量 golden 兜住） | Plugin 缺口（无 Edit 工具被迫整文件重写） | ✅ 修：translator 加 `Edit` 工具 + Phase B 强制「改既有文件用 Edit、禁 Write 重建」 |
 | 5 | ffi.rs 测试用 deprecated `generate_ffi_binding` 无 `#[allow(deprecated)]`，`clippy --all-targets` 报错 | pre-existing 潜伏（`just lint` 不带 `--all-targets` 故门禁未覆盖） | ✅ 修：测试模块加 `#![allow(deprecated)]`，repo `clippy --all-targets` 清零 |
 | 6 | `verify.sh` done 门跑 `cargo nextest run --lib`，**漏跑 tests/ 集成测试**（golden 差异 harness）；clippy 不带 `--all-targets` | Plugin/hooks 缺口（模块可在 golden 等价从未实跑时被签批 done，靠 agent 手动补跑兜住） | ✅ 修：verify.sh 改 `cargo nextest run`（全量）+ `cargo clippy --all-targets -- -D warnings` |
@@ -68,7 +68,7 @@
 
 - **VAL-06 graduate Python 路径** ✅：jmespath（2/2 done）→ `rustmigrate graduate` 成功、`ProjectState→graduate`（done=2/degraded=0）；负向验证 textdistance（仅 base.py done）→ **正确拒绝**「2 个模块尚未终态，无法毕业: file:__init__.py=pending, file:benchmark.py=pending」。完成/未完成识别准确。
 - **VAL-08 全量回归** ✅：`just ci` 全绿（fmt-check + lint + test 531 + deny + shellcheck）。
-- **VAL-05 性能（TS ±10%）**：本 PR 改动不触及 TS 路径热点（stats compare 仅新增 Python 分支、TS 分支不变；verify.sh 仅扩测试范围）；TS 全量回归（531 测试）无退化。专项性能基线沿用 M2 ADV-04，未新增退化点。
+- **VAL-05 性能（TS ±10%）**：本 PR 改动不触及 TS 路径热点（stats compare 仅新增 Python 分支、TS 分支不变；verify.sh 仅扩测试范围）；TS 全量回归（532 测试）无退化。**注：当前为推理判定，未跑基准实测** → 升级为测量判定 [issue #51](https://github.com/snowzhaozhj/rewriteInRust/issues/51)。
 
 ## PR #49 四视角审查（全跑）
 
