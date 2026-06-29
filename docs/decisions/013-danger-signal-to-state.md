@@ -41,4 +41,8 @@ danger 收集复用 decompose 路径已有的「逐文件读源 + `classify_file
 - **core 新增**：`DangerCategory::as_str()`（snake_case 稳定标识）。
 - **设计文档同步**：`docs/design/09-appendix-schemas.md` 的 ModuleState 字段说明补 `danger`。
 - **不涉及 plugin**：plugin 消费 danger 是独立的 C2，本批次不动 `plugin/`。
-- **测试**：新增 e2e `e2e_populate_danger_signals_into_state`——两个耦合 Python 文件分别触发 `numeric_precision`/`concurrency`，断言组 danger 为成员并集（去重 + 字典序）且经 `state get` serde 往返一致。
+- **测试**：新增 e2e `e2e_populate_danger_signals_into_state`——两个耦合 Python 文件分别触发 `numeric_precision`/`concurrency`，断言组 danger 为成员并集（去重 + 字典序）且经 `state get` serde 往返一致；新增 `as_str_matches_serde_snake_case` 单测锁死 `as_str()` 与 serde `rename_all` 一致性（防类别名漂移，C1 审查共识）。
+
+## 后续 TODO（C1 审查类型设计视角，非阻塞）
+
+- **`DangerCategory` 候选上移 `types` 层以恢复编译期值域安全**：当前 `Vec<String>` 是分层约束（保持 `lang → types` 单向依赖）下的务实取舍，代价是丢失类型安全（任意字符串可塞入）。债务正解是把纯数据枚举 `DangerCategory`（已 `Serialize`）从 `lang` 上移到 `types`，让 `ModuleState.danger: Vec<DangerCategory>` 既类型安全又保持单向依赖。属跨模块搬迁，超出 C1「只补数据层透传」范围，记为后续任务，避免 stringly-typed 永久化。

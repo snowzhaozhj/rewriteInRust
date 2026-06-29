@@ -309,3 +309,28 @@ fn dir_has_source_files(dir: &Path, extensions: &[&str], depth: u32) -> bool {
     }
     false
 }
+
+#[cfg(test)]
+mod danger_category_tests {
+    use super::DangerCategory;
+
+    /// `as_str()` 与 `#[serde(rename_all = "snake_case")]` 是两处独立的 snake_case 映射，
+    /// 此测试锁死二者一致性——防未来新增/重命名变体时静默漂移（C1 审查三视角共识 nit）。
+    #[test]
+    fn as_str_matches_serde_snake_case() {
+        for cat in [
+            DangerCategory::NumericPrecision,
+            DangerCategory::Concurrency,
+            DangerCategory::DynamicReflection,
+            DangerCategory::IoSideEffect,
+            DangerCategory::Ffi,
+            DangerCategory::SharedMutableGlobal,
+        ] {
+            assert_eq!(
+                serde_json::to_value(cat).unwrap(),
+                serde_json::json!(cat.as_str()),
+                "as_str() 与 serde 序列化应一致: {cat:?}"
+            );
+        }
+    }
+}
