@@ -109,7 +109,7 @@ Plugin 中的确定性计算由独立的 Rust CLI 工具 `rustmigrate` 承担，
 | `rustmigrate init` | 初始化 `.rust-migration/` 目录 + 项目根目录 `.rustmigrate.toml` 配置文件 |
 | `rustmigrate profile` | 分析源码项目画像（语言检测、框架识别、代码统计、外部工具可用性检测——按 `analysis-tools.json` 逐项验证安装与最低版本，缺失时输出 `ADAPTER_TOOL_MISSING` 警告；同时检测 Tier 0 Rust 外部二进制 `cargo-nextest` 可用性，缺失时输出 `RUST_TOOL_MISSING` 警告） |
 | `rustmigrate graph build` | 使用 tree-sitter 解析源码，构建源码图（存储到 `source-graph.db`）；默认增量（检测 file_fingerprints 跳过未变更文件），`--full` 强制全量重建并重置 graph_integrity 为 full（用于熔断恢复，见 [04 § 5.7.5-5.7.6](./04-toolchain.md#575-图完整性与熔断)）；`--profile` 输出性能画像 JSON（见 [04 § 5.7.4.1](./04-toolchain.md#5741-性能基准与扩展性)） |
-| `rustmigrate graph topo-sort` | 对依赖图执行拓扑排序，输出迁移顺序（纯排序原语，Kahn 算法，不支持有环图；检测到环则返回 E002 非零退出并列出环路径。**破环不在此命令**：源码环由 `state populate-modules` 缩点折叠为 composite 模块组，见 [04 § 5.7.6](./04-toolchain.md#576-图查询能力清单)、[MDR-004](../decisions/004-scc-fold-break-cycle.md)。完整 SCC 检测见 M2 `graph cycles`） |
+| `rustmigrate graph topo-sort` | 对依赖图执行拓扑排序，输出迁移顺序（纯排序原语，Kahn 算法，不支持有环图；检测到环则返回 E002 非零退出并列出环路径。**破环不在此命令**：源码环由 `state populate-modules` 缩点折叠为 composite 模块组，见 [04 § 5.7.6](./04-toolchain.md#576-图查询能力清单)、[MDR-004](../decisions/004-scc-fold-break-cycle.md)。完整 SCC 检测见 M2 `graph cycles`。`--reverse`：逆序输出（依赖在前），纯排序变体不破环，见 [MDR-012](../decisions/012-m3-debt-batch-a-deviations.md)） |
 | `rustmigrate graph deps <module>` | 查询模块的正向依赖树 |
 | `rustmigrate graph interfaces <module>` | 输出模块的导出接口签名文本（查询 source-graph.db 中 `is_exported=true` 节点，按 `line_range` 从 source-ref/ 提取）；`--deps-of <target>` 批量输出 target 的直接依赖模块（imports 边的 1-hop 邻居）的导出接口签名（区别于 `graph deps` 的 BFS 传递闭包）；含每条签名的 token 估算（bytes/4） |
 | `rustmigrate graph stats` | 图统计信息（节点/边计数、度分布） |

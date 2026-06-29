@@ -153,32 +153,20 @@ fn e2e_topo_sort_circular_returns_nonzero_and_cycles() {
 }
 
 #[test]
-fn e2e_topo_sort_members_and_reverse() {
+fn e2e_topo_sort_reverse() {
+    // --reverse 是纯排序变体（不破环）：默认叶子优先，--reverse 整体反转为依赖优先。
     let project = temp_linear_project();
     with_cwd(project.path(), || {
         assert_eq!(run(&["init"]).0, 0);
         assert_eq!(run(&["graph", "build", "--root", "src"]).0, 0);
 
-        // --members：组感知输出 groups（单文件项目 → 每组单成员），结构完整 + sprint 偏序。
-        let (code, json) = run(&["graph", "topo-sort", "--members"]);
-        assert_eq!(code, 0, "members 模式应成功: {json}");
-        let groups = json["data"]["groups"].as_array().expect("应有 groups");
-        assert!(!groups.is_empty(), "应有迁移组");
-        assert!(groups[0]["key"].is_string());
-        assert!(groups[0]["members"].is_array());
-        assert!(groups[0]["sprint"].is_u64());
-        let sprint_of = |needle: &str| -> u64 {
-            groups
-                .iter()
-                .find(|g| g["key"].as_str().unwrap().contains(needle))
-                .unwrap_or_else(|| panic!("应含 {needle} 组: {json}"))["sprint"]
-                .as_u64()
-                .unwrap()
-        };
-        assert!(
-            sprint_of("utils") < sprint_of("index"),
-            "叶子 utils 组 sprint 应小于 index 组: {json}"
-        );
+        // 默认：叶子优先（utils < index）。
+        let (code, json) = run(&["graph", "topo-sort"]);
+        assert_eq!(code, 0, "topo-sort 应成功: {json}");
+        let order = json["data"]["order"].as_array().expect("order 应为数组");
+        let fwd_utils = find_position(order, "utils.ts").expect("应含 utils.ts");
+        let fwd_index = find_position(order, "index.ts").expect("应含 index.ts");
+        assert!(fwd_utils < fwd_index, "默认应叶子优先: {order:?}");
 
         // --reverse：order 整体反转——index 现在排在 utils 前。
         let (code, json) = run(&["graph", "topo-sort", "--reverse"]);
@@ -189,28 +177,6 @@ fn e2e_topo_sort_members_and_reverse() {
         assert!(
             pos_index < pos_utils,
             "reverse 后 index 应排在 utils 前: {order:?}"
-        );
-    });
-}
-
-#[test]
-fn e2e_topo_sort_members_breaks_cycle() {
-    // circular-deps：非组模式退出码 2（见上）；--members 组模式破环折叠 → 退出 0。
-    let tmp = tempfile::tempdir().unwrap();
-    copy_dir(&fixtures_dir().join("circular-deps"), tmp.path());
-    with_cwd(tmp.path(), || {
-        assert_eq!(run(&["init"]).0, 0);
-        assert_eq!(run(&["graph", "build", "--root", "src"]).0, 0);
-
-        let (code, json) = run(&["graph", "topo-sort", "--members"]);
-        assert_eq!(code, 0, "组模式应破环不退出: {json}");
-        let groups = json["data"]["groups"].as_array().expect("应有 groups");
-        assert!(
-            groups.iter().any(|g| {
-                g["is_cycle"].as_bool().unwrap_or(false)
-                    && g["members"].as_array().unwrap().len() > 1
-            }),
-            "环应折叠为一个 is_cycle 的多成员组: {json}"
         );
     });
 }
@@ -1852,6 +1818,31 @@ fn e2e_decompose_aborts_on_high_read_failure() {
                 .unwrap_or_default()
                 .contains("读取失败"),
             "错误消息应说明读取失败原因: {json}"
+        );
+    });
+}
+
+#[test]
+fn e2e_decompose_warns_on_low_read_failure() {
+    // 阈值低占比侧：少数文件读失败（<50%）仍 warn 放行（status warning），不阻断。
+    // linear-deps 有 3 文件，删 1 个 → 1/3≈33% < 50%。
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        assert_eq!(run(&["init"]).0, 0);
+        assert_eq!(run(&["graph", "build", "--root", "src"]).0, 0);
+
+        std::fs::remove_file("src/utils.ts").expect("删 utils.ts");
+        let (code, json) = run(&["graph", "decompose", "--root", "src"]);
+        assert_eq!(code, 0, "低占比读失败应放行不阻断: {json}");
+        assert_eq!(json["status"], "warning", "应降级 warning: {json}");
+        assert!(
+            json["warnings"]
+                .as_array()
+                .map(|w| w
+                    .iter()
+                    .any(|x| x.as_str().unwrap_or_default().contains("读取失败")))
+                .unwrap_or(false),
+            "warnings 应含读取失败告警: {json}"
         );
     });
 }

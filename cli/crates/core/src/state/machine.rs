@@ -294,6 +294,25 @@ impl MigrationStateMachine {
         // 归一 module key：调用方通常传组代表 key，但 run 阶段也可能对折叠组的非代表成员
         // （如 `file:types.ts`）发 transition——反查其所属组代表后按组转换，避免硬失败破坏
         // composite 组状态推进（与 `cmd_state_deps` 的归一逻辑对称）。
+        //
+        // 依赖不变量：`member_files` 是文件节点的**划分**（跨组互斥，每个文件至多属一个组，
+        // 见 populate-modules 落盘）。该不变量成立时 `find` 命中唯一，归一确定；若被破坏
+        // （同一文件出现在多组），`find` 取 HashMap 迭代序首个为非确定——debug 下断言钉住。
+        debug_assert!(
+            self.state_file.modules.contains_key(name)
+                || self
+                    .state_file
+                    .modules
+                    .values()
+                    .filter(|m| {
+                        m.member_files
+                            .as_ref()
+                            .is_some_and(|mf| mf.iter().any(|f| f == name))
+                    })
+                    .count()
+                    <= 1,
+            "member_files 跨组互斥不变量被破坏：{name} 同属多个组"
+        );
         let canonical: String = if self.state_file.modules.contains_key(name) {
             name.to_string()
         } else if let Some((key, _)) = self.state_file.modules.iter().find(|(_, m)| {
