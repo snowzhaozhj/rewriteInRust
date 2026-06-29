@@ -71,7 +71,7 @@ tools: Bash, Read, Edit, Write, Grep, Glob
 | `ffi` | RULE-12 unsafe（已命名，M2 展开） | 跨语言边界涉 `unsafe`/原始指针/ABI：最小化 unsafe 面、注明安全前提；无法安全表达则回报编排器走 `--degrade=ffi` 路径。留 PORT NOTE。 |
 | `shared_mutable_global` | RULE-15 全局状态（已命名，M2 展开） | 全局可变态→`OnceLock`/`LazyLock`/`Mutex` 包裹，避免 `static mut`；显式同步并注明初始化时机。留 PORT NOTE。 |
 
-> RULE-6/12/15 已在 `adapters/<lang>/porting-template.md` 命名但完整展开推迟 M2——命中时仍按上表定向处理 + 留 PORT NOTE；规则细则不足处据 RULE-20 谨慎处理、必要时 `TODO(port)`，**不要虚构未定义的规则细节**。
+> RULE-6/12/15 是规则目录已命名的编号（TS 模板 `adapters/typescript/porting-template.md` 已提及，Python 模板尚未列出），完整展开推迟 M2——命中时仍按上表定向处理 + 留 PORT NOTE；规则细则不足处（尤其 Python 模块按指针查不到时）据 RULE-20 谨慎处理、必要时 `TODO(port)`，**不要虚构未定义的规则细节**。
 
 ## 规则生成输出格式
 

@@ -88,7 +88,7 @@ impl DangerCategory {
 
     /// 该陷阱的人读说明，供翻译上下文注入 / dry-run 报告展示。
     ///
-    /// 不在此硬编码具体 RULE-NN（除已核实的 RULE-22 异步原语）——规则注入由 translator
+    /// 不在此硬编码具体 RULE-NN（除已核实的 RULE-6 异步原语）——规则注入由 translator
     /// 依完整规则目录决定，避免在核心层固化可能漂移的规则映射。
     pub fn concern(&self) -> &'static str {
         match self {
@@ -96,7 +96,7 @@ impl DangerCategory {
                 "数值精度：JS number 为 f64，整数运算/取整与 Rust i64/f64 语义不同，需对边界值定向测试"
             }
             DangerCategory::Concurrency => {
-                "并发：async/Promise 语义需映射到 tokio（RULE-22 异步原语），注意执行顺序与取消语义"
+                "并发：async/Promise 语义需映射到 tokio（RULE-6 异步原语），注意执行顺序与取消语义"
             }
             DangerCategory::DynamicReflection => {
                 "动态/反射：typeof/instanceof/any 等运行时类型操作无法静态翻译，需显式建模"
