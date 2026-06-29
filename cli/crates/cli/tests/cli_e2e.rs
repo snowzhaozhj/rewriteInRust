@@ -160,7 +160,11 @@ fn smoke_init() {
     with_cwd(tmp.path(), || {
         let (code, json) = run(&["init"]);
         assert_eq!(code, 0);
-        assert_eq!(json["status"], "ok");
+        // 空目录无源文件时 source_root 回退 "." 产生 warning
+        assert!(
+            json["status"] == "ok" || json["status"] == "warning",
+            "init status 应为 ok 或 warning: {json}"
+        );
         assert_eq!(json["data"]["message"], "initialized");
         // init 同时生成项目根 .rustmigrate.toml（设计 06:89）。
         assert!(json["data"]["config_file"].is_string());
@@ -168,6 +172,64 @@ fn smoke_init() {
             Path::new(".rustmigrate.toml").exists(),
             "init 应生成 .rustmigrate.toml"
         );
+    });
+}
+
+#[test]
+fn init_source_root_python_flat_package() {
+    let tmp = tempfile::tempdir().unwrap();
+    // 模拟 Python flat-package 布局（如 jmespath）
+    let pkg = tmp.path().join("mypackage");
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::write(pkg.join("__init__.py"), "").unwrap();
+    std::fs::write(pkg.join("core.py"), "x = 1\ny = 2\n").unwrap();
+    std::fs::write(
+        tmp.path().join("setup.py"),
+        "from setuptools import setup\n",
+    )
+    .unwrap();
+    with_cwd(tmp.path(), || {
+        let (code, json) = run(&["init"]);
+        assert_eq!(code, 0, "init 应成功: {json}");
+        let config: String = std::fs::read_to_string(tmp.path().join(".rustmigrate.toml")).unwrap();
+        assert!(
+            config.contains("source_root = \"mypackage\""),
+            "flat-package Python 项目的 source_root 应为包名，实际配置:\n{config}"
+        );
+    });
+}
+
+#[test]
+fn init_source_root_ts_with_src() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+    std::fs::write(tmp.path().join("src/index.ts"), "export const x = 1;\n").unwrap();
+    with_cwd(tmp.path(), || {
+        let (code, _) = run(&["init"]);
+        assert_eq!(code, 0);
+        let config: String = std::fs::read_to_string(tmp.path().join(".rustmigrate.toml")).unwrap();
+        assert!(
+            config.contains("source_root = \"src\""),
+            "有 src/ 的 TS 项目 source_root 应为 src，实际配置:\n{config}"
+        );
+    });
+}
+
+#[test]
+fn init_source_root_fallback_warning() {
+    let tmp = tempfile::tempdir().unwrap();
+    // 空目录，无源文件 → 回退 "." 并产生 warning
+    std::fs::write(tmp.path().join("README.md"), "# hello").unwrap();
+    with_cwd(tmp.path(), || {
+        let (code, json) = run(&["init"]);
+        assert_eq!(code, 0, "init 应成功: {json}");
+        let config: String = std::fs::read_to_string(tmp.path().join(".rustmigrate.toml")).unwrap();
+        assert!(
+            config.contains("source_root = \".\""),
+            "无源文件时 source_root 应回退为 \".\"，实际配置:\n{config}"
+        );
+        // status 应降级为 warning
+        assert_eq!(json["status"], "warning", "回退应产生 warning");
     });
 }
 
@@ -746,12 +808,12 @@ fn smoke_state_get_missing_errors() {
 fn smoke_stats_loc() {
     let tmp = tempfile::tempdir().unwrap();
     with_cwd(tmp.path(), || {
-        let _ = run(&["init"]);
-        // 造源码与 Rust 两侧文件。
+        // 先建目录再 init，确保 source_root 探测到 src/
         std::fs::create_dir_all("src").unwrap();
         std::fs::create_dir_all("rust-src").unwrap();
         std::fs::write("src/a.ts", "export const x = 1;\n").unwrap();
         std::fs::write("rust-src/a.rs", "pub fn x() -> i32 {\n    1\n}\n").unwrap();
+        let _ = run(&["init"]);
 
         let (code, json) = run(&["stats", "loc"]);
         assert_eq!(code, 0, "stats loc 应成功: {json}");
@@ -774,9 +836,9 @@ fn smoke_stats_loc() {
 fn smoke_stats_loc_missing_rust_root() {
     let tmp = tempfile::tempdir().unwrap();
     with_cwd(tmp.path(), || {
-        let _ = run(&["init"]);
         std::fs::create_dir_all("src").unwrap();
         std::fs::write("src/a.ts", "export const x = 1;\n").unwrap();
+        let _ = run(&["init"]);
         // rust-src 不存在 → rust 侧为 null + warning，命令不失败。
         let (code, json) = run(&["stats", "loc"]);
         assert_eq!(code, 0, "缺 rust 目录不应失败: {json}");

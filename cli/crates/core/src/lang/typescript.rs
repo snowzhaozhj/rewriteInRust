@@ -1981,4 +1981,48 @@ export class C extends B<T> implements I {
         let c = classify("export function broken( {{{ \n");
         assert_eq!(c, FileClassification::conservative());
     }
+
+    // === detect_source_root 测试 ===
+
+    fn write_file(dir: &std::path::Path, name: &str, content: &str) {
+        let path = dir.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn source_root_with_src() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_file(tmp.path(), "src/index.ts", "export const x = 1;");
+        let adapter = TypeScriptAdapter::new().unwrap();
+        assert_eq!(
+            adapter.detect_source_root(tmp.path()),
+            Some("src".to_string())
+        );
+    }
+
+    #[test]
+    fn source_root_no_src_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_file(tmp.path(), "index.ts", "export const x = 1;");
+        let adapter = TypeScriptAdapter::new().unwrap();
+        assert_eq!(adapter.detect_source_root(tmp.path()), None);
+    }
+
+    #[test]
+    fn source_root_src_no_ts_files_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_file(tmp.path(), "src/README.md", "# Hello");
+        let adapter = TypeScriptAdapter::new().unwrap();
+        assert_eq!(adapter.detect_source_root(tmp.path()), None);
+    }
+
+    #[test]
+    fn source_root_empty_dir_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let adapter = TypeScriptAdapter::new().unwrap();
+        assert_eq!(adapter.detect_source_root(tmp.path()), None);
+    }
 }

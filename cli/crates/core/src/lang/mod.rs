@@ -250,4 +250,47 @@ pub trait LanguageAdapter: Send {
     fn classify_file(&mut self, _source: &str) -> FileClassification {
         FileClassification::conservative()
     }
+
+    /// 探测项目的源码根目录（相对于 `project_root`）。
+    ///
+    /// 默认实现：递归检查 `src/` 是否含 `resolve_extensions()` 匹配的源文件。
+    /// 返回 `None` 表示未探测到，由调用方回退 `"."`。
+    /// 语言有特殊项目布局约定时 override（如 Python flat-package）。
+    fn detect_source_root(&self, project_root: &Path) -> Option<String> {
+        let src_dir = project_root.join("src");
+        if src_dir.is_dir() && dir_has_source_files(&src_dir, self.resolve_extensions(), 5) {
+            return Some("src".to_string());
+        }
+        None
+    }
+}
+
+/// 目录下是否含有指定扩展名的源文件（递归，过滤 EXCLUDED_DIRS，深度限制）。
+fn dir_has_source_files(dir: &Path, extensions: &[&str], depth: u32) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let ft = entry.file_type();
+        if ft.as_ref().is_ok_and(|t| t.is_file()) {
+            if entry
+                .path()
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| extensions.contains(&e))
+            {
+                return true;
+            }
+        } else if depth > 0 && ft.as_ref().is_ok_and(|t| t.is_dir()) {
+            let name = entry.file_name();
+            let n = name.to_string_lossy();
+            if !n.starts_with('.')
+                && !crate::types::common::EXCLUDED_DIRS.contains(&n.as_ref())
+                && dir_has_source_files(&entry.path(), extensions, depth - 1)
+            {
+                return true;
+            }
+        }
+    }
+    false
 }

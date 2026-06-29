@@ -610,12 +610,23 @@ fn cmd_init() -> CmdResult {
     // 项目根 `.rustmigrate.toml`：不存在时按默认配置写入（幂等，存在不覆盖）。
     let config = config_path();
     let config_already = config.exists();
+    let mut warnings = Vec::new();
     if !config_already {
         let mut cfg = rustmigrate_core::types::config::MigrateConfig::default();
         cfg.project.name = project_name();
         cfg.project.source_language = Some(lang);
-        // exclude 留空：语言默认排除走 EXCLUDED_DIRS（生效）；本字段为用户自定义追加，
-        // Sprint C 接入遍历前不写入，避免"配置看似生效实则不生效"的假象。
+        let source_root = create_adapter(lang)
+            .ok()
+            .and_then(|a| a.detect_source_root(Path::new(".")));
+        match source_root {
+            Some(root) => cfg.project.source_root = root,
+            None => {
+                cfg.project.source_root = ".".to_string();
+                warnings.push(
+                    "source_root 回退为 \".\"（未探测到 src/ 或语言特定包目录），建议在 .rustmigrate.toml 中手动确认".to_string(),
+                );
+            }
+        }
         let toml_str = toml::to_string(&cfg)?;
         std::fs::write(&config, toml_str)?;
     }
@@ -628,7 +639,7 @@ fn cmd_init() -> CmdResult {
             "config_file": config.to_string_lossy(),
             "already_initialized": already && config_already,
         }),
-        Vec::new(),
+        warnings,
     ))
 }
 
