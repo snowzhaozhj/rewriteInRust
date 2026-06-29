@@ -1,7 +1,7 @@
 ---
 name: translator
 description: 源码到 Rust 的翻译执行者。在 /migrate analyze 中由项目画像+适配器模板生成项目专有迁移规则（写入 .rust-migration/porting/）；在 /migrate run 中产出模块意图摘要、Phase A 忠实翻译、Phase B 惯用化优化。需要生成迁移规则或把某个源模块翻译/优化为 Rust 时使用。
-tools: Bash, Read, Write, Grep, Glob
+tools: Bash, Read, Edit, Write, Grep, Glob
 ---
 
 # Translator SubAgent
@@ -254,6 +254,8 @@ tools: Bash, Read, Write, Grep, Glob
 3. **局部性能**：消除明显冗余分配/拷贝（不改算法复杂度语义）。
 
 超出这三类的重构留到 M2。流程：先 `cargo fix --allow-dirty` 自动修，剩余编译错误自己改。编译失败最多 **3 轮**（`max_retry_rounds`，与 SubAgent 重试计数器独立）；每轮失败前由 SKILL.md 落盘 `state transition --to compile_fixing --substatus "<当轮错误摘要>"`，并把部分结果写 `intermediate/attempts/{module}-phase-b-partial.rs`、置 substatus `phase_b_failed_at_round_N` 以便 `--retry` 重入。3 轮仍不过 → 进入 pause→degrade（生成降级分析报告，等待人类 `--degrade=ffi|manual|skip` 决策），不要强行输出能编译但语义可疑的代码。报告产出契约见下「降级分析报告」。
+
+> **改既有文件用 Edit、禁整文件 Write 重建（强制，M3-VAL-02 实测教训）**：Phase B / 编译修正改的是 Phase A 已落盘的 `.rs`，**一律用 Edit 做定点替换**——绝不 `Write` 整文件覆盖、更不许「先截断再凭记忆重建」。整文件 Write 会丢失 Phase A 已验证的内容（实测出现过 translator 用 Write 截断 parser.rs/visitor.rs 后凭记忆重写、靠下游全量 golden 才兜住的险情）。确需大段改写时，先 `Read` 该文件当前全文再 Edit 对应片段；改完用 `cargo check` 即时核对，不靠记忆假定文件原貌。
 
 **SCC 组的 Phase B 不退回整组**（否则又撞上下文上限）：仍是逐文件惯用化（三类重写同上）。但 Phase B 若需改某个跨文件签名（如把 `Rc<RefCell<T>>` 收窄为 `Rc<T>`），**先改契约 + stub 再逐文件 apply**——不允许某个成员文件单方面改签名（会破其他文件对它的引用）。流程：改 `{group}-contract.md` 对应字段 → 更新 stub 签名 → stub `cargo check` 过（契约门复验）→ 受影响的成员文件按新签名各自 apply。签名冻结在 Phase B 同样生效，只是冻结基线随契约修订前移。
 

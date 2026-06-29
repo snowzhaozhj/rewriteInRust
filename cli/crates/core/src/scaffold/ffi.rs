@@ -231,6 +231,10 @@ pub fn count_exports(
 
 #[cfg(test)]
 mod tests {
+    // 本模块整体 #[deprecated]（MDR-007：FFI 取消，degrade_skip 唯一降级路径），
+    // 但保留测试以回归 generate_ffi_binding 的既有行为；测试有意调用 deprecated API，
+    // 故在测试模块内放行 deprecated，避免 `clippy --all-targets -D warnings` 误报。
+    #![allow(deprecated)]
     use super::*;
     use tempfile::TempDir;
 

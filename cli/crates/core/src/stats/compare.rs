@@ -98,8 +98,12 @@ pub struct CompareReport {
 ///
 /// 任一侧目录不存在返回 [`MigrateError::FileNotFound`]（由 CLI 层转成 warning + 跳过，
 /// 见 lib.rs；本函数只负责「目录都存在时」的对比，不静默吞缺失）。
-pub fn compare_structure(source_root: &Path, rust_root: &Path) -> Result<CompareReport> {
-    let source = measure_source(source_root)?;
+pub fn compare_structure(
+    source_root: &Path,
+    rust_root: &Path,
+    source_lang: SourceLang,
+) -> Result<CompareReport> {
+    let source = measure_source_for_lang(source_root, source_lang)?;
     let rust = measure_rust(rust_root)?;
 
     let loc_ratio = Ratio::new(source.code as f64, rust.code as f64);
@@ -115,12 +119,7 @@ pub fn compare_structure(source_root: &Path, rust_root: &Path) -> Result<Compare
     })
 }
 
-/// 度量源码侧：tokei 取 code 行；tree-sitter 取 Function 节点数与控制流嵌套。
-fn measure_source(root: &Path) -> Result<StructureMetrics> {
-    measure_source_for_lang(root, SourceLang::TypeScript)
-}
-
-/// 按指定语言度量源码侧。
+/// 按指定语言度量源码侧：tokei 取 code 行；tree-sitter 取 Function 节点数与控制流嵌套。
 fn measure_source_for_lang(root: &Path, lang: SourceLang) -> Result<StructureMetrics> {
     let loc = count_loc(root)?;
     let graph = build_graph_for_lang(root, lang)?;
@@ -169,6 +168,7 @@ fn source_max_nesting(root: &Path, lang: SourceLang) -> Result<usize> {
             tree_sitter_typescript::language_typescript(),
             is_ts_control_flow,
         ),
+        SourceLang::Python => (tree_sitter_python::language(), is_py_control_flow),
         _ => {
             return Err(MigrateError::NotImplemented(format!(
                 "源码嵌套深度分析尚未支持: {lang}"
@@ -202,6 +202,20 @@ fn is_ts_control_flow(kind: &str) -> bool {
             | "while_statement"
             | "do_statement"
             | "switch_statement"
+    )
+}
+
+/// Python 控制流节点类型：条件 + 循环 + 上下文/异常/匹配块（与 `lang/python.rs`
+/// 机械性判定使用的嵌套节点集一致）。`try`/`with`/`match` 各计一层。
+fn is_py_control_flow(kind: &str) -> bool {
+    matches!(
+        kind,
+        "if_statement"
+            | "for_statement"
+            | "while_statement"
+            | "with_statement"
+            | "try_statement"
+            | "match_statement"
     )
 }
 
@@ -520,8 +534,12 @@ fn real() {
 
     #[test]
     fn compare_missing_source_dir() {
-        let err = compare_structure(Path::new("/tmp/不存在/src"), Path::new("/tmp/不存在/rust"))
-            .unwrap_err();
+        let err = compare_structure(
+            Path::new("/tmp/不存在/src"),
+            Path::new("/tmp/不存在/rust"),
+            SourceLang::TypeScript,
+        )
+        .unwrap_err();
         assert!(matches!(err, MigrateError::FileNotFound(_)));
     }
 
@@ -546,7 +564,7 @@ fn real() {
         )
         .unwrap();
 
-        let report = compare_structure(&src_dir, &rust_dir).unwrap();
+        let report = compare_structure(&src_dir, &rust_dir, SourceLang::TypeScript).unwrap();
         assert_eq!(report.source.functions, 2, "源码应有 f + g 两个函数");
         assert_eq!(report.rust.functions, 1, "Rust 应有 1 个函数");
         assert_eq!(report.source.method, CountMethod::TreeSitter);
@@ -562,6 +580,61 @@ fn real() {
         assert!(json["source"]["functions"].is_number());
         assert!(json["function_ratio"]["ratio"].is_number());
         assert_eq!(json["rust"]["method"], "lexical-scan");
+    }
+
+    #[test]
+    fn compare_structure_supports_python_source() {
+        // M3-VAL-02 验收暴露的缺口修复：Python 源结构门（此前 stats compare 硬编码 TS、
+        // 非 TS 直接报错 NotImplemented）。Python 控制流走 is_py_control_flow。
+        let dir = tempfile::tempdir().unwrap();
+        let src_dir = dir.path().join("src");
+        let rust_dir = dir.path().join("rust");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::create_dir_all(&rust_dir).unwrap();
+
+        // Python 源：2 个函数，最大嵌套 2（for 内 if）。
+        fs::write(
+            src_dir.join("a.py"),
+            "def f(x):\n    for i in range(x):\n        if i > 0:\n            print(i)\n\ndef g():\n    pass\n",
+        )
+        .unwrap();
+        // Rust：1 个函数，最大嵌套 1。
+        fs::write(
+            rust_dir.join("a.rs"),
+            "pub fn f(x: i64) {\n    for i in 0..x {\n        let _ = i;\n    }\n}\n",
+        )
+        .unwrap();
+
+        let report = compare_structure(&src_dir, &rust_dir, SourceLang::Python).unwrap();
+        assert_eq!(report.source.functions, 2, "Python 源应有 f + g 两个函数");
+        assert_eq!(report.source.method, CountMethod::TreeSitter);
+        assert_eq!(report.source.max_nesting, 2, "for>if 嵌套 2 层");
+    }
+
+    #[test]
+    fn python_nesting_elif_try_dont_overcount() {
+        // 审查关注点：elif/else 是 if_statement 的子句（非嵌套 if），不应加深度；
+        // try/except 计一层（except_clause 非控制流节点）；空文件 → 0。
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("a.py"),
+            "def h(x):\n    if x == 1:\n        pass\n    elif x == 2:\n        pass\n    else:\n        pass\n    try:\n        pass\n    except Exception:\n        pass\n    for i in x:\n        with open(i) as fp:\n            pass\n",
+        )
+        .unwrap();
+        assert_eq!(
+            source_max_nesting(dir.path(), SourceLang::Python).unwrap(),
+            2,
+            "for>with=2；elif/else 不应把 if 计成多层、try/except 仅一层"
+        );
+
+        // 空 Python 文件：无控制流，嵌套 0（解析成功但无控制流节点）。
+        let empty = tempfile::tempdir().unwrap();
+        fs::write(empty.path().join("e.py"), "").unwrap();
+        assert_eq!(
+            source_max_nesting(empty.path(), SourceLang::Python).unwrap(),
+            0,
+            "空 Python 文件嵌套 0"
+        );
     }
 
     #[test]
@@ -590,7 +663,7 @@ fn real() {
         fs::write(src_dir.join("a.d.ts"), "export declare const z: number;\n").unwrap();
         fs::write(rust_dir.join("a.rs"), "pub fn f(x: i64) -> i64 { x }\n").unwrap();
 
-        let report = compare_structure(&src_dir, &rust_dir).unwrap();
+        let report = compare_structure(&src_dir, &rust_dir, SourceLang::TypeScript).unwrap();
         assert_eq!(
             report.source.functions, 1,
             "仅 a.ts 的 f，测试/声明文件排除"

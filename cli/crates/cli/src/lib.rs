@@ -2471,12 +2471,6 @@ fn cmd_stats_compare(source: Option<&Path>, rust: Option<&Path>) -> CmdResult {
         rustmigrate_core::profile::detect_language(&source_root)
             .unwrap_or(rustmigrate_core::types::common::SourceLang::TypeScript)
     });
-    if source_lang != rustmigrate_core::types::common::SourceLang::TypeScript {
-        return Err(MigrateError::Config(format!(
-            "stats compare 当前仅支持 TypeScript 源（配置 source_language={source_lang}）；\
-             Python/C/Go 源的结构对比在 M3 实现",
-        )));
-    }
 
     // 与 stats loc 同：源/Rust 目录互相包含时统计会污染，显式告警不静默。
     if let Some(outer) = roots_overlap(&source_root, &rust_root) {
@@ -2486,7 +2480,7 @@ fn cmd_stats_compare(source: Option<&Path>, rust: Option<&Path>) -> CmdResult {
         ));
     }
 
-    match compare_structure(&source_root, &rust_root) {
+    match compare_structure(&source_root, &rust_root, source_lang) {
         Ok(report) => match serde_json::to_value(&report) {
             Ok(v) => Ok((v, warnings)),
             Err(e) => {

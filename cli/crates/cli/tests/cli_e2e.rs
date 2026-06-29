@@ -817,33 +817,47 @@ fn smoke_stats_loc_overlapping_roots_warns() {
 }
 
 #[test]
-fn e2e_stats_compare_rejects_non_typescript_source() {
-    // 问题1（M2-ADV-06 审查）：源侧解析强绑 TS。非 TS 项目须显式报错，
-    // 而非源侧静默收集 0 文件、给出半残比值（functions/nesting 全 0）。
+fn e2e_stats_compare_supports_python_source() {
+    // M3-VAL-02 验收：stats compare 结构门此前硬编码 TS、非 TS 源直接报错
+    // （旧 M2-ADV-06 行为）。M3 Python 支持落地后，Python 源应产出真实结构报告
+    // （tree-sitter-python 取 Function 数与控制流嵌套），而非报错。
     let tmp = tempfile::tempdir().unwrap();
     with_cwd(tmp.path(), || {
         let _ = run(&["init"]);
-        // 将生成的 config 源语言改为非 TS（Python）。
         let cfg = std::fs::read_to_string(".rustmigrate.toml").unwrap();
         let cfg = cfg.replace(
             "source_language = \"typescript\"",
             "source_language = \"python\"",
         );
         std::fs::write(".rustmigrate.toml", &cfg).unwrap();
-        assert!(
-            cfg.contains("source_language = \"python\""),
-            "前置：config 应已改为 python: {cfg}"
-        );
         std::fs::create_dir_all("src").unwrap();
         std::fs::create_dir_all("rust-src").unwrap();
+        // Python 源：2 个函数，最大嵌套 2（for 内 if）。
+        std::fs::write(
+            "src/a.py",
+            "def f(x):\n    for i in range(x):\n        if i > 0:\n            print(i)\n\ndef g():\n    pass\n",
+        )
+        .unwrap();
+        std::fs::write(
+            "rust-src/a.rs",
+            "pub fn f(x: i64) {\n    for i in 0..x {\n        let _ = i;\n    }\n}\n",
+        )
+        .unwrap();
 
         let (code, json) = run(&["stats", "compare", "--source", "src", "--rust", "rust-src"]);
-        assert_eq!(code, 1, "非 TS 源应报错: {json}");
-        assert_eq!(json["status"], "error", "应为 error: {json}");
-        let msg = json["data"]["message"].as_str().unwrap_or_default();
-        assert!(
-            msg.contains("仅支持 TypeScript"),
-            "错误信息应说明仅支持 TS: {json}"
+        assert_eq!(code, 0, "Python 源应被支持、正常产出报告: {json}");
+        assert_eq!(json["status"], "ok", "应为 ok: {json}");
+        assert_eq!(
+            json["data"]["source"]["functions"], 2,
+            "Python 源应识别 f + g 两个函数: {json}"
+        );
+        assert_eq!(
+            json["data"]["source"]["max_nesting"], 2,
+            "for>if 嵌套应为 2 层: {json}"
+        );
+        assert_eq!(
+            json["data"]["source"]["method"], "tree-sitter",
+            "Python 源走 tree-sitter: {json}"
         );
     });
 }
