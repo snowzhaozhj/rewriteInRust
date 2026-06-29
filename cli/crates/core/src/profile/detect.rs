@@ -160,10 +160,17 @@ fn dir_has_source_files(dir: &Path, lang: SourceLang) -> bool {
         })
 }
 
-/// 目录下是否含有指定语言的源文件（递归检查子目录）。
+/// 目录下是否含有指定语言的源文件（递归检查子目录，过滤 EXCLUDED_DIRS，深度限 5）。
 fn dir_has_source_files_recursive(dir: &Path, lang: SourceLang) -> bool {
+    dir_has_source_files_bounded(dir, lang, 5)
+}
+
+fn dir_has_source_files_bounded(dir: &Path, lang: SourceLang, depth: u32) -> bool {
     if dir_has_source_files(dir, lang) {
         return true;
+    }
+    if depth == 0 {
+        return false;
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return false;
@@ -171,7 +178,12 @@ fn dir_has_source_files_recursive(dir: &Path, lang: SourceLang) -> bool {
     entries
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_ok_and(|ft| ft.is_dir()))
-        .any(|e| dir_has_source_files_recursive(&e.path(), lang))
+        .filter(|e| {
+            let name = e.file_name();
+            let n = name.to_string_lossy();
+            !n.starts_with('.') && !EXCLUDED_DIRS.contains(&n.as_ref())
+        })
+        .any(|e| dir_has_source_files_bounded(&e.path(), lang, depth - 1))
 }
 
 /// 探测项目的源码根目录。
@@ -190,9 +202,14 @@ pub fn detect_source_root(project_root: &Path, lang: SourceLang) -> SourceRootDe
     }
 
     if lang == SourceLang::Python {
-        let packages: Vec<String> = std::fs::read_dir(project_root)
-            .into_iter()
-            .flatten()
+        const NON_SOURCE_DIRS: &[&str] = &["tests", "test", "docs", "examples", "benchmarks"];
+        let Ok(entries) = std::fs::read_dir(project_root) else {
+            return SourceRootDetection {
+                source_root: ".".to_string(),
+                reason: "未找到 src/ 或语言特定包目录，回退项目根",
+            };
+        };
+        let packages: Vec<String> = entries
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().is_ok_and(|ft| ft.is_dir()))
             .filter(|e| {
@@ -200,6 +217,7 @@ pub fn detect_source_root(project_root: &Path, lang: SourceLang) -> SourceRootDe
                 let name_str = name.to_string_lossy();
                 !name_str.starts_with('.')
                     && !EXCLUDED_DIRS.contains(&name_str.as_ref())
+                    && !NON_SOURCE_DIRS.contains(&name_str.as_ref())
                     && e.path().join("__init__.py").exists()
             })
             .map(|e| e.file_name().to_string_lossy().into_owned())
@@ -407,6 +425,17 @@ mod tests {
         write_file(tmp.path(), "src/README.md", "# Hello");
         let det = detect_source_root(tmp.path(), SourceLang::TypeScript);
         assert_eq!(det.source_root, ".", "src/ 无源文件应回退");
+    }
+
+    #[test]
+    fn detect_source_root_python_ignores_tests_package() {
+        let tmp = TempDir::new().unwrap();
+        write_file(tmp.path(), "mypackage/__init__.py", "");
+        write_file(tmp.path(), "mypackage/core.py", "x = 1");
+        write_file(tmp.path(), "tests/__init__.py", "");
+        write_file(tmp.path(), "tests/test_core.py", "def test_x(): pass");
+        let det = detect_source_root(tmp.path(), SourceLang::Python);
+        assert_eq!(det.source_root, "mypackage", "tests/ 不应被当作源码包");
     }
 
     #[test]
