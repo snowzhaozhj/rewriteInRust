@@ -58,6 +58,8 @@ impl LanguageAdapter for PythonAdapter {
         let Ok(entries) = std::fs::read_dir(project_root) else {
             return None;
         };
+        // tests/test 含 __init__.py 是 pytest 测试发现约定，不是源码包
+        const PYTHON_TEST_DIRS: &[&str] = &["tests", "test"];
         let packages: Vec<String> = entries
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().is_ok_and(|ft| ft.is_dir()))
@@ -66,6 +68,7 @@ impl LanguageAdapter for PythonAdapter {
                 let n = name.to_string_lossy();
                 !n.starts_with('.')
                     && !crate::types::common::EXCLUDED_DIRS.contains(&n.as_ref())
+                    && !PYTHON_TEST_DIRS.contains(&n.as_ref())
                     && e.path().join("__init__.py").exists()
             })
             .map(|e| e.file_name().to_string_lossy().into_owned())
@@ -2178,15 +2181,18 @@ class PublicClass:
     }
 
     #[test]
-    fn source_root_with_tests_package_returns_none() {
+    fn source_root_ignores_tests_package() {
         let tmp = tempfile::tempdir().unwrap();
         write_file(tmp.path(), "mypackage/__init__.py", "");
         write_file(tmp.path(), "mypackage/core.py", "x = 1");
         write_file(tmp.path(), "tests/__init__.py", "");
         write_file(tmp.path(), "tests/test_core.py", "def test_x(): pass");
         let adapter = PythonAdapter::new().unwrap();
-        // 两个含 __init__.py 的顶层目录 → 多包，保守回退 None
-        assert_eq!(adapter.detect_source_root(tmp.path()), None);
+        // tests/ 是 pytest 约定，不算源码包
+        assert_eq!(
+            adapter.detect_source_root(tmp.path()),
+            Some("mypackage".to_string())
+        );
     }
 
     #[test]
