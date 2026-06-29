@@ -4,8 +4,9 @@
 
 ## 当前位置
 
-- **Milestone**: M1 ✅ → M2 ✅ → **M3 多语言支持（Python 优先）**
-- **阶段**: Sprint A ✅ → Sprint B ✅ → Sprint C ✅ → Sprint E ✅ → **Sprint D 端到端验收 ✅（M3-VAL-01~08 全达标，2026-06-29，PR [#49](https://github.com/snowzhaozhj/rewriteInRust/pull/49) 待合并——4 视角审查全跑、1 important（设计文档同步）+ 4 nit 全落实、just ci 532 绿）**
+- **Milestone**: M1 ✅ → M2 ✅ → **M3 多语言支持（Python 优先）✅ 全部完成（2026-06-29）** → 下一步 M4 地基清理
+- **M3 收尾（2026-06-29）**：Sprint A/B/C/D/E 全部合并，验收 M3-VAL-01~08 全达标；PR [#49](https://github.com/snowzhaozhj/rewriteInRust/pull/49)（ffi 测试修复）+ [#52](https://github.com/snowzhaozhj/rewriteInRust/pull/52)（source_root 探测加固）已合并；遗留 issue [#50](https://github.com/snowzhaozhj/rewriteInRust/issues/50)（source_root 推断）+ [#51](https://github.com/snowzhaozhj/rewriteInRust/issues/51)（VAL-05 性能实测：TS 路径 0%/-16%/-1% 无退化）已 CLOSED+COMPLETED；PLAN-M3 验收清单已全部回填 [x]。
+- **阶段**: Sprint A ✅ → Sprint B ✅ → Sprint C ✅ → Sprint E ✅ → **Sprint D 端到端验收 ✅（M3-VAL-01~08 全达标，2026-06-29，PR [#49](https://github.com/snowzhaozhj/rewriteInRust/pull/49) 已合并——4 视角审查全跑、1 important（设计文档同步）+ 4 nit 全落实、just ci 532 绿）**
 - **🟢 Sprint D 端到端验收 ✅**：2 真实 Python 项目各 ≥1 模块迁移到 done（按 §6 headless 规范）。
   - **VAL-02 jmespath**：2 模块全 done（coupled_batch 7 文件 + visitor.py），**902 黄金集 901 等价 + 1 豁免（D-10）**，端到端 `search()` 全链；独立复核 cargo test/clippy --all-targets 全绿。
   - **VAL-03 textdistance**：base.py 组（编辑距离算法）done，golden_edit_seq 70/70 等价；vector_based 草稿态忠实保留 unimplemented!()。
@@ -30,15 +31,34 @@
 - **最新合并 PR**: [#48](https://github.com/snowzhaozhj/rewriteInRust/pull/48)（CoupledBatch 分流修复）；[#47](https://github.com/snowzhaozhj/rewriteInRust/pull/47)（PLG-06 populate 接入 decompose）；[#46](https://github.com/snowzhaozhj/rewriteInRust/pull/46)（DEC-02 轻量翻译路径）；[#45](https://github.com/snowzhaozhj/rewriteInRust/pull/45)（MDR-011 凝聚合并）；[#43](https://github.com/snowzhaozhj/rewriteInRust/pull/43)（DEC-01 拆解引擎）；[#42](https://github.com/snowzhaozhj/rewriteInRust/pull/42)（M3-VAL-07 §11.2 两文件契约同步）
 - **开放 PR**: 无
 
-### 下一步：Sprint D 端到端验收（M3-VAL-01~08）
+### 下一步：M3 遗留债清理（为 M4 打地基）
 
-Sprint A/B/C/E 全部合并，工具链（CLI 拆解引擎 + Python adapter + Plugin Python 适配）就绪。Sprint D 在 2 个真实 Python 项目上验证端到端迁移。
+**目标（用户 2026-06-29 设定）**：完成 M3 全部任务并达到验收标准（✅ 已达成），清理 pre-existing 工程债，为 M4 打好坚实地基。
 
-- **M3-VAL-01 真实项目选型（前置，需用户定）**：选 2 个 <3K 行开源 Python 项目（纯计算/数据处理类，避免 I/O 密集/框架绑定），要求有 pytest 覆盖。**这是 DEC-GATE 同款硬前置——验收必须跑真实目标，不能用工具自测冒充。**
-- M3-VAL-02/03：项目 A/B 端到端迁移，各 ≥1 模块 done（cargo check+test+clippy 过）
+M3 验收已全部达标，剩余为 CoupledBatch 引入时记录的 5 项 pre-existing 工程债（STATUS 第 24 行原始记录）。先核实当前代码真实状态（PR #49/#52 后可能变化），再按优先级分批修复 + 4 视角审查 + 独立 PR：
+
+1. **read_failures 阈值硬门禁**——全/高比例读失败时静默产出退化 plan（PLG-06 既有，CoupledBatch 路由放大影响）。优先级最高（影响产出可信度）。
+2. **默认 decompose 路径孤儿清理回归覆盖**——「组缩小/整组消失」场景无回归测试。
+3. **state transition 组归一**——不做非代表成员 key 组归一（与 `state deps` 不对称）。
+4. **`graph topo-sort --members --reverse`**——缺参数。
+5. **danger→RULE/定向测试注入**——跨路径既有缺口。
+
+> M3 收尾已完成：PLAN-M3 验收清单回填 [x] + 头部加完成横幅；本文件「当前位置」标记 M3 ✅。
+
+### M4 候选方向（roadmap §M4「完善」，待地基清理后定主线）
+
+- C/C++ LanguageAdapter（bindgen + cbindgen）/ Go LanguageAdapter——复用 Python 验证过的 trait 架构
+- Kani 集成（关键路径形式化验证）
+- 多 agent 并行编排优化 / Strangler Fig 模式工具支持
+- PLAN-M2 推迟项中标「M4 scope」的：图 schema 扩展（TypeAlias/Community）/ FTS5 全文搜索 / 规则治理工具化 / 降级决策学习等（见 PLAN-M3 末尾对账表）
+
+### 历史：Sprint D 端到端验收（M3-VAL-01~08）✅
+
+- **M3-VAL-01 选型**：jmespath + textdistance（纯计算/数据处理，有 pytest 覆盖）
+- M3-VAL-02/03：两项目各 ≥1 模块 done（cargo check+test+clippy 过）
 - M3-VAL-04：差异测试框架（pytest 行为录制 JSON fixture → Rust 对比）
-- M3-VAL-05/06：性能回归（TS ±10%）+ graduate Python 路径验证
-- M3-VAL-07 ✅ 已由 PR #42 完成（设计文档同步）
+- M3-VAL-05/06：性能回归（TS 实测无退化）+ graduate Python 路径验证
+- M3-VAL-07 ✅ PR #42（设计文档同步）
 - M3-VAL-08：全量回归 + 覆盖率 ≥70%
 
 ### M2 遗留（Sprint A 已全部关闭）
