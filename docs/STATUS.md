@@ -4,7 +4,7 @@
 
 ## 当前位置
 
-- **Milestone**: M1 ✅ → M2 ✅ → **M3 多语言支持（Python 优先）✅ 全部完成（2026-06-29）** → 下一步 M4 地基清理
+- **Milestone**: M1 ✅ → M2 ✅ → **M3 多语言支持（Python 优先）✅ 全部完成** → **M3 遗留债清理（M4 地基）✅ 完成（2026-06-30，5 项 CoupledBatch 工程债全清）** → 下一步 M4「完善」主线
 - **M3 收尾（2026-06-29）**：Sprint A/B/C/D/E 全部合并，验收 M3-VAL-01~08 全达标；PR [#49](https://github.com/snowzhaozhj/rewriteInRust/pull/49)（ffi 测试修复）+ [#52](https://github.com/snowzhaozhj/rewriteInRust/pull/52)（source_root 探测加固）已合并；遗留 issue [#50](https://github.com/snowzhaozhj/rewriteInRust/issues/50)（source_root 推断）+ [#51](https://github.com/snowzhaozhj/rewriteInRust/issues/51)（VAL-05 性能实测：TS 路径 0%/-16%/-1% 无退化）已 CLOSED+COMPLETED；PLAN-M3 验收清单已全部回填 [x]。
 - **阶段**: Sprint A ✅ → Sprint B ✅ → Sprint C ✅ → Sprint E ✅ → **Sprint D 端到端验收 ✅（M3-VAL-01~08 全达标，2026-06-29，PR [#49](https://github.com/snowzhaozhj/rewriteInRust/pull/49) 已合并——4 视角审查全跑、1 important（设计文档同步）+ 4 nit 全落实、just ci 532 绿）**
 - **🟢 Sprint D 端到端验收 ✅**：2 真实 Python 项目各 ≥1 模块迁移到 done（按 §6 headless 规范）。
@@ -26,26 +26,32 @@
 - **🟢 PLG-06 populate-modules 接入 decompose ✅**（PR [#47](https://github.com/snowzhaozhj/rewriteInRust/pull/47)，2026-06-28 已合并）：`populate-modules` 消费 `plan_decomposition` 产出，写 `migration-state.json`（`composite_kind` + `member_files` + `decomposition_frozen`）。新增 `--budget`/`--no-decompose` 参数。（注：原「含 non-mechanical 成员展开为独立模块」行为已由上方 M3-DEC coupled_batch 修复推翻。）
 - **MDR-011 ✅ 已合并（PR [#45](https://github.com/snowzhaozhj/rewriteInRust/pull/45)，2026-06-28）**：目录优先两阶段凝聚合并。10 真实项目均值 ~76% 缩减。
 - **Sprint E ✅ 全部完成**：DEC-01（PR #43）+ DEC-GATE（Python 分类器修复）+ DEC-02（PR #46）。
-- **测试基线**: 528 测试 / clippy -D / deny / fmt / shellcheck 全绿
+- **测试基线**: 552 测试 / clippy -D / deny / fmt / shellcheck + plugin validate 全绿
 - **CI 覆盖率**: 待更新
-- **最新合并 PR**: [#48](https://github.com/snowzhaozhj/rewriteInRust/pull/48)（CoupledBatch 分流修复）；[#47](https://github.com/snowzhaozhj/rewriteInRust/pull/47)（PLG-06 populate 接入 decompose）；[#46](https://github.com/snowzhaozhj/rewriteInRust/pull/46)（DEC-02 轻量翻译路径）；[#45](https://github.com/snowzhaozhj/rewriteInRust/pull/45)（MDR-011 凝聚合并）；[#43](https://github.com/snowzhaozhj/rewriteInRust/pull/43)（DEC-01 拆解引擎）；[#42](https://github.com/snowzhaozhj/rewriteInRust/pull/42)（M3-VAL-07 §11.2 两文件契约同步）
+- **最新合并 PR**: [#55](https://github.com/snowzhaozhj/rewriteInRust/pull/55)（danger→规则注入闭环 C1+C2，MDR-013）；[#54](https://github.com/snowzhaozhj/rewriteInRust/pull/54)（decompose 代表漂移孤儿回归）；[#53](https://github.com/snowzhaozhj/rewriteInRust/pull/53)（CLI 三连 + MDR-012）；[#48](https://github.com/snowzhaozhj/rewriteInRust/pull/48)（CoupledBatch 分流修复）；[#47](https://github.com/snowzhaozhj/rewriteInRust/pull/47)（PLG-06 populate 接入 decompose）；[#46](https://github.com/snowzhaozhj/rewriteInRust/pull/46)（DEC-02 轻量翻译路径）；[#45](https://github.com/snowzhaozhj/rewriteInRust/pull/45)（MDR-011 凝聚合并）；[#43](https://github.com/snowzhaozhj/rewriteInRust/pull/43)（DEC-01 拆解引擎）；[#42](https://github.com/snowzhaozhj/rewriteInRust/pull/42)（M3-VAL-07 §11.2 两文件契约同步）
 - **开放 PR**: 无
 
-### 下一步：M3 遗留债清理（为 M4 打地基）
+### M3 遗留债清理（为 M4 打地基）✅ 完成（2026-06-30）
 
-**目标（用户 2026-06-29 设定）**：完成 M3 全部任务并达到验收标准（✅ 已达成），清理 pre-existing 工程债，为 M4 打好坚实地基。
+**目标（用户 2026-06-29 设定）**：完成 M3 全部任务并达到验收标准（✅），清理 pre-existing 工程债，为 M4 打好坚实地基（✅ 5 项全清）。
 
-M3 验收已全部达标，剩余为 CoupledBatch 引入时记录的 5 项 pre-existing 工程债（STATUS 第 24 行原始记录）。先核实当前代码真实状态（PR #49/#52 后可能变化），再按优先级分批修复 + 4 视角审查 + 独立 PR：
+5 项 CoupledBatch pre-existing 工程债全部清理 + 审查 + 合并：
 
-1. **read_failures 阈值硬门禁**——全/高比例读失败时静默产出退化 plan（PLG-06 既有，CoupledBatch 路由放大影响）。优先级最高（影响产出可信度）。
-2. **默认 decompose 路径孤儿清理回归覆盖**——「组缩小/整组消失」场景无回归测试。
-3. **state transition 组归一**——不做非代表成员 key 组归一（与 `state deps` 不对称）。
-4. **`graph topo-sort --members --reverse`**——缺参数。
-5. **danger→RULE/定向测试注入**——跨路径既有缺口。
+| 项 | 内容 | PR | 关键决策 |
+|----|------|----|---------|
+| ③ read_failures 硬门禁 | 占比 ≥50% 阻断全 0-size 退化 plan | [#53](https://github.com/snowzhaozhj/rewriteInRust/pull/53) | MDR-012 |
+| ② topo-sort 参数 | **撤 --members**（违反「破环不在此命令」冻结契约）、新增 --reverse | [#53](https://github.com/snowzhaozhj/rewriteInRust/pull/53) | MDR-012：组感知顺序归 populate |
+| ④ transition 组归一 | 复用 state deps 的 member_files 归一 | [#53](https://github.com/snowzhaozhj/rewriteInRust/pull/53) | — |
+| ⑤ 孤儿清理回归 | 默认 decompose 代表漂移孤儿 e2e | [#54](https://github.com/snowzhaozhj/rewriteInRust/pull/54) | — |
+| ① danger→规则注入 | CLI 落 state + plugin 消费闭环 | [#55](https://github.com/snowzhaozhj/rewriteInRust/pull/55) | MDR-013：state 只落原始类别，RULE 映射归 translator |
 
-> M3 收尾已完成：PLAN-M3 验收清单回填 [x] + 头部加完成横幅；本文件「当前位置」标记 M3 ✅。
+- **审查**：批次 A 4 视角、B 2 视角、C 4(C1)+2(C2) 视角，全部无 important，共识 nit 全修。
+- **新增 MDR**：MDR-012（批次 A 三项偏离）、MDR-013（danger 落 state）。
+- **后续 TODO**（MDR-013 登记，非阻塞，留待 M4）：io_side_effect 补专属 RULE；DangerCategory 上移 types 层恢复类型安全；RULE-6/12/15 porting-template 完整展开。
 
-### M4 候选方向（roadmap §M4「完善」，待地基清理后定主线）
+> M3 收尾 + 遗留债清理均已完成；PLAN-M3 验收清单回填 [x] + 头部完成横幅；本文件「当前位置」标记 M3 + 地基 ✅。
+
+### 下一步：M4「完善」主线（地基已清，候选方向待定主线）
 
 - C/C++ LanguageAdapter（bindgen + cbindgen）/ Go LanguageAdapter——复用 Python 验证过的 trait 架构
 - Kani 集成（关键路径形式化验证）
