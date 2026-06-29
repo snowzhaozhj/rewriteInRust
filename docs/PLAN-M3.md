@@ -4,6 +4,8 @@
 > 语言扩展架构：[06-plugin-structure §11.2](design/06-plugin-structure.md)
 > M2 遗留移交：[STATUS.md](STATUS.md)
 
+> **状态：M3 ✅ 全部完成（2026-06-29）**。Sprint A/B/C/D/E 全部合并，验收 M3-VAL-01~08 全达标（jmespath + textdistance 两真实项目各 ≥1 模块迁移到 done，TS 路径性能实测无退化）。遗留 issue #50/#51 已闭环。下方各 Sprint 验收清单已回填。剩余为 pre-existing 工程债（CoupledBatch 5 项 TODO），见 [STATUS.md](STATUS.md)，作为 M4 地基清理。
+
 ## 目标
 
 支持 Python → Rust 迁移。在 2 个真实 Python 项目中完成至少 1 个模块迁移。
@@ -53,11 +55,11 @@ Sprint A (多语言泛化 + 遗留清理) → Sprint B (Python Adapter Core)
 | M3-DEV-01 | **DEVIATION 4 项 MDR 补录**：fingerprint 提取范围、事务类型 DEFERRED、WAL pragma、exported_names 额外维度 | 0.5d | — |
 
 **验收标准**：
-- [ ] `build_graph()` 接收任意 `LanguageAdapter`，TypeScript 走原路径不回归
-- [ ] `resolve_import` 在 adapter 里，build.rs 不含语言特有解析逻辑
-- [ ] alias 漏边 bug 已修，补测试覆盖
-- [ ] `just ci` 全过（407+ 测试），无新 clippy 警告
-- [ ] M2 遗留全部关闭（FFI MDR + DEVIATION MDR）
+- [x] `build_graph()` 接收任意 `LanguageAdapter`，TypeScript 走原路径不回归
+- [x] `resolve_import` 在 adapter 里，build.rs 不含语言特有解析逻辑
+- [x] alias 漏边 bug 已修，补测试覆盖
+- [x] `just ci` 全过（407+ 测试），无新 clippy 警告
+- [x] M2 遗留全部关闭（FFI MDR + DEVIATION MDR）
 
 ---
 
@@ -93,11 +95,11 @@ Step 3: PR-B3 (Validation)     → PY-07 + PY-08         [~2.5d]
 - 日历时间：~7-8d（PR-B2 内部并行压缩）
 
 **验收标准**：
-- [ ] 3 个 Python fixture 的 `ground-truth.json` 偏序约束全部满足
-- [ ] `cargo run -- graph build --root fixtures/py-linear-deps` 输出正确依赖图
-- [ ] `__init__.py` 包结构正确解析，re-export 透传工作
-- [ ] `if TYPE_CHECKING` 块识别为 `StaticType` import
-- [ ] `just ci` 全过，Python fixture 测试纳入 nextest
+- [x] 3 个 Python fixture 的 `ground-truth.json` 偏序约束全部满足
+- [x] `cargo run -- graph build --root fixtures/py-linear-deps` 输出正确依赖图
+- [x] `__init__.py` 包结构正确解析，re-export 透传工作
+- [x] `if TYPE_CHECKING` 块识别为 `StaticType` import
+- [x] `just ci` 全过，Python fixture 测试纳入 nextest
 
 ---
 
@@ -116,10 +118,10 @@ Step 3: PR-B3 (Validation)     → PY-07 + PY-08         [~2.5d]
 
 **验收标准**：
 - [x] ~~`adapters/python/adapter.json` 符合 06 §11.2 JSON Schema 契约~~（**作废，MDR-009**）→ `adapters/python/` 含 `analysis-tools.json`（格式匹配 `AnalysisTool`）+ `porting-template.md`（frontmatter 与 TS 对齐）
-- [ ] `/migrate analyze` 产出 `migration-state.json`（Python 项目正确填充模块状态）
-- [ ] `/migrate run` 对 Python fixture headless 跑通，至少 1 模块状态推进到 `translating`
-- [ ] translator 可根据 `source_language` 切换类型映射表
-- [ ] 降级报告输出原因和推荐替代；`blocked_by_skip` 标记传播到上游模块
+- [x] `/migrate analyze` 产出 `migration-state.json`（Python 项目正确填充模块状态）
+- [x] `/migrate run` 对 Python fixture headless 跑通，至少 1 模块状态推进到 `translating`
+- [x] translator 可根据 `source_language` 切换类型映射表
+- [x] 降级报告输出原因和推荐替代；`blocked_by_skip` 标记传播到上游模块
 
 ---
 
@@ -138,13 +140,13 @@ Step 3: PR-B3 (Validation)     → PY-07 + PY-08         [~2.5d]
 | M3-VAL-07 | **设计文档同步**：08-roadmap M3 验收标记 + 04-toolchain Python 工具链 + 02-architecture Python 适配器 + PLAN.md §11 PyO3/Mypy 方向更新 | 1d | VAL-03 |
 | M3-VAL-08 | **全量回归 + 覆盖率**：`just ci` 全过；覆盖率 ≥70% | 0.5d | ALL |
 **验收标准**：
-- [ ] 2 个真实 Python 项目中 ≥1 模块迁移到 done
-- [ ] 迁移产物 `cargo check` + `cargo test` + `clippy -D` 全过
-- [ ] 差异测试：Python 原始行为与 Rust 迁移后行为对齐（JSON fixture 对比通过）
-- [ ] `/migrate graduate` 对 Python 项目正确识别完成/未完成状态
-- [ ] TS 路径性能不退化（±10%）
-- [ ] TS 路径全量回归无退化
-- [ ] 设计文档 M3 交付物全部同步（含 PLAN.md §11 方向更新）
+- [x] 2 个真实 Python 项目中 ≥1 模块迁移到 done
+- [x] 迁移产物 `cargo check` + `cargo test` + `clippy -D` 全过
+- [x] 差异测试：Python 原始行为与 Rust 迁移后行为对齐（JSON fixture 对比通过）
+- [x] `/migrate graduate` 对 Python 项目正确识别完成/未完成状态
+- [x] TS 路径性能不退化（±10%）
+- [x] TS 路径全量回归无退化
+- [x] 设计文档 M3 交付物全部同步（含 PLAN.md §11 方向更新）
 
 ---
 
@@ -161,10 +163,10 @@ Step 3: PR-B3 (Validation)     → PY-07 + PY-08         [~2.5d]
 | M3-DEC-02 | **PR-2 轻量翻译路径（Plugin，过门后）**：run.md 机械合批组轻量路径（一次翻完 + 一次编译 + 一次签批 + content-hash 复用；单模块整体 dispatch、整批重跑恢复） | ~2d | DEC-GATE 通过 |
 
 **验收标准**：
-- [ ] DEC-GATE 四维度全过（在真实项目上）
-- [ ] 机械小文件不再各自成独立模块、不再各跑完整重型流水线
-- [ ] 拆解计划确定性可复现（跑两次字节级一致）+ 断点续传以冻结计划为准
-- [ ] TS 既有路径无回归
+- [x] DEC-GATE 四维度全过（在真实项目上）
+- [x] 机械小文件不再各自成独立模块、不再各跑完整重型流水线
+- [x] 拆解计划确定性可复现（跑两次字节级一致）+ 断点续传以冻结计划为准
+- [x] TS 既有路径无回归
 
 **砍掉/推迟**（避免过度设计，详见设计文档 §9）：砍 keep-together 架构单元 / agent 规划阶段 / 多轴难度打分；推迟内聚加权打包、跨复杂度合并、大文件自动拆分、失败处理（交 agent，待真实失败数据）。
 

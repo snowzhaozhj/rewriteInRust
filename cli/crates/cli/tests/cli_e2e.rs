@@ -152,6 +152,35 @@ fn e2e_topo_sort_circular_returns_nonzero_and_cycles() {
     });
 }
 
+#[test]
+fn e2e_topo_sort_reverse() {
+    // --reverse 是纯排序变体（不破环）：默认叶子优先，--reverse 整体反转为依赖优先。
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        assert_eq!(run(&["init"]).0, 0);
+        assert_eq!(run(&["graph", "build", "--root", "src"]).0, 0);
+
+        // 默认：叶子优先（utils < index）。
+        let (code, json) = run(&["graph", "topo-sort"]);
+        assert_eq!(code, 0, "topo-sort 应成功: {json}");
+        let order = json["data"]["order"].as_array().expect("order 应为数组");
+        let fwd_utils = find_position(order, "utils.ts").expect("应含 utils.ts");
+        let fwd_index = find_position(order, "index.ts").expect("应含 index.ts");
+        assert!(fwd_utils < fwd_index, "默认应叶子优先: {order:?}");
+
+        // --reverse：order 整体反转——index 现在排在 utils 前。
+        let (code, json) = run(&["graph", "topo-sort", "--reverse"]);
+        assert_eq!(code, 0, "reverse 模式应成功: {json}");
+        let order = json["data"]["order"].as_array().expect("order 应为数组");
+        let pos_utils = find_position(order, "utils.ts").expect("应含 utils.ts");
+        let pos_index = find_position(order, "index.ts").expect("应含 index.ts");
+        assert!(
+            pos_index < pos_utils,
+            "reverse 后 index 应排在 utils 前: {order:?}"
+        );
+    });
+}
+
 // === 各命令 smoke：合法 JSON + status 正确 ===
 
 #[test]
@@ -1766,6 +1795,54 @@ fn smoke_graph_decompose_dry_run() {
             json2["data"]["invariants"]["plan_hash"].as_str().unwrap(),
             hash1,
             "拆解计划应确定可复现"
+        );
+    });
+}
+
+#[test]
+fn e2e_decompose_aborts_on_high_read_failure() {
+    // graph build 用 src 根记录文件相对路径；decompose --root 指向不含源文件的目录
+    // （.rust-migration，init 后必存在）→ 全部读失败 → 硬阻断，避免产出全 0-size 退化
+    // plan 污染后续 Sprint 规划（旧行为：仅 warn 后照常产出）。
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        assert_eq!(run(&["init"]).0, 0);
+        assert_eq!(run(&["graph", "build", "--root", "src"]).0, 0);
+
+        let (code, json) = run(&["graph", "decompose", "--root", ".rust-migration"]);
+        assert_ne!(code, 0, "高比例读失败应非零退出: {json}");
+        assert_eq!(json["status"], "error");
+        assert!(
+            json["data"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("读取失败"),
+            "错误消息应说明读取失败原因: {json}"
+        );
+    });
+}
+
+#[test]
+fn e2e_decompose_warns_on_low_read_failure() {
+    // 阈值低占比侧：少数文件读失败（<50%）仍 warn 放行（status warning），不阻断。
+    // linear-deps 有 3 文件，删 1 个 → 1/3≈33% < 50%。
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        assert_eq!(run(&["init"]).0, 0);
+        assert_eq!(run(&["graph", "build", "--root", "src"]).0, 0);
+
+        std::fs::remove_file("src/utils.ts").expect("删 utils.ts");
+        let (code, json) = run(&["graph", "decompose", "--root", "src"]);
+        assert_eq!(code, 0, "低占比读失败应放行不阻断: {json}");
+        assert_eq!(json["status"], "warning", "应降级 warning: {json}");
+        assert!(
+            json["warnings"]
+                .as_array()
+                .map(|w| w
+                    .iter()
+                    .any(|x| x.as_str().unwrap_or_default().contains("读取失败")))
+                .unwrap_or(false),
+            "warnings 应含读取失败告警: {json}"
         );
     });
 }
