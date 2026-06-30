@@ -148,6 +148,71 @@ pub enum Complexity {
     Complex,
 }
 
+/// 危险信号类别（M3-DEC-01 决策②(b)，M4-DEBT-02 上移 types 层）。
+///
+/// 命中任一 → 该文件即"非机械"（走重流程）+ 应注入对应 porting 规则 + 加定向测试。
+/// 与"流程深浅"是两件事：重流程本身不抓陷阱，规则注入才是针对性的一刀。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DangerCategory {
+    /// 数值精度（Math./浮点/Number/parseInt/NaN/Infinity）。
+    NumericPrecision,
+    /// 并发（async/await/Promise.all/定时器）。
+    Concurrency,
+    /// 动态/反射（eval/typeof/instanceof/as any/getattr/metaclass）。
+    DynamicReflection,
+    /// IO 副作用（fs/net/process 等 import 或顶层表达式语句）。
+    IoSideEffect,
+    /// FFI / 跨语言边界（如 napi、ctypes、cgo——主要供非 TS 语言）。
+    Ffi,
+    /// 跨文件共享可变全局（顶层 `let`/`var` 可变绑定）。
+    SharedMutableGlobal,
+    /// 未知类别（旧版 state 文件兼容兜底：无法识别的字符串反序列化为此变体）。
+    #[serde(other)]
+    Unknown,
+}
+
+impl DangerCategory {
+    /// 稳定的 snake_case 标识符（与 `#[serde(rename_all = "snake_case")]` 序列化一致）。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DangerCategory::NumericPrecision => "numeric_precision",
+            DangerCategory::Concurrency => "concurrency",
+            DangerCategory::DynamicReflection => "dynamic_reflection",
+            DangerCategory::IoSideEffect => "io_side_effect",
+            DangerCategory::Ffi => "ffi",
+            DangerCategory::SharedMutableGlobal => "shared_mutable_global",
+            DangerCategory::Unknown => "unknown",
+        }
+    }
+
+    /// 该陷阱的人读说明，供翻译上下文注入 / dry-run 报告展示。
+    ///
+    /// 仅在 concern 文案中点名已核实的 RULE-NN（RULE-6/10/12/15/20）——规则注入仍由
+    /// translator 依完整规则目录决定，避免在核心层固化可能漂移的规则映射。
+    pub fn concern(&self) -> &'static str {
+        match self {
+            DangerCategory::NumericPrecision => {
+                "数值精度：源语言数值类型与 Rust 整型/浮点的取值范围、取整、溢出语义不同（如 JS number=f64、Go int=平台位宽、Python int 任意精度），需对边界值定向测试"
+            }
+            DangerCategory::Concurrency => {
+                "并发：源语言并发原语需映射到 Rust（RULE-6 异步/并发）——async/Promise/goroutine/channel 等的执行顺序、取消、共享内存语义需显式建模"
+            }
+            DangerCategory::DynamicReflection => {
+                "动态/反射：运行时类型操作（如 typeof/instanceof/any、getattr/metaclass、reflect）无法静态翻译，需显式建模（RULE-20）"
+            }
+            DangerCategory::IoSideEffect => {
+                "IO 副作用（RULE-10 IO 子节）：文件/网络/进程调用，需隔离副作用并对错误路径定向测试"
+            }
+            DangerCategory::Ffi => "FFI/unsafe（RULE-12）：跨语言边界（napi/ctypes/cgo/unsafe.Pointer），按 degrade_skip 评估或选 Rust 替代 crate",
+            DangerCategory::SharedMutableGlobal => {
+                "跨文件共享可变全局（RULE-15）：模块级可变绑定（顶层 let/var、package 级 var）→ Rust 需 OnceLock/Mutex 等显式同步"
+            }
+            DangerCategory::Unknown => "未知危险类别（旧版数据兼容兜底）",
+        }
+    }
+}
+
 /// 迁移优先级（1 = 最高优先，无依赖的叶节点先迁移）。
 pub type MigrationPriority = u32;
 
@@ -300,4 +365,70 @@ pub fn normalize_path(path: &std::path::Path) -> Option<String> {
         }
     }
     Some(parts.join("/"))
+}
+
+#[cfg(test)]
+mod danger_category_serde_tests {
+    use super::DangerCategory;
+
+    /// `as_str()` 与 `#[serde(rename_all = "snake_case")]` 序列化一致（防变体新增/重命名漂移）。
+    #[test]
+    fn as_str_matches_serde_serialize() {
+        for cat in [
+            DangerCategory::NumericPrecision,
+            DangerCategory::Concurrency,
+            DangerCategory::DynamicReflection,
+            DangerCategory::IoSideEffect,
+            DangerCategory::Ffi,
+            DangerCategory::SharedMutableGlobal,
+            DangerCategory::Unknown,
+        ] {
+            assert_eq!(
+                serde_json::to_value(cat).unwrap(),
+                serde_json::json!(cat.as_str()),
+                "as_str() 与 serde 序列化应一致: {cat:?}"
+            );
+        }
+    }
+
+    /// 双向 round-trip：序列化后再反序列化得回同一变体（M4-DEBT-02，旧 state 文件可正确加载）。
+    #[test]
+    fn serde_round_trip() {
+        for cat in [
+            DangerCategory::NumericPrecision,
+            DangerCategory::Concurrency,
+            DangerCategory::DynamicReflection,
+            DangerCategory::IoSideEffect,
+            DangerCategory::Ffi,
+            DangerCategory::SharedMutableGlobal,
+        ] {
+            let json = serde_json::to_value(cat).unwrap();
+            let back: DangerCategory = serde_json::from_value(json).unwrap();
+            assert_eq!(cat, back, "round-trip 应保持变体: {cat:?}");
+        }
+    }
+
+    /// 未知字符串经 `#[serde(other)]` 兜底为 `Unknown`，不硬失败（旧/新版兼容韧性）。
+    #[test]
+    fn unknown_string_falls_back_to_unknown() {
+        let parsed: DangerCategory =
+            serde_json::from_value(serde_json::json!("some_future_category"))
+                .expect("未知类别应兜底为 Unknown，不应反序列化失败");
+        assert_eq!(parsed, DangerCategory::Unknown);
+    }
+
+    /// 旧版 state 中的 `Vec<String>` danger 数组可整体反序列化为 `Vec<DangerCategory>`。
+    #[test]
+    fn legacy_string_array_deserializes() {
+        let legacy = serde_json::json!(["numeric_precision", "concurrency", "io_side_effect"]);
+        let parsed: Vec<DangerCategory> = serde_json::from_value(legacy).unwrap();
+        assert_eq!(
+            parsed,
+            vec![
+                DangerCategory::NumericPrecision,
+                DangerCategory::Concurrency,
+                DangerCategory::IoSideEffect,
+            ]
+        );
+    }
 }

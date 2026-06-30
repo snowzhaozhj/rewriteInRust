@@ -65,13 +65,13 @@ tools: Bash, Read, Edit, Write, Grep, Glob
 | danger 类别 | 对应 RULE | 定向处理 |
 |------------|----------|---------|
 | `numeric_precision` | RULE-2 类型映射（已落） | 数值类型按取值范围/精度选型，避免 `number`/`int`→`f64` 丢精度（Python `int` 任意精度→`i64`/`i128`/`num-bigint`；`Decimal` 不得降 `f64`）；溢出点用 `checked_*`。留 PORT NOTE + 定向测试覆盖边界/溢出。 |
-| `concurrency` | RULE-6 异步（已命名，M2 展开） | 共享可变态补 `Arc<Mutex>`/原子/channel；源语言「单线程/GIL 下无锁即原子」假设被打破处显式同步。当前由 Phase B「并发模式」承接重写；留 PORT NOTE。 |
+| `concurrency` | RULE-6 并发（已展开，M4） | 按 porting-template「并发模式」节映射 async/Promise/goroutine/channel；共享可变态补 `Arc<Mutex>`/原子/channel；源语言「单线程/GIL 下无锁即原子」假设被打破处显式同步；难以 1:1 映射走 `--degrade=concurrency`。留 PORT NOTE。 |
 | `dynamic_reflection` | RULE-20 不确定性（已落，硬规则） | `getattr`/`setattr`/`__getattr__`/`isinstance` 动态分发→`enum`+match 或 `dyn Trait`；不可判定一律 `TODO(port)`，**禁猜测**。 |
-| `io_side_effect` | 无既有 RULE，按 concern 人工处理 | 无专属 RULE：在意图摘要 `observable_side_effects` 如实登记，保留副作用的执行顺序/可见性；`try/finally` 清理→`Drop`/RAII。留 `// PORT NOTE: danger=io_side_effect` 提示人工核对。 |
-| `ffi` | RULE-12 unsafe（已命名，M2 展开） | 跨语言边界涉 `unsafe`/原始指针/ABI：最小化 unsafe 面、注明安全前提；无法安全表达则回报编排器走 `--degrade=ffi` 路径。留 PORT NOTE。 |
-| `shared_mutable_global` | RULE-15 全局状态（已命名，M2 展开） | 全局可变态→`OnceLock`/`LazyLock`/`Mutex` 包裹，避免 `static mut`；显式同步并注明初始化时机。留 PORT NOTE。 |
+| `io_side_effect` | RULE-10 标准库 IO 映射（M4 归入） | IO 标准库模块（fs/net/process/http 等）→ Rust `std::fs`/`std::net`/`tokio::fs`/`reqwest` 等 crate 映射（按 porting-template RULE-10 IO 子节）；在意图摘要 `observable_side_effects` 如实登记，保留副作用的执行顺序/可见性；`try/finally`/`with` 清理→`Drop`/RAII/`scopeguard`；错误路径用 `std::io::Result` 或 `anyhow`（按 RULE-3 联动）。留 `// PORT NOTE: RULE-10 io_side_effect <说明>`。 |
+| `ffi` | RULE-12 unsafe（已展开，M4） | 按 porting-template「unsafe 使用策略」节：跨语言边界涉 `unsafe`/原始指针/ABI，最小化 unsafe 面、每处注明 `// SAFETY:` 前提；无法安全表达则回报编排器走 `--degrade=ffi` 路径。留 PORT NOTE。 |
+| `shared_mutable_global` | RULE-15 全局状态（已展开，M4） | 按 porting-template「全局状态处理」节：全局可变态→`OnceLock`/`LazyLock`/`Mutex` 包裹，避免 `static mut`；优先依赖注入；显式同步并注明初始化时机。留 PORT NOTE。 |
 
-> RULE-6/12/15 是规则目录已命名的编号（TS 模板 `adapters/typescript/porting-template.md` 已提及，Python 模板尚未列出），完整展开推迟 M2——命中时仍按上表定向处理 + 留 PORT NOTE；规则细则不足处（尤其 Python 模块按指针查不到时）据 RULE-20 谨慎处理、必要时 `TODO(port)`，**不要虚构未定义的规则细节**。
+> RULE-6（并发）/12（unsafe）/15（全局状态）已在 TS/Python `adapters/<lang>/porting-template.md` 完整展开（M4-DEBT-03，含映射表 + 陷阱清单）——命中时按模板对应节定向处理 + 留 PORT NOTE。模板未覆盖的边角据 RULE-20 谨慎处理、必要时 `TODO(port)`，**不要虚构未定义的规则细节**。
 
 ## 规则生成输出格式
 
