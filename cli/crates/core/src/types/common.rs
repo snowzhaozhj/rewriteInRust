@@ -167,7 +167,15 @@ pub enum DangerCategory {
     Ffi,
     /// 跨文件共享可变全局（顶层 `let`/`var` 可变绑定）。
     SharedMutableGlobal,
-    /// 未知类别（旧版 state 文件兼容兜底：无法识别的字符串反序列化为此变体）。
+    /// 未知类别（兼容兜底：无法识别的字符串反序列化为此变体，**不硬失败**）。
+    ///
+    /// **有损单向性**（M4-DEBT-02 知情取舍，PLAN-M4 DEBT-02 已授权 `#[serde(other)]` 方案）：
+    /// 反序列化 `未知字符串 → Unknown`，但再序列化 `Unknown → "unknown"`，原始字符串不可恢复。
+    /// **当前不可触发**：`danger` 值只由 `classify_file()` 分类器产出（恒为上方 6 类已知值），
+    /// 封闭世界里 state 文件永不含未知 danger；唯一进入途径是手工编辑 JSON 或跨 CLI 版本读入
+    /// （后者由 `migration-state.json` 的 `schema_version` 机制负责，见 06-plugin-structure §unknown
+    /// 处理）。故 load→save 透传（含 Sprint F ROB-01a checkpoint）在正常流程中无损。
+    /// 若未来真需保真未知值，改 `Unknown(String)` + 手写 serde（当前 ROI 不足，故取简单兜底）。
     #[serde(other)]
     Unknown,
 }

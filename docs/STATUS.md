@@ -70,8 +70,13 @@
 | M4-DEBT-03 RULE-6/12/15 展开 | ✅ | TS/Python porting-template 各补「并发模式/unsafe 使用策略/全局状态处理」三节（映射表+陷阱）；concern() 文案语言中立化（去 TS 口径硬编码）；各模板 frontmatter bump `rule_version`（+RULE-6/10/12/15）；translator.md 脚注同步 |
 | M4-LANG-01 Go registry 接线 | ✅ | workspace 引 `tree-sitter-go=0.21`；`registry.rs` 加 Go 臂；`lang/go.rs` 骨架（language/can_handle/resolve_extensions/detect_source_root 实，余 `todo!()`）；新增 `create_go_adapter` 测试 |
 
-- **验证**：556 测试全绿（基线 552 +4 serde 测试）；`just ci` 全过（fmt+clippy -D+test+deny+shellcheck）。
-- **待办**：本 PR 走 4 视角审查（DEBT-02 涉 types/state schema + serde 格式，design-checker + 异构交叉不可豁免）。
+- **验证**：559 测试全绿（基线 552 +4 serde +3 go 骨架测试）；`just ci` 全过（fmt+clippy -D+test+deny+shellcheck）。
+- **审查（4 视角全跑，PR [#57](https://github.com/snowzhaozhj/rewriteInRust/pull/57)）**：主审/设计契约/专项/异构交叉。**1 important 必修 + 4 nit/文档同步全落实**：
+  - **important（4 方一致）**：Go registry 接线后 `todo!()` 让 Go 项目 graph build/populate **panic 崩进程**（回归，违反 CLI 统一 JSON）。修：骨架方法非 panic 化——`analyze_file` 返 `Err(NotImplemented)`、`detect_tier` 返保守 `Full`、删 `classify_file` override 用 trait 默认 `conservative()`；新增 3 个 go 骨架回归测试。
+  - **设计文档同步**：09-schema danger 字段（`Vec<String>`→`Vec<DangerCategory>` + unknown 兜底说明）；MDR-013 决策 2/3 标注被 DEBT-02 取代 + 后续 TODO 三项收口标注；translator.md 文末补 RULE-10。
+  - **nit**：`detect_source_root` go.mod 返 `Some(".")` 而非 `None`（避免误导 fallback warning）；Unknown 有损单向性在类型层文档注明（PLAN 授权 + 不可触发理由：danger 恒为分类器 6 类、跨版本由 schema_version 管）。
+  - **Unknown 有损往返研判**：异构定 HIGH、主审 MEDIUM、专项 nit。研判为**理论回归、单版本不可触发**（danger 只由分类器产 6 类，Unknown 仅手工编辑/跨版本时现）；PLAN-M4 DEBT-02 已授权 `#[serde(other)]`；保真方案（`Unknown(String)`）破 Copy + as_str 签名冲突 + 手写 serde 出错面，ROI 不足。采文档充分注明 + 测试锁边界。
+- **待办**：等用户审阅拍板合并（不自行 merge）。
 
 ### 历史：Sprint D 端到端验收（M3-VAL-01~08）✅
 

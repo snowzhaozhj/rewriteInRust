@@ -71,7 +71,7 @@ tools: Bash, Read, Edit, Write, Grep, Glob
 | `ffi` | RULE-12 unsafe（已展开，M4） | 按 porting-template「unsafe 使用策略」节：跨语言边界涉 `unsafe`/原始指针/ABI，最小化 unsafe 面、每处注明 `// SAFETY:` 前提；无法安全表达则回报编排器走 `--degrade=ffi` 路径。留 PORT NOTE。 |
 | `shared_mutable_global` | RULE-15 全局状态（已展开，M4） | 按 porting-template「全局状态处理」节：全局可变态→`OnceLock`/`LazyLock`/`Mutex` 包裹，避免 `static mut`；优先依赖注入；显式同步并注明初始化时机。留 PORT NOTE。 |
 
-> RULE-6（并发）/12（unsafe）/15（全局状态）已在 TS/Python `adapters/<lang>/porting-template.md` 完整展开（M4-DEBT-03，含映射表 + 陷阱清单）——命中时按模板对应节定向处理 + 留 PORT NOTE。模板未覆盖的边角据 RULE-20 谨慎处理、必要时 `TODO(port)`，**不要虚构未定义的规则细节**。
+> RULE-6（并发）/10（标准库 IO 映射）/12（unsafe）/15（全局状态）已在 TS/Python `adapters/<lang>/porting-template.md` 完整展开（M4-DEBT-01/03，含映射表 + 陷阱清单）——命中时按模板对应节定向处理 + 留 PORT NOTE。模板未覆盖的边角据 RULE-20 谨慎处理、必要时 `TODO(port)`，**不要虚构未定义的规则细节**。
 
 ## 规则生成输出格式
 
