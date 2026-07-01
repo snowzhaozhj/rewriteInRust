@@ -110,8 +110,8 @@ pub fn detect_community_deviation(graph: &SourceGraph) -> Result<CommunityReport
 
 // ─── Louvain 社区检测（直接操作邻接表，无外部依赖） ─────────────
 
-/// Louvain 算法：贪心模块度优化。
-/// 返回社区列表，每个社区是成员 file_id 的有序 Vec。
+/// One-level Louvain：贪心模块度局部优化（无超节点聚合阶段）。
+/// Tier 1 诊断用途，结果可能比完整 Louvain 更碎片化。
 fn louvain(file_ids: &[String], edge_weights: &HashMap<(String, String), f64>) -> Vec<Vec<String>> {
     let n = file_ids.len();
     if n == 0 {
@@ -170,8 +170,8 @@ fn louvain(file_ids: &[String], edge_weights: &HashMap<(String, String), f64>) -
             // i 与自身社区的内部连接
             let ki_in_own = neighbor_comm_weights.get(&ci).copied().unwrap_or(0.0);
 
-            // 尝试移除 i
-            sigma_in[ci] -= ki_in_own;
+            // 尝试移除 i（sigma_in 按双计数和维护）
+            sigma_in[ci] -= 2.0 * ki_in_own;
             sigma_tot[ci] -= ki;
             community[i] = usize::MAX; // 临时标记
 
@@ -179,8 +179,8 @@ fn louvain(file_ids: &[String], edge_weights: &HashMap<(String, String), f64>) -
             let mut best_delta = 0.0f64;
 
             for (&cj, &ki_in_cj) in &neighbor_comm_weights {
-                // ΔQ = ki_in_cj/m - σ_tot_cj * ki / (2m²)
-                let delta = ki_in_cj / m2 - sigma_tot[cj] * ki / (m2 * m2) * 2.0;
+                // ΔQ = 2*k_{i,in}/m2 - 2*σ_tot*k_i/m2²（标准 Louvain，m2=2m）
+                let delta = 2.0 * ki_in_cj / m2 - 2.0 * sigma_tot[cj] * ki / (m2 * m2);
                 if delta > best_delta {
                     best_delta = delta;
                     best_comm = cj;
@@ -188,7 +188,7 @@ fn louvain(file_ids: &[String], edge_weights: &HashMap<(String, String), f64>) -
             }
 
             // 也考虑留在原社区
-            let delta_stay = ki_in_own / m2 - sigma_tot[ci] * ki / (m2 * m2) * 2.0;
+            let delta_stay = 2.0 * ki_in_own / m2 - 2.0 * sigma_tot[ci] * ki / (m2 * m2);
             if delta_stay >= best_delta {
                 best_comm = ci;
             }
@@ -198,7 +198,7 @@ fn louvain(file_ids: &[String], edge_weights: &HashMap<(String, String), f64>) -
                 .get(&best_comm)
                 .copied()
                 .unwrap_or(0.0);
-            sigma_in[best_comm] += ki_in_best;
+            sigma_in[best_comm] += 2.0 * ki_in_best;
             sigma_tot[best_comm] += ki;
 
             if best_comm != ci {
@@ -488,6 +488,15 @@ mod tests {
         let edges = HashMap::new();
         let comms = louvain(&ids, &edges);
         assert_eq!(comms.len(), 4, "无边 → 每个节点独立社区");
+    }
+
+    #[test]
+    fn test_louvain_k2_merges() {
+        let ids = vec!["file:a.ts".to_string(), "file:b.ts".to_string()];
+        let mut edges = HashMap::new();
+        edges.insert((ids[0].clone(), ids[1].clone()), 1.0);
+        let comms = louvain(&ids, &edges);
+        assert_eq!(comms.len(), 1, "K2 应合并为单社区: {comms:?}");
     }
 
     #[test]
