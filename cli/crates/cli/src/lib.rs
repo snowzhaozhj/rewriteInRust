@@ -31,7 +31,7 @@ use rustmigrate_core::response::{ErrorData, Response, Status};
 use rustmigrate_core::scaffold::scaffold_project;
 use rustmigrate_core::state::{MigrationStateMachine, SprintAdvanceResult};
 use rustmigrate_core::stats::{compare_structure, count_loc};
-use rustmigrate_core::types::common::{NodeId, Timestamp};
+use rustmigrate_core::types::common::{DangerCategory, NodeId, Timestamp};
 use rustmigrate_core::types::graph::{EdgeType, NodeType};
 use rustmigrate_core::types::state::{
     humanize_module_key, CompositeKind, ModuleState, ModuleStatus, ModuleTier, ProjectState,
@@ -1878,9 +1878,9 @@ fn cmd_state_populate_modules(
         members: Vec<String>,
         sprint: u32,
         composite_kind: Option<CompositeKind>,
-        /// 组内各成员危险信号类别的并集（snake_case，去重 + 字典序；MDR-013）。
+        /// 组内各成员危险信号类别的并集（去重 + 排序；MDR-013）。
         /// decompose 路径填真值；`--no-decompose` 旧路径恒空（不读源、不分类）。
-        danger: Vec<String>,
+        danger: Vec<DangerCategory>,
     }
 
     let (units, decomposition_snapshot) = if no_decompose {
@@ -1934,8 +1934,8 @@ fn cmd_state_populate_modules(
         let mut self_sizes: HashMap<NodeId, usize> = HashMap::new();
         let mut footprints: HashMap<NodeId, usize> = HashMap::new();
         let mut file_kinds: HashMap<String, FileKind> = HashMap::new();
-        // 每文件危险信号类别（snake_case）；组并集在装配 unit 时计算（MDR-013）。
-        let mut danger_map: HashMap<String, Vec<String>> = HashMap::new();
+        // 每文件危险信号类别；组并集在装配 unit 时计算（MDR-013）。
+        let mut danger_map: HashMap<String, Vec<DangerCategory>> = HashMap::new();
         let mut read_failures = 0usize;
         let mut first_failure: Option<String> = None;
         for id in &file_nodes {
@@ -1945,10 +1945,7 @@ fn cmd_state_populate_modules(
                     let cls = adapter.classify_file(&src);
                     file_kinds.insert(id.to_string(), cls.file_kind);
                     if !cls.danger.is_empty() {
-                        danger_map.insert(
-                            id.to_string(),
-                            cls.danger.iter().map(|d| d.as_str().to_string()).collect(),
-                        );
+                        danger_map.insert(id.to_string(), cls.danger);
                     }
                     src.len().div_ceil(4)
                 }
@@ -1991,15 +1988,20 @@ fn cmd_state_populate_modules(
         let plan = plan_decomposition(&graph, &sequence, &self_sizes, &footprints, budget);
         let snapshot = plan.canonical_hash();
 
-        // 组危险信号 = 各成员 danger 的并集（去重 + 字典序；MDR-013）。
-        let union_danger = |members: &[String]| -> Vec<String> {
-            let mut set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        // 组危险信号 = 各成员 danger 的并集（去重 + 按 as_str() 字典序；MDR-013）。
+        // 注：按 as_str() 排序而非枚举 Ord——保持与旧 Vec<String> 输出一致的字符串字典序，
+        // 避免下游消费方（plugin）依赖的 JSON 数组顺序漂移（M4-DEBT-02）。
+        let union_danger = |members: &[String]| -> Vec<DangerCategory> {
+            let mut set: std::collections::BTreeSet<DangerCategory> =
+                std::collections::BTreeSet::new();
             for m in members {
                 if let Some(ds) = danger_map.get(m) {
-                    set.extend(ds.iter().cloned());
+                    set.extend(ds.iter().copied());
                 }
             }
-            set.into_iter().collect()
+            let mut out: Vec<DangerCategory> = set.into_iter().collect();
+            out.sort_by_key(|d| d.as_str());
+            out
         };
 
         let mut units: Vec<MigrationUnit> = Vec::with_capacity(plan.units.len());

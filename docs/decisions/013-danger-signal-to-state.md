@@ -18,12 +18,16 @@
 
 ### 决策 2：字段形态用 `Vec<String>`（而非 `Vec<DangerCategory>`）
 
+> **⚠️ 已被 M4-DEBT-02 取代（PR #57）**：形态改为 `Vec<DangerCategory>`（枚举上移 `types::common` 后无双向依赖问题，见文末「后续 TODO」收口）。下文是 C1 当时的务实取舍记录。
+
 `ModuleState.danger: Vec<String>`，`#[serde(default, skip_serializing_if = "Vec::is_empty")]`。
 
 - **为何不用 `Vec<DangerCategory>`**：`DangerCategory` 定义在 `crate::lang`，而 `lang` 已依赖 `crate::types::state`（`use ...::state::ModuleTier`）。让 `types::state` 反向依赖 `lang::DangerCategory` 会在模块间形成 `types ↔ lang` 双向依赖（Rust intra-crate 虽不报错，但破坏「types 是下层、不依赖 lang」的分层）。用 `String` 保持依赖单向（`lang → types`），types 层零 lang 依赖。
 - **稳定映射**：给 `DangerCategory` 新增 `as_str() -> &'static str` 返回 snake_case 名（与 `#[serde(rename_all = "snake_case")]` 序列化一致），CLI 用它把类别透传为字符串。单点定义，避免散落字面量漂移。
 
 ### 决策 3：组并集 = 成员 danger 的并集（去重 + 字典序）
+
+> **⚠️ 实现细节已被 M4-DEBT-02 更新（PR #57）**：去重改用 `BTreeSet<DangerCategory>`（按枚举身份去重），再 `sort_by_key(as_str())` 重排为字符串字典序——输出顺序与旧 `BTreeSet<String>` 字节级一致。语义不变（去重 + 字典序 + 确定性）。
 
 composite 组的 `danger` = 各成员 `classify_file().danger` 的并集，去重 + 稳定字典序排序（用 `BTreeSet<String>`）。单文件模块 = 自身 danger。保证断点续传/重填的确定性输出。
 
@@ -45,6 +49,8 @@ danger 收集复用 decompose 路径已有的「逐文件读源 + `classify_file
 
 ## 后续 TODO（C1 审查类型设计视角，非阻塞）
 
-- **`DangerCategory` 候选上移 `types` 层以恢复编译期值域安全**：当前 `Vec<String>` 是分层约束（保持 `lang → types` 单向依赖）下的务实取舍，代价是丢失类型安全（任意字符串可塞入）。债务正解是把纯数据枚举 `DangerCategory`（已 `Serialize`）从 `lang` 上移到 `types`，让 `ModuleState.danger: Vec<DangerCategory>` 既类型安全又保持单向依赖。属跨模块搬迁，超出 C1「只补数据层透传」范围，记为后续任务，避免 stringly-typed 永久化。
-- **`io_side_effect` 无对应 RULE**（C2 暴露）：6 类 danger 中 5 类映射到既有 RULE（numeric_precision→RULE-2、concurrency→RULE-6、dynamic_reflection→RULE-20、ffi→RULE-12、shared_mutable_global→RULE-15），唯 `io_side_effect` 无专属 RULE。C2 暂按「concern 人工处理 + 意图摘要 `observable_side_effects` 登记 + verifier 维度 7 探测」兜底。若实际迁移项目 io 副作用陷阱频发，可补一条「副作用顺序/可见性」RULE（porting-template + translator 核心规则），属规则目录扩展，记后续任务。
-- **RULE-6/12/15 仅命名、M2 才完整展开**：concurrency/ffi/shared_mutable_global 命中时 translator 按映射表定向处理 + 留 PORT NOTE，但 porting-template 细则未充分展开（已写「细则不足据 RULE-20 谨慎、必要时 TODO(port)」兜底）。是否提前到 M3 展开这三条，视实际危险信号分布再定。
+> **M4-DEBT 收口（2026-06-30，PR #57）**：下列三项已在 M4 Sprint A 全部落地。决策 2（`Vec<String>` 形态）与决策 3（`BTreeSet<String>` 并集）已被 M4-DEBT-02 取代——形态改为 `Vec<DangerCategory>`、并集用 `BTreeSet<DangerCategory>` 去重后按 `as_str()` 字典序重排（保持输出顺序与旧版字节级一致）。
+
+- ~~**`DangerCategory` 候选上移 `types` 层以恢复编译期值域安全**~~ → ✅ **M4-DEBT-02**：枚举上移 `types::common`，`ModuleState.danger: Vec<DangerCategory>`，保持 `lang → types` 单向依赖（`lang` 改 `use types::common::DangerCategory`）。加 `Deserialize` + `#[serde(other)] Unknown` 兜底（旧/跨版本 state 不硬失败）。
+- ~~**`io_side_effect` 无对应 RULE**~~ → ✅ **M4-DEBT-01**：裁定**并入 RULE-10（标准库函数映射）的 IO 子节**，不新开 RULE（避免规则膨胀，保持 26 类目录）。io 横跨 RULE-3（错误处理）/RULE-10（标准库），独特关注点（副作用顺序/可见性/隔离）作为 RULE-10 IO 子节。TS/Python porting-template 补「标准库 IO 映射」节；translator.md 定向表 io 行改指 RULE-10。
+- ~~**RULE-6/12/15 仅命名、M2 才完整展开**~~ → ✅ **M4-DEBT-03**：concurrency/ffi/shared_mutable_global 三类在 TS/Python porting-template 完整展开（并发模式/unsafe 使用策略/全局状态处理三节，含映射表 + 陷阱清单）；各模板 frontmatter bump `rule_version`。

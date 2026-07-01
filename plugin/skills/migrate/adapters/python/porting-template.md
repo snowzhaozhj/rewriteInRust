@@ -1,6 +1,6 @@
 ---
 language_id: python
-rule_version: RULE-2:v1.0.0, RULE-3:v1.0.0, RULE-7:v1.0.0, RULE-8:v1.0.0, RULE-20:v1.0.0
+rule_version: RULE-2:v1.0.0, RULE-3:v1.0.0, RULE-6:v1.0.0, RULE-7:v1.0.0, RULE-8:v1.0.0, RULE-10:v1.0.0, RULE-12:v1.0.0, RULE-15:v1.0.0, RULE-20:v1.0.0
 target_languages: [py]
 category: porting-template
 created: 2026-06-27
@@ -12,7 +12,7 @@ confidence: high
 
 translator 在 `/migrate analyze` 的规则生成步骤读取本模板，作为项目专有规则（`.rust-migration/porting/`）的基线，须结合 `source-graph.db` 的实际类型与调用**特化**为本项目映射。
 
-> **覆盖范围**：落 Python→Rust 惯用法差异最显著的 5 条核心规则——RULE-2（类型映射）/ RULE-3（错误处理）/ RULE-7（字符串）/ RULE-8（命名）/ RULE-20（不确定性），并附 Python 专有惯用法差异（self / 动态类型 / decorator / GIL）。
+> **覆盖范围**：核心规则——RULE-2（类型映射）/ RULE-3（错误处理）/ RULE-6（并发，M4 补）/ RULE-7（字符串）/ RULE-8（命名）/ RULE-10（标准库 IO 映射，M4 补）/ RULE-12（unsafe，M4 补）/ RULE-15（全局状态，M4 补）/ RULE-20（不确定性），并附 Python 专有惯用法差异（self / 动态类型 / decorator / GIL）。
 
 ## 类型映射
 
@@ -86,6 +86,71 @@ Python 的动态特性在 Rust 无直接对应，是迁移的主要风险点。
 - **GIL 与并发**：Python 有 GIL，多线程不真并行（CPU 密集用多进程）。Rust 无 GIL，`threading`→`std::thread`、`asyncio`→async runtime、`multiprocessing`→线程或 `rayon`。**注意 `multiprocessing` 是进程隔离（独立内存、pickle 传值），映射到线程/rayon 变成共享内存**——原代码若依赖"无共享"假设会出问题。迁移并发代码时显式确认共享状态的同步（`Arc<Mutex<T>>`），不要假设原代码的"看似线程安全"在真并行下成立——留 `TODO(port)` 标注需要复审的共享状态。
 - **全局可变状态 / 模块级单例**：Python 模块级变量 → Rust `static`（需 `OnceLock`/`LazyLock` 或显式传参），避免全局可变；优先改为显式依赖注入。
 - **魔法方法运算符重载**：`__add__`/`__eq__`/`__lt__`/`__iter__` 等 → 对应 trait（`Add`/`PartialEq`/`PartialOrd`/`Iterator`）；`__repr__`→`Debug`、`__str__`→`Display`、`__len__`→自定义 `len()`、`__hash__`→`Hash`，按 trait 契约实现。
+
+## 标准库 IO 映射
+
+RULE-10（IO 子节）。IO 标准库模块（`os`/`sys`/`subprocess`/`socket`/`shutil`/`io`/`pathlib`/`requests`/`urllib`/`http`/`tempfile` 等）→ Rust 对应 crate/标准库映射。当 `danger` 含 `io_side_effect` 时本节强制生效。
+
+| Python 模块 | Rust 映射 | 说明 |
+|------------|----------|------|
+| `open()` / `io` | `std::fs::File` / `std::io::BufReader` | `open(f)`→`File::open(f)?`，`with open` 的自动关闭→`Drop` |
+| `os` / `os.path` | `std::fs` / `std::env` / `std::path` | `os.remove`→`fs::remove_file`，`os.makedirs`→`fs::create_dir_all` |
+| `pathlib.Path` | `std::path::PathBuf` | `Path("a")/"b"`→`PathBuf::from("a").join("b")` |
+| `subprocess` | `std::process::Command` | `subprocess.run()`→`Command::new(...).output()?` |
+| `shutil` | `std::fs` / `fs_extra` | `shutil.copy`→`fs::copy`，`shutil.rmtree`→`fs::remove_dir_all` |
+| `socket` | `std::net` / `tokio::net` | TCP/UDP socket |
+| `requests` / `urllib` | `reqwest` | `requests.get()`→`reqwest::get().await?` |
+| `http.server` | `hyper` / `axum` | HTTP 服务端 |
+| `tempfile` | `tempfile` crate | `NamedTemporaryFile`→`tempfile::NamedTempFile` |
+
+- **副作用顺序/可见性**：保留原代码 IO 操作的执行顺序；在意图摘要 `observable_side_effects` 如实登记所有 IO 操作点。
+- **资源清理**：Python `with` 语句（上下文管理器）→ RAII guard（`Drop`）/ `scopeguard`；`try/finally` 同理。不要丢弃资源清理语义。
+- **错误路径**（联动 RULE-3）：IO 错误用 `std::io::Result` 或 `anyhow` 包裹；Python 的 `FileNotFoundError`/`PermissionError` 等细分异常→ Rust `std::io::ErrorKind` 匹配或 `thiserror` 枚举。
+- **`input()` 内置函数**：`input()`→`std::io::stdin().read_line()`，注意 Rust 版本不自动 strip 换行符。
+
+## 并发模式
+
+RULE-6。danger 含 `concurrency` 时强制生效。Python 有 GIL（多线程不真并行），Rust 无 GIL——并发模型差异是高风险点（与「Python 专有惯用法差异」的 GIL 条联动）。
+
+| Python | Rust | 说明 |
+|--------|------|------|
+| `threading.Thread` | `std::thread` | Rust 线程真并行，无 GIL——原依赖 GIL 隐式原子性的代码会出竞态 |
+| `asyncio` / `async def` / `await` | `Future` / `async fn` + tokio | 需选定运行时；Rust Future 惰性需 `.await` 驱动 |
+| `asyncio.gather(*tasks)` | `tokio::join!` / `join_all` | 并发等待 |
+| `multiprocessing` | `std::thread` / `rayon` | **关键陷阱**：`multiprocessing` 是进程隔离（独立内存、pickle 传值），映射到线程/rayon 变共享内存——原代码若依赖"无共享"假设会出问题 |
+| `queue.Queue` | `std::sync::mpsc` / `crossbeam::channel` | 线程间通信 |
+| `threading.Lock` / `RLock` | `std::sync::Mutex` / `parking_lot::Mutex` | 显式锁 |
+| GIL 隐式保护的共享状态 | `Arc<Mutex<T>>` / 原子类型 | **必须显式同步**：Python 单 GIL 下 `+=` 看似原子，Rust 多线程下需 `AtomicU64`/`Mutex` |
+
+- **CPU 密集 vs IO 密集**：Python 惯例 CPU 密集用 `multiprocessing`、IO 密集用 `asyncio`——映射时 CPU 密集优先 `rayon`（数据并行），IO 密集用 tokio async。
+- **共享状态复审**：迁移并发代码时显式确认所有共享状态的同步，不要假设原代码"看似线程安全"在真并行下成立——留 `TODO(port)` 标注需复审的共享状态。
+- 并发构造难以 1:1 映射时，回报编排器走 degrade_skip（`--degrade=concurrency`）。
+
+## unsafe 使用策略
+
+RULE-12。danger 含 `ffi` 时强制生效。Python 项目的 FFI 主要是 C 扩展（`ctypes`/`cffi`/Cython）或原生模块（`.so`/`.pyd`）。
+
+- **C 扩展模块**：Python↔C 桥接（`ctypes.CDLL`/`cffi`）→ 若 C 库有 Rust 等价 crate 则直接替代；否则用 `bindgen` 生成 FFI 绑定 + 安全包装。
+- **Cython 加速代码**：通常是纯算法的性能优化 → Rust 原生重写即可（Rust 本身已快），不需保留 FFI。
+- **最小化 unsafe 面**：FFI 调用、原始指针、`transmute` 必需的 `unsafe` 须用安全抽象包裹，每处 `unsafe` 块注明 `// SAFETY: <前提>`。
+- **NumPy/科学计算 buffer**：`numpy` 数组的 C buffer 协议 → `ndarray` crate；避免直接操作原始指针。
+- 无法安全表达的 FFI → 回报编排器走 `--degrade=ffi` 路径，不要强行 `unsafe` 掩盖。
+
+## 全局状态处理
+
+RULE-15。danger 含 `shared_mutable_global` 时强制生效。Python 模块级可变变量 → Rust 需显式同步（与「Python 专有惯用法差异」的全局可变状态条联动）。
+
+| Python | Rust | 说明 |
+|--------|------|------|
+| 模块级 `counter = 0`（可变） | `static COUNTER: AtomicU64` / `OnceLock<Mutex<T>>` | 简单计数用原子；复杂状态用 `Mutex` |
+| 模块级缓存 `_cache = {}` | `static CACHE: LazyLock<Mutex<HashMap<...>>>` | 惰性初始化 + 同步 |
+| 单例模式 `_instance = None` | `OnceLock<T>` | 一次性初始化 |
+| 模块级常量 `MAX = 100` | `const MAX: i64` / `static` | 不可变全局直接 `const`，无需同步 |
+| `functools.lru_cache` 装饰器 | `once_cell`/`LazyLock` + `Mutex<HashMap>` 或 `cached` crate | 函数级记忆化缓存 |
+
+- **优先依赖注入**：能改为显式传参的全局状态，优先重构为函数参数/struct 字段，避免全局可变。
+- **禁 `static mut`**：用 `OnceLock`/`LazyLock`/`Mutex`/原子类型，不要 `static mut`（UB 风险）。
+- **GIL 假象**：Python 模块级 `+=` 在 GIL 下看似安全，Rust 多线程下必须原子/锁——迁移时显式同步并标注。
 
 ## 不确定性处理
 

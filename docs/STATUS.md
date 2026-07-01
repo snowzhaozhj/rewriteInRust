@@ -4,7 +4,7 @@
 
 ## 当前位置
 
-- **Milestone**: M1 ✅ → M2 ✅ → **M3 多语言支持（Python 优先）✅ 全部完成** → **M3 遗留债清理（M4 地基）✅ 完成（2026-06-30）** → **M4「完善」规划已定稿（[PLAN-M4.md](PLAN-M4.md) v0.3，双主线：巩固质量度量 + Go 扩语言，~48d，待用户拍板配比后执行）**
+- **Milestone**: M1 ✅ → M2 ✅ → **M3 多语言支持（Python 优先）✅ 全部完成** → **M3 遗留债清理（M4 地基）✅ 完成（2026-06-30）** → **M4「完善」执行中（双主线配比已拍板：双主线并行）——Sprint A 债务收口+Go前置 ✅ 完成（2026-06-30，待 PR 审查）**
 - **M3 收尾（2026-06-29）**：Sprint A/B/C/D/E 全部合并，验收 M3-VAL-01~08 全达标；PR [#49](https://github.com/snowzhaozhj/rewriteInRust/pull/49)（ffi 测试修复）+ [#52](https://github.com/snowzhaozhj/rewriteInRust/pull/52)（source_root 探测加固）已合并；遗留 issue [#50](https://github.com/snowzhaozhj/rewriteInRust/issues/50)（source_root 推断）+ [#51](https://github.com/snowzhaozhj/rewriteInRust/issues/51)（VAL-05 性能实测：TS 路径 0%/-16%/-1% 无退化）已 CLOSED+COMPLETED；PLAN-M3 验收清单已全部回填 [x]。
 - **阶段**: Sprint A ✅ → Sprint B ✅ → Sprint C ✅ → Sprint E ✅ → **Sprint D 端到端验收 ✅（M3-VAL-01~08 全达标，2026-06-29，PR [#49](https://github.com/snowzhaozhj/rewriteInRust/pull/49) 已合并——4 视角审查全跑、1 important（设计文档同步）+ 4 nit 全落实、just ci 532 绿）**
 - **🟢 Sprint D 端到端验收 ✅**：2 真实 Python 项目各 ≥1 模块迁移到 done（按 §6 headless 规范）。
@@ -59,7 +59,24 @@
 - **Go 扩语言线（roadmap 承诺）~31d**：复用 trait 架构接 Go；**关键 critical 修正**——Go 包系统需**扩 trait 暴露目录列举**（`resolve_import` 的 `exists`-only 签名无法探任意命名包代表文件，扩 trait 是 baseline 非 fallback）；Go 验收用质量度量框架设真实门槛（多模块，非单模块编译）。
 - **明确推迟/砍**：C（无类型 IR 下语义难度+ROI）/ Kani（**推迟**，与 proptest 互补不替代，当前 ROI 不足）/ Community Tier 2/3（Tier 1 已纳入）/ Strangler Fig（降文档，离线场景下共存需求不强）/ 并行编排程序化调度器（当前 SKILL.md 编排满足需求，ROI 不足）/ index.json（YAGNI）。
 - **Sprint 结构**：A 债务收口+Go前置 → B 质量度量+既有基线+Community诊断 ‖ C Go Adapter Core → D Plugin Go → E Go 端到端验收 → F 健壮性+编排收口。共 37 任务 ~48d，两线可独立分批交付。
-- **待办**：PLAN-M4 v0.3 草案定稿，**等用户审阅拍板主线配比**（双主线 vs 纯聚焦某线）后进入 Sprint A 执行。
+- **配比决策（2026-06-30 用户拍板）**：双主线并行——Sprint A 完成后，B（巩固线）与 C（Go 线）可并行启动。
+
+#### Sprint A：债务收口 + Go 接入前置 ✅ 完成（2026-06-30，分支 `feat/m4-sprint-a-debt-and-go-wiring`，待 PR 审查）
+
+| 任务 | 状态 | 交付 |
+|------|------|------|
+| M4-DEBT-01 io RULE 归属 | ✅ | **裁定并入 RULE-10（标准库 IO 映射）**，不新开 RULE（保持 26 类）；translator.md 定向表 + TS/Python porting-template 补「标准库 IO 映射」节；concern() 文案加 RULE-10 引用 |
+| M4-DEBT-02 DangerCategory 上移 | ✅ | 枚举从 `lang/mod.rs` 移到 `types/common.rs`，加 `Deserialize`+`#[serde(other)]` 兜底 `Unknown` 变体；`ModuleState.danger: Vec<String>` → `Vec<DangerCategory>`；lib.rs 去 `as_str()` 转换、`union_danger` 按 `as_str()` 重排保旧字典序；新增 4 个 serde 双向/兜底/旧版兼容测试 |
+| M4-DEBT-03 RULE-6/12/15 展开 | ✅ | TS/Python porting-template 各补「并发模式/unsafe 使用策略/全局状态处理」三节（映射表+陷阱）；concern() 文案语言中立化（去 TS 口径硬编码）；各模板 frontmatter bump `rule_version`（+RULE-6/10/12/15）；translator.md 脚注同步 |
+| M4-LANG-01 Go registry 接线 | ✅ | workspace 引 `tree-sitter-go=0.21`；`registry.rs` 加 Go 臂；`lang/go.rs` 骨架（language/can_handle/resolve_extensions/detect_source_root 实，余 `todo!()`）；新增 `create_go_adapter` 测试 |
+
+- **验证**：559 测试全绿（基线 552 +4 serde +3 go 骨架测试）；`just ci` 全过（fmt+clippy -D+test+deny+shellcheck）。
+- **审查（4 视角全跑，PR [#57](https://github.com/snowzhaozhj/rewriteInRust/pull/57)）**：主审/设计契约/专项/异构交叉。**1 important 必修 + 4 nit/文档同步全落实**：
+  - **important（4 方一致）**：Go registry 接线后 `todo!()` 让 Go 项目 graph build/populate **panic 崩进程**（回归，违反 CLI 统一 JSON）。修：骨架方法非 panic 化——`analyze_file` 返 `Err(NotImplemented)`、`detect_tier` 返保守 `Full`、删 `classify_file` override 用 trait 默认 `conservative()`；新增 3 个 go 骨架回归测试。
+  - **设计文档同步**：09-schema danger 字段（`Vec<String>`→`Vec<DangerCategory>` + unknown 兜底说明）；MDR-013 决策 2/3 标注被 DEBT-02 取代 + 后续 TODO 三项收口标注；translator.md 文末补 RULE-10。
+  - **nit**：`detect_source_root` go.mod 返 `Some(".")` 而非 `None`（避免误导 fallback warning）；Unknown 有损单向性在类型层文档注明（PLAN 授权 + 不可触发理由：danger 恒为分类器 6 类、跨版本由 schema_version 管）。
+  - **Unknown 有损往返研判**：异构定 HIGH、主审 MEDIUM、专项 nit。研判为**理论回归、单版本不可触发**（danger 只由分类器产 6 类，Unknown 仅手工编辑/跨版本时现）；PLAN-M4 DEBT-02 已授权 `#[serde(other)]`；保真方案（`Unknown(String)`）破 Copy + as_str 签名冲突 + 手写 serde 出错面，ROI 不足。采文档充分注明 + 测试锁边界。
+- **待办**：等用户审阅拍板合并（不自行 merge）。
 
 ### 历史：Sprint D 端到端验收（M3-VAL-01~08）✅
 

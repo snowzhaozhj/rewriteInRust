@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use strum::{Display, EnumString};
 
-use super::common::{SourceLang, Timestamp};
+use super::common::{DangerCategory, SourceLang, Timestamp};
 
 /// 项目级状态机节点（编排器状态）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Display, EnumString)]
@@ -280,12 +280,12 @@ pub struct ModuleState {
     /// 可能漂移的映射，对齐 `DangerCategory::concern` 注释立场）。单文件模块 = 自身 danger；
     /// 读失败的文件保守按空 danger 处理。`--no-decompose` 旧路径恒为空。
     ///
-    /// **不变量守门人**：合法值域（6 类 snake_case）/ 去重 / 字典序仅由 `populate` 写入路径
-    /// 逻辑保证（`as_str()` 限值域 + `BTreeSet` 去重有序），类型层与 serde 反序列化**不**强制；
-    /// 新增写入点须自行维持。**空值语义重载**：`[]` 同时表示「无危险信号」与「`--no-decompose`
+    /// **类型安全**（M4-DEBT-02）：`Vec<DangerCategory>` 由类型层保证值域；`#[serde(other)]`
+    /// 兜底 `Unknown` 变体确保旧版 state 含未知类别时不硬失败。去重 / 排序由写入路径
+    /// （`BTreeSet` 有序）保证。**空值语义重载**：`[]` 同时表示「无危险信号」与「`--no-decompose`
     /// 未分类」，消费方（C2 plugin）不可据空值推断「安全」。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub danger: Vec<String>,
+    pub danger: Vec<DangerCategory>,
 }
 
 /// serde 跳过条件：值为 `false` 时不序列化（与本结构其余 Option 字段的 skip 约定一致）。
