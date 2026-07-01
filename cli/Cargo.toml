@@ -13,7 +13,6 @@ repository = "https://github.com/snowzhaozhj/rewriteInRust"
 [workspace.dependencies]
 # 图引擎
 petgraph = "0.6"
-graphrs = "0.11"
 rusqlite = { version = "0.31", features = ["bundled", "modern_sqlite"] }
 
 # AST 解析

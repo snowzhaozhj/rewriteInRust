@@ -7,7 +7,6 @@ license.workspace = true
 
 [dependencies]
 petgraph.workspace = true
-graphrs.workspace = true
 rusqlite.workspace = true
 tree-sitter.workspace = true
 tree-sitter-typescript.workspace = true

@@ -1,16 +1,14 @@
 //! 社区检测与结构偏离度诊断（Tier 1）。
 //!
-//! 对 File 级耦合图跑 Leiden 社区检测，与目录结构分区比较 NMI/ARI，
+//! 对 File 级耦合图跑 Louvain 社区检测，与目录结构分区比较 NMI/ARI，
 //! 输出结构偏离度分数。
 
 use crate::graph::SourceGraph;
 use crate::types::graph::{EdgeType, NodeType};
 use anyhow::Result;
-use graphrs::{algorithms::community::leiden, Edge, Graph, GraphSpecs, Node};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
 
 /// 社区检测报告。
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -80,12 +78,12 @@ pub fn detect_community_deviation(graph: &SourceGraph) -> Result<CommunityReport
         *edge_weights.entry(pair).or_insert(0.0) += 1.0;
     }
 
-    let communities = run_leiden(&file_ids, &edge_weights)?;
+    let communities = louvain(&file_ids, &edge_weights);
 
     let assigned: usize = communities.iter().map(|c| c.len()).sum();
     debug_assert_eq!(
         assigned, file_count,
-        "Leiden 输出应覆盖所有 {file_count} 个文件节点，实际 {assigned}"
+        "Louvain 输出应覆盖所有 {file_count} 个文件节点，实际 {assigned}"
     );
 
     let dir_partition = directory_partition(&file_ids);
@@ -97,7 +95,7 @@ pub fn detect_community_deviation(graph: &SourceGraph) -> Result<CommunityReport
     let ari = compute_ari(&leiden_labels, &dir_labels);
     let deviation_score = 1.0 - nmi;
 
-    let details = build_details(&communities, &dir_partition);
+    let details = build_details(&communities);
 
     Ok(CommunityReport {
         community_count: communities.len(),
@@ -110,43 +108,124 @@ pub fn detect_community_deviation(graph: &SourceGraph) -> Result<CommunityReport
     })
 }
 
-fn run_leiden(
-    file_ids: &[String],
-    edge_weights: &HashMap<(String, String), f64>,
-) -> Result<Vec<Vec<String>>> {
-    let nodes: Vec<Arc<Node<String, f64>>> = file_ids
-        .iter()
-        .map(|id| Node::from_name_and_attributes(id.clone(), 0.0))
-        .collect();
+// ─── Louvain 社区检测（直接操作邻接表，无外部依赖） ─────────────
 
-    let edges: Vec<Arc<Edge<String, f64>>> = edge_weights
-        .iter()
-        .map(|((src, tgt), &w)| Edge::with_weight(src.clone(), tgt.clone(), w))
-        .collect();
-
-    if edges.is_empty() {
-        return Ok(file_ids.iter().map(|id| vec![id.clone()]).collect());
+/// Louvain 算法：贪心模块度优化。
+/// 返回社区列表，每个社区是成员 file_id 的有序 Vec。
+fn louvain(file_ids: &[String], edge_weights: &HashMap<(String, String), f64>) -> Vec<Vec<String>> {
+    let n = file_ids.len();
+    if n == 0 {
+        return Vec::new();
     }
 
-    let g = Graph::<String, f64>::new_from_nodes_and_edges(
-        nodes,
-        edges,
-        GraphSpecs::undirected_create_missing(),
-    )
-    .map_err(|e| anyhow::anyhow!("graphrs 图构建失败: {}", e.message))?;
+    let id_to_idx: HashMap<&str, usize> = file_ids
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.as_str(), i))
+        .collect();
 
-    let result = leiden::leiden(&g, true, leiden::QualityFunction::CPM, None, None, None)
-        .map_err(|e| anyhow::anyhow!("Leiden 算法失败: {}", e.message))?;
+    // 邻接表：adj[i] = [(j, weight), ...]
+    let mut adj: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+    let mut total_weight = 0.0f64;
 
-    Ok(result
-        .into_iter()
-        .map(|set| {
-            let mut v: Vec<String> = set.into_iter().collect();
-            v.sort();
-            v
-        })
-        .collect())
+    for ((src, tgt), &w) in edge_weights {
+        if let (Some(&i), Some(&j)) = (id_to_idx.get(src.as_str()), id_to_idx.get(tgt.as_str())) {
+            adj[i].push((j, w));
+            adj[j].push((i, w));
+            total_weight += w;
+        }
+    }
+
+    if total_weight == 0.0 {
+        return file_ids.iter().map(|id| vec![id.clone()]).collect();
+    }
+
+    // 每个节点的加权度
+    let degree: Vec<f64> = (0..n)
+        .map(|i| adj[i].iter().map(|(_, w)| w).sum())
+        .collect();
+
+    // 初始：每个节点独立社区
+    let mut community: Vec<usize> = (0..n).collect();
+    // 社区内部总权重
+    let mut sigma_in: Vec<f64> = vec![0.0; n];
+    // 社区关联总权重（成员度之和）
+    let mut sigma_tot: Vec<f64> = degree.clone();
+
+    let m2 = 2.0 * total_weight;
+
+    loop {
+        let mut improved = false;
+
+        for i in 0..n {
+            let ci = community[i];
+            let ki = degree[i];
+
+            // 计算 i 与各邻居社区的连接权重
+            let mut neighbor_comm_weights: HashMap<usize, f64> = HashMap::new();
+            for &(j, w) in &adj[i] {
+                *neighbor_comm_weights.entry(community[j]).or_insert(0.0) += w;
+            }
+
+            // i 与自身社区的内部连接
+            let ki_in_own = neighbor_comm_weights.get(&ci).copied().unwrap_or(0.0);
+
+            // 尝试移除 i
+            sigma_in[ci] -= ki_in_own;
+            sigma_tot[ci] -= ki;
+            community[i] = usize::MAX; // 临时标记
+
+            let mut best_comm = ci;
+            let mut best_delta = 0.0f64;
+
+            for (&cj, &ki_in_cj) in &neighbor_comm_weights {
+                // ΔQ = ki_in_cj/m - σ_tot_cj * ki / (2m²)
+                let delta = ki_in_cj / m2 - sigma_tot[cj] * ki / (m2 * m2) * 2.0;
+                if delta > best_delta {
+                    best_delta = delta;
+                    best_comm = cj;
+                }
+            }
+
+            // 也考虑留在原社区
+            let delta_stay = ki_in_own / m2 - sigma_tot[ci] * ki / (m2 * m2) * 2.0;
+            if delta_stay >= best_delta {
+                best_comm = ci;
+            }
+
+            community[i] = best_comm;
+            let ki_in_best = neighbor_comm_weights
+                .get(&best_comm)
+                .copied()
+                .unwrap_or(0.0);
+            sigma_in[best_comm] += ki_in_best;
+            sigma_tot[best_comm] += ki;
+
+            if best_comm != ci {
+                improved = true;
+            }
+        }
+
+        if !improved {
+            break;
+        }
+    }
+
+    // 收集社区
+    let mut comm_members: HashMap<usize, Vec<String>> = HashMap::new();
+    for (i, &c) in community.iter().enumerate() {
+        comm_members.entry(c).or_default().push(file_ids[i].clone());
+    }
+
+    let mut result: Vec<Vec<String>> = comm_members.into_values().collect();
+    for members in &mut result {
+        members.sort();
+    }
+    result.sort();
+    result
 }
+
+// ─── 分区比较工具 ─────────────────────────────────────
 
 /// 按父目录分组。
 fn directory_partition(file_ids: &[String]) -> HashMap<String, usize> {
@@ -171,7 +250,6 @@ fn directory_partition(file_ids: &[String]) -> HashMap<String, usize> {
     result
 }
 
-/// 将社区列表转为 per-node label 向量（按 file_ids 顺序）。
 fn partition_to_labels(file_ids: &[String], communities: &[Vec<String>]) -> Vec<usize> {
     let mut label_map: HashMap<&str, usize> = HashMap::new();
     for (idx, community) in communities.iter().enumerate() {
@@ -301,21 +379,7 @@ fn compute_ari(labels_a: &[usize], labels_b: &[usize]) -> f64 {
     (sum_comb_nij as f64 - expected) / (max_index - expected)
 }
 
-fn build_details(
-    communities: &[Vec<String>],
-    dir_partition: &HashMap<String, usize>,
-) -> Vec<CommunityDetail> {
-    let mut id_to_dir: HashMap<usize, String> = HashMap::new();
-    for (file, &dir_id) in dir_partition {
-        id_to_dir.entry(dir_id).or_insert_with(|| {
-            let path_str = file.strip_prefix("file:").unwrap_or(file);
-            Path::new(path_str)
-                .parent()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default()
-        });
-    }
-
+fn build_details(communities: &[Vec<String>]) -> Vec<CommunityDetail> {
     communities
         .iter()
         .enumerate()
@@ -416,5 +480,32 @@ mod tests {
     fn test_ari_single_element() {
         let ari = compute_ari(&[0], &[0]);
         assert!((ari - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_louvain_disconnected() {
+        let ids: Vec<String> = (0..4).map(|i| format!("file:f{i}.ts")).collect();
+        let edges = HashMap::new();
+        let comms = louvain(&ids, &edges);
+        assert_eq!(comms.len(), 4, "无边 → 每个节点独立社区");
+    }
+
+    #[test]
+    fn test_louvain_two_cliques() {
+        let ids: Vec<String> = (0..6).map(|i| format!("file:f{i}.ts")).collect();
+        let mut edges = HashMap::new();
+        // 簇 1: f0-f1-f2 全连接
+        for (a, b) in [(0, 1), (0, 2), (1, 2)] {
+            edges.insert((ids[a].clone(), ids[b].clone()), 1.0);
+        }
+        // 簇 2: f3-f4-f5 全连接
+        for (a, b) in [(3, 4), (3, 5), (4, 5)] {
+            edges.insert((ids[a].clone(), ids[b].clone()), 1.0);
+        }
+        // 簇间弱连接
+        edges.insert((ids[2].clone(), ids[3].clone()), 0.1);
+
+        let comms = louvain(&ids, &edges);
+        assert_eq!(comms.len(), 2, "两个强连通簇应识别为 2 个社区");
     }
 }
