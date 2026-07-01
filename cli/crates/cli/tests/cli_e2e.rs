@@ -2235,3 +2235,182 @@ subagent_timeout_secs = 0
         assert!(warnings.len() >= 4, "应有至少 4 条 warnings: {json}");
     });
 }
+
+// === stats quality（M4-QUAL-01：迁移质量度量框架）===
+
+#[test]
+fn e2e_stats_quality_on_populated_project() {
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        let _ = run(&["init"]);
+        let (code, _) = run(&["graph", "build", "--root", "src"]);
+        assert_eq!(code, 0);
+        let (code, _) = run(&["state", "populate-modules"]);
+        assert_eq!(code, 0);
+
+        let (code, json) = run(&["stats", "quality"]);
+        assert_eq!(code, 0, "stats quality 应成功: {json}");
+        assert_eq!(json["status"], "ok", "应为 ok: {json}");
+
+        let data = &json["data"];
+        assert!(
+            data["degrade_rate"].is_number(),
+            "应有 degrade_rate 数值: {json}"
+        );
+        assert!(
+            data["total_modules"].is_number(),
+            "应有 total_modules: {json}"
+        );
+        assert!(data["modules"].is_array(), "应有 modules 数组: {json}");
+        assert!(
+            data["data_completeness"].is_number(),
+            "应有 data_completeness: {json}"
+        );
+
+        // populate 后全是 pending，无编译/测试数据 → degrade_rate=0，final_score 全 None
+        assert_eq!(data["degrade_rate"], 0.0, "全 pending → 无降级: {json}");
+        let modules = data["modules"].as_array().unwrap();
+        assert!(modules.len() >= 1, "至少 1 个模块: {json}");
+        for m in modules {
+            assert_eq!(m["status"], "pending", "populate 后应为 pending: {m}");
+            assert!(
+                m["final_score"].is_null(),
+                "pending 模块无足够指标 → final_score=null: {m}"
+            );
+        }
+    });
+}
+
+#[test]
+fn e2e_stats_quality_with_transitions() {
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        let _ = run(&["init"]);
+        let (code, _) = run(&["graph", "build", "--root", "src"]);
+        assert_eq!(code, 0);
+        let (code, populate_json) = run(&["state", "populate-modules"]);
+        assert_eq!(code, 0);
+
+        let modules = populate_json["data"]["modules"].as_array().unwrap();
+        let key = modules[0]["id"].as_str().unwrap();
+
+        // 推进到 translating → compile_fixing → testing
+        let (code, _) = run(&[
+            "state",
+            "transition",
+            "--module",
+            key,
+            "--to",
+            "translating",
+            "--reason",
+            "test",
+        ]);
+        assert_eq!(code, 0);
+        let (code, _) = run(&[
+            "state",
+            "transition",
+            "--module",
+            key,
+            "--to",
+            "compile_fixing",
+            "--reason",
+            "test",
+        ]);
+        assert_eq!(code, 0);
+        let (code, _) = run(&[
+            "state",
+            "transition",
+            "--module",
+            key,
+            "--to",
+            "testing",
+            "--reason",
+            "test",
+        ]);
+        assert_eq!(code, 0);
+
+        let (code, json) = run(&["stats", "quality"]);
+        assert_eq!(code, 0, "stats quality 应成功: {json}");
+
+        let mq = json["data"]["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["module"].as_str() == Some(key))
+            .expect("应找到目标模块");
+
+        // testing 状态 → compile_pass=true
+        assert_eq!(
+            mq["deterministic"]["compile_pass"], true,
+            "testing 意味着编译通过: {mq}"
+        );
+    });
+}
+
+#[test]
+fn e2e_stats_community_on_linear_deps() {
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        let _ = run(&["init"]);
+        let (code, _) = run(&["graph", "build", "--root", "src"]);
+        assert_eq!(code, 0);
+
+        let (code, json) = run(&["stats", "community"]);
+        assert_eq!(code, 0, "stats community 应成功: {json}");
+
+        let data = &json["data"];
+        assert!(data["file_count"].is_number(), "应有 file_count: {json}");
+        assert!(data["nmi"].is_number(), "应有 nmi: {json}");
+        assert!(data["ari"].is_number(), "应有 ari: {json}");
+        assert!(
+            data["deviation_score"].is_number(),
+            "应有 deviation_score: {json}"
+        );
+        assert!(
+            data["communities"].is_array(),
+            "应有 communities 数组: {json}"
+        );
+
+        let file_count = data["file_count"].as_u64().unwrap();
+        assert!(file_count >= 3, "linear-deps 应至少 3 个文件节点: {json}");
+
+        let dev_score = data["deviation_score"].as_f64().unwrap();
+        assert!(
+            (0.0..=1.0).contains(&dev_score),
+            "deviation_score 应在 [0,1]: {dev_score}"
+        );
+    });
+}
+
+#[test]
+fn e2e_stats_community_diamond_deps() {
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("diamond-deps"), tmp.path());
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        let (code, _) = run(&["graph", "build", "--root", "src"]);
+        assert_eq!(code, 0);
+
+        let (code, json) = run(&["stats", "community"]);
+        assert_eq!(code, 0, "stats community 应成功: {json}");
+        let data = &json["data"];
+        assert!(data["file_count"].as_u64().unwrap() >= 4);
+        assert!(data["community_count"].as_u64().unwrap() >= 1);
+    });
+}
+
+#[test]
+fn e2e_stats_quality_empty_project() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+
+        let (code, json) = run(&["stats", "quality"]);
+        assert_eq!(code, 0, "空项目 stats quality 应成功: {json}");
+        assert_eq!(json["data"]["total_modules"], 0);
+        assert_eq!(json["data"]["degrade_rate"], 0.0);
+        assert!(json["data"]["avg_final_score"].is_null());
+        let modules = json["data"]["modules"].as_array().unwrap();
+        assert!(modules.is_empty());
+    });
+}
