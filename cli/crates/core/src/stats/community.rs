@@ -33,15 +33,10 @@ pub struct CommunityDetail {
     pub directory_purity: f64,
 }
 
-/// 耦合边类型（同 decompose.rs 定义）。
-const COUPLING_EDGE_TYPES: [EdgeType; 4] = [
-    EdgeType::Imports,
-    EdgeType::Calls,
-    EdgeType::Extends,
-    EdgeType::UsesType,
-];
-
 /// 对源码图跑社区检测，比较社区分区与目录分区的一致性。
+///
+/// Tier 1 仅使用 File→File 的 Imports 边构建耦合图（Calls/Extends/UsesType
+/// 端点多为非 File 节点，需符号→文件投影，留待 Tier 2）。
 pub fn detect_community_deviation(graph: &SourceGraph) -> Result<CommunityReport> {
     let file_ids: Vec<String> = graph
         .nodes()
@@ -63,10 +58,10 @@ pub fn detect_community_deviation(graph: &SourceGraph) -> Result<CommunityReport
     }
 
     let file_set: HashSet<&str> = file_ids.iter().map(|s| s.as_str()).collect();
-    let mut edge_pairs: HashSet<(String, String)> = HashSet::new();
+    let mut edge_weights: HashMap<(String, String), f64> = HashMap::new();
 
     for dep in graph.edges() {
-        if !COUPLING_EDGE_TYPES.contains(&dep.edge_type) {
+        if dep.edge_type != EdgeType::Imports {
             continue;
         }
         let src = dep.source.as_str();
@@ -82,10 +77,17 @@ pub fn detect_community_deviation(graph: &SourceGraph) -> Result<CommunityReport
         } else {
             (tgt.to_string(), src.to_string())
         };
-        edge_pairs.insert(pair);
+        *edge_weights.entry(pair).or_insert(0.0) += 1.0;
     }
 
-    let communities = run_leiden(&file_ids, &edge_pairs)?;
+    let communities = run_leiden(&file_ids, &edge_weights)?;
+
+    let assigned: usize = communities.iter().map(|c| c.len()).sum();
+    debug_assert_eq!(
+        assigned, file_count,
+        "Leiden 输出应覆盖所有 {file_count} 个文件节点，实际 {assigned}"
+    );
+
     let dir_partition = directory_partition(&file_ids);
 
     let leiden_labels = partition_to_labels(&file_ids, &communities);
@@ -110,16 +112,16 @@ pub fn detect_community_deviation(graph: &SourceGraph) -> Result<CommunityReport
 
 fn run_leiden(
     file_ids: &[String],
-    edge_pairs: &HashSet<(String, String)>,
+    edge_weights: &HashMap<(String, String), f64>,
 ) -> Result<Vec<Vec<String>>> {
     let nodes: Vec<Arc<Node<String, f64>>> = file_ids
         .iter()
         .map(|id| Node::from_name_and_attributes(id.clone(), 0.0))
         .collect();
 
-    let edges: Vec<Arc<Edge<String, f64>>> = edge_pairs
+    let edges: Vec<Arc<Edge<String, f64>>> = edge_weights
         .iter()
-        .map(|(src, tgt)| Edge::with_weight(src.clone(), tgt.clone(), 1.0))
+        .map(|((src, tgt), &w)| Edge::with_weight(src.clone(), tgt.clone(), w))
         .collect();
 
     if edges.is_empty() {

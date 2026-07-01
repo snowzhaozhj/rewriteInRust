@@ -30,9 +30,7 @@ use rustmigrate_core::profile::{
 use rustmigrate_core::response::{ErrorData, Response, Status};
 use rustmigrate_core::scaffold::scaffold_project;
 use rustmigrate_core::state::{MigrationStateMachine, SprintAdvanceResult};
-use rustmigrate_core::stats::{
-    compare_structure, compute_quality, count_loc, detect_community_deviation,
-};
+use rustmigrate_core::stats::{compare_structure, count_loc, detect_community_deviation};
 use rustmigrate_core::types::common::{DangerCategory, NodeId, Timestamp};
 use rustmigrate_core::types::graph::{EdgeType, NodeType};
 use rustmigrate_core::types::state::{
@@ -2608,8 +2606,16 @@ fn cmd_stats_compare(source: Option<&Path>, rust: Option<&Path>) -> CmdResult {
 /// `stats quality`：迁移质量度量（degrade_rate / final_score / behavior_coverage）。
 fn cmd_stats_quality() -> CmdResult {
     let path = state_path();
-    let (machine, warnings) = load_state_with_warnings(&path)?;
-    let report = compute_quality(machine.state_file());
+    let (machine, mut warnings) = load_state_with_warnings(&path)?;
+    let cfg = load_config_or_default(&mut warnings);
+    let thresholds = rustmigrate_core::stats::quality::QualityThresholds {
+        done_threshold: cfg.quality.done_threshold,
+        degrade_ffi_threshold: cfg.quality.degrade_ffi_threshold,
+    };
+    let report = rustmigrate_core::stats::quality::compute_quality_with_thresholds(
+        machine.state_file(),
+        &thresholds,
+    );
     Ok((serde_json::to_value(&report)?, warnings))
 }
 

@@ -284,13 +284,14 @@ impl Default for ContextConfig {
 #[serde(default)]
 pub struct ToolsConfig {}
 
-/// 质量门配置（对齐 03 §7.5 阈值 + 06 §11.1 evaluation_method_version）。
+/// 质量门配置（对齐 03 §7.5 阈值 + 06 §11.1）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct QualityConfig {
     pub done_threshold: f64,
     pub degrade_ffi_threshold: f64,
     pub evaluation_method_version: String,
+    pub baseline_sprint: u32,
 }
 
 impl Default for QualityConfig {
@@ -299,6 +300,7 @@ impl Default for QualityConfig {
             done_threshold: 80.0,
             degrade_ffi_threshold: 60.0,
             evaluation_method_version: "0.1".to_string(),
+            baseline_sprint: 1,
         }
     }
 }

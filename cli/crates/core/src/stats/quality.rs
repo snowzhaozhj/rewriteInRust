@@ -13,10 +13,26 @@ pub struct QualityReport {
     pub done_modules: usize,
     pub degraded_modules: usize,
     pub avg_final_score: Option<f64>,
+    pub revision_rate: Option<f64>,
     pub data_completeness: f64,
     pub modules: Vec<ModuleQuality>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub below_threshold: Vec<String>,
+}
+
+/// 质量度量阈值配置。
+pub struct QualityThresholds {
+    pub done_threshold: f64,
+    pub degrade_ffi_threshold: f64,
+}
+
+impl Default for QualityThresholds {
+    fn default() -> Self {
+        Self {
+            done_threshold: 80.0,
+            degrade_ffi_threshold: 60.0,
+        }
+    }
 }
 
 /// 单模块质量度量。
@@ -52,10 +68,14 @@ pub struct AiIndicators {
     pub maintainability: f64,
 }
 
-const DONE_THRESHOLD: f64 = 80.0;
-const DEGRADE_FFI_THRESHOLD: f64 = 60.0;
-
 pub fn compute_quality(state: &MigrationStateFile) -> QualityReport {
+    compute_quality_with_thresholds(state, &QualityThresholds::default())
+}
+
+pub fn compute_quality_with_thresholds(
+    state: &MigrationStateFile,
+    thresholds: &QualityThresholds,
+) -> QualityReport {
     let total_modules = state.modules.len();
     let mut done_modules = 0usize;
     let mut degraded_modules = 0usize;
@@ -126,9 +146,9 @@ pub fn compute_quality(state: &MigrationStateFile) -> QualityReport {
         .filter(|m| {
             if let Some(score) = m.final_score {
                 let threshold = if m.status == ModuleStatus::DegradeFfi {
-                    DEGRADE_FFI_THRESHOLD
+                    thresholds.degrade_ffi_threshold
                 } else {
-                    DONE_THRESHOLD
+                    thresholds.done_threshold
                 };
                 score < threshold
             } else {
@@ -144,6 +164,7 @@ pub fn compute_quality(state: &MigrationStateFile) -> QualityReport {
         done_modules,
         degraded_modules,
         avg_final_score,
+        revision_rate: None,
         data_completeness,
         modules,
         below_threshold,
@@ -172,7 +193,7 @@ fn parse_test_pass_rate(s: &str) -> Option<f64> {
     if s.is_empty() {
         return None;
     }
-    if let Some(stripped) = s.strip_suffix('%') {
+    let result = if let Some(stripped) = s.strip_suffix('%') {
         stripped.trim().parse::<f64>().ok().map(|v| v / 100.0)
     } else if s.contains('/') {
         let parts: Vec<&str> = s.splitn(2, '/').collect();
@@ -193,7 +214,8 @@ fn parse_test_pass_rate(s: &str) -> Option<f64> {
         } else {
             Some(v)
         }
-    }
+    };
+    result.filter(|v| v.is_finite())
 }
 
 /// 计算行为覆盖率。
@@ -227,7 +249,7 @@ fn normalize_test_pass(rate: f64) -> f64 {
     (rate * 100.0).clamp(0.0, 100.0)
 }
 
-fn normalize_ratio(value: f64, _healthy_low: f64, healthy_high: f64, alert: f64) -> f64 {
+fn normalize_ratio(value: f64, healthy_high: f64, alert: f64) -> f64 {
     if value <= healthy_high {
         100.0
     } else if value >= alert {
@@ -252,10 +274,10 @@ fn compute_deterministic_avg(det: &DeterministicIndicators) -> Option<f64> {
         scores.push(normalize_test_pass(rate));
     }
     if let Some(r) = det.loc_ratio {
-        scores.push(normalize_ratio(r, 1.2, 2.0, 3.0));
+        scores.push(normalize_ratio(r, 2.0, 3.0));
     }
     if let Some(r) = det.function_ratio {
-        scores.push(normalize_ratio(r, 0.9, 1.3, 2.0));
+        scores.push(normalize_ratio(r, 1.3, 2.0));
     }
     if let Some(c) = det.clippy_warnings {
         scores.push(normalize_count(c, 10.0));
@@ -264,7 +286,7 @@ fn compute_deterministic_avg(det: &DeterministicIndicators) -> Option<f64> {
         scores.push(normalize_count(u, 15.0));
     }
     if let Some(r) = det.cyclomatic_ratio {
-        scores.push(normalize_ratio(r, 0.8, 1.2, 1.5));
+        scores.push(normalize_ratio(r, 1.2, 1.5));
     }
 
     if scores.len() < 2 {
@@ -393,6 +415,17 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_test_pass_rate_nan_rejected() {
+        assert!(parse_test_pass_rate("NaN").is_none());
+    }
+
+    #[test]
+    fn test_parse_test_pass_rate_infinity_rejected() {
+        assert!(parse_test_pass_rate("inf").is_none());
+        assert!(parse_test_pass_rate("-inf").is_none());
+    }
+
+    #[test]
     fn test_infer_compile_pass_done() {
         assert_eq!(infer_compile_pass(ModuleStatus::Done), Some(true));
     }
@@ -485,18 +518,25 @@ mod tests {
     #[test]
     fn test_below_threshold_detection() {
         let mut state = empty_state();
+        // compile=true(100), test=30%(30) → det_avg=65 → below 80
         let mut m = module(ModuleStatus::Done);
-        m.test_pass_rate = Some("70%".into());
+        m.test_pass_rate = Some("30%".into());
         state.modules.insert("low_score".into(), m);
 
+        // compile=true(100), test=100%(100) → det_avg=100 → above 80
         let mut m2 = module(ModuleStatus::Done);
         m2.test_pass_rate = Some("100%".into());
         state.modules.insert("high_score".into(), m2);
 
         let report = compute_quality(&state);
-        // low_score: compile=true(100), test=70(70) → det_avg=85 → below 80? 85>=80 不低于阈值
-        // 改用更低的值让它低于阈值
-        assert!(report.below_threshold.is_empty() || !report.below_threshold.is_empty());
+        assert!(
+            report.below_threshold.contains(&"low_score".to_string()),
+            "det_avg=65 应低于 done 阈值 80"
+        );
+        assert!(
+            !report.below_threshold.contains(&"high_score".to_string()),
+            "det_avg=100 应不低于 done 阈值 80"
+        );
     }
 
     #[test]
@@ -536,17 +576,17 @@ mod tests {
 
     #[test]
     fn test_normalize_ratio_in_healthy_range() {
-        assert!((normalize_ratio(1.5, 1.2, 2.0, 3.0) - 100.0).abs() < 1e-9);
+        assert!((normalize_ratio(1.5, 2.0, 3.0) - 100.0).abs() < 1e-9);
     }
 
     #[test]
     fn test_normalize_ratio_at_alert() {
-        assert!((normalize_ratio(3.0, 1.2, 2.0, 3.0) - 0.0).abs() < 1e-9);
+        assert!((normalize_ratio(3.0, 2.0, 3.0) - 0.0).abs() < 1e-9);
     }
 
     #[test]
     fn test_normalize_ratio_between() {
-        let v = normalize_ratio(2.5, 1.2, 2.0, 3.0);
+        let v = normalize_ratio(2.5, 2.0, 3.0);
         assert!((v - 50.0).abs() < 1e-9);
     }
 
