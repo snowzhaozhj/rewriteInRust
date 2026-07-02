@@ -20,8 +20,9 @@
 |------|---------|
 | **Sprint 进度** | `sprint.current`（目标模块数 vs 已完成）、`history[].completed_modules` |
 | **模块状态分布** | 各模块 `status`：done / testing / compile_fixing / paused / degrade_* / blocked 计数 |
-| **质量指标** | 各模块 `test_pass_rate`、`coverage`、clippy 警告数 |
-| **止损指标** | DEGRADE 模块比例、LLM 成本、Sprint 停滞周期、质量评分回归（对照 sprint-N-report.json） |
+| **质量指标** | `rustmigrate stats quality` JSON：per-module `behavior_coverage`/`final_score`/`deterministic`；project-wide `degrade_rate`/`avg_final_score`/`data_completeness` |
+| **结构偏离度** | `rustmigrate stats community` JSON：`deviation_score`（0-1，高=目录结构不反映实际耦合）、`nmi`、`ari`、per-community `directory_purity` |
+| **止损指标** | DEGRADE 模块比例（`degrade_rate`）、LLM 成本、Sprint 停滞周期、质量评分回归（`avg_final_score` 对照前 Sprint） |
 | **验证画像** | 实际生效的 Tier 1 工具、被禁用工具及理由（`tier1_exceptions`，含 confidence）、FFI 模块覆盖率采样范围 |
 
 对 `tier1_exceptions` 中 confidence 为 low/medium 的条目，由 verifier 在本命令中重新核查（属性测试关闭可能让纯函数等价性验证失效）。

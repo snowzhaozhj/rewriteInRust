@@ -284,10 +284,26 @@ impl Default for ContextConfig {
 #[serde(default)]
 pub struct ToolsConfig {}
 
-/// 质量门配置（M2 预留）。
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+/// 质量门配置（对齐 03 §7.5 阈值 + 06 §11.1）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct QualityConfig {}
+pub struct QualityConfig {
+    pub done_threshold: f64,
+    pub degrade_ffi_threshold: f64,
+    pub evaluation_method_version: String,
+    pub baseline_sprint: u32,
+}
+
+impl Default for QualityConfig {
+    fn default() -> Self {
+        Self {
+            done_threshold: 80.0,
+            degrade_ffi_threshold: 60.0,
+            evaluation_method_version: "0.1".to_string(),
+            baseline_sprint: 1,
+        }
+    }
+}
 
 /// 解析器配置（M2 预留）。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

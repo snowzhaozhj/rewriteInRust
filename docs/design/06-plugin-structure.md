@@ -120,6 +120,8 @@ Plugin 中的确定性计算由独立的 Rust CLI 工具 `rustmigrate` 承担，
 | `rustmigrate state populate-modules` | 用源码图迁移序列填充 `migration-state.json` 的 `modules`/`sprint`（PLAN 操作）：读 `source-graph.db` → `migration_sequence()` 缩点为 SCC 模块组 → 每组写 `{status:pending, sprint:<缩点 DAG 层级>, member_files:<仅多文件组>}`（module key 用组代表 NodeId 原值；**M1 另写恒为 `Low` 的死字段 `risk`，M2-TIER-01a 删除 `risk`、改填复杂度分档 `tier`**，见 [03 § 4.3.2](./03-execution-model.md#432-复杂度自适应分档tier-01m2)）+ `sprint.current=1`。**破环（MDR-004）：循环依赖不再拒绝，整组折叠为 composite 模块组（编译门禁单元；翻译粒度=单文件，见 [MDR-006](../decisions/006-scc-per-file-stub-first.md)）**。是 `/migrate analyze`→`/migrate run` 衔接的 PLAN 落盘环节（见 PLAN.md §9.5） |
 | `rustmigrate stats loc` | 统计源码和 Rust 代码行数（嵌入 tokei） |
 | `rustmigrate stats compare` | 源码与 Rust 结构复杂度对比（函数数量比、代码行数比、控制流嵌套层级）——复用 tokei + tree-sitter 函数计数，作为 Phase A 结构校验门禁（见 03 § 4.3 Step 4.5） |
+| `rustmigrate stats quality` | 迁移质量度量（per-module `final_score` + project-wide `degrade_rate` / `behavior_coverage`），对齐 03 § 7.5 评分卡（M4-QUAL-01） |
+| `rustmigrate stats community` | 社区结构偏离度诊断：Leiden 社区检测 vs 目录分区 NMI/ARI → `deviation_score`（M4-QUAL-04） |
 | `rustmigrate scaffold workspace` | 生成 Cargo workspace 基础骨架（委托 `cargo init`）；dev-dependencies 与 `deny.toml` 由 scaffolder SubAgent 按项目测试需求注入 |
 
 **M2 扩展 — 5 个命令**：

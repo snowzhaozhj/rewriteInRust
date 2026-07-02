@@ -4,7 +4,7 @@
 
 ## 当前位置
 
-- **Milestone**: M1 ✅ → M2 ✅ → **M3 多语言支持（Python 优先）✅ 全部完成** → **M3 遗留债清理（M4 地基）✅ 完成（2026-06-30）** → **M4「完善」执行中（双主线配比已拍板：双主线并行）——Sprint A 债务收口+Go前置 ✅ 完成（2026-06-30，待 PR 审查）**
+- **Milestone**: M1 ✅ → M2 ✅ → **M3 ✅** → **M3 遗留债清理 ✅** → **M4「完善」执行中——Sprint A ✅（PR #57 已合并）→ Sprint B 质量度量框架 进行中**
 - **M3 收尾（2026-06-29）**：Sprint A/B/C/D/E 全部合并，验收 M3-VAL-01~08 全达标；PR [#49](https://github.com/snowzhaozhj/rewriteInRust/pull/49)（ffi 测试修复）+ [#52](https://github.com/snowzhaozhj/rewriteInRust/pull/52)（source_root 探测加固）已合并；遗留 issue [#50](https://github.com/snowzhaozhj/rewriteInRust/issues/50)（source_root 推断）+ [#51](https://github.com/snowzhaozhj/rewriteInRust/issues/51)（VAL-05 性能实测：TS 路径 0%/-16%/-1% 无退化）已 CLOSED+COMPLETED；PLAN-M3 验收清单已全部回填 [x]。
 - **阶段**: Sprint A ✅ → Sprint B ✅ → Sprint C ✅ → Sprint E ✅ → **Sprint D 端到端验收 ✅（M3-VAL-01~08 全达标，2026-06-29，PR [#49](https://github.com/snowzhaozhj/rewriteInRust/pull/49) 已合并——4 视角审查全跑、1 important（设计文档同步）+ 4 nit 全落实、just ci 532 绿）**
 - **🟢 Sprint D 端到端验收 ✅**：2 真实 Python 项目各 ≥1 模块迁移到 done（按 §6 headless 规范）。
@@ -26,10 +26,10 @@
 - **🟢 PLG-06 populate-modules 接入 decompose ✅**（PR [#47](https://github.com/snowzhaozhj/rewriteInRust/pull/47)，2026-06-28 已合并）：`populate-modules` 消费 `plan_decomposition` 产出，写 `migration-state.json`（`composite_kind` + `member_files` + `decomposition_frozen`）。新增 `--budget`/`--no-decompose` 参数。（注：原「含 non-mechanical 成员展开为独立模块」行为已由上方 M3-DEC coupled_batch 修复推翻。）
 - **MDR-011 ✅ 已合并（PR [#45](https://github.com/snowzhaozhj/rewriteInRust/pull/45)，2026-06-28）**：目录优先两阶段凝聚合并。10 真实项目均值 ~76% 缩减。
 - **Sprint E ✅ 全部完成**：DEC-01（PR #43）+ DEC-GATE（Python 分类器修复）+ DEC-02（PR #46）。
-- **测试基线**: 552 测试 / clippy -D / deny / fmt / shellcheck + plugin validate 全绿
+- **测试基线**: 600 测试 / clippy -D / deny / fmt / shellcheck + plugin validate 全绿
 - **CI 覆盖率**: 待更新
-- **最新合并 PR**: [#55](https://github.com/snowzhaozhj/rewriteInRust/pull/55)（danger→规则注入闭环 C1+C2，MDR-013）；[#54](https://github.com/snowzhaozhj/rewriteInRust/pull/54)（decompose 代表漂移孤儿回归）；[#53](https://github.com/snowzhaozhj/rewriteInRust/pull/53)（CLI 三连 + MDR-012）；[#48](https://github.com/snowzhaozhj/rewriteInRust/pull/48)（CoupledBatch 分流修复）；[#47](https://github.com/snowzhaozhj/rewriteInRust/pull/47)（PLG-06 populate 接入 decompose）；[#46](https://github.com/snowzhaozhj/rewriteInRust/pull/46)（DEC-02 轻量翻译路径）；[#45](https://github.com/snowzhaozhj/rewriteInRust/pull/45)（MDR-011 凝聚合并）；[#43](https://github.com/snowzhaozhj/rewriteInRust/pull/43)（DEC-01 拆解引擎）；[#42](https://github.com/snowzhaozhj/rewriteInRust/pull/42)（M3-VAL-07 §11.2 两文件契约同步）
-- **开放 PR**: 无
+- **最新合并 PR**: [#57](https://github.com/snowzhaozhj/rewriteInRust/pull/57)（M4 Sprint A 债务收口+Go接线）；[#55](https://github.com/snowzhaozhj/rewriteInRust/pull/55)（danger→规则注入闭环）；[#54](https://github.com/snowzhaozhj/rewriteInRust/pull/54)（decompose 代表漂移孤儿回归）；[#53](https://github.com/snowzhaozhj/rewriteInRust/pull/53)（CLI 三连 + MDR-012）
+- **开放 PR**: Sprint B 质量度量（待审查）
 
 ### M3 遗留债清理（为 M4 打地基）✅ 完成（2026-06-30）
 
@@ -61,7 +61,19 @@
 - **Sprint 结构**：A 债务收口+Go前置 → B 质量度量+既有基线+Community诊断 ‖ C Go Adapter Core → D Plugin Go → E Go 端到端验收 → F 健壮性+编排收口。共 37 任务 ~48d，两线可独立分批交付。
 - **配比决策（2026-06-30 用户拍板）**：双主线并行——Sprint A 完成后，B（巩固线）与 C（Go 线）可并行启动。
 
-#### Sprint A：债务收口 + Go 接入前置 ✅ 完成（2026-06-30，分支 `feat/m4-sprint-a-debt-and-go-wiring`，待 PR 审查）
+#### Sprint B：质量度量框架 + 社区检测 进行中（2026-07-01，分支 `feat/m4-sprint-b-quality-metrics`）
+
+| 任务 | 状态 | 交付 |
+|------|------|------|
+| M4-QUAL-01 质量度量框架 | ✅ | `stats/quality.rs`：QualityReport/ModuleQuality/DeterministicIndicators/AiIndicators 类型 + compute_quality + final_score §7.5 公式 + 28 单元测试；CLI `stats quality` 子命令 |
+| M4-QUAL-04 社区检测 | ✅ | `stats/community.rs`：集成 graphrs Leiden → NMI/ARI vs 目录分区 → deviation_score；CLI `stats community` 子命令；8 单元 + 2 E2E 测试 |
+| M4-QUAL-03 Plugin 接线 | ✅ | review.md 仪表板接线 stats quality/community；verifier.md 新增 AI 指标输出 schema |
+| M4-QUAL-02 设计文档更新 | ✅ | 03 §7.5 登记三项新增度量（degrade_rate/behavior_coverage/revision_rate） |
+
+- **验证**：600 测试全绿（基线 559 + 28 quality + 8 community + 5 E2E）；`just ci` 全过。
+- **待审查**：等用户审阅后提 PR。
+
+#### Sprint A：债务收口 + Go 接入前置 ✅ 完成（PR [#57](https://github.com/snowzhaozhj/rewriteInRust/pull/57) 已合并）
 
 | 任务 | 状态 | 交付 |
 |------|------|------|

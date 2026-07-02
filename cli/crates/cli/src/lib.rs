@@ -30,7 +30,7 @@ use rustmigrate_core::profile::{
 use rustmigrate_core::response::{ErrorData, Response, Status};
 use rustmigrate_core::scaffold::scaffold_project;
 use rustmigrate_core::state::{MigrationStateMachine, SprintAdvanceResult};
-use rustmigrate_core::stats::{compare_structure, count_loc};
+use rustmigrate_core::stats::{compare_structure, count_loc, detect_community_deviation};
 use rustmigrate_core::types::common::{DangerCategory, NodeId, Timestamp};
 use rustmigrate_core::types::graph::{EdgeType, NodeType};
 use rustmigrate_core::types::state::{
@@ -328,6 +328,10 @@ pub enum StatsCommands {
         #[arg(long)]
         rust: Option<PathBuf>,
     },
+    /// 迁移质量度量（degrade_rate / final_score / behavior_coverage）。
+    Quality,
+    /// 社区结构偏离度诊断（Leiden vs 目录分区 NMI/ARI）。
+    Community,
 }
 
 /// Scaffold 子命令。
@@ -503,6 +507,8 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
                 writer,
                 cmd_stats_compare(source.as_deref(), rust.as_deref()),
             ),
+            StatsCommands::Quality => emit(writer, cmd_stats_quality()),
+            StatsCommands::Community => emit(writer, cmd_stats_community()),
         },
         Commands::Scaffold { action } => match action {
             ScaffoldCommands::Workspace { target, name } => {
@@ -2595,6 +2601,37 @@ fn cmd_stats_compare(source: Option<&Path>, rust: Option<&Path>) -> CmdResult {
             Ok((serde_json::Value::Null, warnings))
         }
     }
+}
+
+/// `stats quality`：迁移质量度量（degrade_rate / final_score / behavior_coverage）。
+fn cmd_stats_quality() -> CmdResult {
+    let path = state_path();
+    let (machine, mut warnings) = load_state_with_warnings(&path)?;
+    let cfg = load_config_or_default(&mut warnings);
+    let thresholds = rustmigrate_core::stats::quality::QualityThresholds {
+        done_threshold: cfg.quality.done_threshold,
+        degrade_ffi_threshold: cfg.quality.degrade_ffi_threshold,
+    };
+    let report = rustmigrate_core::stats::quality::compute_quality_with_thresholds(
+        machine.state_file(),
+        &thresholds,
+    );
+    Ok((serde_json::to_value(&report)?, warnings))
+}
+
+/// `stats community`：社区结构偏离度诊断（Leiden vs 目录分区）。
+fn cmd_stats_community() -> CmdResult {
+    let graph = load_graph()?;
+    let report = detect_community_deviation(&graph)
+        .map_err(|e| MigrateError::Config(format!("社区检测失败: {e}")))?;
+    let mut warnings = Vec::new();
+    if report.deviation_score > 0.5 {
+        warnings.push(format!(
+            "结构偏离度 {:.2} 较高（>0.5），目录结构不反映实际耦合，迁移拆解质量风险高",
+            report.deviation_score
+        ));
+    }
+    Ok((serde_json::to_value(&report)?, warnings))
 }
 
 /// `scaffold workspace`：生成 Cargo lib 项目骨架。
