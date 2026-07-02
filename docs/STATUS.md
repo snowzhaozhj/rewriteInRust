@@ -4,7 +4,7 @@
 
 ## 当前位置
 
-- **Milestone**: M1 ✅ → M2 ✅ → **M3 ✅** → **M3 遗留债清理 ✅** → **M4「完善」执行中——Sprint A ✅（PR #57 已合并）→ Sprint B 质量度量框架 进行中**
+- **Milestone**: M1 ✅ → M2 ✅ → **M3 ✅** → **M3 遗留债清理 ✅** → **M4「完善」执行中——巩固线 Sprint A ✅（PR #57）+ Sprint B ✅（PR #58）→ Go 线 Sprint C 进行中（PR-C1 Foundation 已交付，待审查）**
 - **M3 收尾（2026-06-29）**：Sprint A/B/C/D/E 全部合并，验收 M3-VAL-01~08 全达标；PR [#49](https://github.com/snowzhaozhj/rewriteInRust/pull/49)（ffi 测试修复）+ [#52](https://github.com/snowzhaozhj/rewriteInRust/pull/52)（source_root 探测加固）已合并；遗留 issue [#50](https://github.com/snowzhaozhj/rewriteInRust/issues/50)（source_root 推断）+ [#51](https://github.com/snowzhaozhj/rewriteInRust/issues/51)（VAL-05 性能实测：TS 路径 0%/-16%/-1% 无退化）已 CLOSED+COMPLETED；PLAN-M3 验收清单已全部回填 [x]。
 - **阶段**: Sprint A ✅ → Sprint B ✅ → Sprint C ✅ → Sprint E ✅ → **Sprint D 端到端验收 ✅（M3-VAL-01~08 全达标，2026-06-29，PR [#49](https://github.com/snowzhaozhj/rewriteInRust/pull/49) 已合并——4 视角审查全跑、1 important（设计文档同步）+ 4 nit 全落实、just ci 532 绿）**
 - **🟢 Sprint D 端到端验收 ✅**：2 真实 Python 项目各 ≥1 模块迁移到 done（按 §6 headless 规范）。
@@ -61,17 +61,31 @@
 - **Sprint 结构**：A 债务收口+Go前置 → B 质量度量+既有基线+Community诊断 ‖ C Go Adapter Core → D Plugin Go → E Go 端到端验收 → F 健壮性+编排收口。共 37 任务 ~48d，两线可独立分批交付。
 - **配比决策（2026-06-30 用户拍板）**：双主线并行——Sprint A 完成后，B（巩固线）与 C（Go 线）可并行启动。
 
-#### Sprint B：质量度量框架 + 社区检测 进行中（2026-07-01，分支 `feat/m4-sprint-b-quality-metrics`）
+#### Sprint C：Go Adapter Core 进行中（2026-07-02，分支 `feat/m4-sprint-c-go-foundation`）
+
+按 PLAN-M4 §Sprint C 执行策略拆 3 PR：PR-C1（Foundation）→ PR-C2（Core Analysis，含 GO-03 扩 trait 关键路径）→ PR-C3（Validation）。
+
+**PR-C1 Foundation（GO-10 + GO-01，已交付待审查）**：
+
+| 任务 | 状态 | 交付 |
+|------|------|------|
+| M4-GO-10 grammar 契约 | ✅ | `tests/ast_contract_go.rs`：固化 21 个 tree-sitter-go 节点 kind + 字段（字段以 tree-sitter-go-0.21 node-types.json 为准），grammar 漂移先红于此 |
+| M4-GO-01 detect_tier | ✅ | `go.rs` 实现复杂度分档：并发（go/select/chan/send）+ 反射（reflect）+ cgo（"C"）+ unsafe → Full；func/method/type → Standard；纯 const/var/package → Trivial；语法错误保守 Full。9 单元测试 |
+
+- **关键坑**：Go grammar 把 `\n` 作 source_file 匿名子节点吐出（Python grammar 无），顶层遍历须 `is_named()` 过滤，否则纯换行被误判为实质内容。
+- **验证**：go 相关 19 测试全绿；`just ci` 全过（fmt+clippy -D+test+deny+shellcheck），TS/Python 无回归。
+- **不在本 PR**：analyze_file/resolve_import/扩 trait/classify_file/fixture（PR-C2/C3）；故 Go 项目 `graph build` 仍返 analyze_file NotImplemented（预期）。
+
+#### Sprint B：质量度量框架 + 社区检测 ✅（PR [#58](https://github.com/snowzhaozhj/rewriteInRust/pull/58) 已合并）
 
 | 任务 | 状态 | 交付 |
 |------|------|------|
 | M4-QUAL-01 质量度量框架 | ✅ | `stats/quality.rs`：QualityReport/ModuleQuality/DeterministicIndicators/AiIndicators 类型 + compute_quality + final_score §7.5 公式 + 28 单元测试；CLI `stats quality` 子命令 |
-| M4-QUAL-04 社区检测 | ✅ | `stats/community.rs`：集成 graphrs Leiden → NMI/ARI vs 目录分区 → deviation_score；CLI `stats community` 子命令；8 单元 + 2 E2E 测试 |
+| M4-QUAL-04 社区检测 | ✅ | `stats/community.rs`：**自实现 Louvain 社区检测**（PR #58 审查中移除 graphrs 依赖）→ NMI/ARI vs 目录分区 → deviation_score；CLI `stats community` 子命令 |
 | M4-QUAL-03 Plugin 接线 | ✅ | review.md 仪表板接线 stats quality/community；verifier.md 新增 AI 指标输出 schema |
 | M4-QUAL-02 设计文档更新 | ✅ | 03 §7.5 登记三项新增度量（degrade_rate/behavior_coverage/revision_rate） |
 
-- **验证**：600 测试全绿（基线 559 + 28 quality + 8 community + 5 E2E）；`just ci` 全过。
-- **待审查**：等用户审阅后提 PR。
+- **PR #58 审查修复**：Louvain ΔQ 公式修正 + sigma_in 双计数（见提交 09711e3）；移除 graphrs 自实现 Louvain（96443d8）。
 
 #### Sprint A：债务收口 + Go 接入前置 ✅ 完成（PR [#57](https://github.com/snowzhaozhj/rewriteInRust/pull/57) 已合并）
 

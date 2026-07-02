@@ -1,17 +1,18 @@
-//! Go 语言适配器骨架。
+//! Go 语言适配器。
 //!
-//! M4 Sprint A 接线：language/can_handle/resolve_extensions/detect_source_root 已实现，
-//! 解析逻辑（analyze_file/resolve_import/detect_tier/classify_file）Sprint C 补全。
+//! M4 Sprint A 接线：language/can_handle/resolve_extensions/detect_source_root。
+//! M4 Sprint C PR-C1（GO-01）：detect_tier 复杂度分档（并发/反射/cgo/unsafe 危险信号）。
+//! 待补（PR-C2/C3）：analyze_file（符号/调用/签名提取，GO-04~06）、resolve_import + 扩 trait
+//! 目录列举（GO-03）、classify_file（GO-02）。
 //!
-//! **骨架阶段不 panic 约定**：`create_adapter(Go)` 已接线，而 `detect_language` 会把
-//! Go 项目自动识别为 Go——若骨架方法用 `todo!()`，Go 项目跑 graph build/populate 会
-//! panic 崩进程（违反 CLI 统一 JSON 输出）。故未实现方法走优雅降级：唯一真正解析入口
-//! `analyze_file` 返回 `Err(NotImplemented)`（由上层产出 `{status:error}` JSON）；不返回
-//! `Result` 的 `detect_tier`/`classify_file` 返回保守默认值（Full / conservative），绝不 panic。
+//! **未实现方法不 panic 约定**：`create_adapter(Go)` 已接线，`detect_language` 会把 Go 项目
+//! 自动识别为 Go——若用 `todo!()`，Go 项目跑 graph build/populate 会 panic 崩进程（违反 CLI
+//! 统一 JSON 输出）。故 `analyze_file` 返回 `Err(NotImplemented)`（上层产出 `{status:error}`
+//! JSON）；不返回 `Result` 的 `classify_file` 用 trait 默认 `conservative()`，绝不 panic。
 
 use std::path::Path;
 
-use tree_sitter::Parser;
+use tree_sitter::{Node, Parser};
 
 use crate::error::{MigrateError, Result};
 use crate::types::common::SourceLang;
@@ -21,9 +22,6 @@ use super::{FileAnalysis, LanguageAdapter};
 
 /// Go 语言适配器（基于 tree-sitter-go）。
 pub struct GoAdapter {
-    // M4 Sprint A 骨架阶段 analyze_file 走 NotImplemented、parser 尚未消费。
-    // Sprint C（GO-01~06）实现解析逻辑后即移除此 allow。
-    #[allow(dead_code)]
     parser: Parser,
 }
 
@@ -69,10 +67,24 @@ impl LanguageAdapter for GoAdapter {
         None
     }
 
-    fn detect_tier(&mut self, _source: &str) -> ModuleTier {
-        // 骨架阶段：保守返回 Full（不降档），与 trait 约定「解析失败返回 Full」一致，绝不 panic。
-        // Sprint C GO-01 实现 Go 复杂度分档（goroutine/channel/cgo/unsafe.Pointer 等危险信号）。
-        ModuleTier::Full
+    fn detect_tier(&mut self, source: &str) -> ModuleTier {
+        // 对齐 python.rs：parse 失败/含语法错误 → 保守 Full；否则按危险信号 + 内容分档。
+        let tree = match self.parser.parse(source, None) {
+            Some(t) => t,
+            None => return ModuleTier::Full,
+        };
+        let root = tree.root_node();
+        if root.has_error() {
+            return ModuleTier::Full;
+        }
+        let signals = scan_go_tier_signals(root, source);
+        if signals.has_danger {
+            ModuleTier::Full
+        } else if signals.has_non_trivial_content {
+            ModuleTier::Standard
+        } else {
+            ModuleTier::Trivial
+        }
     }
 
     // classify_file 不 override——用 trait 默认 conservative()（Normal + 无危险），
@@ -94,14 +106,102 @@ impl LanguageAdapter for GoAdapter {
     }
 }
 
+/// Go 复杂度分档信号（仿 python.rs `PyTierSignals`）。
+#[derive(Default)]
+struct GoTierSignals {
+    /// 含并发/反射/cgo/unsafe 等语义无法机械翻译的危险信号 → Full。
+    has_danger: bool,
+    /// 含函数/方法/类型定义等实质内容 → 至少 Standard（否则纯 const/var/import → Trivial）。
+    has_non_trivial_content: bool,
+}
+
+/// 扫描顶层节点分档：import 单独查危险包，函数/方法/类型体递归查并发危险。
+fn scan_go_tier_signals(root: Node, source: &str) -> GoTierSignals {
+    let mut s = GoTierSignals::default();
+    let mut cursor = root.walk();
+
+    for child in root.children(&mut cursor) {
+        // Go 把 `\n` 等终结符作为 source_file 的匿名子节点吐出（Python grammar 无此行为），
+        // 若不跳过，`_ =>` 兜底会把纯换行误判为实质内容。
+        if !child.is_named() {
+            continue;
+        }
+        match child.kind() {
+            "package_clause" | "comment" => {}
+            // import 危险包（reflect/unsafe/C）在顶层 import 声明，不在函数子树。
+            "import_declaration" => check_import_danger(child, source, &mut s),
+            "function_declaration" | "method_declaration" | "type_declaration" => {
+                s.has_non_trivial_content = true;
+                check_danger_in_subtree(child, &mut s);
+            }
+            // 纯 const/var 声明本身算 trivial，但初始化表达式可能含 make(chan)/go 等危险。
+            "const_declaration" | "var_declaration" => check_danger_in_subtree(child, &mut s),
+            _ => s.has_non_trivial_content = true,
+        }
+    }
+    s
+}
+
+/// import 声明里若引入 reflect（反射）/unsafe（unsafe.Pointer）/C（cgo），标危险。
+fn check_import_danger(node: Node, source: &str, signals: &mut GoTierSignals) {
+    let mut cursor = node.walk();
+    let mut stack = vec![node];
+    while let Some(current) = stack.pop() {
+        if current.kind() == "import_spec" {
+            if let Some(path) = current.child_by_field_name("path") {
+                // interpreted_string_literal 文本含引号，如 "reflect"。
+                let raw = &source[path.byte_range()];
+                let pkg = raw.trim_matches(|c| c == '"' || c == '`');
+                if matches!(pkg, "reflect" | "unsafe" | "C") {
+                    signals.has_danger = true;
+                    return;
+                }
+            }
+        }
+        cursor.reset(current);
+        for child in current.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+}
+
+/// 递归子树找并发危险：goroutine（go_statement）/select/channel/send/接收。
+fn check_danger_in_subtree(node: Node, signals: &mut GoTierSignals) {
+    let mut cursor = node.walk();
+    let mut stack = vec![node];
+    while let Some(current) = stack.pop() {
+        match current.kind() {
+            "go_statement" | "select_statement" | "channel_type" | "send_statement" => {
+                signals.has_danger = true;
+                return;
+            }
+            // 接收操作 `<-ch`：tree-sitter-go 解析为带 `<-` 操作符的 unary_expression。
+            // 仅接收 channel（如 `v := <-getCh()`）的代码不含上面任何节点，需单独识别，
+            // 否则漏判并发。send_statement/channel_type 已在上分支先命中并返回，不会误入此处。
+            "unary_expression" => {
+                let mut op = current.walk();
+                if current.children(&mut op).any(|c| c.kind() == "<-") {
+                    signals.has_danger = true;
+                    return;
+                }
+            }
+            _ => {}
+        }
+        cursor.reset(current);
+        for child in current.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
 
-    /// 骨架阶段所有方法都不 panic（回归：防 todo!() 让 Go 项目 graph build 崩进程）。
+    /// 未实现方法不 panic（回归：防 todo!() 让 Go 项目 graph build 崩进程）。
     #[test]
-    fn skeleton_methods_do_not_panic() {
+    fn unimplemented_methods_do_not_panic() {
         let mut adapter = GoAdapter::new().unwrap();
         // analyze_file 优雅报错而非 panic。
         let err = adapter
@@ -111,14 +211,104 @@ mod tests {
             err.to_string().contains("尚未实现"),
             "analyze_file 应返回 NotImplemented，实际: {err}"
         );
-        // detect_tier 保守返回 Full，不 panic。
-        assert_eq!(adapter.detect_tier("package main\n"), ModuleTier::Full);
         // classify_file（trait 默认）返回保守分类，不 panic、不判机械。
         let cls = adapter.classify_file("package main\n");
         assert!(cls.danger.is_empty());
         assert!(!cls.is_mechanical());
         // resolve_import 返回 None，不 panic。
         assert_eq!(adapter.resolve_import("fmt", "main.go", &|_| false), None);
+    }
+
+    /// 纯 package 声明 / 纯常量 → Trivial（无实质内容、无危险）。
+    #[test]
+    fn detect_tier_trivial() {
+        let mut adapter = GoAdapter::new().unwrap();
+        assert_eq!(adapter.detect_tier("package main\n"), ModuleTier::Trivial);
+        assert_eq!(
+            adapter.detect_tier("package config\n\nconst Version = \"1.0\"\nvar Debug = false\n"),
+            ModuleTier::Trivial
+        );
+    }
+
+    /// 普通函数/类型定义、无危险信号 → Standard。
+    #[test]
+    fn detect_tier_standard() {
+        let mut adapter = GoAdapter::new().unwrap();
+        let src = "package m\n\nfunc Add(a, b int) int {\n\treturn a + b\n}\n\ntype Point struct {\n\tX int\n\tY int\n}\n";
+        assert_eq!(adapter.detect_tier(src), ModuleTier::Standard);
+    }
+
+    /// goroutine → Full。
+    #[test]
+    fn detect_tier_goroutine_is_full() {
+        let mut adapter = GoAdapter::new().unwrap();
+        let src = "package m\n\nfunc run() {\n\tgo work()\n}\n";
+        assert_eq!(adapter.detect_tier(src), ModuleTier::Full);
+    }
+
+    /// channel（send + chan 类型）→ Full。
+    #[test]
+    fn detect_tier_channel_is_full() {
+        let mut adapter = GoAdapter::new().unwrap();
+        let src = "package m\n\nfunc pipe(ch chan int) {\n\tch <- 1\n}\n";
+        assert_eq!(adapter.detect_tier(src), ModuleTier::Full);
+    }
+
+    /// select → Full。
+    #[test]
+    fn detect_tier_select_is_full() {
+        let mut adapter = GoAdapter::new().unwrap();
+        let src = "package m\n\nfunc pick(a, b chan int) {\n\tselect {\n\tcase <-a:\n\tcase <-b:\n\t}\n}\n";
+        assert_eq!(adapter.detect_tier(src), ModuleTier::Full);
+    }
+
+    /// 仅从 channel 接收（`v := <-getCh()`，无 chan 类型/send/go/select 语法节点）→ Full。
+    /// 回归：codex+主审审查发现的接收表达式漏判。
+    #[test]
+    fn detect_tier_receive_is_full() {
+        let mut adapter = GoAdapter::new().unwrap();
+        // 从函数返回的 channel 接收：函数签名不含 channel_type，仅有 unary_expression `<-`。
+        let assign = "package m\n\nfunc consume() int {\n\treturn <-getCh()\n}\n";
+        assert_eq!(adapter.detect_tier(assign), ModuleTier::Full);
+        // 语句式接收 `<-done`。
+        let stmt = "package m\n\nfunc wait() {\n\t<-getDone()\n}\n";
+        assert_eq!(adapter.detect_tier(stmt), ModuleTier::Full);
+    }
+
+    /// import "reflect" / "unsafe" / "C"（cgo）→ Full。
+    #[test]
+    fn detect_tier_danger_imports_are_full() {
+        let mut adapter = GoAdapter::new().unwrap();
+        for pkg in ["reflect", "unsafe", "C"] {
+            let src = format!("package m\n\nimport \"{pkg}\"\n\nfunc f() {{}}\n");
+            assert_eq!(
+                adapter.detect_tier(&src),
+                ModuleTier::Full,
+                "import {pkg} 应判 Full"
+            );
+        }
+        // 分组 import 形式也应命中。
+        let grouped =
+            "package m\n\nimport (\n\t\"fmt\"\n\t\"reflect\"\n)\n\nfunc f() { fmt.Println() }\n";
+        assert_eq!(adapter.detect_tier(grouped), ModuleTier::Full);
+    }
+
+    /// 无害 import（fmt/strings）不触发危险 → Standard。
+    #[test]
+    fn detect_tier_safe_imports_not_full() {
+        let mut adapter = GoAdapter::new().unwrap();
+        let src = "package m\n\nimport \"fmt\"\n\nfunc greet() {\n\tfmt.Println(\"hi\")\n}\n";
+        assert_eq!(adapter.detect_tier(src), ModuleTier::Standard);
+    }
+
+    /// 语法错误 → 保守 Full。
+    #[test]
+    fn detect_tier_syntax_error_is_full() {
+        let mut adapter = GoAdapter::new().unwrap();
+        assert_eq!(
+            adapter.detect_tier("package m\n\nfunc broken( {\n"),
+            ModuleTier::Full
+        );
     }
 
     /// 含 go.mod 的目录探测为源码根 Some(".")（探测成功，不触发 fallback warning）。
