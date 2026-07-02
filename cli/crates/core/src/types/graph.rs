@@ -56,7 +56,9 @@ pub enum EdgeType {
     Extends,
     /// 类型引用（Function → Class/Interface/Enum）。
     UsesType,
-    /// 对外导出（File → Function/Class/Interface/Enum）。
+    /// 对外导出（File → Function/Class/Interface/Enum/Variable/TypeAlias）。
+    /// Variable/TypeAlias 目标由 Go adapter 产出（M4-GO-04：Go 导出=首字母大写，
+    /// 包级 const/var 与 type 别名同样可导出）。
     Exports,
     /// 迁移映射（源节点 → RustTarget）。
     MapsTo,

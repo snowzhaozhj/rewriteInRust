@@ -135,7 +135,9 @@ impl LanguageAdapter for PythonAdapter {
         specifier: &str,
         current_file: &str,
         exists: &dyn Fn(&str) -> bool,
+        _list_dir: &dyn Fn(&str) -> Vec<String>,
     ) -> Option<String> {
+        // Python 靠 `__init__.py` 固定代表文件名 + exists 单路径试探解析，无需 list_dir。
         if specifier.is_empty() {
             return None;
         }
@@ -1867,17 +1869,18 @@ class PublicClass:
             .map(|s| s.to_string())
             .collect();
         let exists = |p: &str| files.contains(p);
+        let no_dir = |_: &str| Vec::new();
 
         // from . import utils → pkg/utils.py
-        let result = adapter.resolve_import(".utils", "pkg/main.py", &exists);
+        let result = adapter.resolve_import(".utils", "pkg/main.py", &exists, &no_dir);
         assert_eq!(result, Some("pkg/utils.py".to_string()));
 
         // from ..models import base → pkg/models/base.py
-        let result = adapter.resolve_import("..models.base", "pkg/sub/main.py", &exists);
+        let result = adapter.resolve_import("..models.base", "pkg/sub/main.py", &exists, &no_dir);
         assert_eq!(result, Some("pkg/models/base.py".to_string()));
 
         // from . import (package) → pkg/__init__.py
-        let result = adapter.resolve_import(".", "pkg/main.py", &exists);
+        let result = adapter.resolve_import(".", "pkg/main.py", &exists, &no_dir);
         assert_eq!(result, Some("pkg/__init__.py".to_string()));
     }
 
@@ -1889,11 +1892,12 @@ class PublicClass:
             .map(|s| s.to_string())
             .collect();
         let exists = |p: &str| files.contains(p);
+        let no_dir = |_: &str| Vec::new();
 
-        let result = adapter.resolve_import("mypackage.module", "other.py", &exists);
+        let result = adapter.resolve_import("mypackage.module", "other.py", &exists, &no_dir);
         assert_eq!(result, Some("mypackage/module.py".to_string()));
 
-        let result = adapter.resolve_import("mypackage", "other.py", &exists);
+        let result = adapter.resolve_import("mypackage", "other.py", &exists, &no_dir);
         assert_eq!(result, Some("mypackage/__init__.py".to_string()));
     }
 
@@ -1901,10 +1905,14 @@ class PublicClass:
     fn resolve_import_external() {
         let adapter = PythonAdapter::new().unwrap();
         let exists = |_: &str| false;
+        let no_dir = |_: &str| Vec::new();
 
-        assert_eq!(adapter.resolve_import("os", "test.py", &exists), None);
         assert_eq!(
-            adapter.resolve_import("numpy.array", "test.py", &exists),
+            adapter.resolve_import("os", "test.py", &exists, &no_dir),
+            None
+        );
+        assert_eq!(
+            adapter.resolve_import("numpy.array", "test.py", &exists, &no_dir),
             None
         );
     }

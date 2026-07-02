@@ -183,13 +183,25 @@ pub trait LanguageAdapter: Send {
     /// `specifier`：原始 import 路径（如 `./utils`、`express`）。
     /// `current_file`：当前文件的项目相对路径。
     /// `exists`：检查候选路径是否在项目文件集中。
+    /// `list_dir`：列举某目录**直属**（非递归）、在项目文件集中的源文件相对路径（`dir == ""`
+    /// 表示项目根目录）。TS/Python 靠固定代表文件名（`index.*`/`__init__.py`）+ `exists`
+    /// 单路径试探即可解析，忽略此参数；**Go 包=目录、无固定代表文件名**，必须靠 `list_dir`
+    /// 枚举包目录挑代表文件（M4-GO-03，扩 trait 为 baseline 非 fallback）。
     /// 返回 `None` 表示外部依赖或无法解析。
     fn resolve_import(
         &self,
         specifier: &str,
         current_file: &str,
         exists: &dyn Fn(&str) -> bool,
+        list_dir: &dyn Fn(&str) -> Vec<String>,
     ) -> Option<String>;
+
+    /// 图构建前注入项目根，供适配器缓存项目级元数据（在解析任何文件前调用一次）。
+    ///
+    /// 默认 no-op；仅需**项目级上下文**解析导入的语言 override。Go 在此读 `go.mod`
+    /// 取 module path（`resolve_import` 是 `&self` 且只有 `exists`/`list_dir` 回调，
+    /// 拿不到 project_root/go.mod，故 module 前缀必须在此提前注入，M4-GO-03）。
+    fn configure_project(&mut self, _project_root: &Path) {}
 
     /// 评估源码的翻译复杂度分档。
     ///

@@ -69,6 +69,12 @@ fn build_graph_inner(
         .canonicalize()
         .map_err(|_| MigrateError::FileNotFound(root.to_path_buf()))?;
 
+    // 解析任何文件前注入项目根，供适配器缓存项目级元数据（Go 读 go.mod 取 module 前缀，
+    // M4-GO-03）；默认 no-op，TS/Python 无影响。**增量路径须同样接线**（见下方）。
+    for adapter in adapters.iter_mut() {
+        adapter.configure_project(&root);
+    }
+
     let files = collect_source_files(&root, adapters)?;
     if files.is_empty() {
         let total_ms = t_start.map_or(0, |t| t.elapsed().as_millis() as u64);
@@ -246,6 +252,12 @@ pub fn build_graph_incremental(
     let root = root
         .canonicalize()
         .map_err(|_| MigrateError::FileNotFound(root.to_path_buf()))?;
+
+    // 增量路径同样须注入项目根（否则增量重建的 Go 跨包边全丢，M4-GO-03）；
+    // 委托 build_graph_inner 的分支会再调一次，configure_project 幂等（重读 go.mod）无害。
+    for adapter in adapters.iter_mut() {
+        adapter.configure_project(&root);
+    }
 
     // DB 不存在：退化为全量构建
     if !db_path.exists() {
@@ -735,6 +747,24 @@ struct ReExportInfo {
     wildcards: Vec<String>,
 }
 
+/// 相对路径的直接父目录（与 `decompose::unit_dir` 同构：`p.rfind('/')`，根目录 → `""`）。
+fn parent_dir(p: &str) -> &str {
+    match p.rfind('/') {
+        Some(i) => &p[..i],
+        None => "",
+    }
+}
+
+/// 预建「目录 → 直属文件列表」索引，供 `list_dir` 回调 O(1) 查询（避免每次 import O(N) 扫
+/// file_set）。Go 包 resolve（M4-GO-03）用它枚举包目录挑代表文件；TS/Python 不消费。
+fn build_dir_index(file_set: &HashSet<String>) -> HashMap<&str, Vec<String>> {
+    let mut idx: HashMap<&str, Vec<String>> = HashMap::new();
+    for p in file_set {
+        idx.entry(parent_dir(p)).or_default().push(p.clone());
+    }
+    idx
+}
+
 /// 为每个文件构建 re-export 信息表，供 [`resolve_reexport_origin`] 做符号透传。
 fn build_reexport_map(
     analyses: &HashMap<String, FileAnalysis>,
@@ -743,6 +773,8 @@ fn build_reexport_map(
     file_adapter_map: &HashMap<String, usize>,
 ) -> HashMap<String, ReExportInfo> {
     let exists = |p: &str| file_set.contains(p);
+    let dir_index = build_dir_index(file_set);
+    let list_dir = |dir: &str| dir_index.get(dir).cloned().unwrap_or_default();
     let mut map: HashMap<String, ReExportInfo> = HashMap::new();
     for (rel, analysis) in analyses {
         let mut info = ReExportInfo::default();
@@ -752,7 +784,8 @@ fn build_reexport_map(
             if !import.reexport {
                 continue;
             }
-            let Some(tgt) = adapters[adapter_idx].resolve_import(&import.module_path, rel, &exists)
+            let Some(tgt) =
+                adapters[adapter_idx].resolve_import(&import.module_path, rel, &exists, &list_dir)
             else {
                 continue; // 外部模块（npm 包）re-export，无法透传
             };
@@ -873,6 +906,8 @@ fn add_cross_file_edges(
     // 会制造虚假双向边、整库坍缩成一个巨型 SCC。memo/visiting 跨文件复用。
     let reexport_map = build_reexport_map(analyses, file_set, adapters, file_adapter_map);
     let exists = |p: &str| file_set.contains(p);
+    let dir_index = build_dir_index(file_set);
+    let list_dir = |dir: &str| dir_index.get(dir).cloned().unwrap_or_default();
     let mut origin_memo: HashMap<(String, String), Option<String>> = HashMap::new();
     let mut origin_visiting: HashSet<(String, String)> = HashSet::new();
 
@@ -896,7 +931,7 @@ fn add_cross_file_edges(
         let adapter_idx = file_adapter_map.get(rel.as_str()).copied().unwrap_or(0);
         for import in &analysis.imports {
             let Some(target_rel) =
-                adapters[adapter_idx].resolve_import(&import.module_path, rel, &exists)
+                adapters[adapter_idx].resolve_import(&import.module_path, rel, &exists, &list_dir)
             else {
                 continue;
             };
@@ -1087,7 +1122,9 @@ fn resolve_import(
 ) -> Option<String> {
     use crate::lang::typescript::TypeScriptAdapter;
     let adapter = TypeScriptAdapter::new().expect("TS adapter init");
-    adapter.resolve_import(module_path, current_rel, &|p| file_set.contains(p))
+    adapter.resolve_import(module_path, current_rel, &|p| file_set.contains(p), &|_| {
+        Vec::new()
+    })
 }
 
 #[cfg(test)]

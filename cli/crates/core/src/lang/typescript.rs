@@ -131,7 +131,9 @@ impl LanguageAdapter for TypeScriptAdapter {
         specifier: &str,
         current_file: &str,
         exists: &dyn Fn(&str) -> bool,
+        _list_dir: &dyn Fn(&str) -> Vec<String>,
     ) -> Option<String> {
+        // TS 靠 `index.*` 固定代表文件名 + exists 单路径试探解析，无需 list_dir。
         if !specifier.starts_with('.') {
             return None;
         }
