@@ -1,8 +1,13 @@
 //! Go grammar 契约测试。
 //!
 //! 与 `ast_contract.rs`（TypeScript）/ `ast_contract_python.rs` 同模式：固化
-//! `go.rs` 依赖的 tree-sitter-go 节点类型 (kind) 和字段 (field)，grammar 升级时
-//! 若重命名/移除会先红于此，而非让集成测试以间接方式暴露。
+//! `go.rs` 现在及后续（Sprint C PR-C2/C3 的 analyze_file/resolve_import）依赖的
+//! tree-sitter-go 节点类型 (kind) 和字段 (field)，grammar 升级时若重命名/移除会先红
+//! 于此，而非让集成测试以间接方式暴露。
+//!
+//! PR-C1 的 `go.rs` 目前仅 `child_by_field_name("path")`（import_spec）一处真正依赖字段，
+//! 其余字段断言（function/method/type_spec/call/selector/composite/qualified 等）是给
+//! PR-C2/C3 符号/调用/签名提取的**前向登记 guard**——下个 PR 落地即生效，提前锁定避免漂移。
 //!
 //! 维护：`go.rs` 新依赖一个 kind/field 时，往 [`CONTRACTS`] 加一行、并确保
 //! [`SRC`] 能触发它。字段以 tree-sitter-go-0.21 `node-types.json` 为准。
@@ -190,7 +195,7 @@ fn ast_contract_go_holds() {
             assert!(
                 node.child_by_field_name(field).is_some(),
                 "kind `{}` 的 required field `{}` 取不到：grammar 可能改了字段名/结构，\
-                 go.rs 中 child_by_field_name(\"{}\") 将静默失效",
+                 go.rs（现在或 PR-C2/C3）中 child_by_field_name(\"{}\") 将静默失效",
                 c.kind,
                 field,
                 field

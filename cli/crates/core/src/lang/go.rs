@@ -165,7 +165,7 @@ fn check_import_danger(node: Node, source: &str, signals: &mut GoTierSignals) {
     }
 }
 
-/// 递归子树找并发危险：goroutine（go_statement）/select/channel/send。
+/// 递归子树找并发危险：goroutine（go_statement）/select/channel/send/接收。
 fn check_danger_in_subtree(node: Node, signals: &mut GoTierSignals) {
     let mut cursor = node.walk();
     let mut stack = vec![node];
@@ -174,6 +174,16 @@ fn check_danger_in_subtree(node: Node, signals: &mut GoTierSignals) {
             "go_statement" | "select_statement" | "channel_type" | "send_statement" => {
                 signals.has_danger = true;
                 return;
+            }
+            // 接收操作 `<-ch`：tree-sitter-go 解析为带 `<-` 操作符的 unary_expression。
+            // 仅接收 channel（如 `v := <-getCh()`）的代码不含上面任何节点，需单独识别，
+            // 否则漏判并发。send_statement/channel_type 已在上分支先命中并返回，不会误入此处。
+            "unary_expression" => {
+                let mut op = current.walk();
+                if current.children(&mut op).any(|c| c.kind() == "<-") {
+                    signals.has_danger = true;
+                    return;
+                }
             }
             _ => {}
         }
@@ -250,6 +260,19 @@ mod tests {
         let mut adapter = GoAdapter::new().unwrap();
         let src = "package m\n\nfunc pick(a, b chan int) {\n\tselect {\n\tcase <-a:\n\tcase <-b:\n\t}\n}\n";
         assert_eq!(adapter.detect_tier(src), ModuleTier::Full);
+    }
+
+    /// 仅从 channel 接收（`v := <-getCh()`，无 chan 类型/send/go/select 语法节点）→ Full。
+    /// 回归：codex+主审审查发现的接收表达式漏判。
+    #[test]
+    fn detect_tier_receive_is_full() {
+        let mut adapter = GoAdapter::new().unwrap();
+        // 从函数返回的 channel 接收：函数签名不含 channel_type，仅有 unary_expression `<-`。
+        let assign = "package m\n\nfunc consume() int {\n\treturn <-getCh()\n}\n";
+        assert_eq!(adapter.detect_tier(assign), ModuleTier::Full);
+        // 语句式接收 `<-done`。
+        let stmt = "package m\n\nfunc wait() {\n\t<-getDone()\n}\n";
+        assert_eq!(adapter.detect_tier(stmt), ModuleTier::Full);
     }
 
     /// import "reflect" / "unsafe" / "C"（cgo）→ Full。
