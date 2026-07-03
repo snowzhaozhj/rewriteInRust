@@ -33,9 +33,9 @@ pub enum NodeType {
     RustTarget,
     /// 测试夹具节点（TestedBy 边的目标端）。
     TestFixture,
-    /// 类型别名（M2 扩展，预留）。
+    /// 类型别名（M2 预留枚举，M4-GO-04 起 Go adapter 实际产出）。
     TypeAlias,
-    /// 模块级常量/变量（M2 扩展，预留）。
+    /// 模块级常量/变量（M2 预留枚举，M4-GO-04 起 Go adapter 实际产出）。
     Variable,
     /// 功能聚类（M2 扩展，Leiden 算法产出）。
     Community,

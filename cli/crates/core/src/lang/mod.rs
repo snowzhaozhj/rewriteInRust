@@ -198,10 +198,14 @@ pub trait LanguageAdapter: Send {
 
     /// 图构建前注入项目根，供适配器缓存项目级元数据（在解析任何文件前调用一次）。
     ///
-    /// 默认 no-op；仅需**项目级上下文**解析导入的语言 override。Go 在此读 `go.mod`
-    /// 取 module path（`resolve_import` 是 `&self` 且只有 `exists`/`list_dir` 回调，
-    /// 拿不到 project_root/go.mod，故 module 前缀必须在此提前注入，M4-GO-03）。
-    fn configure_project(&mut self, _project_root: &Path) {}
+    /// 返回**项目级警告**（如清单存在却解析失败），由 build 层汇入图 `warnings`（CLI 统一
+    /// JSON 约定：warnings 非空即降级 status）。默认 no-op 返回空；仅需**项目级上下文**解析
+    /// 导入的语言 override。Go 在此读 `go.mod` 取 module path（`resolve_import` 是 `&self`
+    /// 且只有 `exists`/`list_dir` 回调，拿不到 project_root/go.mod，故 module 前缀必须在此
+    /// 提前注入，M4-GO-03）。
+    fn configure_project(&mut self, _project_root: &Path) -> Vec<String> {
+        Vec::new()
+    }
 
     /// 评估源码的翻译复杂度分档。
     ///

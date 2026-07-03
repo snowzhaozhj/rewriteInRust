@@ -56,6 +56,12 @@ const CONTRACTS: &[Contract] = &[
         kind: "var_spec",
         required_fields: &["name"],
     },
+    // 分组 var 容器（GO-04：grammar 不对称——`var (...)` 多包一层 var_spec_list，
+    // `const (...)` 直挂 const_spec；extract_go_var_const 须对 var_spec_list 下钻）
+    Contract {
+        kind: "var_spec_list",
+        required_fields: &[],
+    },
     // 类型定义
     Contract {
         kind: "type_declaration",
@@ -185,6 +191,11 @@ import (
 )
 
 const Version = "1.0"
+
+var (
+	debug = false
+	limit = 10
+)
 
 var mu sync.Mutex
 

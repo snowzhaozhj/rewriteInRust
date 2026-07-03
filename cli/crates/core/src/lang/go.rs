@@ -9,7 +9,8 @@
 //!   注入 module 前缀 + 扩 trait `list_dir` 目录列举。
 //! - GO-04：符号提取（func/method/type struct→Class/interface→Interface/const/var→Variable）
 //!   + Contains/Extends（struct 嵌入）边 + 首字母大写导出 + 后置 Exports 边。
-//! - GO-05：调用分析（`pkg.Func`/`x.Method`/composite literal 构造）+ instance_type_bindings。
+//! - GO-05：调用分析（`pkg.Func`/`x.Method`/composite literal 构造）+ 函数作用域实例绑定
+//!   （`x.M`→`Type.M` 在函数作用域内定型，隔离跨函数同名变量污染，I-2）。
 //! - GO-06：signature 提取（func/method 剥 body、interface 方法集、struct 字段骨架）。
 //! - GO-07：interface 隐式实现——**不强连 Implements 边**（D-M4-02），方法集入 signature。
 //!
@@ -78,9 +79,18 @@ impl LanguageAdapter for GoAdapter {
         &["go"]
     }
 
-    fn configure_project(&mut self, project_root: &Path) {
+    fn configure_project(&mut self, project_root: &Path) -> Vec<String> {
         // 读 go.mod 的 module 前缀，供 resolve_import 剥离本地包路径（M4-GO-03）。
         self.module_path = parse_go_module_path(project_root);
+        // 有 go.mod 却解析不出 module 声明 → 所有跨包导入会被静默按外部依赖处理（跨包边全丢）。
+        // 显式告警区分「GOPATH 模式无 go.mod（可静默）」与「go.mod 异常（应报警）」（I-4）。
+        if self.module_path.is_none() && project_root.join("go.mod").exists() {
+            return vec![
+                "go.mod 存在但未解析出 module 声明——跨包导入将按外部依赖处理，跨包依赖边丢失"
+                    .to_string(),
+            ];
+        }
+        Vec::new()
     }
 
     fn analyze_file(&mut self, source: &str, rel_path: &str) -> Result<FileAnalysis> {
@@ -99,7 +109,6 @@ impl LanguageAdapter for GoAdapter {
             imports: Vec::new(),
             calls: Vec::new(),
             exported_names: HashSet::new(),
-            instance_type_bindings: HashMap::new(),
         };
 
         // File 节点。
@@ -135,7 +144,9 @@ impl LanguageAdapter for GoAdapter {
             imports: ctx.imports,
             calls: ctx.calls,
             exported_names: ctx.exported_names,
-            instance_type_bindings: ctx.instance_type_bindings,
+            // Go 的实例绑定改为函数作用域内即时定型（`x.M`→`Type.M` 已写入 calls），不再
+            // 输出文件级绑定表——杜绝跨函数同名变量污染的错边（I-2）。
+            instance_type_bindings: HashMap::new(),
         })
     }
 
@@ -305,9 +316,8 @@ struct GoAnalysisContext<'a> {
     edges: Vec<Dependency>,
     imports: Vec<ImportInfo>,
     calls: Vec<CallInfo>,
-    /// Go 无显式 export 表；此字段仅为对齐 `FileAnalysis` 形状（导出由首字母大写逐名判定）。
+    /// 导出符号名（首字母大写逐名填充）；用于后置生成 File→symbol Exports 边。
     exported_names: HashSet<String>,
-    instance_type_bindings: HashMap<String, String>,
 }
 
 /// 取节点源码文本（零 panic，对齐 python.rs `py_node_text`）。
@@ -356,7 +366,12 @@ fn walk_go_toplevel(root: Node, ctx: &mut GoAnalysisContext) {
 fn parse_go_module_path(root: &Path) -> Option<String> {
     let content = std::fs::read_to_string(root.join("go.mod")).ok()?;
     for line in content.lines() {
-        if let Some(rest) = line.trim().strip_prefix("module ") {
+        // `module` 后跟任意空白（空格或 tab）——不用 `strip_prefix("module ")` 硬编码单空格，
+        // 且需空白分隔避免匹配 `modulefoo`（主审 nit）。
+        if let Some(rest) = line.trim().strip_prefix("module") {
+            if !rest.starts_with(char::is_whitespace) {
+                continue;
+            }
             let m = rest
                 .split("//")
                 .next()
@@ -638,36 +653,51 @@ fn go_base_type_name(node: Node, source: &str) -> Option<String> {
 fn extract_go_var_const(node: Node, ctx: &mut GoAnalysisContext) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        let spec_kind = child.kind();
-        if spec_kind != "const_spec" && spec_kind != "var_spec" {
-            // 分组 const(...)/var(...) 的 spec 直挂 declaration，无独立 list 容器。
+        match child.kind() {
+            "const_spec" | "var_spec" => emit_go_var_const_spec(child, ctx),
+            // tree-sitter-go 分组语法不对称：`const (...)` 的 const_spec 直挂 declaration，
+            // 但 `var (...)` 多包一层 `var_spec_list`（grammar：`var_declaration → choice(
+            // var_spec, var_spec_list)`）。分组 var 须下钻一层，否则整块 Variable/Exports 漏建。
+            "var_spec_list" => {
+                let mut lc = child.walk();
+                for spec in child.children(&mut lc) {
+                    if spec.kind() == "var_spec" {
+                        emit_go_var_const_spec(spec, ctx);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// 单个 const_spec/var_spec → Variable 节点：遍历多名 `name`（`var a, b int`），过滤 `_`
+/// 空标识符与逗号 token；首字母大写者记导出（后置 Exports 边）。
+fn emit_go_var_const_spec(spec: Node, ctx: &mut GoAnalysisContext) {
+    let sig = go_node_text(spec, ctx.source).trim().to_string();
+    let mut nc = spec.walk();
+    for name_node in spec.children_by_field_name("name", &mut nc) {
+        if name_node.kind() != "identifier" {
+            continue; // 过滤 name 里混入的 `,` token
+        }
+        let name = go_node_text(name_node, ctx.source);
+        if name.is_empty() || name == "_" {
             continue;
         }
-        let sig = go_node_text(child, ctx.source).trim().to_string();
-        let mut nc = child.walk();
-        for name_node in child.children_by_field_name("name", &mut nc) {
-            if name_node.kind() != "identifier" {
-                continue; // 过滤 const_spec.name 里混入的 `,` token
-            }
-            let name = go_node_text(name_node, ctx.source);
-            if name.is_empty() || name == "_" {
-                continue;
-            }
-            let exported = go_is_exported(name);
-            if exported {
-                ctx.exported_names.insert(name.to_string());
-            }
-            let mut n = SourceNode::new(
-                NodeId::symbol(NodeType::Variable, ctx.rel_path, name),
-                NodeType::Variable,
-                name.to_string(),
-                ctx.rel_path.to_string(),
-            );
-            n.line_range = Some(go_node_span(child));
-            n.signature = Some(sig.clone());
-            n.is_exported = exported;
-            ctx.nodes.push(n);
+        let exported = go_is_exported(name);
+        if exported {
+            ctx.exported_names.insert(name.to_string());
         }
+        let mut n = SourceNode::new(
+            NodeId::symbol(NodeType::Variable, ctx.rel_path, name),
+            NodeType::Variable,
+            name.to_string(),
+            ctx.rel_path.to_string(),
+        );
+        n.line_range = Some(go_node_span(spec));
+        n.signature = Some(sig.clone());
+        n.is_exported = exported;
+        ctx.nodes.push(n);
     }
 }
 
@@ -789,7 +819,8 @@ fn extract_go_function(node: Node, ctx: &mut GoAnalysisContext) {
     ctx.nodes.push(n);
 
     if let Some(body) = node.child_by_field_name("body") {
-        extract_go_calls(body, ctx);
+        let scope = build_go_fn_scope(node, body, None, ctx.source);
+        extract_go_calls(body, &scope, ctx);
     }
 }
 
@@ -831,15 +862,13 @@ fn extract_go_method(node: Node, ctx: &mut GoAnalysisContext) {
     ctx.edges
         .push(Dependency::new(class_id, id, EdgeType::Contains));
 
-    // receiver 变量绑定：`r.Other()` 可解析（对齐 python self→class）。
-    if let Some(var) = recv_var {
-        if var != "_" {
-            ctx.instance_type_bindings.insert(var, recv_type);
-        }
-    }
-
+    // receiver 变量 → 函数作用域绑定（`r.Other()` 定型为 `Type.Other`，对齐 python self→class）。
     if let Some(body) = node.child_by_field_name("body") {
-        extract_go_calls(body, ctx);
+        let receiver = recv_var
+            .filter(|v| v != "_")
+            .map(|v| (v, recv_type.clone()));
+        let scope = build_go_fn_scope(node, body, receiver, ctx.source);
+        extract_go_calls(body, &scope, ctx);
     }
 }
 
@@ -878,10 +907,13 @@ fn go_signature(node: Node, source: &str) -> String {
         .to_string()
 }
 
-// ==================== GO-05 调用 + instance_type_bindings ====================
+// ==================== GO-05 调用 + 函数作用域实例绑定 ====================
 
-/// 递归提取函数/方法体内的调用与构造绑定（手写 stack DFS，对齐 python.rs）。
-fn extract_go_calls(root: Node, ctx: &mut GoAnalysisContext) {
+/// 递归提取函数/方法体内的调用与构造（手写 stack DFS，对齐 python.rs）。`scope` 是该函数
+/// 作用域的「变量→类型」绑定（由 [`build_go_fn_scope`] 预扫），用于把 `x.M()` 定型为
+/// `Type.M`——**函数作用域隔离**，杜绝旧文件级绑定表被同名局部变量跨函数污染导致的错边
+/// （I-2/异构#1）。实例绑定不再在此 DFS 内累积，故此处不处理 short_var/var_declaration。
+fn extract_go_calls(root: Node, scope: &HashMap<String, String>, ctx: &mut GoAnalysisContext) {
     let mut cursor = root.walk();
     let mut stack = vec![root];
     while let Some(current) = stack.pop() {
@@ -890,7 +922,7 @@ fn extract_go_calls(root: Node, ctx: &mut GoAnalysisContext) {
                 if let Some(func) = current.child_by_field_name("function") {
                     if let Some(callee) = go_callee_name(func, ctx.source) {
                         ctx.calls.push(CallInfo {
-                            callee,
+                            callee: resolve_go_method_callee(callee, scope),
                             is_constructor: false,
                         });
                     }
@@ -908,8 +940,109 @@ fn extract_go_calls(root: Node, ctx: &mut GoAnalysisContext) {
                     // 匿名结构体/`[]T{}`/`map[K]V{}`：go_base_type_name 返回 None → 跳过。
                 }
             }
-            "short_var_declaration" | "assignment_statement" => go_bind_assign(current, ctx),
-            "var_declaration" => go_bind_local_var(current, ctx),
+            _ => {}
+        }
+        cursor.reset(current);
+        for child in current.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+}
+
+/// `x.M` → `Type.M`（当 `x` 是当前函数作用域内的实例绑定）；`pkg.Func`（`pkg` 非绑定变量）
+/// 与本地裸调用 `Foo` 原样返回。
+fn resolve_go_method_callee(callee: String, scope: &HashMap<String, String>) -> String {
+    if let Some(dot) = callee.find('.') {
+        if let Some(ty) = scope.get(&callee[..dot]) {
+            return format!("{ty}{}", &callee[dot..]);
+        }
+    }
+    callee
+}
+
+/// 预扫函数作用域的「变量→类型」实例绑定：receiver 变量 + 具名类型形参 + 函数体内局部
+/// `v := Foo{}` / `var v Foo` 绑定。同名不同类型 → 剔除并标记歧义（保守，退化为漏边而非
+/// 错边，守住「漏边非错边」底线）。
+fn build_go_fn_scope(
+    fn_node: Node,
+    body: Node,
+    receiver: Option<(String, String)>,
+    source: &str,
+) -> HashMap<String, String> {
+    let mut scope = HashMap::new();
+    let mut poisoned = HashSet::new();
+    if let Some((var, ty)) = receiver {
+        bind_go_scope(&mut scope, &mut poisoned, &var, ty);
+    }
+    // 具名类型形参（`func run(r Rect)` → r→Rect；修异构#2 形参方法调用漏边）。
+    if let Some(params) = fn_node.child_by_field_name("parameters") {
+        collect_go_param_bindings(params, &mut scope, &mut poisoned, source);
+    }
+    collect_go_local_bindings(body, &mut scope, &mut poisoned, source);
+    scope
+}
+
+/// 写入一条作用域绑定；同名已存在且类型不同 → 剔除并加入 `poisoned`（后续该名再绑定亦忽略）。
+fn bind_go_scope(
+    scope: &mut HashMap<String, String>,
+    poisoned: &mut HashSet<String>,
+    var: &str,
+    ty: String,
+) {
+    if var == "_" || poisoned.contains(var) {
+        return;
+    }
+    match scope.get(var) {
+        Some(existing) if *existing != ty => {
+            scope.remove(var);
+            poisoned.insert(var.to_string());
+        }
+        _ => {
+            scope.insert(var.to_string(), ty);
+        }
+    }
+}
+
+/// 形参绑定：遍历 parameter_declaration（多名共类型 `func(a, b Rect)`），取具名类型基名。
+/// 可变参 `...T`（variadic_parameter_declaration）是 slice，不绑定实例类型。
+fn collect_go_param_bindings(
+    params: Node,
+    scope: &mut HashMap<String, String>,
+    poisoned: &mut HashSet<String>,
+    source: &str,
+) {
+    let mut cursor = params.walk();
+    for pd in params.children(&mut cursor) {
+        if pd.kind() != "parameter_declaration" {
+            continue;
+        }
+        let Some(ty) = pd
+            .child_by_field_name("type")
+            .and_then(|t| go_base_type_name(t, source))
+        else {
+            continue;
+        };
+        for name in go_field_identifiers(pd, "name", source) {
+            bind_go_scope(scope, poisoned, &name, ty.clone());
+        }
+    }
+}
+
+/// DFS 函数体收集局部 `v := Foo{}` / `v = &Foo{}` / `var v Foo` / `var v = Foo{}` 绑定。
+fn collect_go_local_bindings(
+    root: Node,
+    scope: &mut HashMap<String, String>,
+    poisoned: &mut HashSet<String>,
+    source: &str,
+) {
+    let mut cursor = root.walk();
+    let mut stack = vec![root];
+    while let Some(current) = stack.pop() {
+        match current.kind() {
+            "short_var_declaration" | "assignment_statement" => {
+                go_bind_assign(current, scope, poisoned, source)
+            }
+            "var_declaration" => go_bind_local_var(current, scope, poisoned, source),
             _ => {}
         }
         cursor.reset(current);
@@ -930,7 +1063,12 @@ fn go_callee_name(func: Node, source: &str) -> Option<String> {
 
 /// `v := Foo{}` / `v = &Foo{}` 短变量/赋值绑定：左标识符 → 右 composite 类型（剥指针）。
 /// 工厂 `v := NewFoo()`（call）不绑定（静态无法定型，保守——build.rs 落 fn_index 唯一兜底）。
-fn go_bind_assign(node: Node, ctx: &mut GoAnalysisContext) {
+fn go_bind_assign(
+    node: Node,
+    scope: &mut HashMap<String, String>,
+    poisoned: &mut HashSet<String>,
+    source: &str,
+) {
     let (Some(left), Some(right)) = (
         node.child_by_field_name("left"),
         node.child_by_field_name("right"),
@@ -943,43 +1081,40 @@ fn go_bind_assign(node: Node, ctx: &mut GoAnalysisContext) {
         if l.kind() != "identifier" {
             continue;
         }
-        let var = go_node_text(*l, ctx.source);
-        if var == "_" {
-            continue;
-        }
-        if let Some(ty) = go_composite_binding_type(*r, ctx.source) {
-            ctx.instance_type_bindings.insert(var.to_string(), ty);
+        let var = go_node_text(*l, source);
+        if let Some(ty) = go_composite_binding_type(*r, source) {
+            bind_go_scope(scope, poisoned, var, ty);
         }
     }
 }
 
 /// 局部 `var v Foo` / `var v = Foo{}` 绑定（top-level var 走 extract_go_var_const 建 Variable
 /// 节点，不来此；本函数仅处理函数体内的 var_declaration）。
-fn go_bind_local_var(node: Node, ctx: &mut GoAnalysisContext) {
+fn go_bind_local_var(
+    node: Node,
+    scope: &mut HashMap<String, String>,
+    poisoned: &mut HashSet<String>,
+    source: &str,
+) {
     let mut cursor = node.walk();
     for spec in node.children(&mut cursor) {
         if spec.kind() != "var_spec" {
             continue;
         }
-        let names = go_field_identifiers(spec, "name", ctx.source);
+        let names = go_field_identifiers(spec, "name", source);
         // 优先显式类型 `var v Foo`；否则看初始化器 `var v = Foo{}`。
         if let Some(ty) = spec
             .child_by_field_name("type")
-            .and_then(|t| go_base_type_name(t, ctx.source))
+            .and_then(|t| go_base_type_name(t, source))
         {
             for name in names {
-                if name != "_" {
-                    ctx.instance_type_bindings.insert(name, ty.clone());
-                }
+                bind_go_scope(scope, poisoned, &name, ty.clone());
             }
         } else if let Some(value) = spec.child_by_field_name("value") {
             let vals = go_named_children(value);
             for (name, v) in names.iter().zip(vals.iter()) {
-                if name == "_" {
-                    continue;
-                }
-                if let Some(ty) = go_composite_binding_type(*v, ctx.source) {
-                    ctx.instance_type_bindings.insert(name.clone(), ty);
+                if let Some(ty) = go_composite_binding_type(*v, source) {
+                    bind_go_scope(scope, poisoned, name, ty);
                 }
             }
         }
@@ -1317,21 +1452,49 @@ mod tests {
         assert!(find_node(&a, "Y").is_some());
     }
 
-    /// GO-05：本地调用 / `pkg.Func` / `x.Method` callee 串。
+    /// GO-04：分组 `var (...)` / `const (...)` 块——tree-sitter-go 对 var 分组多包一层
+    /// `var_spec_list`，须下钻。回归：修复前分组 var 块整体漏建 Variable + Exports 边。
+    #[test]
+    fn analyze_go_grouped_var_const_block() {
+        let a = analyze(
+            "package m\n\nvar (\n\tExported = 1\n\tprivate = 2\n)\n\nconst (\n\tMax = 10\n\tmin = 0\n)\n",
+        );
+        // 分组 var 块（关键回归：修复前为零）。
+        let ev = find_node(&a, "Exported").expect("分组 var 导出项 Variable");
+        assert_eq!(ev.node_type, NodeType::Variable);
+        assert!(ev.is_exported);
+        assert_eq!(
+            find_node(&a, "private").expect("分组 var 私有项").node_type,
+            NodeType::Variable
+        );
+        // 分组 const 块（原本走通，防回归）。
+        assert!(find_node(&a, "Max").is_some());
+        assert!(find_node(&a, "min").is_some());
+        // 导出项进 Exports 边。
+        assert!(has_edge(&a, EdgeType::Exports, "pkg/m.go", "Exported"));
+        assert!(has_edge(&a, EdgeType::Exports, "pkg/m.go", "Max"));
+    }
+
+    /// GO-05：本地调用 / `pkg.Func` / 形参方法调用定型。`r Rect` 形参 → `r.Area()` 定型为
+    /// `Rect.Area`（形参绑定，修异构#2 漏边）。
     #[test]
     fn analyze_go_calls() {
         let a = analyze("package m\n\nimport \"fmt\"\n\nfunc run(r Rect) {\n\thelper()\n\tfmt.Println(\"x\")\n\tr.Area()\n}\n");
         let callees: Vec<&str> = a.calls.iter().map(|c| c.callee.as_str()).collect();
         assert!(callees.contains(&"helper"), "本地调用: {callees:?}");
         assert!(callees.contains(&"fmt.Println"), "跨包调用: {callees:?}");
-        assert!(callees.contains(&"r.Area"), "方法调用: {callees:?}");
+        assert!(
+            callees.contains(&"Rect.Area"),
+            "形参方法调用定型 Rect.Area: {callees:?}"
+        );
     }
 
-    /// GO-05：composite literal `Foo{}`/`&Foo{}` → 构造 + 绑定；`[]int{}` 不产。
+    /// GO-05：composite literal `Foo{}`/`&Foo{}` → 构造；`[]int{}` 不产。局部绑定 `a := Rect{}`
+    /// 使 `a.Area()` 定型为 `Rect.Area`。
     #[test]
     fn analyze_go_composite_constructor_and_binding() {
         let a = analyze(
-            "package m\n\nfunc build() {\n\ta := Rect{}\n\tb := &Point{}\n\t_ = []int{1, 2}\n}\n",
+            "package m\n\nfunc build() {\n\ta := Rect{}\n\tb := &Point{}\n\t_ = []int{1, 2}\n\ta.Area()\n}\n",
         );
         let ctors: Vec<&str> = a
             .calls
@@ -1342,28 +1505,56 @@ mod tests {
         assert!(ctors.contains(&"Rect"), "Rect{{}} 构造: {ctors:?}");
         assert!(ctors.contains(&"Point"), "&Point{{}} 构造: {ctors:?}");
         assert!(!ctors.contains(&"int"), "[]int{{}} 非具名构造");
-        assert_eq!(a.instance_type_bindings.get("a"), Some(&"Rect".to_string()));
-        assert_eq!(
-            a.instance_type_bindings.get("b"),
-            Some(&"Point".to_string())
+        let callees: Vec<&str> = a.calls.iter().map(|c| c.callee.as_str()).collect();
+        assert!(
+            callees.contains(&"Rect.Area"),
+            "局部绑定方法调用定型: {callees:?}"
         );
     }
 
-    /// GO-05：工厂函数 `v := NewFoo()` 不绑定（保守）。
+    /// GO-05：工厂函数 `v := NewFoo()` 不绑定（保守）→ `v.Do()` 不定型，保留 `v.Do`。
     #[test]
     fn analyze_go_factory_no_binding() {
-        let a = analyze("package m\n\nfunc build() {\n\tv := NewFoo()\n\t_ = v\n}\n");
+        let a = analyze("package m\n\nfunc build() {\n\tv := NewFoo()\n\tv.Do()\n}\n");
+        let callees: Vec<&str> = a.calls.iter().map(|c| c.callee.as_str()).collect();
         assert!(
-            !a.instance_type_bindings.contains_key("v"),
-            "工厂调用不绑定类型"
+            callees.contains(&"v.Do")
+                && !callees.iter().any(|c| c.ends_with(".Do") && *c != "v.Do"),
+            "工厂调用不绑定类型，v.Do 不定型: {callees:?}"
         );
     }
 
-    /// GO-05：receiver 变量绑定（`r.other()` 可解析）。
+    /// GO-05：receiver 变量绑定——method body 内 `r.other()` 定型为 `Rect.other`。
     #[test]
     fn analyze_go_receiver_var_binding() {
-        let a = analyze("package m\n\ntype Rect struct{}\n\nfunc (r Rect) Area() {}\n");
-        assert_eq!(a.instance_type_bindings.get("r"), Some(&"Rect".to_string()));
+        let a =
+            analyze("package m\n\ntype Rect struct{}\n\nfunc (r Rect) Area() {\n\tr.other()\n}\n");
+        let callees: Vec<&str> = a.calls.iter().map(|c| c.callee.as_str()).collect();
+        assert!(
+            callees.contains(&"Rect.other"),
+            "receiver 方法调用定型: {callees:?}"
+        );
+    }
+
+    /// GO-05 回归（I-2/异构#1）：同文件两函数复用同名变量、绑不同类型，**函数作用域隔离**——
+    /// 各自正确定型，无跨函数污染错边。修复前文件级绑定表会让 g 的 `x.M()` 误连 A.M。
+    #[test]
+    fn analyze_go_binding_scope_isolated_across_functions() {
+        let a = analyze(
+            "package m\n\nfunc f() {\n\tx := A{}\n\tx.M()\n}\n\nfunc g(x B) {\n\tx.M()\n}\n",
+        );
+        let callees: Vec<&str> = a.calls.iter().map(|c| c.callee.as_str()).collect();
+        assert!(callees.contains(&"A.M"), "f 内 x→A: {callees:?}");
+        assert!(
+            callees.contains(&"B.M"),
+            "g 内 x→B（作用域隔离）: {callees:?}"
+        );
+        // 关键：不得出现跨函数污染——g 的 x.M 绝不能被定型为 A.M 以外……即两条独立正确。
+        assert_eq!(
+            callees.iter().filter(|c| **c == "A.M").count(),
+            1,
+            "A.M 恰一条（f），无污染: {callees:?}"
+        );
     }
 
     /// GO-06：signature 含多返回值/可变参/泛型。
@@ -1507,6 +1698,36 @@ mod tests {
             r,
             Some("internal/foo/a.go".to_string()),
             "字典序第一非 _test.go"
+        );
+    }
+
+    /// I-4：configure_project 警告——有 go.mod 却无 module 声明应告警；无 go.mod（GOPATH）
+    /// 与正常 go.mod 静默。
+    #[test]
+    fn configure_project_warns_on_unparseable_go_mod() {
+        // 有 go.mod 但无 module 行 → 警告。
+        let bad = tempfile::tempdir().unwrap();
+        std::fs::write(bad.path().join("go.mod"), "go 1.21\n\nrequire ()\n").unwrap();
+        let mut ad = GoAdapter::new().unwrap();
+        let w = ad.configure_project(bad.path());
+        assert_eq!(w.len(), 1, "go.mod 异常应告警: {w:?}");
+        assert!(w[0].contains("go.mod"), "警告内容含 go.mod: {w:?}");
+
+        // 无 go.mod（GOPATH 模式）→ 静默。
+        let none = tempfile::tempdir().unwrap();
+        let mut ad2 = GoAdapter::new().unwrap();
+        assert!(
+            ad2.configure_project(none.path()).is_empty(),
+            "无 go.mod 不告警（可静默的 GOPATH 模式）"
+        );
+
+        // 正常 go.mod → 静默。
+        let ok = tempfile::tempdir().unwrap();
+        std::fs::write(ok.path().join("go.mod"), "module example.com/x\n").unwrap();
+        let mut ad3 = GoAdapter::new().unwrap();
+        assert!(
+            ad3.configure_project(ok.path()).is_empty(),
+            "正常 go.mod 不告警"
         );
     }
 

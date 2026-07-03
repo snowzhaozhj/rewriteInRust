@@ -28,8 +28,8 @@
 - **Sprint E ✅ 全部完成**：DEC-01（PR #43）+ DEC-GATE（Python 分类器修复）+ DEC-02（PR #46）。
 - **测试基线**: 600 测试 / clippy -D / deny / fmt / shellcheck + plugin validate 全绿
 - **CI 覆盖率**: 待更新
-- **最新合并 PR**: [#57](https://github.com/snowzhaozhj/rewriteInRust/pull/57)（M4 Sprint A 债务收口+Go接线）；[#55](https://github.com/snowzhaozhj/rewriteInRust/pull/55)（danger→规则注入闭环）；[#54](https://github.com/snowzhaozhj/rewriteInRust/pull/54)（decompose 代表漂移孤儿回归）；[#53](https://github.com/snowzhaozhj/rewriteInRust/pull/53)（CLI 三连 + MDR-012）
-- **开放 PR**: Sprint B 质量度量（待审查）
+- **最新合并 PR**: [#59](https://github.com/snowzhaozhj/rewriteInRust/pull/59)（M4 Sprint C PR-C1 Go Foundation）；[#58](https://github.com/snowzhaozhj/rewriteInRust/pull/58)（Sprint B 质量度量）；[#57](https://github.com/snowzhaozhj/rewriteInRust/pull/57)（M4 Sprint A 债务收口+Go接线）
+- **开放 PR**: [#60](https://github.com/snowzhaozhj/rewriteInRust/pull/60)（M4 Sprint C PR-C2 Go Adapter Core，4 视角审查中）
 
 ### M3 遗留债清理（为 M4 打地基）✅ 完成（2026-06-30）
 
@@ -83,7 +83,13 @@
   - **跨包 Calls 精度已知限制**（R3）：代表文件不含被调符号→漏边（非错边）；采「记录+decompose 目录凝聚兜底」，**不加 build.rs Go 专用 Calls 兜底**（保语言无关层纯净，符号级精确需符号表超范围），R3 build.rs 回退推迟 PR-C3/GO-09。
   - **Variable 激活无 panic**：Variable/TypeAlias 已在枚举、唯一 `match`(build.rs) 带 `_` 兜底；Exports doc 已同步补 Variable/TypeAlias 目标（design-checker 必查）。
 - **验证**：641 测试全绿（新增 ~29 Go 单测 + 契约扩展）；`just ci` 全过（fmt+clippy -D+test+deny+shellcheck），TS/Python 无回归。
-- **后续 TODO（记账，PR-C3/后续）**：① 跨文件 Contains fixup（方法与类型分属同包不同文件时 Contains 边静默丢，仿 fixup_extends）；② 跨包 composite literal 绑定精化（qualified_type 丢包前缀）；③ FFI 接口收集须限定 Function 节点（Variable 导出会抬高 count_exports）；④ `//go:build` 复杂括号表达式求值；⑤ pre-existing：`cli_e2e.rs:2273` 的 `--all-targets` clippy len_zero（Sprint B 引入，`just ci` 不含 --all-targets 故不阻塞）。
+- **PR #60 审查（4 视角全跑）**：主审/设计契约/专项(silent-failure+类型+测试)/异构交叉。**4 项 important 全修**：
+  - **I-1 分组 `var (...)` 漏建 Variable/Exports**（主审+专项）：tree-sitter-go `var_declaration` 分组多包一层 `var_spec_list`（const 直挂，不对称），旧代码只遍历直接子 → 分组 var 块整块漏建（击穿本 PR「激活 Variable」目标）。修：下钻 `var_spec_list`；补分组单测 + 契约固化 `var_spec_list`；订正错误注释。
+  - **I-2 局部变量绑定跨函数作用域错边**（异构#1，突破「漏边非错边」底线）：`instance_type_bindings` 文件级表被同名局部变量跨函数污染。修：改**函数作用域**绑定——`build_go_fn_scope` 预扫 receiver+形参+局部绑定，`x.M`→`Type.M` 在作用域内即时定型（同名冲突 poison 退化漏边）；顺带修异构#2 形参方法调用漏边；build.rs 无需改。补作用域隔离回归测试。
+  - **I-3 configure_project 双注入点零回归守卫**（专项）：补 Go 跨包边回归测试，同守 `build_graph_inner` + `build_graph_incremental`（DB 存在自有路径）两注入点。
+  - **I-4 go.mod 异常静默丢跨包边**（专项）：`configure_project` 改返 `Vec<String>` 警告，有 go.mod 却无 module 声明时汇入图 warnings（区分可静默的 GOPATH 模式）；补 adapter + build 两级测试。
+  - **nit 已清**：`exported_names`/`TypeAlias`/`Variable` 注释订正、`parse_go_module_path` 容忍 tab。测试基线 567 core（+7 新测）全绿。
+- **后续 TODO（记账，PR-C3/后续）**：① 跨文件 Contains fixup（方法与类型分属同包不同文件时 Contains 边静默丢，仿 fixup_extends）；② 跨包 composite literal 绑定精化（qualified_type 丢包前缀，异构#3）；③ FFI 接口收集须限定 Function 节点（Variable 导出会抬高 count_exports）；④ `//go:build` 复杂括号表达式求值（异构#4）；⑤ pre-existing：`cli_e2e.rs:2273` 的 `--all-targets` clippy len_zero（Sprint B 引入，`just ci` 不含 --all-targets 故不阻塞）。
 
 **PR-C1 Foundation（GO-10 + GO-01，已交付待审查）**：
 
