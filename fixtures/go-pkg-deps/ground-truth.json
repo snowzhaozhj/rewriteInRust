@@ -1,0 +1,24 @@
+{
+  "description": "Go 多文件同包凝聚 + 跨包调用 + 文件过滤回归。store 包含 query.go+store.go（同包，decompose 应凝聚到同一 DecompUnit）；query.go 字典序第一 → 代表文件，承载跨包 store.Query 精确解析。过滤回归: store_test.go（_test.go）与 helper_windows.go（平台后缀）被 can_handle 完全排除（图中无任何节点，含 File）；tagged.go 被 //go:build ignore 门控 → 仅保留孤立 File 节点（跳过符号）。nodes/edges 完整集合（双向严格校验）。",
+  "nodes": [
+    { "id": "file:main.go", "type": "File", "is_exported": false, "is_async": false },
+    { "id": "file:store/query.go", "type": "File", "is_exported": false, "is_async": false },
+    { "id": "file:store/store.go", "type": "File", "is_exported": false, "is_async": false },
+    { "id": "file:store/tagged.go", "type": "File", "is_exported": false, "is_async": false },
+    { "id": "function:main.go:main", "type": "Function", "is_exported": false, "is_async": false },
+    { "id": "function:store/query.go:Query", "type": "Function", "is_exported": true, "is_async": false },
+    { "id": "class:store/store.go:Store", "type": "Class", "is_exported": true, "is_async": false },
+    { "id": "function:store/store.go:Store.Save", "type": "Function", "is_exported": true, "is_async": false }
+  ],
+  "edges": [
+    { "source": "file:main.go", "target": "file:store/query.go", "type": "imports" },
+    { "source": "file:main.go", "target": "function:store/query.go:Query", "type": "calls" },
+    { "source": "class:store/store.go:Store", "target": "function:store/store.go:Store.Save", "type": "contains" },
+    { "source": "file:store/query.go", "target": "function:store/query.go:Query", "type": "exports" },
+    { "source": "file:store/store.go", "target": "class:store/store.go:Store", "type": "exports" },
+    { "source": "file:store/store.go", "target": "function:store/store.go:Store.Save", "type": "exports" }
+  ],
+  "topo_order_constraints": [
+    ["file:store/query.go", "file:main.go"]
+  ]
+}

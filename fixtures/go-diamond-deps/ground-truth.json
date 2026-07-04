@@ -1,0 +1,40 @@
+{
+  "description": "Go 菱形包依赖: main -> {left, right} -> geom。geom 集中演示 interface（Shape）、struct 同包嵌入（Circle 嵌入 Base → extends 边）、隐式接口实现（Circle 有 Area 满足 Shape，但不连 Implements 边，D-M4-02）。left/right 跨包引用 geom.Version（selector，仅 imports 边无 calls 边）；main 跨包调用 left/right 代表文件函数。nodes/edges 完整集合（双向严格校验）。",
+  "nodes": [
+    { "id": "file:main.go", "type": "File", "is_exported": false, "is_async": false },
+    { "id": "file:left/left.go", "type": "File", "is_exported": false, "is_async": false },
+    { "id": "file:right/right.go", "type": "File", "is_exported": false, "is_async": false },
+    { "id": "file:geom/geom.go", "type": "File", "is_exported": false, "is_async": false },
+    { "id": "function:main.go:main", "type": "Function", "is_exported": false, "is_async": false },
+    { "id": "function:left/left.go:LeftVersion", "type": "Function", "is_exported": true, "is_async": false },
+    { "id": "function:right/right.go:RightVersion", "type": "Function", "is_exported": true, "is_async": false },
+    { "id": "interface:geom/geom.go:Shape", "type": "Interface", "is_exported": true, "is_async": false },
+    { "id": "class:geom/geom.go:Base", "type": "Class", "is_exported": true, "is_async": false },
+    { "id": "class:geom/geom.go:Circle", "type": "Class", "is_exported": true, "is_async": false },
+    { "id": "function:geom/geom.go:Circle.Area", "type": "Function", "is_exported": true, "is_async": false },
+    { "id": "variable:geom/geom.go:Version", "type": "Variable", "is_exported": true, "is_async": false }
+  ],
+  "edges": [
+    { "source": "file:main.go", "target": "file:left/left.go", "type": "imports" },
+    { "source": "file:main.go", "target": "file:right/right.go", "type": "imports" },
+    { "source": "file:left/left.go", "target": "file:geom/geom.go", "type": "imports" },
+    { "source": "file:right/right.go", "target": "file:geom/geom.go", "type": "imports" },
+    { "source": "file:main.go", "target": "function:left/left.go:LeftVersion", "type": "calls" },
+    { "source": "file:main.go", "target": "function:right/right.go:RightVersion", "type": "calls" },
+    { "source": "class:geom/geom.go:Circle", "target": "class:geom/geom.go:Base", "type": "extends" },
+    { "source": "class:geom/geom.go:Circle", "target": "function:geom/geom.go:Circle.Area", "type": "contains" },
+    { "source": "file:geom/geom.go", "target": "interface:geom/geom.go:Shape", "type": "exports" },
+    { "source": "file:geom/geom.go", "target": "class:geom/geom.go:Base", "type": "exports" },
+    { "source": "file:geom/geom.go", "target": "class:geom/geom.go:Circle", "type": "exports" },
+    { "source": "file:geom/geom.go", "target": "function:geom/geom.go:Circle.Area", "type": "exports" },
+    { "source": "file:geom/geom.go", "target": "variable:geom/geom.go:Version", "type": "exports" },
+    { "source": "file:left/left.go", "target": "function:left/left.go:LeftVersion", "type": "exports" },
+    { "source": "file:right/right.go", "target": "function:right/right.go:RightVersion", "type": "exports" }
+  ],
+  "topo_order_constraints": [
+    ["file:geom/geom.go", "file:left/left.go"],
+    ["file:geom/geom.go", "file:right/right.go"],
+    ["file:left/left.go", "file:main.go"],
+    ["file:right/right.go", "file:main.go"]
+  ]
+}

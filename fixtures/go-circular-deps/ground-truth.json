@@ -1,0 +1,32 @@
+{
+  "description": "Go 包级环: a -> b -> a（互相 import 闭环），shared 被 a 引用但不在环内，main 引用 a/shared。注意: 真实 go build 禁止导入环——本 fixture 为静态图 SCC 环检测而设，不要求可编译。拓扑排序应失败（expect_error），环成员 = {a, b}。nodes/edges 完整集合（双向严格校验）。",
+  "nodes": [
+    { "id": "file:main.go", "type": "File", "is_exported": false, "is_async": false },
+    { "id": "file:a/a.go", "type": "File", "is_exported": false, "is_async": false },
+    { "id": "file:b/b.go", "type": "File", "is_exported": false, "is_async": false },
+    { "id": "file:shared/shared.go", "type": "File", "is_exported": false, "is_async": false },
+    { "id": "function:a/a.go:Ping", "type": "Function", "is_exported": true, "is_async": false },
+    { "id": "function:b/b.go:Pong", "type": "Function", "is_exported": true, "is_async": false },
+    { "id": "function:shared/shared.go:Tag", "type": "Function", "is_exported": true, "is_async": false },
+    { "id": "function:main.go:main", "type": "Function", "is_exported": false, "is_async": false }
+  ],
+  "edges": [
+    { "source": "file:a/a.go", "target": "file:b/b.go", "type": "imports" },
+    { "source": "file:b/b.go", "target": "file:a/a.go", "type": "imports" },
+    { "source": "file:a/a.go", "target": "file:shared/shared.go", "type": "imports" },
+    { "source": "file:main.go", "target": "file:a/a.go", "type": "imports" },
+    { "source": "file:main.go", "target": "file:shared/shared.go", "type": "imports" },
+    { "source": "file:a/a.go", "target": "function:b/b.go:Pong", "type": "calls" },
+    { "source": "file:a/a.go", "target": "function:shared/shared.go:Tag", "type": "calls" },
+    { "source": "file:b/b.go", "target": "function:a/a.go:Ping", "type": "calls" },
+    { "source": "file:main.go", "target": "function:a/a.go:Ping", "type": "calls" },
+    { "source": "file:main.go", "target": "function:shared/shared.go:Tag", "type": "calls" },
+    { "source": "file:a/a.go", "target": "function:a/a.go:Ping", "type": "exports" },
+    { "source": "file:b/b.go", "target": "function:b/b.go:Pong", "type": "exports" },
+    { "source": "file:shared/shared.go", "target": "function:shared/shared.go:Tag", "type": "exports" }
+  ],
+  "topo_sort": {
+    "expect_error": true,
+    "cycle_contains": ["a/a.go", "b/b.go"]
+  }
+}

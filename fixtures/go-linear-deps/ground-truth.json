@@ -1,0 +1,35 @@
+{
+  "description": "Go 线性包依赖: utils -> service -> main（跨包 import + 跨包函数调用到代表文件）。覆盖: 多返回值签名（MinMax）、首字母大写导出约定、模块级 const/var 激活 Variable 节点、同包 composite literal 构造（Scaler{} → Constructor sub_kind）+ 局部绑定方法调用（Scaler.Scale）。nodes/edges 为完整集合（双向严格校验）。",
+  "nodes": [
+    { "id": "file:main.go", "type": "File", "is_exported": false, "is_async": false },
+    { "id": "file:service/service.go", "type": "File", "is_exported": false, "is_async": false },
+    { "id": "file:utils/utils.go", "type": "File", "is_exported": false, "is_async": false },
+    { "id": "function:main.go:main", "type": "Function", "is_exported": false, "is_async": false },
+    { "id": "function:service/service.go:Run", "type": "Function", "is_exported": true, "is_async": false },
+    { "id": "function:service/service.go:Scaler.Scale", "type": "Function", "is_exported": true, "is_async": false },
+    { "id": "class:service/service.go:Scaler", "type": "Class", "is_exported": true, "is_async": false },
+    { "id": "function:utils/utils.go:Clamp", "type": "Function", "is_exported": true, "is_async": false },
+    { "id": "function:utils/utils.go:MinMax", "type": "Function", "is_exported": true, "is_async": false },
+    { "id": "variable:utils/utils.go:MaxValue", "type": "Variable", "is_exported": true, "is_async": false },
+    { "id": "variable:utils/utils.go:clampLo", "type": "Variable", "is_exported": false, "is_async": false }
+  ],
+  "edges": [
+    { "source": "file:main.go", "target": "file:service/service.go", "type": "imports" },
+    { "source": "file:service/service.go", "target": "file:utils/utils.go", "type": "imports" },
+    { "source": "file:main.go", "target": "function:service/service.go:Run", "type": "calls" },
+    { "source": "file:service/service.go", "target": "function:utils/utils.go:Clamp", "type": "calls" },
+    { "source": "file:service/service.go", "target": "function:service/service.go:Scaler.Scale", "type": "calls" },
+    { "source": "file:service/service.go", "target": "class:service/service.go:Scaler", "type": "calls", "sub_kind": "Constructor" },
+    { "source": "class:service/service.go:Scaler", "target": "function:service/service.go:Scaler.Scale", "type": "contains" },
+    { "source": "file:service/service.go", "target": "function:service/service.go:Run", "type": "exports" },
+    { "source": "file:service/service.go", "target": "function:service/service.go:Scaler.Scale", "type": "exports" },
+    { "source": "file:service/service.go", "target": "class:service/service.go:Scaler", "type": "exports" },
+    { "source": "file:utils/utils.go", "target": "function:utils/utils.go:Clamp", "type": "exports" },
+    { "source": "file:utils/utils.go", "target": "function:utils/utils.go:MinMax", "type": "exports" },
+    { "source": "file:utils/utils.go", "target": "variable:utils/utils.go:MaxValue", "type": "exports" }
+  ],
+  "topo_order_constraints": [
+    ["file:utils/utils.go", "file:service/service.go"],
+    ["file:service/service.go", "file:main.go"]
+  ]
+}

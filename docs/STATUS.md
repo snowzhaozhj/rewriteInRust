@@ -4,7 +4,7 @@
 
 ## 当前位置
 
-- **Milestone**: M1 ✅ → M2 ✅ → **M3 ✅** → **M3 遗留债清理 ✅** → **M4「完善」执行中——巩固线 Sprint A ✅（PR #57）+ Sprint B ✅（PR #58）→ Go 线 Sprint C 进行中（PR-C1 Foundation 已交付，待审查）**
+- **Milestone**: M1 ✅ → M2 ✅ → **M3 ✅** → **M3 遗留债清理 ✅** → **M4「完善」执行中——巩固线 Sprint A ✅（PR #57）+ Sprint B ✅（PR #58）→ Go 线 Sprint C 收尾中（PR-C1 #59 ✅ + PR-C2 #60 ✅ 已合并 → PR-C3 Validation 已交付，待审查）**
 - **M3 收尾（2026-06-29）**：Sprint A/B/C/D/E 全部合并，验收 M3-VAL-01~08 全达标；PR [#49](https://github.com/snowzhaozhj/rewriteInRust/pull/49)（ffi 测试修复）+ [#52](https://github.com/snowzhaozhj/rewriteInRust/pull/52)（source_root 探测加固）已合并；遗留 issue [#50](https://github.com/snowzhaozhj/rewriteInRust/issues/50)（source_root 推断）+ [#51](https://github.com/snowzhaozhj/rewriteInRust/issues/51)（VAL-05 性能实测：TS 路径 0%/-16%/-1% 无退化）已 CLOSED+COMPLETED；PLAN-M3 验收清单已全部回填 [x]。
 - **阶段**: Sprint A ✅ → Sprint B ✅ → Sprint C ✅ → Sprint E ✅ → **Sprint D 端到端验收 ✅（M3-VAL-01~08 全达标，2026-06-29，PR [#49](https://github.com/snowzhaozhj/rewriteInRust/pull/49) 已合并——4 视角审查全跑、1 important（设计文档同步）+ 4 nit 全落实、just ci 532 绿）**
 - **🟢 Sprint D 端到端验收 ✅**：2 真实 Python 项目各 ≥1 模块迁移到 done（按 §6 headless 规范）。
@@ -28,8 +28,8 @@
 - **Sprint E ✅ 全部完成**：DEC-01（PR #43）+ DEC-GATE（Python 分类器修复）+ DEC-02（PR #46）。
 - **测试基线**: 600 测试 / clippy -D / deny / fmt / shellcheck + plugin validate 全绿
 - **CI 覆盖率**: 待更新
-- **最新合并 PR**: [#59](https://github.com/snowzhaozhj/rewriteInRust/pull/59)（M4 Sprint C PR-C1 Go Foundation）；[#58](https://github.com/snowzhaozhj/rewriteInRust/pull/58)（Sprint B 质量度量）；[#57](https://github.com/snowzhaozhj/rewriteInRust/pull/57)（M4 Sprint A 债务收口+Go接线）
-- **开放 PR**: [#60](https://github.com/snowzhaozhj/rewriteInRust/pull/60)（M4 Sprint C PR-C2 Go Adapter Core，4 视角审查中）
+- **最新合并 PR**: [#60](https://github.com/snowzhaozhj/rewriteInRust/pull/60)（M4 Sprint C PR-C2 Go Adapter Core）；[#59](https://github.com/snowzhaozhj/rewriteInRust/pull/59)（PR-C1 Go Foundation）；[#58](https://github.com/snowzhaozhj/rewriteInRust/pull/58)（Sprint B 质量度量）
+- **开放 PR**: PR-C3（M4 Sprint C Go Validation，4 视角审查中）
 
 ### M3 遗留债清理（为 M4 打地基）✅ 完成（2026-06-30）
 
@@ -63,7 +63,23 @@
 
 #### Sprint C：Go Adapter Core 进行中（2026-07-02，PR-C2 分支 `feat/m4-sprint-c-pr-c2-go-core`）
 
-按 PLAN-M4 §Sprint C 执行策略拆 3 PR：PR-C1（Foundation ✅ PR [#59](https://github.com/snowzhaozhj/rewriteInRust/pull/59) 已合并）→ **PR-C2（Core Analysis，含 GO-03 扩 trait 关键路径，已交付待审查）** → PR-C3（Validation）。
+按 PLAN-M4 §Sprint C 执行策略拆 3 PR：PR-C1（Foundation ✅ PR [#59](https://github.com/snowzhaozhj/rewriteInRust/pull/59) 已合并）→ PR-C2（Core Analysis ✅ PR [#60](https://github.com/snowzhaozhj/rewriteInRust/pull/60) 已合并）→ **PR-C3（Validation，GO-08/GO-09，已交付待审查）**。
+
+**PR-C3 Validation（GO-08 fixture + GO-09 集成测试，已交付待审查）**：
+
+| 任务 | 状态 | 交付 |
+|------|------|------|
+| M4-GO-08 Go fixture（4 个） | ✅ | `fixtures/go-{linear,diamond,circular,pkg}-deps`，各含 `go.mod`（module 前缀）+ 源码 + `ground-truth.json`（节点/边/拓扑偏序，双向严格校验格式，对齐 py fixture） |
+| M4-GO-09 Go graph 集成测试 | ✅ | `tests/go_ground_truth.rs`（27 测试）：4 fixture nodes/edges/topo 双向严格校验 + Go 特有断言 |
+
+- **fixture 覆盖矩阵**：
+  - **linear**（utils→service→main）：跨包 import + 跨包函数调用到代表文件、多返回值签名 round-trip、const/var 激活 Variable + 导出判定、**同包** composite literal 构造（Constructor sub_kind）+ 局部绑定方法调用。
+  - **diamond**（main→{left,right}→geom）：菱形包 import、struct 同包嵌入 → extends、interface 隐式实现**不连 Implements**（D-M4-02）、interface/struct 签名。
+  - **circular**（a↔b + shared 环外）：包级 SCC 环检测、topo expect_error、shared 不在环、migration_sequence has_cycles。
+  - **pkg**（store 多文件包）：`_test.go`/平台后缀 `_windows.go` **完全排除**（无 File 节点）+ `//go:build ignore` → **孤立 File 节点**（跳符号）；跨包调用解析到代表文件（字典序第一非 `_test.go`）；**GO-09 decompose 同包凝聚**——预算 35 恰容 store 包 3 文件同目录凝聚、装不下 main.go，验证同包凝聚 + 跨目录边界（非"预算无穷大全并"平凡通过）。
+- **规避已知精度限制**（PR-C2 记账 TODO）：跨包只做「import + 调用代表文件内符号」，构造调用放同包内——避免 qualified composite literal 丢包前缀、非代表文件符号漏边污染 ground-truth。fixture 描述已注明。
+- **验证**：core 594 测试全绿（+27 Go fixture 测试）；`just ci` 全过；`cargo run -- graph build --root ../fixtures/go-linear-deps` → node=11/edge=13（status=warning：Go 全量降级 + 无 migration-state，符合 CLI 契约）。
+- **不在本 PR**：R3 build.rs Go 专用 Calls 兜底、跨文件 Contains fixup 等 PR-C2 记账项（留 GO-09 后续/后续 PR）。
 
 **PR-C2 Core Analysis（GO-02~07，已交付待审查）**：
 
