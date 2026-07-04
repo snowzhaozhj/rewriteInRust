@@ -124,12 +124,12 @@ Step 3: PR-C3 (Validation)     → GO-08 + GO-09          [工时 ~2.5d]
 - **GO-03 扩 trait 是关键路径最高风险**，PR-C2 起步即做；spike 死断言不过则当 PR 内走包级聚合回退（工时已含）
 
 **验收标准**：
-- [ ] 4 个 Go fixture 偏序约束全部满足
-- [ ] `cargo run -- graph build --root fixtures/go-linear-deps` 输出正确依赖图
-- [ ] `_test.go` 与非默认平台 build-tag 文件被正确排除（go-pkg-deps 回归覆盖）
-- [ ] go-pkg-deps 同包多文件归入同一 `DecompUnit`（spike 断言通过，或包级聚合回退已落地）
-- [ ] 首字母大写导出、多返回值签名、receiver 归属正确
-- [ ] `just ci` 全过，Go fixture 纳入 nextest
+- [x] 4 个 Go fixture 偏序约束全部满足
+- [x] `cargo run -- graph build --root fixtures/go-linear-deps` 输出正确依赖图
+- [x] `_test.go` 与非默认平台 build-tag 文件被正确排除（go-pkg-deps 回归覆盖）
+- [x] go-pkg-deps 同包多文件归入同一 `DecompUnit`（spike 断言通过，或包级聚合回退已落地）
+- [x] 首字母大写导出、多返回值签名、receiver 归属正确
+- [x] `just ci` 全过，Go fixture 纳入 nextest
 
 ---
 

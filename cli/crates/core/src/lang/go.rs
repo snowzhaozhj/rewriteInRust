@@ -18,11 +18,13 @@
 //! 拿不到其他文件符号表，跨包只能返回「包代表文件」（目录内字典序第一个非 `_test.go`）。
 //! 若被调导出符号不在代表文件，build.rs 精确文件匹配会 miss → 该跨包 Calls 边**漏建**（非错
 //! 建：精确匹配 miss 即 drop）。这不影响 decompose 拆解（靠 Imports 边 + 目录凝聚，不依赖
-//! Calls），符号级精确解析需符号表（超 M4-GO-03 范围）。端到端死断言 owner=GO-09（PR-C3）。
+//! Calls），符号级精确解析需符号表（超 M4-GO-03 范围）。端到端死断言已由 PR-C3
+//! （`tests/go_ground_truth.rs` go-pkg-deps decompose 凝聚断言）落地。
 //!
 //! **跨文件 Contains 已知限制**：Go 允许方法与类型定义在同包不同文件；`extract_go_method`
 //! 发的 `Contains(Class(recv_type,rel)→method)` 目标 Class 若在他文件则 `add_edge` 静默丢弃
-//! （Contains 无 fixup，不同于 Extends）。PR-C2 单测限同文件，跨文件 fixup 记 TODO（PR-C3）。
+//! （Contains 无 fixup，不同于 Extends）。PR-C2 单测限同文件，跨文件 fixup 记 TODO（后续 PR，
+//! 见 STATUS.md Sprint C「后续 TODO」①）。
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
