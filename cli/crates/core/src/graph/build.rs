@@ -69,11 +69,21 @@ fn build_graph_inner(
         .canonicalize()
         .map_err(|_| MigrateError::FileNotFound(root.to_path_buf()))?;
 
+    // 解析任何文件前注入项目根，供适配器缓存项目级元数据（Go 读 go.mod 取 module 前缀，
+    // M4-GO-03）；默认 no-op，TS/Python 无影响。**增量路径须同样接线**（见下方）。
+    // 返回的项目级警告（如 go.mod 异常）汇入图 warnings（I-4）。
+    let mut config_warnings = Vec::new();
+    for adapter in adapters.iter_mut() {
+        config_warnings.extend(adapter.configure_project(&root));
+    }
+
     let files = collect_source_files(&root, adapters)?;
     if files.is_empty() {
         let total_ms = t_start.map_or(0, |t| t.elapsed().as_millis() as u64);
+        let mut empty = SourceGraph::new();
+        empty.warnings.extend(config_warnings);
         return Ok((
-            SourceGraph::new(),
+            empty,
             BuildProfile {
                 parse_ms: total_ms,
                 edge_build_ms: 0,
@@ -84,6 +94,7 @@ fn build_graph_inner(
     }
 
     let mut graph = SourceGraph::new();
+    graph.warnings.extend(config_warnings);
     let mut file_analyses: HashMap<String, FileAnalysis> = HashMap::new();
     let mut file_adapter_map: HashMap<String, usize> = HashMap::new();
     let mut all_edges: Vec<Dependency> = Vec::new();
@@ -247,6 +258,14 @@ pub fn build_graph_incremental(
         .canonicalize()
         .map_err(|_| MigrateError::FileNotFound(root.to_path_buf()))?;
 
+    // 增量路径同样须注入项目根（否则增量重建的 Go 跨包边全丢，M4-GO-03）；
+    // 委托 build_graph_inner 的分支会再调一次，configure_project 幂等（重读 go.mod）无害。
+    // 项目级警告（如 go.mod 异常）在 DB-存在路径汇入 warnings；DB-缺失路径由 inner 汇入（I-4）。
+    let mut config_warnings = Vec::new();
+    for adapter in adapters.iter_mut() {
+        config_warnings.extend(adapter.configure_project(&root));
+    }
+
     // DB 不存在：退化为全量构建
     if !db_path.exists() {
         let (graph, bp, fps) = build_graph_inner(&root, adapters, profile)?;
@@ -281,6 +300,7 @@ pub fn build_graph_incremental(
 
     // 加载已有图（从 DB）
     let mut graph = persist::load_from_db(db_path)?;
+    graph.warnings.extend(config_warnings);
 
     // 扫描磁盘文件
     let files = collect_source_files(&root, adapters)?;
@@ -735,6 +755,24 @@ struct ReExportInfo {
     wildcards: Vec<String>,
 }
 
+/// 相对路径的直接父目录（与 `decompose::unit_dir` 同构：`p.rfind('/')`，根目录 → `""`）。
+fn parent_dir(p: &str) -> &str {
+    match p.rfind('/') {
+        Some(i) => &p[..i],
+        None => "",
+    }
+}
+
+/// 预建「目录 → 直属文件列表」索引，供 `list_dir` 回调 O(1) 查询（避免每次 import O(N) 扫
+/// file_set）。Go 包 resolve（M4-GO-03）用它枚举包目录挑代表文件；TS/Python 不消费。
+fn build_dir_index(file_set: &HashSet<String>) -> HashMap<&str, Vec<String>> {
+    let mut idx: HashMap<&str, Vec<String>> = HashMap::new();
+    for p in file_set {
+        idx.entry(parent_dir(p)).or_default().push(p.clone());
+    }
+    idx
+}
+
 /// 为每个文件构建 re-export 信息表，供 [`resolve_reexport_origin`] 做符号透传。
 fn build_reexport_map(
     analyses: &HashMap<String, FileAnalysis>,
@@ -743,6 +781,8 @@ fn build_reexport_map(
     file_adapter_map: &HashMap<String, usize>,
 ) -> HashMap<String, ReExportInfo> {
     let exists = |p: &str| file_set.contains(p);
+    let dir_index = build_dir_index(file_set);
+    let list_dir = |dir: &str| dir_index.get(dir).cloned().unwrap_or_default();
     let mut map: HashMap<String, ReExportInfo> = HashMap::new();
     for (rel, analysis) in analyses {
         let mut info = ReExportInfo::default();
@@ -752,7 +792,8 @@ fn build_reexport_map(
             if !import.reexport {
                 continue;
             }
-            let Some(tgt) = adapters[adapter_idx].resolve_import(&import.module_path, rel, &exists)
+            let Some(tgt) =
+                adapters[adapter_idx].resolve_import(&import.module_path, rel, &exists, &list_dir)
             else {
                 continue; // 外部模块（npm 包）re-export，无法透传
             };
@@ -873,6 +914,8 @@ fn add_cross_file_edges(
     // 会制造虚假双向边、整库坍缩成一个巨型 SCC。memo/visiting 跨文件复用。
     let reexport_map = build_reexport_map(analyses, file_set, adapters, file_adapter_map);
     let exists = |p: &str| file_set.contains(p);
+    let dir_index = build_dir_index(file_set);
+    let list_dir = |dir: &str| dir_index.get(dir).cloned().unwrap_or_default();
     let mut origin_memo: HashMap<(String, String), Option<String>> = HashMap::new();
     let mut origin_visiting: HashSet<(String, String)> = HashSet::new();
 
@@ -896,7 +939,7 @@ fn add_cross_file_edges(
         let adapter_idx = file_adapter_map.get(rel.as_str()).copied().unwrap_or(0);
         for import in &analysis.imports {
             let Some(target_rel) =
-                adapters[adapter_idx].resolve_import(&import.module_path, rel, &exists)
+                adapters[adapter_idx].resolve_import(&import.module_path, rel, &exists, &list_dir)
             else {
                 continue;
             };
@@ -1087,7 +1130,9 @@ fn resolve_import(
 ) -> Option<String> {
     use crate::lang::typescript::TypeScriptAdapter;
     let adapter = TypeScriptAdapter::new().expect("TS adapter init");
-    adapter.resolve_import(module_path, current_rel, &|p| file_set.contains(p))
+    adapter.resolve_import(module_path, current_rel, &|p| file_set.contains(p), &|_| {
+        Vec::new()
+    })
 }
 
 #[cfg(test)]
@@ -1358,6 +1403,71 @@ mod tests {
             has_import,
             "ESM `import './b.js'` 应经 adapter 声明的扩展名解析为 a.ts→b.ts Imports 边"
         );
+    }
+
+    /// 回归（I-3/专项 IMPORTANT-2）：Go 跨包 Imports 边依赖 configure_project 注入 go.mod
+    /// module 前缀。同时守**全量**（build_graph_inner，L75）与**增量**（build_graph_incremental
+    /// DB 已存在自有路径，L259）两处注入点——删任一处，对应路径的跨包边全丢，本测试即红。
+    #[test]
+    fn go_cross_package_edge_requires_configure_project_injection() {
+        let dir = std::env::temp_dir().join("rustmigrate_go_configure_project_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("pkg/a")).unwrap();
+        std::fs::create_dir_all(dir.join("pkg/b")).unwrap();
+        std::fs::write(dir.join("go.mod"), "module example.com/proj\n\ngo 1.21\n").unwrap();
+        std::fs::write(dir.join("pkg/b/b.go"), "package b\n\nfunc Do() {}\n").unwrap();
+        let a_src = "package a\n\nimport \"example.com/proj/pkg/b\"\n\nfunc Use() {\n\tb.Do()\n}\n";
+        std::fs::write(dir.join("pkg/a/a.go"), a_src).unwrap();
+
+        let has_import = |g: &SourceGraph| {
+            g.edges().any(|e| {
+                e.edge_type == EdgeType::Imports
+                    && e.source.as_str() == "file:pkg/a/a.go"
+                    && e.target.as_str() == "file:pkg/b/b.go"
+            })
+        };
+
+        // 全量路径（build_graph_inner 注入点 L75）。
+        let full = build_graph_for_lang(&dir, SourceLang::Go).unwrap();
+        assert!(
+            has_import(&full),
+            "全量：configure_project 注入后应有跨包 Imports 边 a→b"
+        );
+
+        // 增量路径：首次建 DB（DB 缺失→委托 inner），再结构变更 a.go，第二次走增量自有路径。
+        let db = dir.join(".rustmigrate/graph.db");
+        let mut ad1: Vec<Box<dyn LanguageAdapter>> = vec![create_adapter(SourceLang::Go).unwrap()];
+        build_graph_incremental(&dir, &db, &mut ad1, false).unwrap();
+        std::fs::write(
+            dir.join("pkg/a/a.go"),
+            format!("{a_src}\nfunc Extra() {{}}\n"),
+        )
+        .unwrap();
+        let mut ad2: Vec<Box<dyn LanguageAdapter>> = vec![create_adapter(SourceLang::Go).unwrap()];
+        let (incr, _, stats) = build_graph_incremental(&dir, &db, &mut ad2, false).unwrap();
+        assert!(stats.incremental, "第二次应走增量路径（DB 已存在）");
+        assert!(
+            has_import(&incr),
+            "增量：configure_project 注入后应保留跨包 Imports 边 a→b（删增量注入点则丢）"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 回归（I-4/专项 IMPORTANT-1）：go.mod 存在却无 module 声明时，configure_project 的告警
+    /// 应汇入图 warnings（而非静默产出零跨包边图）。
+    #[test]
+    fn go_unparseable_go_mod_surfaces_warning() {
+        let dir = std::env::temp_dir().join("rustmigrate_go_bad_gomod_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("go.mod"), "go 1.21\n").unwrap(); // 无 module 行
+        std::fs::write(dir.join("main.go"), "package main\n\nfunc main() {}\n").unwrap();
+
+        let graph = build_graph_for_lang(&dir, SourceLang::Go).unwrap();
+        let has_warn = graph.warnings.iter().any(|w| w.contains("go.mod"));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(has_warn, "go.mod 异常应汇入 warnings: {:?}", graph.warnings);
     }
 
     /// re-export 透传：barrel 假环不应折叠成 SCC。

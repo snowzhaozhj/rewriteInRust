@@ -34,6 +34,11 @@ const CONTRACTS: &[Contract] = &[
         kind: "import_spec",
         required_fields: &["path"],
     },
+    // 分组 import 容器（GO-02：单 import 直挂 import_spec，分组经此容器）
+    Contract {
+        kind: "import_spec_list",
+        required_fields: &[],
+    },
     // 顶层声明
     Contract {
         kind: "const_declaration",
@@ -50,6 +55,12 @@ const CONTRACTS: &[Contract] = &[
     Contract {
         kind: "var_spec",
         required_fields: &["name"],
+    },
+    // 分组 var 容器（GO-04：grammar 不对称——`var (...)` 多包一层 var_spec_list，
+    // `const (...)` 直挂 const_spec；extract_go_var_const 须对 var_spec_list 下钻）
+    Contract {
+        kind: "var_spec_list",
+        required_fields: &[],
     },
     // 类型定义
     Contract {
@@ -72,6 +83,40 @@ const CONTRACTS: &[Contract] = &[
         kind: "qualified_type",
         required_fields: &["name", "package"],
     },
+    // 类型别名 `type X = Y`（GO-04：独立节点，非 type_spec）
+    Contract {
+        kind: "type_alias",
+        required_fields: &["name", "type"],
+    },
+    // 泛型类型/receiver（GO-04：go_base_type_name 剥 .type 取基名）
+    Contract {
+        kind: "generic_type",
+        required_fields: &["type"],
+    },
+    // 泛型类型参数容器（GO-06 签名含 [T any]，前向 guard）
+    Contract {
+        kind: "type_parameter_list",
+        required_fields: &[],
+    },
+    // 指针类型（GO-04：receiver `*T` / 嵌入 go_base_type_name 剥指针，named_child(0)）
+    Contract {
+        kind: "pointer_type",
+        required_fields: &[],
+    },
+    // struct 字段（GO-04：嵌入字段靠 name field 缺失判定，依赖 type field）
+    Contract {
+        kind: "field_declaration_list",
+        required_fields: &[],
+    },
+    Contract {
+        kind: "field_declaration",
+        required_fields: &["type"],
+    },
+    // interface 嵌入元素（GO-04：extract_interface_embeds 取 named_child(0)）
+    Contract {
+        kind: "type_elem",
+        required_fields: &[],
+    },
     // 函数/方法
     Contract {
         kind: "function_declaration",
@@ -80,6 +125,15 @@ const CONTRACTS: &[Contract] = &[
     Contract {
         kind: "method_declaration",
         required_fields: &["receiver", "name", "body"],
+    },
+    // 参数（GO-04：receiver 归属经 parameter_declaration.type/.name）
+    Contract {
+        kind: "parameter_list",
+        required_fields: &[],
+    },
+    Contract {
+        kind: "parameter_declaration",
+        required_fields: &["type"],
     },
     // 调用/选择器/构造
     Contract {
@@ -93,6 +147,20 @@ const CONTRACTS: &[Contract] = &[
     Contract {
         kind: "composite_literal",
         required_fields: &["type", "body"],
+    },
+    // 短变量声明/赋值（GO-05：instance_type_bindings 经 left/right）
+    Contract {
+        kind: "short_var_declaration",
+        required_fields: &["left", "right"],
+    },
+    Contract {
+        kind: "assignment_statement",
+        required_fields: &["left", "right"],
+    },
+    // 一元表达式（GO-05：`&Foo{}` 取地址构造经 operand；detect_tier 亦扫 `<-` 接收）
+    Contract {
+        kind: "unary_expression",
+        required_fields: &["operand"],
     },
     // 并发危险信号（detect_tier 扫描）
     Contract {
@@ -124,10 +192,27 @@ import (
 
 const Version = "1.0"
 
+var (
+	debug = false
+	limit = 10
+)
+
 var mu sync.Mutex
+
+var gs Stack[int]
+
+type Meters = float64
 
 type Shape interface {
 	Area() float64
+}
+
+type ReadWriter interface {
+	Shape
+}
+
+type Stack[T any] struct {
+	items []T
 }
 
 type Rect struct {
@@ -135,8 +220,17 @@ type Rect struct {
 	H float64
 }
 
+type Named struct {
+	Rect
+	name string
+}
+
 func (r Rect) Area() float64 {
 	return r.W * r.H
+}
+
+func (r *Rect) Scale(f float64) {
+	r.W *= f
 }
 
 func describe(s Shape) string {
@@ -145,6 +239,8 @@ func describe(s Shape) string {
 
 func run() {
 	r := Rect{W: 1, H: 2}
+	p := &Rect{W: 1, H: 1}
+	_ = p
 	_ = r.Area()
 	ch := make(chan int)
 	go func() {

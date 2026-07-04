@@ -33,9 +33,9 @@ pub enum NodeType {
     RustTarget,
     /// 测试夹具节点（TestedBy 边的目标端）。
     TestFixture,
-    /// 类型别名（M2 扩展，预留）。
+    /// 类型别名（M2 预留枚举，M4-GO-04 起 Go adapter 实际产出）。
     TypeAlias,
-    /// 模块级常量/变量（M2 扩展，预留）。
+    /// 模块级常量/变量（M2 预留枚举，M4-GO-04 起 Go adapter 实际产出）。
     Variable,
     /// 功能聚类（M2 扩展，Leiden 算法产出）。
     Community,
@@ -56,7 +56,9 @@ pub enum EdgeType {
     Extends,
     /// 类型引用（Function → Class/Interface/Enum）。
     UsesType,
-    /// 对外导出（File → Function/Class/Interface/Enum）。
+    /// 对外导出（File → Function/Class/Interface/Enum/Variable/TypeAlias）。
+    /// Variable/TypeAlias 目标由 Go adapter 产出（M4-GO-04：Go 导出=首字母大写，
+    /// 包级 const/var 与 type 别名同样可导出）。
     Exports,
     /// 迁移映射（源节点 → RustTarget）。
     MapsTo,
