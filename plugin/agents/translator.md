@@ -200,6 +200,13 @@ tools: Bash, Read, Edit, Write, Grep, Glob
 - **`__init__.py` 包结构**：Python 包（含 `__init__.py` 的目录）→ Rust 模块树（`mod.rs` 或 `<pkg>/mod.rs`）；`__init__.py` 里的 re-export（`from .x import Y`）→ `pub use`。源图把包节点折叠后，翻译单元仍是源文件，按图节点 ID 定位（见上「定位源文件」），不要把整包合并成单文件。
 - **type-only import：无语法关键字，但有 `TYPE_CHECKING` 惯用法**：Python 没有 TS `import type` 那种**语法关键字**，但 `if TYPE_CHECKING:` 块内的 import 是惯用的**仅类型导入**——运行时不执行（`TYPE_CHECKING` 运行时恒为 `False`），只供类型注解。源图已把这类 import 标为 `StaticType`（区别于运行时值导入）。翻译时：普通 import（值导入）按图的 `imports` 边如实建立 Rust `use`；`TYPE_CHECKING` 块内的 `StaticType` import 仅在类型位置用到，Rust 里同样只是 `use`（无需 TS 那种独立语法，编译器按使用裁剪未用项）。**不要因「Python 无 `import type` 语法」就把 `StaticType` import 当作可忽略**——它仍是真实的类型依赖，漏建会丢类型引用关系。
 
+Go 项目须额外注意（`source_language=go`，类型映射细则以 `adapters/go/porting-template.md` 为准，此处只列 Phase A 结构对应要点）：
+
+- **receiver → `self`**：Go 方法的 receiver `func (s *T) M()` / `func (s T) M()` 是显式声明的第一形参，翻译成 Rust `impl T { fn m(&self / &mut self / self) }`——**指针 receiver `*T`** 按方法是否写状态映射 `&mut self`（写）或 `&self`（只读），**值 receiver `T`** 是拷贝语义映射 `&self`（若源码依赖修改这份拷贝而不影响原值，在方法内 `let mut s = self.clone()` 还原，不要错译成 `&mut self` 改到原对象）。无 receiver 的包级函数 → 关联函数或自由 `fn`。这是结构对应，属 Phase A 忠实翻译。
+- **package → mod、大写导出 → `pub`**：Go 一个目录一个 package，翻译成 Rust 一个 `mod`（`<pkg>/mod.rs`）。Go 的导出规则是**标识符首字母大写即导出**（`Foo` 导出、`foo` 包私有）——大写标识符译为 `pub`，小写不加 `pub`（默认模块私有）。源图已按首字母大写标注 Exports 边，按图判定，不要凭猜。**Go 无相对 import**：import 路径是完整模块路径（`example.com/m/pkg`），源图已把跨包 import 解析到代表文件，按 `imports` 边建 `use crate::...`，不要生造相对路径。
+- **`if err != nil` → `?`/`Result`**：Go 的错误是显式返回值 `(T, error)`，惯用 `if err != nil { return ..., err }` 逐层上抛。忠实翻译成 Rust `Result<T, E>` + `?`——**多返回值 `(T, error)` → `Result<T, E>`**（成功返 `Ok(T)`，`err != nil` 分支返 `Err`）；comma-ok 双返回 `(v, ok := m[k])` / 类型断言 `(v, ok := x.(T))` → `Option<T>`（`ok=false` → `None`）。`panic`/`recover` 不是常规错误路径，遇到时留 `TODO(port)` 并回报（见 verifier 的 recover/panic 边界案例），不要静默改写成 `Result`。
+- **零值与 `nil` → `Option`/显式初始化**：Go 变量声明即零值（`0`/`""`/`nil`/空 struct），Rust 无隐式零值——译码须显式初始化或走 `Default`。指针/接口/map/slice 的 `nil` 语义按上下文映射 `Option::None`（可缺省）或空集合（`Vec::new()`/`HashMap::new()`）；**区分「nil = 无值」与「nil = 空但存在」**（如 `nil` map 可读不可写），按源语义选对，不要一律 `None`。
+
 **SCC 组成员文件的 Phase A = 填空，不是从零翻译**：若本次任务是 SCC 组的某个成员文件（调用方会注入契约 + stub），输入额外含 `intermediate/{group}-contract.md` + 该 mod 的 stub。此时 Phase A 是**把 stub 里对应 mod 的 `todo!()` 填成实现**：
 - **签名锁定**：struct 字段、fn 签名、所有权类型（`Rc`/`Weak`/`RefCell`）、mod 声明一律照 stub/契约**逐字节不改**。填完 `diff stub impl` 应仅 body 变化。
 - **改签名不是你的职责，但分两种情形回报编排器**：① 若契约签名**够用**、你只是想改得更顺手 → 别改，照填；② 若契约签名**不够用**（缺一个跨文件方法、所有权类型选错导致填不下去）→ 停下回报「契约不足 + 具体缺口」，由编排器走**契约增量**（改契约+stub→契约门复验→重填），不要硬塞或猜一个签名（会破其他文件对你的引用）。这与下「Phase B 改签名先改契约」同源。
