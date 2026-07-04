@@ -1,0 +1,10 @@
+[
+  {
+    "tool_id": "go",
+    "display_name": "Go toolchain",
+    "min_version": "1.21.0",
+    "install_hint": "https://go.dev/dl/ 或 brew install go",
+    "required": false,
+    "version_args": ["version"]
+  }
+]
