@@ -71,7 +71,7 @@ tools: Bash, Read, Edit, Write, Grep, Glob
 | `ffi` | RULE-12 unsafe（已展开，M4） | 按 porting-template「unsafe 使用策略」节：跨语言边界涉 `unsafe`/原始指针/ABI，最小化 unsafe 面、每处注明 `// SAFETY:` 前提；无法安全表达则回报编排器走 `--degrade=ffi` 路径。留 PORT NOTE。 |
 | `shared_mutable_global` | RULE-15 全局状态（已展开，M4） | 按 porting-template「全局状态处理」节：全局可变态→`OnceLock`/`LazyLock`/`Mutex` 包裹，避免 `static mut`；优先依赖注入；显式同步并注明初始化时机。留 PORT NOTE。 |
 
-> RULE-6（并发）/10（标准库 IO 映射）/12（unsafe）/15（全局状态）已在 TS/Python `adapters/<lang>/porting-template.md` 完整展开（M4-DEBT-01/03，含映射表 + 陷阱清单）——命中时按模板对应节定向处理 + 留 PORT NOTE。模板未覆盖的边角据 RULE-20 谨慎处理、必要时 `TODO(port)`，**不要虚构未定义的规则细节**。
+> RULE-6（并发）/10（标准库 IO 映射）/12（unsafe）/15（全局状态）已在 TS/Python/Go `adapters/<lang>/porting-template.md` 完整展开（TS/Python 见 M4-DEBT-01/03，Go 见 M4-PLG-02，含映射表 + 陷阱清单）——命中时按模板对应节定向处理 + 留 PORT NOTE。模板未覆盖的边角据 RULE-20 谨慎处理、必要时 `TODO(port)`，**不要虚构未定义的规则细节**。
 
 ## 规则生成输出格式
 
@@ -202,9 +202,9 @@ tools: Bash, Read, Edit, Write, Grep, Glob
 
 Go 项目须额外注意（`source_language=go`，类型映射细则以 `adapters/go/porting-template.md` 为准，此处只列 Phase A 结构对应要点）：
 
-- **receiver → `self`**：Go 方法的 receiver `func (s *T) M()` / `func (s T) M()` 是显式声明的第一形参，翻译成 Rust `impl T { fn m(&self / &mut self / self) }`——**指针 receiver `*T`** 按方法是否写状态映射 `&mut self`（写）或 `&self`（只读），**值 receiver `T`** 是拷贝语义映射 `&self`（若源码依赖修改这份拷贝而不影响原值，在方法内 `let mut s = self.clone()` 还原，不要错译成 `&mut self` 改到原对象）。无 receiver 的包级函数 → 关联函数或自由 `fn`。这是结构对应，属 Phase A 忠实翻译。
-- **package → mod、大写导出 → `pub`**：Go 一个目录一个 package，翻译成 Rust 一个 `mod`（`<pkg>/mod.rs`）。Go 的导出规则是**标识符首字母大写即导出**（`Foo` 导出、`foo` 包私有）——大写标识符译为 `pub`，小写不加 `pub`（默认模块私有）。源图已按首字母大写标注 Exports 边，按图判定，不要凭猜。**Go 无相对 import**：import 路径是完整模块路径（`example.com/m/pkg`），源图已把跨包 import 解析到代表文件，按 `imports` 边建 `use crate::...`，不要生造相对路径。
-- **`if err != nil` → `?`/`Result`**：Go 的错误是显式返回值 `(T, error)`，惯用 `if err != nil { return ..., err }` 逐层上抛。忠实翻译成 Rust `Result<T, E>` + `?`——**多返回值 `(T, error)` → `Result<T, E>`**（成功返 `Ok(T)`，`err != nil` 分支返 `Err`）；comma-ok 双返回 `(v, ok := m[k])` / 类型断言 `(v, ok := x.(T))` → `Option<T>`（`ok=false` → `None`）。`panic`/`recover` 不是常规错误路径，遇到时留 `TODO(port)` 并回报（见 verifier 的 recover/panic 边界案例），不要静默改写成 `Result`。
+- **receiver → `self`**：Go 方法的 receiver `func (s *T) M()` / `func (s T) M()` 是显式声明的第一形参，翻译成 Rust `impl T { fn m(&self / &mut self / self) }`——**指针 receiver `*T`** 按方法是否写状态映射 `&mut self`（写）或 `&self`（只读），**值 receiver `T`** 是拷贝语义映射 `&self`（若源码依赖修改这份拷贝而不影响原值，在方法内 `let mut s = self.clone()` 还原，不要错译成 `&mut self` 改到原对象）——**注意值 receiver 只拷贝顶层，若 struct 含 `map`/`slice`/指针字段则拷贝仍共享底层数据、改这些字段仍影响原对象**，此处按源语义决定是否深拷贝。无 receiver 的包级函数 → 关联函数或自由 `fn`。这是结构对应，属 Phase A 忠实翻译。
+- **package → mod、大写导出 → `pub`**：Go 一个目录一个 package，翻译成 Rust 一个 `mod`（`<pkg>/mod.rs`）。Go 的导出规则是**标识符首字母大写即导出**（`Foo` 导出、`foo` 包私有）——大写标识符译为 `pub`，小写不加 `pub`（默认模块私有）。源图已按首字母大写标注 Exports 边，按图判定，不要凭猜。**Go（module 模式）无相对 import**：import 用包路径——标准库是短路径（`fmt`/`net/http`），第三方/本项目用模块路径（`example.com/m/pkg`），均非相对路径。源图已把跨包 import 解析到代表文件，按 `imports` 边建 `use crate::...`，不要生造相对路径。
+- **`if err != nil` → `?`/`Result`**：Go 的错误是显式返回值 `(T, error)`，惯用 `if err != nil { return ..., err }` 逐层上抛。忠实翻译成 Rust `Result<T, E>` + `?`——**多返回值 `(T, error)` → `Result<T, E>`**（成功返 `Ok(T)`，`err != nil` 分支返 `Err`）；comma-ok 双返回 `(v, ok := m[k])` / 类型断言 `(v, ok := x.(T))` → `Option<T>`（`ok=false` → `None`）。**`panic`/`recover` 按 `adapters/go/porting-template.md` RULE-3**：Go 库代码惯用返回 error 而非 panic，迁移保持此边界；`recover` 拦截 panic → Rust 用 `Result` 显式传播，跨 goroutine/线程 panic 用 `JoinHandle::join` 的 `Err` 处理，**不要用 `catch_unwind` 模拟 recover**（除非确属不可恢复的边界隔离）。仅当语义确实不明时才留 `TODO(port)` 回报，不要一律 escalate。
 - **零值与 `nil` → `Option`/显式初始化**：Go 变量声明即零值（`0`/`""`/`nil`/空 struct），Rust 无隐式零值——译码须显式初始化或走 `Default`。指针/接口/map/slice 的 `nil` 语义按上下文映射 `Option::None`（可缺省）或空集合（`Vec::new()`/`HashMap::new()`）；**区分「nil = 无值」与「nil = 空但存在」**（如 `nil` map 可读不可写），按源语义选对，不要一律 `None`。
 
 **SCC 组成员文件的 Phase A = 填空，不是从零翻译**：若本次任务是 SCC 组的某个成员文件（调用方会注入契约 + stub），输入额外含 `intermediate/{group}-contract.md` + 该 mod 的 stub。此时 Phase A 是**把 stub 里对应 mod 的 `todo!()` 填成实现**：
