@@ -880,8 +880,11 @@ skills/migrate/adapters/
 ├── python/
 │   ├── analysis-tools.json
 │   └── porting-template.md
+├── go/
+│   ├── analysis-tools.json
+│   └── porting-template.md
 └── c_cpp/
-    └── ...                     # 同上两文件结构
+    └── ...                     # 同上两文件结构（推迟，见 PLAN-M4 D-M4-03）
 ```
 
 > **适配器与核心规则的版本同步（R3-D7-03）**：`porting-template.md` 的 frontmatter 已有 `rule_version` 字段（见 § 11.2.1）；约定其值记录生成/更新该模板时依据的核心规则版本（如 `RULE-3:v2.0.0, RULE-8:v1.5.0`）。核心规则发生破坏性升级（如 RULE-3 v1→v2）时，已生成模板的 `rule_version` 与当前核心规则比对即可识别过期，避免新旧规则版本混用（防止 [05 § 6.2](./05-documentation-system.md#62-迁移规则体系通用--项目专有)「项目专有规则优先」约束被打破）。陈旧检测的程序化执行（verifier 在 `/migrate analyze`/`run` 时比对并提示复审）为 M2 项，复用既有 `[rules].enforce_rule_version_consistency` 开关，不新增配置字段。
@@ -907,7 +910,7 @@ skills/migrate/adapters/
 - frontmatter 格式复用 [05-documentation-system.md § 6.1](./05-documentation-system.md#61-核心产出物总览)；对适配器的特殊约定：**必含 `language_id`、`rule_version` 字段**。
 - 正文至少含一条 `## 类型映射` 标题；除必含 `## 类型映射` 外，应含所有与源语言存在惯用法差异的 MVP 通用规则类对应节（参考 [05 § 6.2.1](./05-documentation-system.md#621-跨适配器特化示例) 跨适配器特化示例）。
 
-`analysis-tools.json`（CLI `profile --adapter-tools` 消费）为 JSON 数组，每项 `{tool_id, display_name, min_version, install_hint, required}`，由 CLI 读取并检测语言专用外部工具可用性。
+`analysis-tools.json`（CLI `profile --adapter-tools` 消费）为 JSON 数组，每项 `{tool_id, display_name, min_version, install_hint, required, version_args}`，由 CLI 读取并检测语言专用外部工具可用性。其中 `version_args`（可选，默认 `["--version"]`）覆盖版本探测参数——少数工具不接受 `--version`（如 Go 用 `go version`），用此字段指定。
 
 > **类型/依赖提取的输出契约**：由 CLI `rustmigrate graph build`（tree-sitter）统一产出，不再是适配器脚本职责。其输出映射到 source-graph 节点/边的权威格式见 [09-appendix-schemas.md § source-graph 导出格式](./09-appendix-schemas.md#附录-d关键中间产物-schema简化版)（每条依赖映射为 `imports`/`uses_type` 边，源/目标对应节点 `id`）。
 

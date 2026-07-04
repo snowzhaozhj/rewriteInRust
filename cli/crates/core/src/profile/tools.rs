@@ -19,10 +19,10 @@ use crate::process::{run_with_timeout, PROBE_TIMEOUT};
 /// `analysis-tools.json` 中的单个工具条目。
 ///
 /// 格式见 `06-plugin-structure.md` § adapter.json 契约：
-/// JSON 数组，每项 `{tool_id, display_name, min_version, install_hint, required}`。
+/// JSON 数组，每项 `{tool_id, display_name, min_version, install_hint, required, version_args}`。
 #[derive(Debug, Clone, Deserialize)]
 pub struct AnalysisTool {
-    /// 工具的可执行文件名（探测时运行 `<tool_id> --version`）。
+    /// 工具的可执行文件名（探测时运行 `<tool_id> <version_args...>`）。
     pub tool_id: String,
     /// 人类可读名称（用于警告文案）。
     pub display_name: String,
@@ -35,6 +35,10 @@ pub struct AnalysisTool {
     /// 是否为必需工具（仅必需工具缺失才产出警告）。
     #[serde(default = "default_required")]
     pub required: bool,
+    /// 版本探测参数（可选；省略或为空时默认 `["--version"]`）。
+    /// 少数工具不接受 `--version`（如 Go 用 `go version`），用此字段覆盖。
+    #[serde(default)]
+    pub version_args: Option<Vec<String>>,
 }
 
 fn default_required() -> bool {
@@ -183,15 +187,19 @@ pub fn check_adapter_tools(tools: &[AnalysisTool]) -> Vec<ToolStatus> {
     tools.iter().map(check_tool).collect()
 }
 
-/// 检测单个工具：运行 `<tool_id> --version` 并解析版本。
+/// 检测单个工具：运行 `<tool_id> <version_args...>`（默认 `--version`）并解析版本。
 pub fn check_tool(tool: &AnalysisTool) -> ToolStatus {
+    let args: Vec<&str> = match &tool.version_args {
+        Some(v) if !v.is_empty() => v.iter().map(String::as_str).collect(),
+        _ => vec!["--version"],
+    };
     ToolStatus {
         tool_id: tool.tool_id.clone(),
         display_name: tool.display_name.clone(),
         min_version: tool.min_version.clone(),
         install_hint: tool.install_hint.clone(),
         required: tool.required,
-        probe: interpret_probe(probe_version(&tool.tool_id, &["--version"])),
+        probe: interpret_probe(probe_version(&tool.tool_id, &args)),
     }
 }
 
@@ -237,7 +245,7 @@ fn probe_version(bin: &str, args: &[&str]) -> Probe {
         Err(e) => return Probe::Failed(format!("无法执行 {bin}: {e}")),
     };
     if !output.status.success() {
-        return Probe::Failed(format!("{bin} --version 退出码非零: {}", output.status));
+        return Probe::Failed(format!("{label} 退出码非零: {}", output.status));
     }
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     if !stdout.is_empty() {
@@ -245,7 +253,7 @@ fn probe_version(bin: &str, args: &[&str]) -> Probe {
     }
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
     if stderr.is_empty() {
-        Probe::Failed(format!("{bin} --version 无输出"))
+        Probe::Failed(format!("{label} 无输出"))
     } else {
         Probe::Found(stderr)
     }
@@ -419,6 +427,7 @@ mod tests {
             min_version: None,
             install_hint: Some("install it".to_owned()),
             required: true,
+            version_args: None,
         };
         let status = check_tool(&tool);
         assert!(!status.available());
@@ -434,6 +443,7 @@ mod tests {
             min_version: None,
             install_hint: None,
             required: false,
+            version_args: None,
         };
         let status = check_tool(&tool);
         assert!(!status.available());
@@ -460,5 +470,40 @@ mod tests {
         assert_eq!(tools[0].tool_id, "depcruise");
         assert_eq!(tools[0].min_version.as_deref(), Some("11.0.0"));
         assert!(tools[0].required);
+        // 未声明 version_args → None（走默认 `--version` 路径）。
+        assert_eq!(tools[0].version_args, None);
+    }
+
+    #[test]
+    fn test_version_args_parses_from_json() {
+        // Go 用 `go version`（不接受 `--version`）：version_args 覆盖默认探测参数。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("analysis-tools.json");
+        std::fs::write(
+            &path,
+            r#"[{"tool_id":"go","display_name":"Go toolchain","min_version":"1.21.0","required":false,"version_args":["version"]}]"#,
+        )
+        .unwrap();
+        let tools = load_analysis_tools(&path).unwrap();
+        assert_eq!(tools[0].version_args, Some(vec!["version".to_owned()]));
+        assert!(!tools[0].required);
+    }
+
+    #[test]
+    fn test_version_args_routes_to_probe_command() {
+        // version_args 确实被传给探测命令：cargo 存在但传非法 flag → 非零退出（ProbeFailed），
+        // 证明用的是自定义参数而非默认 `--version`。cargo 在本仓库测试运行器中必然存在。
+        let tool = AnalysisTool {
+            tool_id: "cargo".to_owned(),
+            display_name: "cargo".to_owned(),
+            min_version: None,
+            install_hint: None,
+            required: false,
+            version_args: Some(vec!["--definitely-bogus-flag-xyz".to_owned()]),
+        };
+        let status = check_tool(&tool);
+        assert!(!status.available());
+        // 命令存在但探测失败（非 Missing），故 probe_error 有值。
+        assert!(status.probe_error().is_some());
     }
 }
