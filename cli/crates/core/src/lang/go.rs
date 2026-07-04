@@ -246,8 +246,9 @@ impl LanguageAdapter for GoAdapter {
 /// Go 复杂度分档信号（仿 python.rs `PyTierSignals`）。
 #[derive(Default)]
 struct GoTierSignals {
-    /// 命中的危险类别（并发/反射/cgo/unsafe），排序去重。非空 → detect_tier 判 Full，
-    /// 同时经 classify_file 落 state.danger 驱动 degrade_skip 边界（PLG-05）。
+    /// 命中的危险类别（并发/反射/cgo/unsafe），BTreeSet 去重 + 按枚举判别序排列
+    /// （最终 state 落盘时组并集另按 `as_str()` 字典序重排，见 lib.rs `union_danger`）。
+    /// 非空 → detect_tier 判 Full，同时经 classify_file 落 state.danger 驱动 degrade_skip 边界（PLG-05）。
     danger: BTreeSet<DangerCategory>,
     /// 含函数/方法/类型定义等实质内容 → 至少 Standard（否则纯 const/var/import → Trivial）。
     has_non_trivial_content: bool,
@@ -317,6 +318,11 @@ fn check_danger_in_subtree(node: Node, signals: &mut GoTierSignals) {
     let mut stack = vec![node];
     while let Some(current) = stack.pop() {
         match current.kind() {
+            // 注：`channel_type` 出现在函数签名/struct 字段（`func f(ch chan int)`、
+            // `type T struct{ ch chan int }`）——即使无实际 goroutine/收发也标 Concurrency。
+            // 这是**有意保守**（channel 存在即并发相邻，翻译须映射 Rust channel 语义），
+            // 且与 detect_tier 危险扫描口径**统一**（收窄此处会致 tier=Full 但 danger 无
+            // concurrency 的分裂）。宁可多标不可漏——多标只是多走完整降级路径，漏标会错译。
             "go_statement" | "select_statement" | "channel_type" | "send_statement" => {
                 signals.danger.insert(DangerCategory::Concurrency);
             }
@@ -1312,6 +1318,11 @@ mod tests {
             cat!("package m\n\nfunc c() int {\n\treturn <-getCh()\n}\n"),
             vec![DangerCategory::Concurrency]
         );
+        // select 也 → Concurrency（category 级断言——tier 级 detect_tier_select_is_full 只验非空）。
+        assert_eq!(
+            cat!("package m\n\nfunc pick(a, b chan int) {\n\tselect {\n\tcase <-a:\n\tcase <-b:\n\t}\n}\n"),
+            vec![DangerCategory::Concurrency]
+        );
 
         // reflect → DynamicReflection；unsafe/cgo → Ffi。
         assert_eq!(
@@ -1343,6 +1354,16 @@ mod tests {
                 DangerCategory::Concurrency,
                 DangerCategory::DynamicReflection
             ]
+        );
+
+        // 分组 import 同时命中 reflect + unsafe（Go 惯用分组 import）→ [DynamicReflection, Ffi]，
+        // 验证分组 import 分类级解析 + Ffi 进多类并集 + 判别序（DynamicReflection < Ffi）。
+        let grouped = adapter.classify_file(
+            "package m\n\nimport (\n\t\"reflect\"\n\t\"unsafe\"\n)\n\nfunc f() {}\n",
+        );
+        assert_eq!(
+            grouped.danger,
+            vec![DangerCategory::DynamicReflection, DangerCategory::Ffi]
         );
 
         // 语法错误 → 保守空（不 panic）。
