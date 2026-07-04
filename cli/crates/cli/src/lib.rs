@@ -15,7 +15,7 @@ use clap::Parser;
 use serde::Serialize;
 use serde_json::json;
 
-use rustmigrate_core::detect::detect_tier;
+use rustmigrate_core::detect::detect_tier_for_lang;
 use rustmigrate_core::error::MigrateError;
 use rustmigrate_core::graph::build::{build_graph_full, build_graph_ts_incremental};
 use rustmigrate_core::graph::decompose::{cohesion_mq, plan_decomposition, verify_invariants};
@@ -1869,13 +1869,30 @@ fn cmd_state_populate_modules(
         }
     }
 
+    // 源语言解析（config 优先，未配置探测，失败回退 TS）——tier 分档与 danger 分类共用，
+    // 选对 adapter。否则非 TS 文件走 TS adapter `can_handle=false` 一律保守判 Full（tier 失真）。
+    let cfg = load_config_or_default(&mut warnings);
+    let source_root = root
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(&cfg.project.source_root));
+    let lang = match cfg.project.source_language {
+        Some(l) => l,
+        None => match rustmigrate_core::profile::detect_language(&source_root) {
+            Ok(l) => l,
+            Err(e) => {
+                warnings.push(format!("源语言探测失败，回退 TypeScript：{e}"));
+                SourceLang::TypeScript
+            }
+        },
+    };
+
     // 复杂度分档（M2-TIER-01a）：对全部成员文件检测 tier。
     let all_files: Vec<NodeId> = sequence
         .scc_groups
         .iter()
         .flat_map(|g| g.members.iter().cloned())
         .collect();
-    let tier_map = detect_tiers_for_modules(&all_files, root, &mut warnings);
+    let tier_map = detect_tiers_for_modules(&all_files, root, lang, &mut warnings);
 
     // --- decompose 集成 vs SCC-only 旧路径 ---
     // MigrationUnit：统一抽象，让 decompose 和 SCC-only 两路径产出同构数据。
@@ -1914,21 +1931,7 @@ fn cmd_state_populate_modules(
             .collect();
         (units, None)
     } else {
-        // 新路径：decompose 凝聚合并。
-        let cfg = load_config_or_default(&mut warnings);
-        let source_root = root
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from(&cfg.project.source_root));
-        let lang = match cfg.project.source_language {
-            Some(l) => l,
-            None => match rustmigrate_core::profile::detect_language(&source_root) {
-                Ok(l) => l,
-                Err(e) => {
-                    warnings.push(format!("源语言探测失败，回退 TypeScript：{e}"));
-                    SourceLang::TypeScript
-                }
-            },
-        };
+        // 新路径：decompose 凝聚合并。lang/cfg/source_root 已在上方解析（tier 与 danger 共用）。
         let mut adapter = create_adapter(lang)?;
 
         // 逐文件计算 self_sizes/footprints + 分类（复用 cmd_graph_decompose 逻辑）。
@@ -2160,12 +2163,16 @@ fn cmd_state_populate_modules(
 
 /// 对迁移序列中的所有模块运行复杂度分档检测（M2-TIER-01a）。
 ///
-/// 从 NodeId 解析文件路径 → 在 `root`（或 CWD）下查找源文件 → `detect_tier` 评估。
+/// 从 NodeId 解析文件路径 → 在 `root`（或 CWD）下查找源文件 → `detect_tier_for_lang` 评估。
 /// 文件不存在时静默跳过（tier 为 best-effort，不阻塞 populate）；
 /// 仅在检测逻辑本身失败时记 warning。
+///
+/// `lang` 由调用方解析（config 优先，未配置探测，失败回退 TS），供选对 adapter——**否则
+/// 非 TS 文件会因 TS adapter `can_handle=false` 一律保守判 `Full`**（Go/Python tier 失真）。
 fn detect_tiers_for_modules(
     order: &[NodeId],
     root: Option<&Path>,
+    lang: rustmigrate_core::types::common::SourceLang,
     warnings: &mut Vec<String>,
 ) -> std::collections::HashMap<String, Option<ModuleTier>> {
     let cwd = std::env::current_dir().unwrap_or_default();
@@ -2183,7 +2190,7 @@ fn detect_tiers_for_modules(
 
         let full_path = base.join(file_path);
         if full_path.exists() {
-            match detect_tier(&full_path) {
+            match detect_tier_for_lang(&full_path, lang) {
                 Ok(tier) => {
                     tiers.insert(node_id.to_string(), Some(tier));
                 }

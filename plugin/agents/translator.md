@@ -304,6 +304,7 @@ Go 项目须额外注意（`source_language=go`，类型映射细则以 `adapter
 - **按失败分类给推荐**：`dependency_resolution`（缺等价库）/ `semantic_gap`（源语言特性无 Rust 等价）通常能定位替代 crate（如源模块是 HTTP 客户端 → `reqwest`，是日期解析 → `chrono`）；`compilation_error` / `type_complexity` 多为翻译实现问题而非缺库，可留空。
 - **理由具体到能力**：rationale 写清该 crate 覆盖被裁剪模块的哪项职责，不写空泛「功能强大」。
 - **无合适替代则留空数组**，不硬凑——上游会改为 `TODO(port)` 标记人工处理。
+- **并发/FFI 类降级的 crate 取自适配器模板**：源模块因并发或 FFI/反射走 degrade_skip 时（Go 尤为常见——`classify_file` 已把 goroutine/select/channel/`<-` 标 `Concurrency`、cgo/`unsafe.Pointer` 标 `Ffi`、`reflect` 标 `DynamicReflection`，落 `ModuleState.danger`；并发模型差异大，porting-template 判「默认走 degrade_skip」），`recommended_alternatives` 直接引用 `adapters/<lang>/porting-template.md` 并发节/unsafe 节的 crate。Go 对照：`go f()`→`tokio`/`rayon`、`chan`/`select`→`tokio::sync::mpsc`/`crossbeam::channel`/`tokio::select!`、`sync.WaitGroup`→`tokio::task::JoinSet`、cgo→`bindgen`。rationale 写清替代哪项并发/FFI 能力。
 - 复用你产出的 `dependency-mapping.md`（源依赖→Rust crate 映射）思路定位候选。
 
 ## 并行翻译 porting 规则约束（M2-SCALE-02）

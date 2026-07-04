@@ -1318,6 +1318,79 @@ fn e2e_populate_danger_signals_into_state() {
     });
 }
 
+/// PLG-05：Go `classify_file` 的 danger 类别须端到端透传进 `migration-state.json`，与
+/// TS/Python 同链路。两个同包耦合文件——worker.go 触发 `concurrency`（goroutine + channel）、
+/// meta.go 触发 `dynamic_reflection`（`import "reflect"`）——decompose 凝聚为 1 coupled_batch，
+/// 组 danger = 成员并集（去重 + 字典序）。守护 classify_file → populate → state 对 Go 生效，
+/// 支撑 headless run 的 degrade_skip 边界（并发/反射类降级）。
+#[test]
+fn e2e_populate_go_danger_signals_into_state() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("go.mod"),
+        "module example.com/e2e\n\ngo 1.21\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("worker.go"),
+        "package app\n\nfunc FanOut(xs []int) int {\n\tch := make(chan int)\n\tfor _, x := range xs {\n\t\tgo func(v int) { ch <- v }(x)\n\t}\n\tsum := 0\n\tfor range xs {\n\t\tsum += <-ch\n\t}\n\treturn sum\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("meta.go"),
+        "package app\n\nimport \"reflect\"\n\nfunc TypeName(x any) string {\n\treturn reflect.TypeOf(x).String()\n}\n",
+    )
+    .unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        assert_eq!(run(&["graph", "build", "--root", "."]).0, 0);
+
+        let (code, json) = run(&["state", "populate-modules", "--root", "."]);
+        assert_eq!(code, 0, "populate 应成功: {json}");
+        let modules = json["data"]["modules"].as_array().unwrap();
+        assert_eq!(modules.len(), 1, "同包两文件应凝聚为 1 组: {json}");
+        let group = &modules[0];
+        assert_eq!(group["composite_kind"], "coupled_batch", "{group}");
+        // 组 danger = 成员并集：concurrency（worker.go）+ dynamic_reflection（meta.go），字典序。
+        assert_eq!(
+            group["danger"],
+            serde_json::json!(["concurrency", "dynamic_reflection"]),
+            "组 danger 应为 Go 成员危险信号并集（去重 + 字典序）: {group}"
+        );
+        assert_eq!(run(&["validate", "state"]).0, 0, "落盘后 state 应合法");
+    });
+}
+
+/// 回归（PLG-06 发现的 pre-existing bug）：populate 的 tier 分档须按源语言选 adapter。
+/// 修复前 `detect_tier` 硬编码 TS adapter → 非 TS 文件 `can_handle=false` 一律保守判 `Full`
+/// （Go/Python tier 全失真）；修复后按 `detect_tier_for_lang` 选对 adapter，Go 纯计算单文件
+/// （有函数体、无危险信号）应判 `standard`。防 tier 检测退回 TS-only。
+#[test]
+fn e2e_populate_go_tier_detected_by_language() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("go.mod"),
+        "module example.com/t\n\ngo 1.21\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("calc.go"),
+        "package main\n\nfunc Add(a, b int) int {\n\treturn a + b\n}\n",
+    )
+    .unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        assert_eq!(run(&["graph", "build", "--root", "."]).0, 0);
+        let (code, json) = run(&["state", "populate-modules", "--root", "."]);
+        assert_eq!(code, 0, "{json}");
+        let m = &json["data"]["modules"][0];
+        assert_eq!(
+            m["tier"], "standard",
+            "Go 纯计算单文件应判 standard（非 TS 硬编码保守 full）: {m}"
+        );
+    });
+}
+
 #[test]
 fn e2e_populate_cleans_orphan_pending() {
     // 源码图删文件后重填：上一轮登记、本轮序列已不含的 pending 模块应被清理为孤儿，

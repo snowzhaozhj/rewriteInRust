@@ -26,18 +26,19 @@
 //! （Contains 无 fixup，不同于 Extends）。PR-C2 单测限同文件，跨文件 fixup 记 TODO（后续 PR，
 //! 见 STATUS.md Sprint C「后续 TODO」①）。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use tree_sitter::{Node, Parser};
 
 use crate::error::{MigrateError, Result};
-use crate::types::common::{NodeId, SourceLang, Span};
+use crate::types::common::{DangerCategory, NodeId, SourceLang, Span};
 use crate::types::graph::{Dependency, EdgeType, NodeType, SourceNode};
 use crate::types::state::ModuleTier;
 
 use super::{
-    CallInfo, FileAnalysis, ImportInfo, ImportKind, ImportedSymbol, LanguageAdapter, SymbolKind,
+    CallInfo, FileAnalysis, FileClassification, FileKind, ImportInfo, ImportKind, ImportedSymbol,
+    LanguageAdapter, SymbolKind,
 };
 
 /// Go 语言适配器（基于 tree-sitter-go）。
@@ -191,7 +192,7 @@ impl LanguageAdapter for GoAdapter {
             return ModuleTier::Full;
         }
         let signals = scan_go_tier_signals(root, source);
-        if signals.has_danger {
+        if !signals.danger.is_empty() {
             ModuleTier::Full
         } else if signals.has_non_trivial_content {
             ModuleTier::Standard
@@ -200,9 +201,31 @@ impl LanguageAdapter for GoAdapter {
         }
     }
 
-    // classify_file 不 override——用 trait 默认 conservative()（Normal + 无危险），
-    // 保证 Go 文件绝不会被误判为机械合批，也不 panic。Go 机械分类（barrel/纯常量等）
-    // 当前不做（MDR-011 拆解已不用机械门分流），保守默认足够安全。
+    /// Go 危险信号分类（PLG-05）：`file_kind` 恒 `Normal`（Go 不做机械分类——MDR-011
+    /// 拆解已不用机械门分流，保守默认足够安全），只填 `danger` 供 populate 落 state、
+    /// 驱动 headless degrade_skip 边界与 verifier 定向探测。分类映射（与 detect_tier
+    /// 危险信号同源）：goroutine/select/channel/send/`<-` → `Concurrency`；`reflect`
+    /// → `DynamicReflection`；cgo(`import "C"`)/`unsafe` → `Ffi`（口径与 GO-01/PLG-04
+    /// 及 adapters/go/porting-template.md 统一）。
+    ///
+    /// TODO(PLG-05 后续): io import（os/net/fs）→ IoSideEffect、顶层可变 var →
+    /// SharedMutableGlobal 暂未纳入（PLG-05 聚焦并发/反射/FFI 六项触发），需要时补。
+    fn classify_file(&mut self, source: &str) -> FileClassification {
+        // 解析失败/含语法错误 → 保守 Normal + 无危险（绝不误判机械，也不 panic）。
+        let tree = match self.parser.parse(source, None) {
+            Some(t) => t,
+            None => return FileClassification::conservative(),
+        };
+        let root = tree.root_node();
+        if root.has_error() {
+            return FileClassification::conservative();
+        }
+        let signals = scan_go_tier_signals(root, source);
+        FileClassification {
+            file_kind: FileKind::Normal,
+            danger: signals.danger.into_iter().collect(),
+        }
+    }
 
     fn detect_source_root(&self, project_root: &Path) -> Option<String> {
         // Go 项目：含 go.mod 的目录为 module 根，源码即在根目录。返回 Some(".")（探测成功）
@@ -223,8 +246,9 @@ impl LanguageAdapter for GoAdapter {
 /// Go 复杂度分档信号（仿 python.rs `PyTierSignals`）。
 #[derive(Default)]
 struct GoTierSignals {
-    /// 含并发/反射/cgo/unsafe 等语义无法机械翻译的危险信号 → Full。
-    has_danger: bool,
+    /// 命中的危险类别（并发/反射/cgo/unsafe），排序去重。非空 → detect_tier 判 Full，
+    /// 同时经 classify_file 落 state.danger 驱动 degrade_skip 边界（PLG-05）。
+    danger: BTreeSet<DangerCategory>,
     /// 含函数/方法/类型定义等实质内容 → 至少 Standard（否则纯 const/var/import → Trivial）。
     has_non_trivial_content: bool,
 }
@@ -256,7 +280,8 @@ fn scan_go_tier_signals(root: Node, source: &str) -> GoTierSignals {
     s
 }
 
-/// import 声明里若引入 reflect（反射）/unsafe（unsafe.Pointer）/C（cgo），标危险。
+/// import 声明里若引入 reflect（反射）→ DynamicReflection / unsafe（unsafe.Pointer）
+/// 与 C（cgo）→ Ffi，记入 danger 类别。不 early return——同文件可同时命中多类。
 fn check_import_danger(node: Node, source: &str, signals: &mut GoTierSignals) {
     let mut cursor = node.walk();
     let mut stack = vec![node];
@@ -266,9 +291,15 @@ fn check_import_danger(node: Node, source: &str, signals: &mut GoTierSignals) {
                 // interpreted_string_literal 文本含引号，如 "reflect"。
                 let raw = &source[path.byte_range()];
                 let pkg = raw.trim_matches(|c| c == '"' || c == '`');
-                if matches!(pkg, "reflect" | "unsafe" | "C") {
-                    signals.has_danger = true;
-                    return;
+                match pkg {
+                    "reflect" => {
+                        signals.danger.insert(DangerCategory::DynamicReflection);
+                    }
+                    // unsafe.Pointer 与 cgo（import "C"）口径统一归 Ffi/RULE-12。
+                    "unsafe" | "C" => {
+                        signals.danger.insert(DangerCategory::Ffi);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -279,24 +310,23 @@ fn check_import_danger(node: Node, source: &str, signals: &mut GoTierSignals) {
     }
 }
 
-/// 递归子树找并发危险：goroutine（go_statement）/select/channel/send/接收。
+/// 递归子树找并发危险：goroutine（go_statement）/select/channel/send/接收 → Concurrency。
+/// 不 early return——虽 Concurrency 单类去重后只记一次，但需遍历完整子树以不漏其他形态。
 fn check_danger_in_subtree(node: Node, signals: &mut GoTierSignals) {
     let mut cursor = node.walk();
     let mut stack = vec![node];
     while let Some(current) = stack.pop() {
         match current.kind() {
             "go_statement" | "select_statement" | "channel_type" | "send_statement" => {
-                signals.has_danger = true;
-                return;
+                signals.danger.insert(DangerCategory::Concurrency);
             }
             // 接收操作 `<-ch`：tree-sitter-go 解析为带 `<-` 操作符的 unary_expression。
             // 仅接收 channel（如 `v := <-getCh()`）的代码不含上面任何节点，需单独识别，
-            // 否则漏判并发。send_statement/channel_type 已在上分支先命中并返回，不会误入此处。
+            // 否则漏判并发。
             "unary_expression" => {
                 let mut op = current.walk();
                 if current.children(&mut op).any(|c| c.kind() == "<-") {
-                    signals.has_danger = true;
-                    return;
+                    signals.danger.insert(DangerCategory::Concurrency);
                 }
             }
             _ => {}
@@ -1165,7 +1195,7 @@ mod tests {
         let a = adapter.analyze_file("package main\n", "main.go").unwrap();
         assert_eq!(a.nodes.len(), 1); // 仅 File 节点
         assert_eq!(a.nodes[0].node_type, NodeType::File);
-        // classify_file（trait 默认）返回保守分类，不 panic、不判机械。
+        // classify_file：纯 package 无危险 → danger 空、file_kind=Normal（不判机械）。
         let cls = adapter.classify_file("package main\n");
         assert!(cls.danger.is_empty());
         assert!(!cls.is_mechanical());
@@ -1256,6 +1286,70 @@ mod tests {
         let mut adapter = GoAdapter::new().unwrap();
         let src = "package m\n\nimport \"fmt\"\n\nfunc greet() {\n\tfmt.Println(\"hi\")\n}\n";
         assert_eq!(adapter.detect_tier(src), ModuleTier::Standard);
+    }
+
+    /// classify_file 危险分类（PLG-05）：goroutine/channel/select → Concurrency；
+    /// reflect → DynamicReflection；unsafe/cgo → Ffi；无害 → 空；file_kind 恒 Normal。
+    #[test]
+    fn classify_file_danger_categories() {
+        let mut adapter = GoAdapter::new().unwrap();
+        macro_rules! cat {
+            ($src:expr) => {
+                adapter.classify_file($src).danger
+            };
+        }
+
+        // 并发四形态均 → Concurrency（单类去重）。
+        assert_eq!(
+            cat!("package m\n\nfunc r() {\n\tgo work()\n}\n"),
+            vec![DangerCategory::Concurrency]
+        );
+        assert_eq!(
+            cat!("package m\n\nfunc p(ch chan int) {\n\tch <- 1\n}\n"),
+            vec![DangerCategory::Concurrency]
+        );
+        assert_eq!(
+            cat!("package m\n\nfunc c() int {\n\treturn <-getCh()\n}\n"),
+            vec![DangerCategory::Concurrency]
+        );
+
+        // reflect → DynamicReflection；unsafe/cgo → Ffi。
+        assert_eq!(
+            cat!("package m\n\nimport \"reflect\"\n\nfunc f() {}\n"),
+            vec![DangerCategory::DynamicReflection]
+        );
+        assert_eq!(
+            cat!("package m\n\nimport \"unsafe\"\n\nfunc f() {}\n"),
+            vec![DangerCategory::Ffi]
+        );
+        assert_eq!(
+            cat!("package m\n\nimport \"C\"\n\nfunc f() {}\n"),
+            vec![DangerCategory::Ffi]
+        );
+
+        // 无害 → 空；file_kind 恒 Normal（不判机械）。
+        let safe = adapter
+            .classify_file("package m\n\nimport \"fmt\"\n\nfunc g() {\n\tfmt.Println()\n}\n");
+        assert!(safe.danger.is_empty());
+        assert_eq!(safe.file_kind, FileKind::Normal);
+
+        // 多类共存：reflect import + goroutine → 两类，排序去重（Concurrency < DynamicReflection）。
+        let multi = adapter.classify_file(
+            "package m\n\nimport \"reflect\"\n\nfunc r() {\n\tgo work()\n\t_ = reflect.TypeOf(1)\n}\n",
+        );
+        assert_eq!(
+            multi.danger,
+            vec![
+                DangerCategory::Concurrency,
+                DangerCategory::DynamicReflection
+            ]
+        );
+
+        // 语法错误 → 保守空（不 panic）。
+        assert!(adapter
+            .classify_file("package m\n\nfunc f( {\n")
+            .danger
+            .is_empty());
     }
 
     /// 语法错误 → 保守 Full。
