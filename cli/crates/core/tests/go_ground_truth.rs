@@ -56,7 +56,7 @@ struct GroundTruth {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)] // node_type/note 仅为完整反序列化 ground-truth.json，未在断言中读取
+#[allow(dead_code)] // note 仅为完整反序列化 ground-truth.json，未在断言中读取
 struct NodeSpec {
     id: String,
     #[serde(rename = "type")]
@@ -127,6 +127,17 @@ fn assert_node_attributes(fixture: &str) {
             .node_index(&NodeId::new(&spec.id))
             .unwrap_or_else(|| panic!("{fixture} 节点 {} 不存在", spec.id));
         let node = graph.node(idx).unwrap();
+
+        // node_type 双向校验：ground-truth 的 `type` 字段（PascalCase，如 "Class"）须与实际
+        // NodeType 相符——防止 `type` 列写错却因 id 前缀恰巧一致而漏检（codex I-3 / 主审 nit）。
+        assert_eq!(
+            format!("{:?}", node.node_type),
+            spec.node_type,
+            "{fixture} 节点 {} node_type 不匹配: 期望 {}, 实际 {:?}",
+            spec.id,
+            spec.node_type,
+            node.node_type
+        );
 
         if let Some(expected) = spec.is_exported {
             assert_eq!(
@@ -520,15 +531,25 @@ fn go_pkg_deps_same_package_files_in_one_decomp_unit() {
     let graph = build("go-pkg-deps");
     let seq = migration_sequence(&graph);
 
-    // self_sizes/footprints 按文件 NodeId 赋一致小值。预算 35 恰容 store 包 3 文件（3×10=30）
-    // 同目录凝聚，但装不下再并入 main.go（会达 40）——既验证同包凝聚，又保持跨目录边界有意义
-    // （避免"预算无穷大 → 全并一单元"的平凡通过）。
+    // self_sizes/footprints 按文件 NodeId 赋一致值（PER=10），绕开真实 token≈bytes/4 换算。
+    let per = 10usize;
     let sizes: HashMap<NodeId, usize> = graph
         .nodes()
         .filter(|n| n.node_type == NodeType::File)
-        .map(|n| (n.id.clone(), 10usize))
+        .map(|n| (n.id.clone(), per))
         .collect();
-    let plan = plan_decomposition(&graph, &seq, &sizes, &sizes, 35);
+
+    // 预算从 store 目录实际 File 节点数**自适应**推导（不写死 35、不依赖 tagged.go 具体计数）：
+    // 取 = store 目录全部 File 节点 footprint 之和 + PER/2，恰好容 store 全并（sum ≤ budget）、
+    // 但容不下再并入任一外部目录文件（sum + PER > budget）。这样即使将来 store 增删文件、或
+    // 改变 //go:build ignore 文件是否计为 File 节点，"同包凝聚 + 跨目录边界"两个不变量仍成立。
+    let store_footprint: usize = sizes
+        .keys()
+        .filter(|id| id.as_str().starts_with("file:store/"))
+        .count()
+        * per;
+    let budget = store_footprint + per / 2;
+    let plan = plan_decomposition(&graph, &seq, &sizes, &sizes, budget);
 
     // 找到包含 store/query.go 的单元，断言 store 包全部实体文件同在其中。
     let unit = plan
@@ -547,7 +568,8 @@ fn go_pkg_deps_same_package_files_in_one_decomp_unit() {
             unit.members
         );
     }
-    // main.go 属于不同目录（root），不应混入 store 单元。
+    // main.go 属于不同目录（root），不应混入 store 单元——预算按上式恰好挡住跨目录并入，
+    // 使断言非"预算无穷大 → 全并一单元"的平凡通过。
     assert!(
         !unit.members.iter().any(|m| m == "file:main.go"),
         "根目录 main.go 不应并入 store 包单元: {:?}",

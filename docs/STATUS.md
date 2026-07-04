@@ -79,6 +79,13 @@
   - **pkg**（store 多文件包）：`_test.go`/平台后缀 `_windows.go` **完全排除**（无 File 节点）+ `//go:build ignore` → **孤立 File 节点**（跳符号）；跨包调用解析到代表文件（字典序第一非 `_test.go`）；**GO-09 decompose 同包凝聚**——预算 35 恰容 store 包 3 文件同目录凝聚、装不下 main.go，验证同包凝聚 + 跨目录边界（非"预算无穷大全并"平凡通过）。
 - **规避已知精度限制**（PR-C2 记账 TODO）：跨包只做「import + 调用代表文件内符号」，构造调用放同包内——避免 qualified composite literal 丢包前缀、非代表文件符号漏边污染 ground-truth。fixture 描述已注明。
 - **验证**：core 594 测试全绿（+27 Go fixture 测试）；`just ci` 全过；`cargo run -- graph build --root ../fixtures/go-linear-deps` → node=11/edge=13（status=warning：Go 全量降级 + 无 migration-state，符合 CLI 契约）。
+- **PR #61 审查（4 视角全跑）**：主审 / 设计契约 / 专项测试覆盖 / 异构交叉。
+  - **主审**：通过，无 important；4 nit（其一 go.rs:25 stale `TODO(PR-C3)` 注释已订正）。
+  - **设计契约**：6/6 PASS，无 important（节点/边类型、Variable 激活、文件过滤、decompose 凝聚、schema 均与 design/PLAN-M4/D-M4-02/MDR-011 一致）；1 pre-existing（design 04 §5.7.1 表格 calls/exports 源方向措辞 drift，非本 PR 引入，记 TODO）。
+  - **专项测试覆盖**：**1 important 已修**——CLI 层 `graph build` Go dispatch 无自动化测试（验收 [x] 仅手验）→ 补 `cli_e2e.rs::smoke_graph_build_go_detects_and_degrades`（断言 node=11/edge=13 + status=warning，证明确实路由到 GoAdapter）；nit 分层判断（单文件语义已由 41 个 PR-C2 单测守护，不在端到端层重复）。
+  - **异构交叉（codex）**：**3 important**——① decompose 测试写死 budget=35 且依赖 tagged.go 撑体积 → 改**预算自适应**（从 store 目录 File footprint 推导，增删文件/改 ignore 归组均不失效）；② import 指向"代表文件"固化精度限制 → **研判为 GO-03 既定契约**（trait 无符号表，代表文件是 baseline，design-checker PASS），非缺陷，保留 + 已注明；③ node `type` 字段未校验 → assert_node_attributes 加 **node_type 断言**（一并闭合主审 nit#4）。2 nit：store_test.go 跑 `go test` 会失败 → 改非空构造；extends 是嵌入映射约定 → 描述已注明。
+- **审查后新增测试**：cli_e2e Go smoke（1）+ go_ground_truth node_type 断言强化；均绿。
+- **后续 TODO（记账）**：① 跨文件 Contains fixup（go.rs 模块头，后续 PR）；② design 04 §5.7.1 表格 calls/exports 源方向措辞同步（设计契约 pre-existing）。
 - **不在本 PR**：R3 build.rs Go 专用 Calls 兜底、跨文件 Contains fixup 等 PR-C2 记账项（留 GO-09 后续/后续 PR）。
 
 **PR-C2 Core Analysis（GO-02~07，已交付待审查）**：

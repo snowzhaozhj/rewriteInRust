@@ -382,6 +382,33 @@ fn smoke_graph_build_python_detects_and_degrades() {
     });
 }
 
+/// Go 源（go-linear-deps）经 `detect_language` 路由到 Go adapter：强制全量并输出降级
+/// 警告（status=warning），图非空。覆盖 CLI 层 Go 语言 dispatch——否则 GoAdapter 路由
+/// 若回归（如误落 TS）会静默产出空/错图而无测试报警。
+#[test]
+fn smoke_graph_build_go_detects_and_degrades() {
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("go-linear-deps"), tmp.path());
+    with_cwd(tmp.path(), || {
+        // 不 init：走纯 detect_language 探测路径（go.mod + .go → SourceLang::Go）。
+        let (code, json) = run(&["graph", "build", "--root", "."]);
+        assert_eq!(code, 0, "Go graph build 应成功: {json}");
+        assert_eq!(json["status"], "warning", "降级应使 status=warning: {json}");
+        assert_eq!(json["data"]["full"], true, "Go 应强制全量: {json}");
+        // 非空且与库层一致（node=11/edge=13），证明确实路由到 GoAdapter 而非空/错图。
+        assert_eq!(
+            json["data"]["node_count"].as_u64().unwrap_or(0),
+            11,
+            "Go 图节点数应为 11（GoAdapter 正确路由）: {json}"
+        );
+        assert_eq!(
+            json["data"]["edge_count"].as_u64().unwrap_or(0),
+            13,
+            "Go 图边数应为 13: {json}"
+        );
+    });
+}
+
 #[test]
 fn smoke_graph_stats() {
     let project = temp_linear_project();
