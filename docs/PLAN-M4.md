@@ -146,12 +146,12 @@ Step 3: PR-C3 (Validation)     → GO-08 + GO-09          [工时 ~2.5d]
 | M4-PLG-05 | **degrade_skip Go 边界**：goroutine/select/channel/reflect/cgo/`unsafe.Pointer` 触发降级，输出原因 + 推荐 Rust crate（tokio/crossbeam/rayon）；`blocked_by_skip` 传播复用 M3 机制 | 1d | — |
 | M4-PLG-06 | **Plugin Go 端到端验证**：`/migrate analyze` + `run` 对 Go fixture headless 跑通，≥1 模块推进到 `translating` | 1d | PLG-01~05 |
 
-**验收标准**：
-- [ ] `adapters/go/` 含两文件契约，frontmatter 含 `language_id`/`target_languages: [go]`/`rule_version`
-- [ ] `/migrate analyze` 对 Go 项目正确填充 `migration-state.json`
-- [ ] `/migrate run` 对 Go fixture headless 跑通，≥1 模块推进到 `translating`
-- [ ] translator 可按 `source_language=go` 切换类型映射表
-- [ ] goroutine/channel/unsafe.Pointer 等触发 degrade_skip 并输出推荐替代
+**验收标准**（✅ 全达标，见 [m4-sprint-d-acceptance.md](m4-sprint-d-acceptance.md)）：
+- [x] `adapters/go/` 含两文件契约，frontmatter 含 `language_id`/`target_languages: [go]`/`rule_version`（PR #62）
+- [x] `/migrate analyze` 对 Go 项目正确填充 `migration-state.json`
+- [x] `/migrate run` 对 Go fixture headless 跑通，≥1 模块推进到 `translating`
+- [x] translator 可按 `source_language=go` 切换类型映射表
+- [x] goroutine/channel/unsafe.Pointer 等触发 degrade_skip 并输出推荐替代（`classify_file` danger 分类 + porting-template crate 推荐）
 
 ---
 

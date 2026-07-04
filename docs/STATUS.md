@@ -4,7 +4,8 @@
 
 ## 当前位置
 
-- **Milestone**: M1 ✅ → M2 ✅ → **M3 ✅** → **M3 遗留债清理 ✅** → **M4「完善」执行中——巩固线 Sprint A ✅（PR #57）+ Sprint B ✅（PR #58）→ Go 线 Sprint C 收尾中（PR-C1 #59 ✅ + PR-C2 #60 ✅ 已合并 → PR-C3 Validation 已交付，待审查）**
+- **Milestone**: M1 ✅ → M2 ✅ → **M3 ✅** → **M3 遗留债清理 ✅** → **M4「完善」执行中——巩固线 Sprint A ✅（PR #57）+ Sprint B ✅（PR #58）→ Go 线 Sprint C ✅ 全合并（C1 #59 / C2 #60 / C3 #61）→ Sprint D「Plugin Go 适配」✅ 交付（PR-D1 PLG-01/02 ✅ #62 已合并 → PR #63 = PLG-03/04/05/06 合并交付：提示词 Go 分支 + classify_file danger 分类 + populate tier-by-language 修复 + 端到端验收，等审查/合并）**
+- **Sprint D 全达标**（2026-07-05，见 [m4-sprint-d-acceptance.md](m4-sprint-d-acceptance.md)）：PLG-03/04 translator/analyzer/verifier Go 分支（4 视角审查全跑，2 important+5 nit 已修）；**PLG-05** Go `classify_file` danger 分类（goroutine/select/channel→Concurrency、reflect→DynamicReflection、cgo/unsafe→Ffi）端到端落 state + translator degrade crate 推荐；**PLG-06** 单文件 Go 模块 headless 全链路推进到 `translating` + 真实 Phase A 翻译 cargo check 绿；**修复 pre-existing bug**：populate tier 硬编码 TS adapter（非 TS 文件恒判 Full）→ 改按语言选 adapter。go 单测 51 + cli_e2e 81 全绿，`just ci` 通过。
 - **M3 收尾（2026-06-29）**：Sprint A/B/C/D/E 全部合并，验收 M3-VAL-01~08 全达标；PR [#49](https://github.com/snowzhaozhj/rewriteInRust/pull/49)（ffi 测试修复）+ [#52](https://github.com/snowzhaozhj/rewriteInRust/pull/52)（source_root 探测加固）已合并；遗留 issue [#50](https://github.com/snowzhaozhj/rewriteInRust/issues/50)（source_root 推断）+ [#51](https://github.com/snowzhaozhj/rewriteInRust/issues/51)（VAL-05 性能实测：TS 路径 0%/-16%/-1% 无退化）已 CLOSED+COMPLETED；PLAN-M3 验收清单已全部回填 [x]。
 - **阶段**: Sprint A ✅ → Sprint B ✅ → Sprint C ✅ → Sprint E ✅ → **Sprint D 端到端验收 ✅（M3-VAL-01~08 全达标，2026-06-29，PR [#49](https://github.com/snowzhaozhj/rewriteInRust/pull/49) 已合并——4 视角审查全跑、1 important（设计文档同步）+ 4 nit 全落实、just ci 532 绿）**
 - **🟢 Sprint D 端到端验收 ✅**：2 真实 Python 项目各 ≥1 模块迁移到 done（按 §6 headless 规范）。
