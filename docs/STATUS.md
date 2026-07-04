@@ -4,7 +4,8 @@
 
 ## 当前位置
 
-- **Milestone**: M1 ✅ → M2 ✅ → **M3 ✅** → **M3 遗留债清理 ✅** → **M4「完善」执行中——巩固线 Sprint A ✅（PR #57）+ Sprint B ✅（PR #58）→ Go 线 Sprint C ✅ 全合并（C1 #59 / C2 #60 / C3 #61）→ Sprint D「Plugin Go 适配」✅ 交付（PR-D1 PLG-01/02 ✅ #62 已合并 → PR #63 = PLG-03/04/05/06 合并交付：提示词 Go 分支 + classify_file danger 分类 + populate tier-by-language 修复 + 端到端验收，等审查/合并）**
+- **Milestone**: M1 ✅ → M2 ✅ → **M3 ✅** → **M3 遗留债清理 ✅** → **M4「完善」执行中——巩固线 Sprint A ✅（PR #57）+ Sprint B ✅（PR #58）→ Go 线 Sprint C ✅ 全合并（C1 #59 / C2 #60 / C3 #61）→ Sprint D「Plugin Go 适配」✅ 全合并（#62 + #63）→ 巩固线 Sprint F「健壮性+编排收口」启动：GOV-01 规则版本陈旧检测 ✅ 交付（分支 `feat/m4-sprint-f-gov-01-rule-version-check`，等审查/合并）**
+- **Sprint F GOV-01 交付**（2026-07-05）：`validate rules` CLI 命令——校验各适配器 `porting-template.md` 的 `rule_version` vs 权威清单 `plugin/skills/migrate/references/rule-registry.json`。新增核心模块 `core/src/rule_version.rs`（load_rule_registry/parse_template_rule_version/check_template_consistency/check_adapters_dir，三类 issue：missing_in_template/version_mismatch/unknown_rule）；`RulesConfig` 落地 `enforce_rule_version_consistency`（默认 true）——不一致时 enforce=true→`status=error` 退出码 1（非静默）、false→降级 warning。13 新测（9 单测 + 4 cli_e2e，含**真实模板一致回归守卫**）；`just ci` 全绿。设计同步：06 §10.0.1 命令清单 + §11.1 `[rules]` 注释；MDR-014。**砍 index.json**（YAGNI，对齐 PLAN）。
 - **Sprint D 全达标**（2026-07-05，见 [m4-sprint-d-acceptance.md](m4-sprint-d-acceptance.md)）：PLG-03/04 translator/analyzer/verifier Go 分支（4 视角审查全跑，2 important+5 nit 已修）；**PLG-05** Go `classify_file` danger 分类（goroutine/select/channel→Concurrency、reflect→DynamicReflection、cgo/unsafe→Ffi）端到端落 state + translator degrade crate 推荐；**PLG-06** 单文件 Go 模块 headless 全链路推进到 `translating` + 真实 Phase A 翻译 cargo check 绿；**修复 pre-existing bug**：populate tier 硬编码 TS adapter（非 TS 文件恒判 Full）→ 改按语言选 adapter。go 单测 51 + cli_e2e 81 全绿，`just ci` 通过。
 - **M3 收尾（2026-06-29）**：Sprint A/B/C/D/E 全部合并，验收 M3-VAL-01~08 全达标；PR [#49](https://github.com/snowzhaozhj/rewriteInRust/pull/49)（ffi 测试修复）+ [#52](https://github.com/snowzhaozhj/rewriteInRust/pull/52)（source_root 探测加固）已合并；遗留 issue [#50](https://github.com/snowzhaozhj/rewriteInRust/issues/50)（source_root 推断）+ [#51](https://github.com/snowzhaozhj/rewriteInRust/issues/51)（VAL-05 性能实测：TS 路径 0%/-16%/-1% 无退化）已 CLOSED+COMPLETED；PLAN-M3 验收清单已全部回填 [x]。
 - **阶段**: Sprint A ✅ → Sprint B ✅ → Sprint C ✅ → Sprint E ✅ → **Sprint D 端到端验收 ✅（M3-VAL-01~08 全达标，2026-06-29，PR [#49](https://github.com/snowzhaozhj/rewriteInRust/pull/49) 已合并——4 视角审查全跑、1 important（设计文档同步）+ 4 nit 全落实、just ci 532 绿）**
@@ -29,8 +30,8 @@
 - **Sprint E ✅ 全部完成**：DEC-01（PR #43）+ DEC-GATE（Python 分类器修复）+ DEC-02（PR #46）。
 - **测试基线**: 600 测试 / clippy -D / deny / fmt / shellcheck + plugin validate 全绿
 - **CI 覆盖率**: 待更新
-- **最新合并 PR**: [#60](https://github.com/snowzhaozhj/rewriteInRust/pull/60)（M4 Sprint C PR-C2 Go Adapter Core）；[#59](https://github.com/snowzhaozhj/rewriteInRust/pull/59)（PR-C1 Go Foundation）；[#58](https://github.com/snowzhaozhj/rewriteInRust/pull/58)（Sprint B 质量度量）
-- **开放 PR**: PR-C3（M4 Sprint C Go Validation，4 视角审查中）
+- **最新合并 PR**: [#63](https://github.com/snowzhaozhj/rewriteInRust/pull/63)（M4 Sprint D PLG-03~06）；[#62](https://github.com/snowzhaozhj/rewriteInRust/pull/62)（Sprint D PLG-01/02）；[#61](https://github.com/snowzhaozhj/rewriteInRust/pull/61)（Sprint C PR-C3 Go Validation）
+- **开放 PR**: Sprint F GOV-01（规则版本陈旧检测，分支 `feat/m4-sprint-f-gov-01-rule-version-check`，待审查）
 
 ### M3 遗留债清理（为 M4 打地基）✅ 完成（2026-06-30）
 

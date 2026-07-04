@@ -28,6 +28,7 @@ use rustmigrate_core::profile::{
     check_adapter_tools, check_cargo_nextest, load_analysis_tools, profile_project, ToolStatus,
 };
 use rustmigrate_core::response::{ErrorData, Response, Status};
+use rustmigrate_core::rule_version::{check_adapters_dir, load_rule_registry};
 use rustmigrate_core::scaffold::scaffold_project;
 use rustmigrate_core::state::{MigrationStateMachine, SprintAdvanceResult};
 use rustmigrate_core::stats::{compare_structure, count_loc, detect_community_deviation};
@@ -181,6 +182,18 @@ pub enum ValidateCommands {
     },
     /// 校验 `.rustmigrate.toml` 配置文件合法性。
     Config,
+    /// 校验各适配器 `porting-template.md` 的 `rule_version` 与权威规则清单一致性（M4-GOV-01）。
+    ///
+    /// 权威清单陈旧检测：核心规则破坏性升级后模板未同步 bump 即漂移，`[rules]
+    /// .enforce_rule_version_consistency`（默认 true）为真时不一致返回错误、为假时降级 warning。
+    Rules {
+        /// 权威规则版本清单 JSON 路径（如 `plugin/skills/migrate/references/rule-registry.json`）。
+        #[arg(long)]
+        registry: PathBuf,
+        /// 适配器根目录，扫描 `<dir>/<lang>/porting-template.md`（如 `plugin/skills/migrate/adapters`）。
+        #[arg(long)]
+        adapters_dir: PathBuf,
+    },
 }
 
 /// State 子命令。
@@ -434,6 +447,10 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
                 auto_unblock,
             } => emit(writer, cmd_validate_state(*check_blocked, *auto_unblock)),
             ValidateCommands::Config => emit(writer, cmd_validate_config()),
+            ValidateCommands::Rules {
+                registry,
+                adapters_dir,
+            } => emit(writer, cmd_validate_rules(registry, adapters_dir)),
         },
         Commands::State { action } => match action {
             StateCommands::Get { module, human } => emit(writer, cmd_state_get(module, *human)),
@@ -1653,6 +1670,88 @@ fn cmd_validate_config() -> CmdResult {
         }),
         warnings,
     ))
+}
+
+/// `validate rules --registry <json> --adapters-dir <dir>`：校验各适配器 `porting-template.md`
+/// 的 `rule_version` 与权威规则清单一致性（M4-GOV-01）。
+///
+/// 陈旧检测：核心规则破坏性升级后模板未同步 bump 即漂移（新旧规则版本混用，破坏 `05 § 6.2`
+/// 「项目专有规则优先」约束）。严重度由项目根 `[rules].enforce_rule_version_consistency`（默认 true）
+/// 控制——为真时任一模板不一致返回**错误**（`status=error`，退出码 1，非静默），为假时降级为 warning。
+///
+/// 各模板逐条不一致项（`missing_in_template` / `version_mismatch` / `unknown_rule`）写入
+/// `data.checks[].issues`，便于定位。
+fn cmd_validate_rules(registry_path: &Path, adapters_dir: &Path) -> CmdResult {
+    let registry = load_rule_registry(registry_path)?;
+    let checks = check_adapters_dir(&registry, adapters_dir)?;
+
+    let mut warnings: Vec<String> = Vec::new();
+    let enforce = load_config_or_default(&mut warnings)
+        .rules
+        .enforce_rule_version_consistency;
+
+    // 汇总不一致模板，构造可读摘要（`typescript: RULE-3 version_mismatch(v1.0.0→v0.9.0)`）。
+    let inconsistent: Vec<&_> = checks.iter().filter(|c| !c.is_consistent()).collect();
+    let consistent = inconsistent.is_empty();
+
+    if !consistent {
+        let summary = inconsistent
+            .iter()
+            .map(|c| {
+                let items = c
+                    .issues
+                    .iter()
+                    .map(|i| match (&i.expected, &i.actual) {
+                        (Some(e), Some(a)) => {
+                            format!("{} {}({e}→{a})", i.rule, issue_kind_str(i.kind))
+                        }
+                        (Some(e), None) => {
+                            format!("{} {}(权威 {e})", i.rule, issue_kind_str(i.kind))
+                        }
+                        (None, Some(a)) => {
+                            format!("{} {}(模板 {a})", i.rule, issue_kind_str(i.kind))
+                        }
+                        (None, None) => format!("{} {}", i.rule, issue_kind_str(i.kind)),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{}: {items}", c.adapter)
+            })
+            .collect::<Vec<_>>()
+            .join("；");
+
+        if enforce {
+            return Err(MigrateError::SchemaValidation(format!(
+                "适配器 rule_version 与权威清单不一致（enforce_rule_version_consistency=true）：{summary}"
+            )));
+        }
+        warnings.push(format!(
+            "适配器 rule_version 与权威清单不一致（enforce_rule_version_consistency=false，未阻断）：{summary}"
+        ));
+    }
+
+    Ok((
+        json!({
+            "registry": registry_path.to_string_lossy(),
+            "adapters_dir": adapters_dir.to_string_lossy(),
+            "rules_count": registry.rules.len(),
+            "consistent": consistent,
+            "enforce": enforce,
+            "checks": checks,
+        }),
+        warnings,
+    ))
+}
+
+/// [`RuleVersionIssueKind`](rustmigrate_core::rule_version::RuleVersionIssueKind) 的中文摘要词
+/// （仅用于人读的错误/warning 文案；机读走 `data.checks[].issues[].kind` 的 snake_case）。
+fn issue_kind_str(kind: rustmigrate_core::rule_version::RuleVersionIssueKind) -> &'static str {
+    use rustmigrate_core::rule_version::RuleVersionIssueKind::*;
+    match kind {
+        MissingInTemplate => "模板缺失",
+        VersionMismatch => "版本不符",
+        UnknownRule => "未知规则",
+    }
 }
 
 /// `state get <module> [--human]`：查询指定模块迁移状态。
