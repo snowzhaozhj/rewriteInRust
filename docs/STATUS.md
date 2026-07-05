@@ -31,7 +31,7 @@
 - **测试基线**: 600 测试 / clippy -D / deny / fmt / shellcheck + plugin validate 全绿
 - **CI 覆盖率**: 待更新
 - **最新合并 PR**: [#63](https://github.com/snowzhaozhj/rewriteInRust/pull/63)（M4 Sprint D PLG-03~06）；[#62](https://github.com/snowzhaozhj/rewriteInRust/pull/62)（Sprint D PLG-01/02）；[#61](https://github.com/snowzhaozhj/rewriteInRust/pull/61)（Sprint C PR-C3 Go Validation）
-- **开放 PR**: Sprint F GOV-01（规则版本陈旧检测，分支 `feat/m4-sprint-f-gov-01-rule-version-check`，待审查）
+- **开放 PR**: [#64](https://github.com/snowzhaozhj/rewriteInRust/pull/64) Sprint F GOV-01（规则版本陈旧检测，4 视角审查全跑 + 2 important 已修，`just ci` 全绿，待用户验收）
 
 ### M3 遗留债清理（为 M4 打地基）✅ 完成（2026-06-30）
 
