@@ -40,7 +40,7 @@ cli/crates/core/src/
 │   └── coverage.rs     # 迁移进度 + 覆盖率统计
 └── validate/
     ├── mod.rs          # 验证入口
-    └── rules.rs        # 验证规则（Tier 0/1/2）
+    └── tiers.rs        # 迁移产物三层验证（Tier 0/1/2）
 ```
 
 ### 模块依赖 DAG

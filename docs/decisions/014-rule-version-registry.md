@@ -25,6 +25,7 @@ PLAN-M4 GOV-01 要求：CLI 校验各 `porting-template.md` frontmatter `rule_ve
 命令挂在 `validate` 族下：`validate rules --registry <json> --adapters-dir <dir>`。核心逻辑落**新模块** `core/src/rule_version.rs`（`load_rule_registry` / `parse_template_rule_version` / `check_template_consistency` / `check_adapters_dir`）。
 
 - **为何不放 `validate/rules.rs`**：该文件已存在，语义是 **CI 验证管线 tier**（cargo check/clippy/nextest 分层），与「porting 规则版本治理」是不同域，同名易混。用独立顶层模块 `rule_version` 避免概念污染。
+- **并彻底消歧——老 `validate/rules.rs` → `validate/tiers.rs`**：仅避让新命令还不够，老文件名 `rules` 与本 PR 的 `rule_version` + CLI `validate rules` 三重撞名。老模块核心是 `ValidationTier`（三层验证），且外部**零调用**（M1-STATE-03 定义待接线），故 `git mv` 重命名为 `tiers.rs`（模块 `validate::tiers`）零调用点风险，一并在本 PR 消歧。类型名 `ValidationTier`/`ValidationRule` 自带 `Validation` 前缀无歧义，保持不变。
 - **路径显式传参（不内建定位）**：`--registry` / `--adapters-dir` 由调用方（plugin SKILL/hooks）传插件相对路径，与既有 `profile --adapter-tools <json>` 显式传适配器资产路径的模式一致。CLI 运行在**目标迁移项目**目录，插件资产不在目标项目内，故必须外部传入。
 - **命令清单归属**：设计 `05 § 6.2` 曾把确定性版本校验列为 M2「备选」命令 `validate rules --check-module-versions`（未纳入 M2 5 命令）。GOV-01 由 PLAN-M4 显式授权正式落地为 `validate rules`（scope 收窄为**适配器模板级**校验，非模块级），已同步 `06 § 10.0.1` 命令清单。
 

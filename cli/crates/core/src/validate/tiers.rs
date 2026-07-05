@@ -1,6 +1,9 @@
-//! 验证规则定义。
+//! 迁移产物的三层验证体系（Tier0 编译/clippy · Tier1 覆盖率 · Tier2 proptest/fuzz）。
 //!
-//! 参照设计文档中的三层验证体系（Tier0 / Tier1 / Tier2）。
+//! **命名消歧**：本模块管迁移**产物质量门**（`ValidationTier` 分层跑 cargo 检查），与
+//! [`crate::rule_version`]（porting 核心规则**版本**治理）及 CLI `validate rules` 命令是不同域——
+//! 后者校验 `porting-template.md` 的 `rule_version` 与权威清单一致性。二者都含「rule」故此处以
+//! `tiers` 命名（原 `validate/rules.rs`，M4-GOV-01 消歧重命名，MDR-014 决策 2）。
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
