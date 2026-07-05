@@ -114,12 +114,35 @@ pub struct ResumePlan {
     pub next: Vec<String>,
     /// `blocked` 模块——等依赖。字典序。
     pub blocked: Vec<String>,
-    /// 进度计数（覆盖全部模块，跨 sprint）。已完成/已降级不重跑。
-    pub progress: ResumeProgress,
+    /// `done`（真终态）模块数——不重跑，仅计入进度。**不可从上述列表派生**（终态模块不入任何列表）。
+    pub done: usize,
+    /// `degrade_*`（降级终态：ffi/manual/skip）模块数——不重跑，仅计入进度。同样不可派生。
+    pub degraded: usize,
+}
+
+impl ResumePlan {
+    /// 按需派生进度计数快照（单一真相源：列表长度 + `done`/`degraded`）。
+    ///
+    /// 不独立存储，避免与列表计数形成可各自变动的第二真相源（见 MDR-017 审查加固）。
+    pub fn progress(&self) -> ResumeProgress {
+        let in_progress = self.interrupted.len();
+        let pending = self.next.len();
+        let blocked = self.blocked.len();
+        let awaiting_decision = self.awaiting_decision.len();
+        ResumeProgress {
+            done: self.done,
+            degraded: self.degraded,
+            in_progress,
+            pending,
+            blocked,
+            awaiting_decision,
+            total: self.done + self.degraded + in_progress + pending + blocked + awaiting_decision,
+        }
+    }
 }
 
 /// [`ResumePlan`] 中被中断的单个运行态模块。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct InterruptedModule {
     /// 模块 key（组代表 NodeId）。
     pub module: String,
@@ -130,8 +153,11 @@ pub struct InterruptedModule {
     pub member_files: Vec<String>,
 }
 
-/// [`ResumePlan`] 的进度计数（覆盖全部模块，跨 sprint）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// [`ResumePlan`] 的进度计数快照——由 [`ResumePlan::progress`] **按需派生**，非独立存储的第二真相源。
+///
+/// 四个列表桶计数直接取各 `Vec` 长度，`done`/`degraded` 取 [`ResumePlan`] 的两个不可派生字段，
+/// `total` 为六桶之和（恒等于 `modules.len()`）。CLI 层用它拼扁平 JSON `progress` 对象。
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ResumeProgress {
     /// `done` 模块数（真终态）。
     pub done: usize,
@@ -819,23 +845,14 @@ impl MigrationStateMachine {
         next.sort();
         blocked.sort();
 
-        let progress = ResumeProgress {
-            done,
-            degraded,
-            in_progress: interrupted.len(),
-            pending: next.len(),
-            blocked: blocked.len(),
-            awaiting_decision: awaiting_decision.len(),
-            total: self.state_file.modules.len(),
-        };
-
         ResumePlan {
             sprint: self.state_file.sprint.as_ref().map(|s| s.current),
             interrupted,
             awaiting_decision,
             next,
             blocked,
-            progress,
+            done,
+            degraded,
         }
     }
 
@@ -2867,7 +2884,7 @@ mod tests {
         // 字典序排序：c, e, r, t。
         let keys: Vec<&str> = plan.interrupted.iter().map(|i| i.module.as_str()).collect();
         assert_eq!(keys, vec!["c", "e", "r", "t"]);
-        assert_eq!(plan.progress.in_progress, 4);
+        assert_eq!(plan.progress().in_progress, 4);
         assert!(plan.awaiting_decision.is_empty());
         assert!(plan.next.is_empty());
         // 单文件模块 member_files 回退到 [module]。
@@ -2883,7 +2900,7 @@ mod tests {
 
         let plan = m.resume_plan();
         assert_eq!(plan.awaiting_decision, vec!["p".to_string()]);
-        assert_eq!(plan.progress.awaiting_decision, 1);
+        assert_eq!(plan.progress().awaiting_decision, 1);
         let interrupted_keys: Vec<&str> =
             plan.interrupted.iter().map(|i| i.module.as_str()).collect();
         assert_eq!(interrupted_keys, vec!["t"], "paused 不得混入 interrupted");
@@ -2899,8 +2916,9 @@ mod tests {
         m.update_module("s", module_with_status(ModuleStatus::DegradeSkip));
 
         let plan = m.resume_plan();
-        assert_eq!(plan.progress.done, 1);
-        assert_eq!(plan.progress.degraded, 3);
+        assert_eq!(plan.progress().done, 1);
+        assert_eq!(plan.progress().degraded, 3);
+        assert_eq!(plan.progress().total, 4, "全终态项目 total 仍对账");
         assert!(plan.interrupted.is_empty());
         assert!(plan.next.is_empty());
         assert!(plan.awaiting_decision.is_empty());
@@ -2910,15 +2928,20 @@ mod tests {
     #[test]
     fn test_resume_plan_pending_and_blocked_buckets() {
         let mut m = new_machine();
-        m.update_module("p1", module_with_status(ModuleStatus::Pending));
+        // 逆序插入 p2 先于 p1，验证 next 桶的字典序确定性（HashMap 迭代非确定 + `.sort()`）。
         m.update_module("p2", module_with_status(ModuleStatus::Pending));
+        m.update_module("p1", module_with_status(ModuleStatus::Pending));
         m.update_module("b", module_with_status(ModuleStatus::Blocked));
 
         let plan = m.resume_plan();
-        assert_eq!(plan.next, vec!["p1".to_string(), "p2".to_string()]);
+        assert_eq!(
+            plan.next,
+            vec!["p1".to_string(), "p2".to_string()],
+            "next 桶应字典序（不受插入序影响）"
+        );
         assert_eq!(plan.blocked, vec!["b".to_string()]);
-        assert_eq!(plan.progress.pending, 2);
-        assert_eq!(plan.progress.blocked, 1);
+        assert_eq!(plan.progress().pending, 2);
+        assert_eq!(plan.progress().blocked, 1);
     }
 
     #[test]
@@ -2932,23 +2955,47 @@ mod tests {
         m.update_module("blk", module_with_status(ModuleStatus::Blocked));
         m.update_module("pau", module_with_status(ModuleStatus::Paused));
 
-        let p = m.resume_plan().progress;
+        let plan = m.resume_plan();
+        let p = plan.progress();
         assert_eq!(p.total, 6);
         assert_eq!(
             p.done + p.degraded + p.in_progress + p.pending + p.blocked + p.awaiting_decision,
             p.total,
             "各桶计数应与 total 对账"
         );
+        // 派生等式：progress 计数须与 ResumePlan 列表长度一致（钉死单一真相源，见 MDR-017 审查加固）。
+        assert_eq!(p.in_progress, plan.interrupted.len());
+        assert_eq!(p.pending, plan.next.len());
+        assert_eq!(p.blocked, plan.blocked.len());
+        assert_eq!(p.awaiting_decision, plan.awaiting_decision.len());
+        assert_eq!(p.done, plan.done);
+        assert_eq!(p.degraded, plan.degraded);
     }
 
     #[test]
     fn test_resume_plan_empty_modules() {
-        // 空 modules：全空桶、progress 归零、sprint 反映 init 默认（若有）。
+        // 空 modules：全空桶、progress 归零；init 无 sprint 状态 → sprint 为 None。
         let m = new_machine();
         let plan = m.resume_plan();
         assert!(plan.interrupted.is_empty());
         assert!(plan.next.is_empty());
-        assert_eq!(plan.progress.total, 0);
+        assert_eq!(plan.progress().total, 0);
+        assert!(
+            plan.sprint.is_none(),
+            "init 无 sprint 状态时 sprint 应为 None"
+        );
+    }
+
+    #[test]
+    fn test_resume_plan_sprint_reflects_current() {
+        // 有 sprint 状态时，plan.sprint 映射 sprint.current。
+        use crate::types::state::SprintState;
+        let mut m = new_machine();
+        m.set_sprint(SprintState {
+            current: 3,
+            history: Vec::new(),
+        });
+        assert_eq!(m.resume_plan().sprint, Some(3));
     }
 
     #[test]

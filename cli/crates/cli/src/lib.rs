@@ -2047,6 +2047,7 @@ fn cmd_state_resume() -> CmdResult {
     let path = state_path();
     let (machine, warnings) = load_state_with_warnings(&path)?;
     let plan = machine.resume_plan();
+    let progress = plan.progress();
 
     // interrupted：每项附幂等重入命令（编排器逐个执行保证断点续跑不腐蚀）。
     let interrupted: Vec<serde_json::Value> = plan
@@ -2069,13 +2070,13 @@ fn cmd_state_resume() -> CmdResult {
                 "interrupted": plan.interrupted.iter().map(|m| &m.module).collect::<Vec<_>>(),
             },
             "progress": {
-                "done": plan.progress.done,
-                "degraded": plan.progress.degraded,
-                "in_progress": plan.progress.in_progress,
-                "pending": plan.progress.pending,
-                "blocked": plan.progress.blocked,
-                "awaiting_decision": plan.progress.awaiting_decision,
-                "total": plan.progress.total,
+                "done": progress.done,
+                "degraded": progress.degraded,
+                "in_progress": progress.in_progress,
+                "pending": progress.pending,
+                "blocked": progress.blocked,
+                "awaiting_decision": progress.awaiting_decision,
+                "total": progress.total,
             },
             "interrupted": interrupted,
             "awaiting_decision": plan.awaiting_decision,

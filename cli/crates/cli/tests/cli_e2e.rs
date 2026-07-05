@@ -781,6 +781,18 @@ fn smoke_state_resume() {
             "state recover --module run --policy retry"
         );
 
+        // resume_point：断点位置精简视图（sprint + interrupted 模块名列表）。
+        assert_eq!(
+            json["data"]["resume_point"]["interrupted"],
+            serde_json::json!(["run"]),
+            "resume_point.interrupted 应为精简模块名视图: {json}"
+        );
+        // init 未建 sprint 状态 → resume_point.sprint 为 null。
+        assert!(
+            json["data"]["resume_point"]["sprint"].is_null(),
+            "无 sprint 状态时 resume_point.sprint 应为 null: {json}"
+        );
+
         // paused 单列 awaiting_decision，不进 interrupted（续跑不复活）。
         assert_eq!(json["data"]["awaiting_decision"][0], "pau");
         // pending → next；blocked → blocked。
