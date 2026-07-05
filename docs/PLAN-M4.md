@@ -15,7 +15,7 @@ M4 在 08-roadmap 中定位「完善（持续）」。**R1 主线审查指出一
 
 **被否决/推迟的方向**：
 
-- **并行编排程序化调度器——推迟**：基础设施（`parallel.rs` / `topo.parallel_groups` / `run.md` 并行段 / `workflow.md`）M2-SCALE 已落地。程序化调度器是 M2 已推迟的大工程，当前 SKILL.md 编排满足 2-3 门语言调度需求，程序化状态机投入大、ROI 不足。M4 做增量收口：worktree 生命周期代码化（Sprint F ORCH-01）+ **循环健壮性大幅扩充**（ROB-01a/b/c 共 3d，覆盖 M3 实际遇到的 watchdog stall、额度耗尽、单模块失败扩散等可靠性问题）。
+- **并行编排——已评估并移除（见 [MDR-018](decisions/018-serial-migration-drop-parallel.md)）**：原 M2-SCALE 并行基础设施（`parallel.rs` / `topo.parallel_groups` / `run.md` 并行段 / `workflow.md`）从未真实端到端跑通；ORCH-01 调研后用户拍板**砍并行、砍 worktree 隔离、工作流永久回归串行**（迁移是终端用户逐模块 review 的 human-in-the-loop 过程，并行破坏可审性；速度非卖点）。M4 做增量收口：Sprint F ORCH-01 由「worktree 生命周期代码化」重定义为**工作流串行化收口**（移除并行残留 + 文档/代码一致化）+ **循环健壮性大幅扩充**（ROB-01a/b/c 共 3d，覆盖 M3 实际遇到的 watchdog stall、额度耗尽、单模块失败扩散等可靠性问题）。
 - **C/C++ adapter——推迟**：真正理由是**无类型 IR 架构下，C 的弱类型/指针/手动内存语义使「安全 Rust 翻译 + 等价审查」远难于 Go，ROI 在 35d 预算内做不下 Go+C**（不是「tree-sitter 宏一票否决」——宏仅在任意 token 位置才破，大量常规 C 可解析，用宏否决整门语言与本项目对 Go 并发走 degrade_skip 的处理双标）。roadmap 原 bindgen/cbindgen FFI 方案随 C 整体推迟。未来若做，走 LLMIGRATE 式 tree-sitter 拓扑路线（复用本架构），不引入 c2rust 平行工具链。
 - **Kani——推迟（非砍）**：Kani（BMC）验证的是翻译后 Rust 代码的正确性（无 panic/溢出/越界），与 proptest 差异测试（源↔Rust 等价性）**互补不替代**——前者穷举有界输入证明安全性，后者随机采样验证等价性。M4 预算有限，Kani 的 ROI 在当前阶段（2-3 门语言、小型项目验证）不如质量度量框架高；推迟到 C 路线（unsafe 高产出）或更大真实项目验证阶段，届时 Kani 的正确性证明价值充分显现。
 - **Community 节点——Tier 1 质量诊断信号纳入 Sprint B**：`NodeType::Community` 枚举已预留。Rust 生态已有可用 Leiden 实现（`graphrs` 0.11.16，4 年历史 33K 下载；`leiden-rs` 0.8.1 含 petgraph 适配器），原「无成熟纯 Rust Leiden crate」判断已过时。M4 做 **Tier 1 质量诊断**（~2d，Sprint B QUAL-04）：跑 Leiden → 与目录结构比对 → 输出结构偏离度分数 → 接入质量度量框架，作为源项目可迁移性评估维度。不做 Tier 2（辅助拆解）/ Tier 3（完整 Community 节点落地），视真实项目暴露需求再升级。
@@ -33,7 +33,7 @@ M4 在 08-roadmap 中定位「完善（持续）」。**R1 主线审查指出一
 - `SourceLang::Go` 已存在（`types/common.rs:135`）；tokei `Go → SourceLang::Go` 已映射（`profile/detect.rs:45`）；`EXCLUDED_DIRS` 已含 `vendor`（`common.rs:284`）
 - **MDR-011 目录优先两阶段凝聚合并**已落地（`graph/decompose.rs`，带 footprint 预算 + 凸性约束）
 - 质量评分 `final_score` 概念在设计 [03 §7.5](design/03-execution-model.md) 已定义（per-module，sprint 聚合推迟项），Sprint B 复用并落地
-- 并行编排基础设施已落地（`parallel.rs` / `topo.rs:compute_parallel_groups`）
+- ~~并行编排基础设施已落地（`parallel.rs` / `topo.rs:compute_parallel_groups`）~~ → **已评估并移除**（[MDR-018](decisions/018-serial-migration-drop-parallel.md)，工作流回归串行；死代码由 ORCH-01 收口 PR 清理）
 
 ## 核心技术方向
 
@@ -191,14 +191,14 @@ Step 3: PR-C3 (Validation)     → GO-08 + GO-09          [工时 ~2.5d]
 | M4-ROB-01a ✅ | **checkpoint 硬化 + 幂等重试**：每个模块完成后立即原子持久化状态（migration-state.json 原子写 + 全字段不丢）；重跑失败模块不腐蚀已有状态（状态回退 + 产物清理），保证幂等。**交付**（PR 待审）：原子写已达标（补全字段 round-trip 守卫）；`state reset` 命令 = 确定性状态回退 + 幂等空操作 + `done`/`blocked`/`degrade_*` 须 `--force`；产物 `.rs` 删除归编排器（CLI 输出 `cleanup.member_files` 作用域，不猜路径删）；9 新测；MDR-015 | 1d | — |
 | M4-ROB-01b ✅ | **watchdog stall 检测 + 恢复路径**：识别 agent 静默超时（后台长命令 stdout 静默超 600s）→ 标记当前模块失败 → 跳过或重试（可配置策略）→ 不阻塞后续无依赖模块推进；输出明确的失败原因和恢复建议。**交付**（PR 待审）：检测归编排器（CLI 不观测子进程 stdout）+ `state recover --module <M> --policy retry\|skip` 确定性幂等恢复（retry 复用 reset / skip 直设 paused 绕转换矩阵）；`[orchestration]` 扩 `stall_timeout_secs`/`stall_recovery_policy`；SKILL/run/workflow stall 编排 prose；12 新测（8 core + 1 cli_e2e + 3 config）；MDR-016 | 1d | ROB-01a |
 | M4-ROB-01c ✅ | **额度耗尽优雅暂停 + 续跑**：检测 token 预算/API 额度逼近上限 → 保存当前进度（含进行中模块的中间状态）→ 输出续跑指令（断点位置 + 恢复命令）→ 下次从断点恢复，已完成模块不重跑。**交付**（PR 待审）：检测归编排器/harness（CLI 观测不到额度）；新增 `state resume` 纯查询命令（core `resume_plan` + `ResumePlan`/`InterruptedModule`/`ResumeProgress`）——按 `ModuleStatus` 归 5 桶（运行态→interrupted 带 recover_command / paused→awaiting_decision 不复活 / pending→next / blocked→blocked / 终态不重跑仅计入 progress）；实际重入复用 `state recover --policy retry`；不加额度阈值 config（YAGNI）；8 新测（7 core + 1 cli_e2e）；MDR-017 | 1d | ROB-01a |
-| M4-ORCH-01 | **worktree 生命周期代码化**：当前 worktree 创建/合并/清理散在 run.md 文字约定 → 落为代码层管理（防泄漏/冲突）。**不含程序化状态机调度器**（当前 SKILL.md 编排满足 2-3 门语言调度需求，程序化状态机投入大、当前 ROI 不足，推迟） | 1d | — |
+| M4-ORCH-01（重定义） | **工作流串行化收口**（原「worktree 生命周期代码化」，前提已被 [MDR-018](decisions/018-serial-migration-drop-parallel.md) 推翻）：砍并行、砍 worktree 隔离、工作流永久回归串行 → 移除 CLI 并行死代码（`parallel.rs`/`parallel_groups`/`max_concurrent`/两层 done/`petgraph_isolation`）+ plugin 文档串行化（workflow/run/translator/SKILL）+ 设计文档一致化（03/06/09）。决策与落地清单见 MDR-018。**不含程序化状态机调度器**（推迟） | 决策 ✅ / 收口 ~1.5d | — |
 | M4-GOV-01 ✅ | **规则版本陈旧检测**：CLI 校验各 `porting-template.md` frontmatter `rule_version` vs 权威清单一致性；落地设计已留的 `[rules].enforce_rule_version_consistency` 开关；不一致返回明确错误（复用 `profile/tools.rs` JSON 框架）。**砍 index.json 自动生成**（3 门语言规模未到回本点，数据模型投机，YAGNI）。**交付**（PR 待审）：`rule-registry.json` 权威清单 + `validate rules` 命令 + `rule_version.rs`（缺失/版本不符/未知规则三类 issue）；enforce=true 报错退出码 1、false 降级 warning；13 新测（9 单测 + 4 cli_e2e 含真实模板一致回归守卫）；MDR-014 | 1.5d | — |
 
 **验收标准**：
 - [x] 模拟单模块失败/中断，续跑不丢状态、可重入、幂等（重跑不腐蚀已有产物）——ROB-01a ✅ `state reset`（幂等回退 + `reset;reset`==`reset`）+ 全字段 round-trip 守卫，见 [MDR-015](decisions/015-reset-idempotent-retry-boundary.md)
 - [x] 模拟 watchdog stall（agent 静默超时），系统自动标记失败 + 跳过/重试 + 后续模块不阻塞——ROB-01b ✅ `state recover`（检测归编排器 + retry/skip 幂等恢复 + `state deps` 无依赖模块推进），见 [MDR-016](decisions/016-watchdog-stall-recovery-boundary.md)
 - [x] 模拟额度耗尽，系统优雅暂停 + 输出续跑指令 + 下次断点恢复——ROB-01c ✅ `state resume`（纯查询断点计划：interrupted 带 recover_command 幂等重入 / 终态不重跑 / paused 不复活），检测归编排器，见 [MDR-017](decisions/017-quota-pause-resume-boundary.md)
-- [ ] worktree 生命周期有代码层管理（创建/合并/清理），不再纯文字约定
+- [ ] ORCH-01（重定义）：工作流串行化收口——并行/worktree 隔离残留全部移除（CLI 死代码 + plugin 文档 + 设计文档），文档与代码一致、无「教并行实则串行」矛盾（决策 MDR-018 ✅，代码/文档收口待开工）
 - [x] `rule_version` 与权威清单不一致时 CLI 报错（非静默）——GOV-01 ✅ `validate rules`（enforce=true→退出码 1）
 - [ ] TS/Python/Go 既有路径无回归
 
@@ -213,7 +213,7 @@ Step 3: PR-C3 (Validation)     → GO-08 + GO-09          [工时 ~2.5d]
 | C Go Adapter Core | Go | 10 | 15d | GoAdapter 全方法 + 扩 trait 包凝聚 + 文件过滤 + 4 fixture |
 | D Plugin Go 适配 | Go | 6 | 7d | adapters/go/ + 提示词 Go 分支 + degrade 边界 |
 | E Go 端到端验收 | Go | 8 | 9d | 2 真实 Go 项目多模块 + 质量度量验收 |
-| F 健壮性 + 编排收口 | 巩固 | 5 | 5.5d | checkpoint 硬化 + watchdog stall 恢复 + 额度韧性续跑 + worktree 生命周期 + 版本陈旧检测 |
+| F 健壮性 + 编排收口 | 巩固 | 5 | 5.5d | checkpoint 硬化 + watchdog stall 恢复 + 额度韧性续跑 + 工作流串行化收口（ORCH-01 重定义，MDR-018）+ 版本陈旧检测 |
 | **合计** | | **37** | **~48d** | 巩固线 ~17d + Go 线 ~31d |
 
 ## 明确不做（含理由）
@@ -226,7 +226,7 @@ Step 3: PR-C3 (Validation)     → GO-08 + GO-09          [工时 ~2.5d]
 | Strangler Fig 工具化 | 本项目是离线翻译工作台，旧代码和新代码不需要运行时共存，Strangler Fig 的核心价值（过渡期共存+逐步切流量）在此场景下需求不强。注：拓扑迁移管翻译**顺序**、Strangler Fig 管过渡期**共存**，两者正交——但离线场景下 scaffold+拓扑已覆盖编译期可用性；**降文档** |
 | 跨文件方法调用档 2（receiver 类型环境） | 质量增量、非阻塞，档 1 名称匹配够用；视真实漏边率未来立项；**推迟** |
 | TypeAlias 节点产出 | 枚举已预留，非 Go 前置；Go fixture 暴露需求再补；**推迟** |
-| 并行编排程序化调度器 | 当前 SKILL.md 编排满足 2-3 门语言调度需求，程序化状态机投入大、当前 ROI 不足。M4 做 worktree 生命周期收口（ORCH-01）+ **循环健壮性大幅扩充**（ROB-01a/b/c 共 3d：checkpoint 硬化 + watchdog stall 恢复 + 额度韧性续跑）；**推迟**程序化调度器 |
+| 并行编排（含程序化调度器） | **并行整体移除**（[MDR-018](decisions/018-serial-migration-drop-parallel.md)）：迁移工作流回归串行——终端用户逐模块 review 无法并行、速度非卖点、并行隔离成果回收从未实现属坏投资。M4 做 ORCH-01 串行化收口 + **循环健壮性大幅扩充**（ROB-01a/b/c 共 3d：checkpoint 硬化 + watchdog stall 恢复 + 额度韧性续跑）；程序化调度器随并行一并不做 |
 | index.json 自动生成 | 3 门语言规模未到回本点，数据模型投机，**YAGNI 砍** |
 | 混合语言 monorepo / namespace packages | 单项目单语言假设不变，超 M4 范围 |
 
@@ -261,7 +261,7 @@ Step 3: PR-C3 (Validation)     → GO-08 + GO-09          [工时 ~2.5d]
 | Go LanguageAdapter | ✅ **Go 线旗舰** | Sprint C/D/E |
 | Kani 集成 | **推迟**（D-M4-04） | Kani（正确性）与 proptest（等价性）互补；当前 ROI 不足，推迟到 C 路线或更大项目 |
 | 社区反馈驱动规则库积累 | **部分** | Sprint F GOV-01 版本检测；Sprint B QUAL-04 Community 结构诊断；社区运营非代码范围 |
-| 多 agent 并行编排优化 | **收口（大幅扩充健壮性）** | Sprint F ORCH-01 worktree 生命周期 + ROB-01a/b/c 循环健壮性 3d（checkpoint/watchdog/额度韧性）；程序化调度器推迟 |
+| 多 agent 并行编排优化 | **移除（回归串行）** | 并行整体砍除见 [MDR-018](decisions/018-serial-migration-drop-parallel.md)；Sprint F ORCH-01 改为串行化收口 + ROB-01a/b/c 循环健壮性 3d（checkpoint/watchdog/额度韧性） |
 | Strangler Fig 模式工具支持 | **降文档** | 离线工作台场景下运行时共存需求不强；scaffold+拓扑已覆盖编译期可用性 |
 | （新增）迁移质量度量 + 巩固 | ✅ **巩固线旗舰** | Sprint B；R1 审查驱动新增，非 roadmap 原列，已显式标注 |
 
