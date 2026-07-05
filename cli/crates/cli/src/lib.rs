@@ -29,7 +29,7 @@ use rustmigrate_core::profile::{
 };
 use rustmigrate_core::response::{ErrorData, Response, Status};
 use rustmigrate_core::scaffold::scaffold_project;
-use rustmigrate_core::state::{MigrationStateMachine, SprintAdvanceResult};
+use rustmigrate_core::state::{MigrationStateMachine, ResetOutcome, SprintAdvanceResult};
 use rustmigrate_core::stats::{compare_structure, count_loc, detect_community_deviation};
 use rustmigrate_core::types::common::{DangerCategory, NodeId, Timestamp};
 use rustmigrate_core::types::graph::{EdgeType, NodeType};
@@ -318,6 +318,23 @@ pub enum StateCommands {
         #[arg(long)]
         reason: Option<String>,
     },
+    /// 幂等回退失败/中途模块到干净的重译入口（M4-ROB-01a：checkpoint 硬化 + 幂等重试）。
+    ///
+    /// 状态回退到 `translating` 并清全部进度字段（substatus/phase_a_version/audit/
+    /// test_pass_rate/coverage/known_differences/blocked 锚点），保留 attempts 审计（追加 reset
+    /// 记录）与结构冻结字段（tier/member_files/composite_kind/decomposition_*/danger）。
+    /// **幂等**：已在干净入口时为空操作（`reset;reset` == `reset`）。**守护**：`done`/`blocked`/
+    /// `degrade_*` 须 `--force`。输出 `cleanup` 作用域（member 源文件 + 保留/清理指令）——CLI 不删
+    /// `rust_root` 下 `.rs`（不猜路径，见 MDR-015），由编排器据此清理部分产物。
+    Reset {
+        /// 模块 key（组代表 NodeId，或折叠组的非代表成员，自动归一到组代表）。
+        #[arg(long)]
+        module: String,
+        /// 强制回退终态 / 锚点：`done`（重迁已完成）/ `blocked`（清阻塞锚点）/
+        /// `degrade_*`（降级恢复，人类决策）须显式 `--force`。
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 /// Stats 子命令。
@@ -499,6 +516,7 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
                 ),
             ),
             StateCommands::AdvanceSprint => emit(writer, cmd_state_advance_sprint()),
+            StateCommands::Reset { module, force } => emit(writer, cmd_state_reset(module, *force)),
             StateCommands::Update {
                 module,
                 status,
@@ -1850,6 +1868,38 @@ fn cmd_state_transition(
             "status": updated.status.to_string(),
             "substatus": updated.substatus,
             "state": serde_json::to_value(updated)?,
+        }),
+        warnings,
+    ))
+}
+
+/// `state reset --module <m> [--force]`：幂等回退失败/中途模块到干净的重译入口（M4-ROB-01a）。
+///
+/// core [`MigrationStateMachine::reset_module`] 做确定性状态回退（清进度字段、保留 attempts
+/// 审计并追加 reset 记录、`done`/`blocked`/`degrade_*` 须 `--force`、已在干净入口时幂等空操作），
+/// 落盘走 tmp-fsync-rename 原子写。幂等空操作（`was_noop`）免落盘——保证 `reset;reset` 不产生多余
+/// backup/写。输出附 `cleanup` 作用域（member 源文件 + 清理/保留指令）——CLI **不**删 `rust_root`
+/// 下的 `.rs`（不猜路径，架构边界见 MDR-015），由编排器据此清理部分产物后 `run <m> --retry`。
+fn cmd_state_reset(module: &str, force: bool) -> CmdResult {
+    let path = state_path();
+    let (mut machine, warnings) = load_state_with_warnings(&path)?;
+    let outcome: ResetOutcome = machine.reset_module(module, force)?;
+    // 幂等空操作不改状态、免落盘（避免多余 backup/写，保证 reset;reset 状态一致）。
+    if !outcome.was_noop {
+        machine.save(&path)?;
+    }
+    Ok((
+        json!({
+            "module": outcome.module,
+            "reset_from": outcome.reset_from.to_string(),
+            "reset_to": outcome.reset_to.to_string(),
+            "was_noop": outcome.was_noop,
+            "cleanup": {
+                "member_files": outcome.member_files,
+                "rust_artifacts": "删除 rust_root 下 member_files 对应的部分 .rs 产物（重译前清理）",
+                "preserve": "intermediate/attempts/* 及审计产物保留（不删）",
+                "next": format!("/migrate run {} --retry", outcome.module),
+            },
         }),
         warnings,
     ))

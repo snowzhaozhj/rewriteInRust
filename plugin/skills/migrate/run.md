@@ -36,7 +36,7 @@
 
 | status / substatus | 动作 |
 |---|---|
-| `done` | 报错退出：终态不可重做（确需重迁则人工重置状态后再跑） |
+| `done` | 报错退出：终态不可重做（确需重迁：`rustmigrate state reset --module <M> --force` 回退后再跑，见 SKILL.md「失败/中途模块回滚」） |
 | `paused` | 报错退出：模块暂停中，先 `--degrade=ffi\|manual\|skip` 确认降级方式再续 |
 | `degrade_*` 无 `--force` | 报错：降级是人类决策，须 `--force` |
 | `degrade_*` + `--force` | 重置为 `translating`（清 substatus/attempts）→ 续第 2 步 |
@@ -152,7 +152,7 @@
 - **单候选**（`trivial` 档）：产出 Rust 源文件（写 `rust_root/`）+ `_porting_manifest.json` + 持久化 `intermediate/attempts/{module}-phase-a.rs`。**L1 校验**：Rust 文件存在且编译通过、manifest 非空。
 - **多候选**（`standard`/`full` 档，M2-ADV-01）：产出 2 个候选文件到 `intermediate/attempts/{module}-phase-a-candidate-{1,2}.rs` + 各自的 `{module}-candidate-{1,2}-manifest.json`。**不立即写 `rust_root/`**（等选优后写入）。**L1 校验**：两个候选文件均存在且各自编译通过、两个 manifest JSON 合法。
 
-失败 ≤2 次重试；仍失败则回滚（删 `rust_root/{module}.rs` 部分写入，保留 intent.md + attempts/*，状态复位 `translating`/substatus=null）。成功后 `state transition --module <M> --substatus phase_a_complete_awaiting_review`（status 不变）。
+失败 ≤2 次重试；仍失败则回滚：`rustmigrate state reset --module <M>`（状态复位 `translating`/substatus=null、保留 attempts 审计），按其 `cleanup.member_files` 删 `rust_root/{module}.rs` 部分写入（intent.md + attempts/* 保留）——见 SKILL.md「失败/中途模块回滚」。成功后 `state transition --module <M> --substatus phase_a_complete_awaiting_review`（status 不变）。
 
 #### SCC 组 Phase A（契约门 → 逐文件填空）
 

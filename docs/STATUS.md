@@ -30,8 +30,9 @@
 - **Sprint E ✅ 全部完成**：DEC-01（PR #43）+ DEC-GATE（Python 分类器修复）+ DEC-02（PR #46）。
 - **测试基线**: 600 测试 / clippy -D / deny / fmt / shellcheck + plugin validate 全绿
 - **CI 覆盖率**: 待更新
-- **最新合并 PR**: [#63](https://github.com/snowzhaozhj/rewriteInRust/pull/63)（M4 Sprint D PLG-03~06）；[#62](https://github.com/snowzhaozhj/rewriteInRust/pull/62)（Sprint D PLG-01/02）；[#61](https://github.com/snowzhaozhj/rewriteInRust/pull/61)（Sprint C PR-C3 Go Validation）
-- **开放 PR**: [#64](https://github.com/snowzhaozhj/rewriteInRust/pull/64) Sprint F GOV-01（规则版本陈旧检测，4 视角审查全跑 + 2 important 已修，`just ci` 全绿，待用户验收）
+- **Sprint F ROB-01a 交付**（2026-07-05，待审查）：**checkpoint 硬化 + 幂等重试**。现状调查确认**原子写已达标**（`atomic_write` tmp+fsync+rename+dir-sync+backup），缺口在幂等重试（`transition_module` 同态报错、回滚全靠 run.md 文字约定）。交付：① core `MigrationStateMachine::reset_module` + `ResetOutcome`——确定性状态回退（→translating、清全部进度字段、保留 attempts+审计、结构冻结字段不动）、`done`/`blocked`/`degrade_*` 须 `--force`、已在干净入口时**幂等空操作**（`reset;reset`==`reset`、免落盘）；② CLI `state reset --module <M> [--force]`（`cmd_state_reset`，输出 `cleanup.member_files` 源作用域驱动编排器删部分 `.rs`——CLI 不猜路径删文件）；③ 全字段 round-trip 完整性测试钉「不丢字段」。**边界决策 MDR-015**（收窄版方案 A：CLI 做状态回退+输出清单、产物 `.rs` 删除归编排器，不动 schema、YAGNI 同 index.json）。9 新测（8 核心 + 1 cli_e2e）；SKILL.md 单点收敛「失败/中途模块回滚」+ run.md 两处回滚约定改引用 `state reset`；设计 06 命令清单同步。`just ci` 全绿（707 测试）。**下游**：ROB-01b（watchdog）/ROB-01c（额度续跑）将复用 `state reset`。
+- **最新合并 PR**: [#64](https://github.com/snowzhaozhj/rewriteInRust/pull/64)（Sprint F GOV-01 规则版本陈旧检测，已合并）；[#63](https://github.com/snowzhaozhj/rewriteInRust/pull/63)（M4 Sprint D PLG-03~06）；[#62](https://github.com/snowzhaozhj/rewriteInRust/pull/62)（Sprint D PLG-01/02）
+- **开放 PR**: Sprint F ROB-01a（checkpoint 硬化 + 幂等重试，分支 `feat/m4-sprint-f-rob-01a-checkpoint-idempotent-retry`，`just ci` 全绿，待 4 视角审查 + 用户验收）
 
 ### M3 遗留债清理（为 M4 打地基）✅ 完成（2026-06-30）
 
