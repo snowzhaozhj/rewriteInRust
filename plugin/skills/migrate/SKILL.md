@@ -56,5 +56,12 @@ argument-hint: "[analyze|run|workflow|review] [module]"
   - **L2 结构校验**：JSON 产出物（`migration-state.json`、测试结果）格式合法、关键字段非空；`source-graph.db` 必要表存在。
 - 校验失败时按失败恢复三步处理：①记录调用到 `migration-state.json.subagent_calls` ②诊断+重试（`max_retries_per_step` 默认 2）③重试耗尽则提示用户三选项「重试 / 部分跳过(降级) / 完整回滚」。中间产物 `intermediate/attempts/*` 始终保留。
 
+### 失败/中途模块回滚：`state reset`（统一命令，勿手工改 state）
+需把某模块回退到干净重译入口重跑时（编译/测试失败复位、`degrade_*`/`done` 重做、断点脏状态清理），**统一调 `rustmigrate state reset --module <M> [--force]`**，不要手工编辑 `migration-state.json`：
+- **确定性状态回退**：status→`translating`、清全部进度字段（substatus / phase_a_version / audit / 通过率 / coverage / known_differences / blocked 锚点）；**保留** `attempts`（追加一条 `reset` 审计）与结构冻结字段（tier / member_files / composite_kind / decomposition_* / danger）。`pending` 保持 `pending`。
+- **幂等**：模块已在干净入口（`translating`/`pending` 且进度字段皆空）时为空操作（`was_noop=true`，不追加审计、免落盘，`cleanup` 返回 `{skip:true}`）——`reset` 可安全重复调用。
+- **守护**：`done`（终态）/ `blocked`（依赖锚点）/ `paused`（自动重试耗尽待人类抉择）/ `degrade_*`（降级须人类确认）须显式 `--force`，否则报错；项目 `graduate` 态下一律拒绝（含 `--force`）。
+- **产物清理归编排器**：CLI 不删 `rust_root` 下的 `.rs`（不猜路径）。**先看 `data.was_noop`**：`true`（`cleanup.skip=true`）→ 无产物需清理、直接 `run <M> --retry`；`false` → 据 `data.cleanup.member_files`（模块源作用域）删这些源文件对应的部分 `.rs` 产物，**删后回读核对目标 `.rs` 已不存在**（把「漏删」从静默腐蚀变可观测），再 `run <M> --retry`；`intermediate/attempts/*` 与审计产物始终保留。
+
 ### 产出物根目录
 所有产出物在源项目下的 `.rust-migration/` 目录（`init` 创建）。关键文件：`migration-state.json`、`source-graph.db`、`porting/`（迁移规则）、`PARITY.md`、`AGENTS.md`、`test-fixtures/golden/`。写 `migration-state.json` 统一走 CLI（原子写：tmp→fsync→rename）。

@@ -633,6 +633,53 @@ fn smoke_state_transition() {
 }
 
 #[test]
+fn smoke_state_reset() {
+    // M4-ROB-01a：state reset 幂等回退失败/中途模块 + 输出 cleanup 作用域。
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        // 注入一个「编译修复中」的失败现场模块。
+        inject_module("compile_fixing");
+
+        // 首次 reset：回退到 translating，was_noop=false，附 cleanup 作用域。
+        let (code, json) = run(&["state", "reset", "--module", "a"]);
+        assert_eq!(code, 0, "非终态 reset 应成功: {json}");
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["data"]["reset_from"], "compile_fixing");
+        assert_eq!(json["data"]["reset_to"], "translating");
+        assert_eq!(json["data"]["was_noop"], false);
+        // cleanup 作用域：单文件模块 member_files = [module key "a"]。
+        assert_eq!(json["data"]["cleanup"]["member_files"][0], "a");
+        assert!(json["data"]["cleanup"]["next"]
+            .as_str()
+            .unwrap()
+            .contains("--retry"));
+
+        // 二次 reset：幂等空操作（已在干净入口 translating/null），cleanup 给 skip 信号。
+        let (code, json) = run(&["state", "reset", "--module", "a"]);
+        assert_eq!(code, 0);
+        assert_eq!(json["data"]["was_noop"], true, "reset;reset 应幂等: {json}");
+        assert_eq!(json["data"]["reset_to"], "translating");
+        assert_eq!(
+            json["data"]["cleanup"]["skip"], true,
+            "noop 的 cleanup 应给 skip 信号（编排层幂等）: {json}"
+        );
+
+        // done 终态：不带 --force 应报错。
+        inject_module("done");
+        let (code, json) = run(&["state", "reset", "--module", "a"]);
+        assert_eq!(code, 1, "done 无 --force reset 应报错: {json}");
+        assert_eq!(json["status"], "error");
+
+        // done + --force：回退到 translating。
+        let (code, json) = run(&["state", "reset", "--module", "a", "--force"]);
+        assert_eq!(code, 0, "done + --force reset 应成功: {json}");
+        assert_eq!(json["data"]["reset_from"], "done");
+        assert_eq!(json["data"]["reset_to"], "translating");
+    });
+}
+
+#[test]
 fn smoke_state_record_subagent_call() {
     let tmp = tempfile::tempdir().unwrap();
     with_cwd(tmp.path(), || {
@@ -2370,7 +2417,7 @@ fn e2e_stats_quality_on_populated_project() {
         // populate 后全是 pending，无编译/测试数据 → degrade_rate=0，final_score 全 None
         assert_eq!(data["degrade_rate"], 0.0, "全 pending → 无降级: {json}");
         let modules = data["modules"].as_array().unwrap();
-        assert!(modules.len() >= 1, "至少 1 个模块: {json}");
+        assert!(!modules.is_empty(), "至少 1 个模块: {json}");
         for m in modules {
             assert_eq!(m["status"], "pending", "populate 后应为 pending: {m}");
             assert!(

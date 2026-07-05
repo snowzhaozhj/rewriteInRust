@@ -34,6 +34,24 @@ pub struct MigrationStateMachine {
     persistence_config: PersistenceConfig,
 }
 
+/// [`reset_module`](MigrationStateMachine::reset_module) 的结果——描述这次幂等回退把模块从
+/// 什么状态回退到什么状态，以及是否为空操作（已处于干净重译入口，重复 reset 无副作用）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResetOutcome {
+    /// 归一后的组代表 module key（入参传非代表成员时为其所属组代表）。
+    pub module: String,
+    /// 回退前的模块状态。
+    pub reset_from: ModuleStatus,
+    /// 回退后的模块状态（`pending` 保持不变，其余均为 `translating`）。
+    pub reset_to: ModuleStatus,
+    /// 是否为幂等空操作（模块已处于干净重译入口，本次未改动任何字段、未追加审计）。
+    /// 为真时调用方可省略 save。
+    pub was_noop: bool,
+    /// 模块的源文件作用域（NodeId）：composite 组 → `member_files`；单文件 → `[module]`。
+    /// CLI 层据此构造产物清理指令（CLI 不猜 rust_root 路径删 `.rs`，见 MDR-015）。
+    pub member_files: Vec<String>,
+}
+
 impl MigrationStateMachine {
     /// 从文件加载状态。
     ///
@@ -291,39 +309,8 @@ impl MigrationStateMachine {
         reason: Option<&str>,
         force: bool,
     ) -> Result<()> {
-        // 归一 module key：调用方通常传组代表 key，但 run 阶段也可能对折叠组的非代表成员
-        // （如 `file:types.ts`）发 transition——反查其所属组代表后按组转换，避免硬失败破坏
-        // composite 组状态推进（与 `cmd_state_deps` 的归一逻辑对称）。
-        //
-        // 依赖不变量：`member_files` 是文件节点的**划分**（跨组互斥，每个文件至多属一个组，
-        // 见 populate-modules 落盘）。该不变量成立时 `find` 命中唯一，归一确定；若被破坏
-        // （同一文件出现在多组），`find` 取 HashMap 迭代序首个为非确定——debug 下断言钉住。
-        debug_assert!(
-            self.state_file.modules.contains_key(name)
-                || self
-                    .state_file
-                    .modules
-                    .values()
-                    .filter(|m| {
-                        m.member_files
-                            .as_ref()
-                            .is_some_and(|mf| mf.iter().any(|f| f == name))
-                    })
-                    .count()
-                    <= 1,
-            "member_files 跨组互斥不变量被破坏：{name} 同属多个组"
-        );
-        let canonical: String = if self.state_file.modules.contains_key(name) {
-            name.to_string()
-        } else if let Some((key, _)) = self.state_file.modules.iter().find(|(_, m)| {
-            m.member_files
-                .as_ref()
-                .is_some_and(|mf| mf.iter().any(|f| f == name))
-        }) {
-            key.clone()
-        } else {
-            return Err(MigrateError::Config(format!("模块不存在: {name}")));
-        };
+        // 归一 module key（组非代表成员 → 组代表，见 canonical_module_key）。
+        let canonical = self.canonical_module_key(name)?;
         let module = self
             .state_file
             .modules
@@ -398,6 +385,162 @@ impl MigrationStateMachine {
             });
         }
         Ok(())
+    }
+
+    /// 归一 module key：调用方通常传组代表 key，但 run/reset 阶段也可能对折叠组的非代表成员
+    /// （如 `file:types.ts`）发起操作——反查其所属组代表后按组处理，避免硬失败破坏 composite
+    /// 组状态推进（与 `cmd_state_deps` 的归一逻辑对称）。命中直接返回；查无则 `模块不存在`。
+    ///
+    /// 依赖不变量：`member_files` 是文件节点的**划分**（跨组互斥，每个文件至多属一个组，见
+    /// populate-modules 落盘）。该不变量成立时 `find` 命中唯一、归一确定；若被破坏（同一文件
+    /// 出现在多组），`find` 取 HashMap 迭代序首个为非确定——debug 下断言钉住。
+    fn canonical_module_key(&self, name: &str) -> Result<String> {
+        if self.state_file.modules.contains_key(name) {
+            return Ok(name.to_string());
+        }
+        // 反查非代表成员所属组。不变量破坏时（同一文件属多组）**release 也硬错**——
+        // 原仅 debug_assert 钉住、release 静默取 HashMap 迭代序首个（非确定），复用到破坏性的
+        // reset 会清空**错误模块**的进度字段（数据破坏，非仅状态偏差），故升级为运行时错误。
+        let matches: Vec<&String> = self
+            .state_file
+            .modules
+            .iter()
+            .filter(|(_, m)| {
+                m.member_files
+                    .as_ref()
+                    .is_some_and(|mf| mf.iter().any(|f| f == name))
+            })
+            .map(|(k, _)| k)
+            .collect();
+        match matches.as_slice() {
+            [] => Err(MigrateError::Config(format!("模块不存在: {name}"))),
+            [one] => Ok((*one).clone()),
+            _ => Err(MigrateError::Config(format!(
+                "member_files 跨组互斥不变量被破坏：{name} 同属多个组"
+            ))),
+        }
+    }
+
+    /// 幂等回退失败/中途模块到干净的重译入口（M4-ROB-01a：checkpoint 硬化 + 幂等重试）。
+    ///
+    /// 把模块状态回退到 `translating` 并清除全部「尝试进度」字段（`substatus` /
+    /// `phase_a_version` / `phase_a_audit_passed` / `test_pass_rate` / `coverage` /
+    /// `known_differences` / blocked 锚点），使断点续传路由（run.md § 断点续传路由）从
+    /// Phase A 起点干净重跑。**保留** `attempts`（审计历史，追加一条 `reset` 记录）、`tier`、
+    /// `member_files` / `composite_kind` / `decomposition_*` / `danger`（结构性冻结字段）——
+    /// 回退是「重试」而非「重新拆解」。
+    ///
+    /// **幂等**：模块已处于干净重译入口（`translating`/`pending` 且全部进度字段为空）时为
+    /// 空操作（`was_noop=true`），**不追加审计记录**——保证 `reset;reset` 与 `reset` 状态一致
+    /// （调用方可据 `was_noop` 省略 save）。
+    ///
+    /// **终态 / 锚点 / 决策点守护**：`done`（唯一真终态）、`blocked`（依赖锚点）、`paused`
+    /// （自动重试耗尽待人类抉择）、`degrade_*`（人类降级决策）须 `force=true` 才可回退，否则报错
+    /// ——防止误清断点续传锚点 / 静默重迁已完成模块 / 绕过降级抉择。**项目级**：`graduate`
+    /// （毕业终态）下一律拒绝（含 `--force`），避免制造「项目终态 + 非终态模块」矛盾。
+    ///
+    /// **产物清理不在此**：CLI 不写 `rust_root` 下的 `.rs`、也不猜路径删（见 MDR-015）；本方法只做
+    /// 确定性的状态回退，`rust_root` 部分产物的清理由 CLI 层据 member 作用域输出指令、编排器执行。
+    /// module key 归一同 [`transition_module`](Self::transition_module)。
+    pub fn reset_module(&mut self, name: &str, force: bool) -> Result<ResetOutcome> {
+        // 项目级守护（先于 --force，force 不可绕过）：`graduate`（毕业终态）下把 done 模块回退成
+        // 非终态会制造「项目终态 + 非终态模块」矛盾，且状态机无 `graduate → sprint_loop` 回退路径
+        // （难以恢复）。拒绝——如需重迁已毕业项目的模块，须先重开迁移。
+        if self.state_file.state == ProjectState::Graduate {
+            return Err(MigrateError::Config(
+                "项目已毕业（graduate），reset 会制造「项目终态 + 非终态模块」矛盾且无合法回退路径；\
+                 如需重迁请先重开迁移"
+                    .to_string(),
+            ));
+        }
+        let canonical = self.canonical_module_key(name)?;
+        let module = self
+            .state_file
+            .modules
+            .get_mut(&canonical)
+            .expect("canonical 已校验存在");
+        let from = module.status;
+        // 源作用域（清理指令用）：composite → member_files；单文件 → [canonical]。
+        let member_files = module
+            .member_files
+            .clone()
+            .unwrap_or_else(|| vec![canonical.clone()]);
+
+        // 终态 / 锚点 / 决策点守护：done / blocked / paused / degrade_* 须 --force。
+        if !force {
+            let guard = match from {
+                ModuleStatus::Done => Some("done 是终态，重迁已完成模块须 --force（人类确认）"),
+                ModuleStatus::Blocked => {
+                    Some("模块阻塞中（等依赖），reset 会清除阻塞锚点，须 --force")
+                }
+                // paused = 自动重试耗尽、待人类在「重试 vs 降级」间抉择的决策点（决策地位同
+                // degrade_*）。裸 reset 会静默塞回重试循环、绕过该抉择（ROB-01b watchdog 程序化
+                // 调 reset 时尤甚），故须 --force 显式确认「就是要重试」。
+                ModuleStatus::Paused => {
+                    Some("模块暂停中（自动重试耗尽待人类抉择），reset 会绕过降级决策点，须 --force")
+                }
+                s if s.is_degraded() => Some("降级恢复是人类决策（见设计 § Step 0.3），须 --force"),
+                _ => None,
+            };
+            if let Some(msg) = guard {
+                return Err(MigrateError::Config(format!(
+                    "{from} 模块 reset 需 --force：{msg}"
+                )));
+            }
+        }
+
+        // 幂等判定：已处于干净重译入口 → 空操作，不改任何字段、不追加审计。
+        let already_clean = matches!(from, ModuleStatus::Translating | ModuleStatus::Pending)
+            && module.substatus.is_none()
+            && module.phase_a_version.is_none()
+            && module.phase_a_audit_passed.is_none()
+            && module.test_pass_rate.is_none()
+            && module.coverage.is_none()
+            && module.known_differences == 0
+            && module.blocked_by.is_none()
+            && module.pre_blocked_status.is_none();
+        if already_clean {
+            return Ok(ResetOutcome {
+                module: canonical,
+                reset_from: from,
+                reset_to: from,
+                was_noop: true,
+                member_files,
+            });
+        }
+
+        // 回退：清全部进度字段，status → translating。
+        // `pending` 保持 `pending`（尚未起步、无产物，无需前移到 translating）。
+        let to = if from == ModuleStatus::Pending {
+            ModuleStatus::Pending
+        } else {
+            ModuleStatus::Translating
+        };
+        module.status = to;
+        module.substatus = None;
+        module.phase_a_version = None;
+        module.phase_a_audit_passed = None;
+        module.test_pass_rate = None;
+        module.coverage = None;
+        module.known_differences = 0;
+        module.blocked_by = None;
+        module.pre_blocked_status = None;
+
+        // 审计：append reset 记录（保留既有 attempts 历史）。
+        module.attempts.push(AttemptRecord {
+            timestamp: Timestamp::new(chrono::Utc::now().to_rfc3339()),
+            result: format!("reset:{from}→{to}"),
+            retry_count: 0,
+            checkpoint: None,
+        });
+
+        Ok(ResetOutcome {
+            module: canonical,
+            reset_from: from,
+            reset_to: to,
+            was_noop: false,
+            member_files,
+        })
     }
 
     /// 追加一条 SubAgent 调用记录到顶层 `subagent_calls` 数组（append-only，不去重）。
@@ -1366,6 +1509,324 @@ mod tests {
                 "{st} 不带 force 恢复应报 Config 错误"
             );
         }
+    }
+
+    // === M4-ROB-01a：reset_module（幂等回退失败/中途模块）===
+
+    /// 辅助：构造一个「翻译中途、带各类进度字段」的模块（模拟失败/中断现场）。
+    fn dirty_module(status: ModuleStatus) -> ModuleState {
+        let mut m = module_with_status(status);
+        m.substatus = Some("phase_a_in_progress".to_string());
+        m.phase_a_version = Some("hash-abc".to_string());
+        m.phase_a_audit_passed = Some(true);
+        m.test_pass_rate = Some("0.5".to_string());
+        m.coverage = Some(42);
+        m.known_differences = 3;
+        m.attempts.push(AttemptRecord {
+            timestamp: Timestamp::new("2026-07-05T00:00:00Z".to_string()),
+            result: "编译失败".to_string(),
+            retry_count: 1,
+            checkpoint: None,
+        });
+        m
+    }
+
+    #[test]
+    fn test_reset_module_rolls_back_progress_fields() {
+        // 中途失败模块 reset → translating + 全部进度字段清空，attempts 保留并追加 reset 记录，
+        // 结构冻结字段（tier）不动。
+        let mut m = new_machine();
+        let mut dirty = dirty_module(ModuleStatus::CompileFixing);
+        dirty.tier = Some(crate::types::state::ModuleTier::Standard);
+        m.update_module("a", dirty);
+
+        let out = m.reset_module("a", false).expect("非终态 reset 应成功");
+        assert_eq!(out.reset_from, ModuleStatus::CompileFixing);
+        assert_eq!(out.reset_to, ModuleStatus::Translating);
+        assert!(!out.was_noop);
+        assert_eq!(out.module, "a");
+        assert_eq!(out.member_files, vec!["a".to_string()]); // 单文件 → [module]
+
+        let md = &m.state_file().modules["a"];
+        assert_eq!(md.status, ModuleStatus::Translating);
+        assert!(md.substatus.is_none());
+        assert!(md.phase_a_version.is_none());
+        assert!(md.phase_a_audit_passed.is_none());
+        assert!(md.test_pass_rate.is_none());
+        assert!(md.coverage.is_none());
+        assert_eq!(md.known_differences, 0);
+        // attempts：既有 1 条 + reset 审计 1 条 = 2；tier 冻结字段保留。
+        assert_eq!(md.attempts.len(), 2);
+        assert_eq!(md.attempts[1].result, "reset:compile_fixing→translating");
+        assert_eq!(md.tier, Some(crate::types::state::ModuleTier::Standard));
+    }
+
+    #[test]
+    fn test_reset_module_idempotent_noop() {
+        // 已在干净重译入口（translating/null）→ 空操作：was_noop=true、不追加审计、字段不变。
+        let mut m = new_machine();
+        m.update_module("a", module_with_status(ModuleStatus::Translating));
+
+        let out = m.reset_module("a", false).expect("干净入口 reset 应成功");
+        assert!(out.was_noop);
+        assert_eq!(out.reset_from, ModuleStatus::Translating);
+        assert_eq!(out.reset_to, ModuleStatus::Translating);
+        assert!(m.state_file().modules["a"].attempts.is_empty());
+
+        // reset;reset 收敛：先 reset 脏模块，再 reset 应为 noop，两次后状态与一次一致。
+        let mut m2 = new_machine();
+        m2.update_module("b", dirty_module(ModuleStatus::Testing));
+        let first = m2.reset_module("b", false).unwrap();
+        assert!(!first.was_noop);
+        let after_first = m2.state_file().modules["b"].clone();
+        let second = m2.reset_module("b", false).unwrap();
+        assert!(second.was_noop, "第二次 reset 应为幂等空操作");
+        assert_eq!(
+            &after_first,
+            &m2.state_file().modules["b"],
+            "reset;reset 状态应与 reset 一致（无多余审计）"
+        );
+    }
+
+    #[test]
+    fn test_reset_module_pending_stays_pending_noop() {
+        // pending 尚未起步、无产物：reset 为 noop，保持 pending（不前移 translating）。
+        let mut m = new_machine();
+        m.update_module("a", module_with_status(ModuleStatus::Pending));
+        let out = m.reset_module("a", false).expect("pending reset 应成功");
+        assert!(out.was_noop);
+        assert_eq!(out.reset_to, ModuleStatus::Pending);
+        assert_eq!(m.state_file().modules["a"].status, ModuleStatus::Pending);
+    }
+
+    #[test]
+    fn test_reset_module_guards_terminal_and_anchor_without_force() {
+        // done / blocked / paused / degrade_* 不带 --force 应报 Config 错误（守护终态/锚点/决策点）。
+        for st in [
+            ModuleStatus::Done,
+            ModuleStatus::Blocked,
+            ModuleStatus::Paused,
+            ModuleStatus::DegradeFfi,
+            ModuleStatus::DegradeManual,
+            ModuleStatus::DegradeSkip,
+        ] {
+            let mut m = new_machine();
+            m.update_module("a", module_with_status(st));
+            assert!(
+                matches!(m.reset_module("a", false), Err(MigrateError::Config(_))),
+                "{st} 不带 force reset 应报 Config 错误"
+            );
+            // 状态未被改动（守护生效）。
+            assert_eq!(m.state_file().modules["a"].status, st);
+        }
+    }
+
+    #[test]
+    fn test_reset_module_paused_force_recovers() {
+        // paused + --force：允许回退到 translating（人类显式确认「就是要重试」）。
+        let mut m = new_machine();
+        m.update_module("a", dirty_module(ModuleStatus::Paused));
+        let out = m.reset_module("a", true).expect("paused + force 应成功");
+        assert_eq!(out.reset_from, ModuleStatus::Paused);
+        assert_eq!(out.reset_to, ModuleStatus::Translating);
+        assert_eq!(
+            m.state_file().modules["a"].status,
+            ModuleStatus::Translating
+        );
+    }
+
+    #[test]
+    fn test_reset_module_rejected_in_graduate_even_with_force() {
+        // 项目级守护：graduate 下 reset 一律拒绝（含 --force），避免制造矛盾终态。
+        let mut m = new_machine();
+        // 推进到 graduate（init→…→graduate）。
+        for st in [
+            ProjectState::Profile,
+            ProjectState::Plan,
+            ProjectState::Scaffold,
+            ProjectState::SprintLoop,
+            ProjectState::Graduate,
+        ] {
+            m.transition(st).unwrap();
+        }
+        m.update_module("a", module_with_status(ModuleStatus::Done));
+        // 即使带 --force 也拒绝。
+        assert!(
+            matches!(m.reset_module("a", true), Err(MigrateError::Config(_))),
+            "graduate 下 reset --force 应报 Config 错误"
+        );
+        assert_eq!(m.state_file().modules["a"].status, ModuleStatus::Done);
+    }
+
+    #[test]
+    fn test_canonical_module_key_rejects_broken_partition() {
+        // member_files 跨组互斥不变量被破坏（同一文件属多组）→ release 也硬错（非静默取首个）。
+        let mut m = new_machine();
+        let mut g1 = module_with_status(ModuleStatus::Pending);
+        g1.member_files = Some(vec!["g1".to_string(), "file:shared.ts".to_string()]);
+        let mut g2 = module_with_status(ModuleStatus::Pending);
+        g2.member_files = Some(vec!["g2".to_string(), "file:shared.ts".to_string()]);
+        m.update_module("g1", g1);
+        m.update_module("g2", g2);
+        // 对同属两组的成员发 reset：应报「不变量被破坏」而非静默错归组。
+        let err = m.reset_module("file:shared.ts", false);
+        assert!(
+            matches!(&err, Err(MigrateError::Config(msg)) if msg.contains("不变量被破坏")),
+            "破坏的划分应硬错: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_reset_module_force_recovers_terminal_and_anchor() {
+        // 带 --force：done/blocked/degrade_* 均可回退到 translating（blocked 锚点一并清）。
+        let mut m = new_machine();
+        let mut blocked = module_with_status(ModuleStatus::Blocked);
+        blocked.blocked_by = Some(vec!["file:dep.ts".to_string()]);
+        blocked.pre_blocked_status = Some(ModuleStatus::Translating);
+        m.update_module("a", blocked);
+        let out = m
+            .reset_module("a", true)
+            .expect("force reset blocked 应成功");
+        assert_eq!(out.reset_to, ModuleStatus::Translating);
+        let md = &m.state_file().modules["a"];
+        assert_eq!(md.status, ModuleStatus::Translating);
+        assert!(md.blocked_by.is_none());
+        assert!(md.pre_blocked_status.is_none());
+
+        for st in [ModuleStatus::Done, ModuleStatus::DegradeSkip] {
+            let mut m2 = new_machine();
+            m2.update_module("b", module_with_status(st));
+            let o = m2.reset_module("b", true).expect("force reset 终态应成功");
+            assert_eq!(o.reset_from, st);
+            assert_eq!(o.reset_to, ModuleStatus::Translating);
+        }
+    }
+
+    #[test]
+    fn test_reset_module_normalizes_non_representative_member() {
+        // 传折叠组的非代表成员 key：归一到组代表，member_files 作用域回传全组成员。
+        let mut m = new_machine();
+        let mut grp = dirty_module(ModuleStatus::Testing);
+        grp.member_files = Some(vec!["grp".to_string(), "file:helper.ts".to_string()]);
+        m.update_module("grp", grp);
+
+        let out = m
+            .reset_module("file:helper.ts", false)
+            .expect("成员 reset 应归一成功");
+        assert_eq!(out.module, "grp");
+        assert_eq!(
+            out.member_files,
+            vec!["grp".to_string(), "file:helper.ts".to_string()]
+        );
+        assert_eq!(
+            m.state_file().modules["grp"].status,
+            ModuleStatus::Translating
+        );
+        assert!(!m.state_file().modules.contains_key("file:helper.ts"));
+    }
+
+    #[test]
+    fn test_reset_module_missing() {
+        let mut m = new_machine();
+        assert!(matches!(
+            m.reset_module("nonexistent", false),
+            Err(MigrateError::Config(_))
+        ));
+    }
+
+    #[test]
+    fn test_full_field_round_trip_preserves_all_fields() {
+        // M4-ROB-01a checkpoint 硬化：全字段填满 → save（tmp-fsync-rename 原子写）→ load →
+        // 逐字段相等。钉住「save/load 不丢字段」——防止未来新增字段漏进序列化/反序列化路径。
+        use crate::types::common::DangerCategory;
+        use crate::types::state::{CompositeKind, ModuleTier, SubAgentCall};
+
+        let module = ModuleState {
+            status: ModuleStatus::Reviewing,
+            substatus: Some("incomplete".to_string()),
+            sprint: Some(2),
+            attempts: vec![AttemptRecord {
+                timestamp: Timestamp::new("2026-07-05T01:00:00Z".to_string()),
+                result: "编译失败".to_string(),
+                retry_count: 2,
+                checkpoint: Some("cp-1".to_string()),
+            }],
+            test_pass_rate: Some("0.95".to_string()),
+            coverage: Some(88),
+            known_differences: 4,
+            tier: Some(ModuleTier::Full),
+            phase_a_version: Some("hash-a".to_string()),
+            phase_a_audit_passed: Some(true),
+            blocked_by: Some(vec!["file:dep.ts".to_string()]),
+            pre_blocked_status: Some(ModuleStatus::Testing),
+            member_files: Some(vec!["file:a.ts".to_string(), "file:b.ts".to_string()]),
+            composite_kind: Some(CompositeKind::CoupledBatch),
+            decomposition_snapshot: Some("snap-hash".to_string()),
+            decomposition_frozen: true,
+            danger: vec![DangerCategory::Concurrency, DangerCategory::Ffi],
+        };
+
+        let original = MigrationStateFile {
+            version: STATE_SCHEMA_VERSION.to_string(),
+            state: ProjectState::SprintLoop,
+            state_history: vec![StateHistoryEntry {
+                state: ProjectState::Init,
+                entered_at: Timestamp::new("2026-07-05T00:00:00Z".to_string()),
+                exited_at: Some(Timestamp::new("2026-07-05T00:10:00Z".to_string())),
+            }],
+            project: Some(ProjectInfo {
+                name: "p".to_string(),
+                source_language: SourceLang::TypeScript,
+                source_commit: Some("abc123".to_string()),
+                source_loc: 1234,
+                created_at: Timestamp::new("2026-07-05T00:00:00Z".to_string()),
+            }),
+            sprint: Some(SprintState {
+                current: 2,
+                history: vec![SprintEntry {
+                    id: 1,
+                    started_at: Timestamp::new("2026-07-05T00:00:00Z".to_string()),
+                    completed_at: Some(Timestamp::new("2026-07-05T00:30:00Z".to_string())),
+                    target_modules: vec!["file:a.ts".to_string()],
+                    completed_modules: vec!["file:a.ts".to_string()],
+                    notes: Some("done".to_string()),
+                    porting_md_version: Some("v2".to_string()),
+                }],
+            }),
+            modules: std::collections::HashMap::from([("grp".to_string(), module)]),
+            config_ref: Some(".rustmigrate.toml".to_string()),
+            subagent_calls: vec![SubAgentCall {
+                step_index: 6,
+                subagent_name: "translator".to_string(),
+                started_at: Timestamp::new("2026-07-05T00:05:00Z".to_string()),
+                ended_at: Some(Timestamp::new("2026-07-05T00:06:00Z".to_string())),
+                status: "success".to_string(),
+                error_message: Some("none".to_string()),
+            }],
+            metadata: Some(MigrationMetadata {
+                graph_build_completed: true,
+                graph_build_completed_at: Some(Timestamp::new("2026-07-05T00:02:00Z".to_string())),
+                last_error: Some("transient".to_string()),
+                lock_token: Some("tok".to_string()),
+                version: 7,
+                last_modified_by: Some("me".to_string()),
+            }),
+        };
+
+        let machine = MigrationStateMachine {
+            state_file: original.clone(),
+            recovered_from_backup: false,
+            persistence_config: PersistenceConfig::default(),
+        };
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
+        let path = dir.path().join("migration-state.json");
+        machine.save(&path).expect("save 应成功");
+        let loaded = MigrationStateMachine::load(&path).expect("load 应成功");
+        assert_eq!(
+            loaded.state_file(),
+            &original,
+            "save→load 应逐字段还原，无字段丢失（checkpoint 硬化）"
+        );
     }
 
     /// VER-05：load 对含非法 timestamp 的合法 JSON 应加载失败（自定义 Deserialize 拒非法值 → Json 错误）。
