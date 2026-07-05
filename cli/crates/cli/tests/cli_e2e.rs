@@ -745,6 +745,68 @@ fn smoke_state_recover() {
 }
 
 #[test]
+fn smoke_state_resume() {
+    // M4-ROB-01c：state resume 输出额度耗尽/中断后的续跑断点计划（纯查询）。
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        // 注入混合态：done 终态 / 运行态 compile_fixing / paused 决策点 / pending 候选 / blocked。
+        let path = std::path::Path::new(".rust-migration").join("migration-state.json");
+        let mut state: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        state["modules"] = serde_json::json!({
+            "d":  { "status": "done" },
+            "run":{ "status": "compile_fixing" },
+            "pau":{ "status": "paused" },
+            "p":  { "status": "pending" },
+            "b":  { "status": "blocked" },
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+
+        let (code, json) = run(&["state", "resume"]);
+        assert_eq!(code, 0, "resume 应成功: {json}");
+        assert_eq!(json["status"], "ok");
+
+        // interrupted：仅运行态模块，且带 recover_command（幂等重入）。
+        let interrupted = json["data"]["interrupted"].as_array().unwrap();
+        assert_eq!(
+            interrupted.len(),
+            1,
+            "仅 compile_fixing 归 interrupted: {json}"
+        );
+        assert_eq!(interrupted[0]["module"], "run");
+        assert_eq!(interrupted[0]["status"], "compile_fixing");
+        assert_eq!(
+            interrupted[0]["recover_command"],
+            "state recover --module run --policy retry"
+        );
+
+        // paused 单列 awaiting_decision，不进 interrupted（续跑不复活）。
+        assert_eq!(json["data"]["awaiting_decision"][0], "pau");
+        // pending → next；blocked → blocked。
+        assert_eq!(json["data"]["next"][0], "p");
+        assert_eq!(json["data"]["blocked"][0], "b");
+
+        // done 终态不出现在任何可操作桶（不重跑）。
+        assert!(!interrupted.iter().any(|m| m["module"] == "d"));
+        assert!(!json["data"]["next"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m == "d"));
+
+        // progress 计数对账。
+        let p = &json["data"]["progress"];
+        assert_eq!(p["done"], 1);
+        assert_eq!(p["in_progress"], 1);
+        assert_eq!(p["awaiting_decision"], 1);
+        assert_eq!(p["pending"], 1);
+        assert_eq!(p["blocked"], 1);
+        assert_eq!(p["total"], 5);
+    });
+}
+
+#[test]
 fn smoke_state_record_subagent_call() {
     let tmp = tempfile::tempdir().unwrap();
     with_cwd(tmp.path(), || {

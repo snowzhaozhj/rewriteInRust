@@ -191,6 +191,8 @@
 
 > **Watchdog stall（stdout 静默卡死）** 与上述「返回超时/校验失败」正交：后台命令 stdout 静默超 `[orchestration].stall_timeout_secs`（默认 600s）判 stall，不能靠计数器兜（它根本没返回）。检测到后统一走 `state recover --policy <retry|skip>` 做幂等恢复——策略解析、检测方式、无依赖模块推进见 SKILL.md「Watchdog stall 检测与恢复」。
 
+> **额度耗尽优雅暂停 + 断点续跑（M4-ROB-01c）**：token 预算 / API 额度逼近上限（harness budget.remaining()）时，**当前原子步收尾后停止**（勿在写 `.rs`/改 state 半途中断——状态已逐步原子 checkpoint），commit + 更新台账做断点。续跑时先 `state resume` 拿断点计划：对 `data.interrupted`（运行态被中断模块）逐个执行其 `recover_command`（`state recover --policy retry`）幂等重入；`data.next`（pending）用 `state deps <M>` 判就绪后推进；`data.awaiting_decision`（paused）不复活；**已完成/降级模块不重跑**。详见 SKILL.md「额度耗尽优雅暂停与续跑」。
+
 ### 10. 测试验证（verifier）
 `state transition --module <M> --to testing`。调 verifier（**前/后记 subagent_call**，step_index=10）生成测试并跑 `hooks/scripts/verify.sh`（nextest + clippy + 条件 loom/shuttle），产出测试结果 JSON（**L2**：通过率 ∈[0,1]）。**done 前置硬条件**：通过率 ≥ 预期、clippy 无 warning、`TODO(port)` 计数=0、无未确认的 `bug_replica`。任一不满足标 incomplete、停在 testing：用 `state transition --module <M> --substatus "incomplete" --reason "<未满足项摘要>"`（**不带 `--to testing`**——已在 testing，同态 `--to` 会被转换矩阵拒；省略 `--to` 时 CLI 走 substatus-only 路径合法，且 `--reason` 会把原因 append 进 `attempts`）。失败 ≤2 次重试，回滚保留 Phase B 产物。通过 → `state transition --module <M> --to reviewing`。
 

@@ -94,6 +94,8 @@ rustmigrate state get modules
 
 **失败不阻塞**：某模块翻译失败（重试耗尽）→ 按 run.md 失败恢复标 `paused`（headless 下自动 `degrade_skip`，见下文），继续处理同层其他模块。**worktree agent stall（stdout 静默卡死）** 同理不阻塞：编排器轮询 `BashOutput` 检测静默超 `stall_timeout_secs` → `state recover --module <M> --policy <retry|skip>`（见 SKILL.md「Watchdog stall 检测与恢复」）→ `skip` 时置 `paused` 并用 `state deps` 取同层无依赖模块继续，卡死的 worktree 不拖住整层。
 
+**额度逼近上限（budget.remaining()）时优雅暂停**：不在一层并行翻译半途硬停——让**当前正在合并/验证的原子步收尾**（已合并的 worktree 状态已 checkpoint），再 commit + 台账。续跑时 `state resume` 拿断点计划：`interrupted`（含中断的整组验证/compile_fixing 模块）逐个 `state recover --policy retry` 幂等重入，`next` 层继续派发，已 done 模块不重跑（见 SKILL.md「额度耗尽优雅暂停与续跑」）。
+
 #### 2c. 合并（git merge）
 
 编排器在主分支上逐个合并 worktree 分支：
