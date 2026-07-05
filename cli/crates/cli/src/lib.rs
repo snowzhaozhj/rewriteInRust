@@ -357,6 +357,18 @@ pub enum StateCommands {
         #[arg(long)]
         reason: Option<String>,
     },
+    /// 额度耗尽/中断后的**续跑断点计划**（M4-ROB-01c：优雅暂停 + 断点续跑）。
+    ///
+    /// 纯查询、无副作用、不加载 graph——读 `migration-state.json`（已由 ROB-01a 逐步原子
+    /// checkpoint）把模块按状态归桶：运行态（translating/compile_fixing/testing/reviewing）→
+    /// `interrupted`（各带 `recover_command`，编排器逐个跑 `state recover --policy retry` 幂等
+    /// 重入）；`paused` → `awaiting_decision`（待人类/降级决策，**不复活**）；`pending` →
+    /// `next`（用 `state deps <M>` 判就绪后推进）；`blocked` → `blocked`；终态（done/degrade_*）
+    /// **不重跑**，仅计入 `progress`。
+    ///
+    /// 额度**检测**归编排器/harness（CLI 观测不到 token 预算）；本命令只据已 checkpoint 的 state
+    /// 产出计划。实际重入的状态变更复用 `state recover`（不重复实现）。见 MDR-017。
+    Resume,
 }
 
 /// `state recover --policy` 的 CLI 取值（映射到核心 [`RecoverPolicy`]）。
@@ -581,6 +593,7 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
                     reason.as_deref(),
                 ),
             ),
+            StateCommands::Resume => emit(writer, cmd_state_resume()),
         },
         Commands::Stats { action } => match action {
             StatsCommands::Loc { source, rust } => {
@@ -2019,6 +2032,58 @@ fn cmd_state_recover(module: &str, policy: RecoverPolicy, reason: Option<&str>) 
             "recover_to": outcome.to.to_string(),
             "was_noop": outcome.was_noop,
             "recovery": recovery,
+        }),
+        warnings,
+    ))
+}
+
+/// `state resume`：额度耗尽/中断后的续跑断点计划（M4-ROB-01c）。
+///
+/// 委派 [`MigrationStateMachine::resume_plan`] 做纯查询分类，输出断点位置 + 逐模块恢复命令 +
+/// 下一步指引。**不 mutation**——interrupted 模块的实际重入由编排器逐个执行输出的
+/// `recover_command`（`state recover --policy retry`）完成；terminal 模块不重跑；`awaiting_decision`
+/// 待人类/降级决策不复活。见 MDR-017。
+fn cmd_state_resume() -> CmdResult {
+    let path = state_path();
+    let (machine, warnings) = load_state_with_warnings(&path)?;
+    let plan = machine.resume_plan();
+    let progress = plan.progress();
+
+    // interrupted：每项附幂等重入命令（编排器逐个执行保证断点续跑不腐蚀）。
+    let interrupted: Vec<serde_json::Value> = plan
+        .interrupted
+        .iter()
+        .map(|m| {
+            json!({
+                "module": m.module,
+                "status": m.status.to_string(),
+                "member_files": m.member_files,
+                "recover_command": format!("state recover --module {} --policy retry", m.module),
+            })
+        })
+        .collect();
+
+    Ok((
+        json!({
+            "resume_point": {
+                "sprint": plan.sprint,
+                "interrupted": plan.interrupted.iter().map(|m| &m.module).collect::<Vec<_>>(),
+            },
+            "progress": {
+                "done": progress.done,
+                "degraded": progress.degraded,
+                "in_progress": progress.in_progress,
+                "pending": progress.pending,
+                "blocked": progress.blocked,
+                "awaiting_decision": progress.awaiting_decision,
+                "total": progress.total,
+            },
+            "interrupted": interrupted,
+            "awaiting_decision": plan.awaiting_decision,
+            "next": plan.next,
+            "blocked": plan.blocked,
+            "advice": "对 interrupted 逐个执行 recover_command 保证幂等重入；已完成/降级模块不重跑；\
+                       next 模块用 `state deps <M>` 判依赖就绪后推进；awaiting_decision（paused）待人类/降级决策，续跑不复活",
         }),
         warnings,
     ))
