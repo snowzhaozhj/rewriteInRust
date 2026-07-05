@@ -35,9 +35,15 @@ status → `translating`，清全部「尝试进度」字段（`substatus` / `ph
 
 `already_clean`（status ∈ {`translating`,`pending`} 且全部进度字段为空）时直接返回 `was_noop=true`，**不改任何字段、不追加审计**——保证 `reset;reset` 与 `reset` 状态严格一致（若 no-op 也 append 审计，二次调用会多一条记录，破坏幂等）。CLI 据 `was_noop` **免落盘**（避免多余 `.backup`/写）。
 
-### 决策 4：终态 / 锚点守护须 `--force`
+### 决策 4：终态 / 锚点 / 决策点守护须 `--force`；`graduate` 项目态一律拒绝
 
-`done`（唯一真终态）/ `blocked`（依赖锚点）/ `degrade_*`（降级须人类确认）不带 `--force` → `MigrateError::Config` 报错、状态不动。防止误清断点续传锚点 / 静默重迁已完成模块。与 `transition_module` 的 `degrade_* → translating 须 --force` 立场一致。
+**模块级守护**（`!force` 时报 `MigrateError::Config`、状态不动）：
+- `done`（唯一真终态）——防静默重迁已完成模块；
+- `blocked`（依赖锚点）——防误清断点续传锚点；
+- `paused`（**自动重试耗尽、待人类在「重试 vs 降级」间抉择的决策点**）——决策地位同 `degrade_*`（`run.md` 断点路由对 paused 亦要求先 `--degrade` 确认）。裸 reset 会把它静默塞回重试循环、绕过抉择（ROB-01b watchdog 程序化调 reset 时尤甚），故须 `--force` 显式确认「就是要重试」。**paused 纳入守护是 4 视角审查共识**（专项定 HIGH：CLI 未把 paused 挡在门外与本决策自述矛盾）；
+- `degrade_*`（降级须人类确认）——与 `transition_module` 的 `degrade_* → translating 须 --force` 立场一致。
+
+**项目级守护**（含 `--force` 一律拒绝）：项目状态 `graduate`（毕业终态）下 reset 会制造「项目终态 + 非终态模块」矛盾，且状态机无 `graduate → sprint_loop` 回退路径、`validate_state` 对 Graduate 校验仍是 TODO——落盘后难恢复。故 `graduate` 下直接报错（异构审查 important，Claude 初版漏掉）。如需重迁已毕业项目的模块，须先重开迁移。
 
 ### 决策 5：checkpoint 硬化验证 = 全字段 round-trip 测试
 
@@ -46,12 +52,19 @@ status → `translating`，清全部「尝试进度」字段（`substatus` / `ph
 ## 影响
 
 - **新增**：core `MigrationStateMachine::reset_module` + `ResetOutcome`（导出）；`validate` 无关。7 reset 单测 + 1 全字段 round-trip 单测；`state reset` CLI 命令 + `cmd_state_reset`（1 cli_e2e：回退/幂等/done 守护/force 恢复/cleanup 作用域）。
-- **重构**：`transition_module` 的组代表归一抽出为私有 `canonical_module_key`（行为不变，reset 复用）。
+- **重构**：`transition_module` 的组代表归一抽出为私有 `canonical_module_key`（reset 复用）；顺带把「`member_files` 跨组互斥不变量破坏」从仅 `debug_assert`（release 静默取迭代序首个）**升级为 release 运行时硬错**——复用到破坏性 reset 后误归组会清空**错误模块**进度字段（数据破坏），故必须硬错（专项审查 MEDIUM）。
 - **改**：SKILL.md 新增「失败/中途模块回滚：`state reset`」单点约定；run.md 断点路由 `done` 行 + 单文件 Phase A 失败回滚改引用 `state reset`（paused/保留状态的回滚非 reset 语义，不动）。
 - **不改 schema**：`ModuleState` 无新字段（产物清单归编排器，见决策 1）。
+
+### 审查加固（4 视角审查后落实）
+
+- **`was_noop` 时 `cleanup` 给 `skip:true` 信号**（专项 MEDIUM）：noop reset 无产物需清理，但若响应仍原样输出删除指令，编排器（ROB-01b/c 程序化按 `cleanup` 行事）会对一次无副作用的 noop 仍触发删 `.rs` + 重跑——幂等在状态层成立却在**编排副作用层**被打破。故 noop 时 `cleanup={skip:true}`，把幂等延伸到编排层。
+- **`was_noop` + `recovered_from_backup` 自愈**（异构/专项 nit）：noop 免落盘，但若本次因主文件损坏从 `.backup` 恢复，即使 noop 也 `save` 一次自愈损坏主文件（recovered 时 `save` 不备份，不会用恢复态覆盖有效 backup）。
+- **`attempts` 语义分歧**（主审 nit，有意）：`state reset` **保留** attempts 并追加 `reset` 审计；而 `degrade_* + --force`（走 `transition_module`）**清除** attempts。两者对同类「回退到 translating」处理不同——reset 是「保留失败史供诊断」，degrade 恢复是「人类已决策的干净重启」。有意分歧，此处点明。
 
 ## 后续 TODO（记账，非阻塞）
 
 1. **ROB-01b（watchdog stall 检测 + 恢复）**：将复用 `state reset` 做失败模块回退——识别 agent 静默超时 → `reset` → 跳过/重试策略。
 2. **ROB-01c（额度耗尽优雅暂停 + 续跑）**：断点恢复时对进行中模块调 `reset` 保证幂等重入。
 3. **产物清理若未来需 CLI 强一致**：真实项目若暴露「编排器漏删部分 `.rs`」的实证腐蚀，再评估决策 1 的产出物清单方案（当前 YAGNI）。
+4. **CAS 版本全面接入所有写命令**（异构审查提出，**pre-existing 架构现状、非本 PR 引入**）：`metadata.version` 目前**仅** `update_with_cas` 递增，`transition` / `record-subagent-call` / `advance-sprint` / `reset` 均不递增——CAS 是 M2「单写者串行」假设下的预留（`06 § 610`），只在 `state update` 命令间生效。reset 与既有 `transition` 行为一致地不参与 CAS，非 reset 独有不一致。未来若并发写全面启用，所有状态写命令应统一递增 `version`（含 reset）——届时一并接入。

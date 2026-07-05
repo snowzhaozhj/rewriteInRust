@@ -655,11 +655,15 @@ fn smoke_state_reset() {
             .unwrap()
             .contains("--retry"));
 
-        // 二次 reset：幂等空操作（已在干净入口 translating/null）。
+        // 二次 reset：幂等空操作（已在干净入口 translating/null），cleanup 给 skip 信号。
         let (code, json) = run(&["state", "reset", "--module", "a"]);
         assert_eq!(code, 0);
         assert_eq!(json["data"]["was_noop"], true, "reset;reset 应幂等: {json}");
         assert_eq!(json["data"]["reset_to"], "translating");
+        assert_eq!(
+            json["data"]["cleanup"]["skip"], true,
+            "noop 的 cleanup 应给 skip 信号（编排层幂等）: {json}"
+        );
 
         // done 终态：不带 --force 应报错。
         inject_module("done");
@@ -2413,7 +2417,7 @@ fn e2e_stats_quality_on_populated_project() {
         // populate 后全是 pending，无编译/测试数据 → degrade_rate=0，final_score 全 None
         assert_eq!(data["degrade_rate"], 0.0, "全 pending → 无降级: {json}");
         let modules = data["modules"].as_array().unwrap();
-        assert!(modules.len() >= 1, "至少 1 个模块: {json}");
+        assert!(!modules.is_empty(), "至少 1 个模块: {json}");
         for m in modules {
             assert_eq!(m["status"], "pending", "populate 后应为 pending: {m}");
             assert!(

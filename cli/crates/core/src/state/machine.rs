@@ -395,31 +395,29 @@ impl MigrationStateMachine {
     /// populate-modules 落盘）。该不变量成立时 `find` 命中唯一、归一确定；若被破坏（同一文件
     /// 出现在多组），`find` 取 HashMap 迭代序首个为非确定——debug 下断言钉住。
     fn canonical_module_key(&self, name: &str) -> Result<String> {
-        debug_assert!(
-            self.state_file.modules.contains_key(name)
-                || self
-                    .state_file
-                    .modules
-                    .values()
-                    .filter(|m| {
-                        m.member_files
-                            .as_ref()
-                            .is_some_and(|mf| mf.iter().any(|f| f == name))
-                    })
-                    .count()
-                    <= 1,
-            "member_files 跨组互斥不变量被破坏：{name} 同属多个组"
-        );
         if self.state_file.modules.contains_key(name) {
-            Ok(name.to_string())
-        } else if let Some((key, _)) = self.state_file.modules.iter().find(|(_, m)| {
-            m.member_files
-                .as_ref()
-                .is_some_and(|mf| mf.iter().any(|f| f == name))
-        }) {
-            Ok(key.clone())
-        } else {
-            Err(MigrateError::Config(format!("模块不存在: {name}")))
+            return Ok(name.to_string());
+        }
+        // 反查非代表成员所属组。不变量破坏时（同一文件属多组）**release 也硬错**——
+        // 原仅 debug_assert 钉住、release 静默取 HashMap 迭代序首个（非确定），复用到破坏性的
+        // reset 会清空**错误模块**的进度字段（数据破坏，非仅状态偏差），故升级为运行时错误。
+        let matches: Vec<&String> = self
+            .state_file
+            .modules
+            .iter()
+            .filter(|(_, m)| {
+                m.member_files
+                    .as_ref()
+                    .is_some_and(|mf| mf.iter().any(|f| f == name))
+            })
+            .map(|(k, _)| k)
+            .collect();
+        match matches.as_slice() {
+            [] => Err(MigrateError::Config(format!("模块不存在: {name}"))),
+            [one] => Ok((*one).clone()),
+            _ => Err(MigrateError::Config(format!(
+                "member_files 跨组互斥不变量被破坏：{name} 同属多个组"
+            ))),
         }
     }
 
@@ -436,13 +434,25 @@ impl MigrationStateMachine {
     /// 空操作（`was_noop=true`），**不追加审计记录**——保证 `reset;reset` 与 `reset` 状态一致
     /// （调用方可据 `was_noop` 省略 save）。
     ///
-    /// **终态 / 锚点守护**：`done`（唯一真终态）、`blocked`（依赖锚点）、`degrade_*`（人类降级
-    /// 决策）须 `force=true` 才可回退，否则报错——防止误清断点续传锚点 / 静默重迁已完成模块。
+    /// **终态 / 锚点 / 决策点守护**：`done`（唯一真终态）、`blocked`（依赖锚点）、`paused`
+    /// （自动重试耗尽待人类抉择）、`degrade_*`（人类降级决策）须 `force=true` 才可回退，否则报错
+    /// ——防止误清断点续传锚点 / 静默重迁已完成模块 / 绕过降级抉择。**项目级**：`graduate`
+    /// （毕业终态）下一律拒绝（含 `--force`），避免制造「项目终态 + 非终态模块」矛盾。
     ///
     /// **产物清理不在此**：CLI 不写 `rust_root` 下的 `.rs`、也不猜路径删（见 MDR-015）；本方法只做
     /// 确定性的状态回退，`rust_root` 部分产物的清理由 CLI 层据 member 作用域输出指令、编排器执行。
     /// module key 归一同 [`transition_module`](Self::transition_module)。
     pub fn reset_module(&mut self, name: &str, force: bool) -> Result<ResetOutcome> {
+        // 项目级守护（先于 --force，force 不可绕过）：`graduate`（毕业终态）下把 done 模块回退成
+        // 非终态会制造「项目终态 + 非终态模块」矛盾，且状态机无 `graduate → sprint_loop` 回退路径
+        // （难以恢复）。拒绝——如需重迁已毕业项目的模块，须先重开迁移。
+        if self.state_file.state == ProjectState::Graduate {
+            return Err(MigrateError::Config(
+                "项目已毕业（graduate），reset 会制造「项目终态 + 非终态模块」矛盾且无合法回退路径；\
+                 如需重迁请先重开迁移"
+                    .to_string(),
+            ));
+        }
         let canonical = self.canonical_module_key(name)?;
         let module = self
             .state_file
@@ -456,12 +466,18 @@ impl MigrationStateMachine {
             .clone()
             .unwrap_or_else(|| vec![canonical.clone()]);
 
-        // 终态 / 锚点守护：done / blocked / degrade_* 须 --force。
+        // 终态 / 锚点 / 决策点守护：done / blocked / paused / degrade_* 须 --force。
         if !force {
             let guard = match from {
                 ModuleStatus::Done => Some("done 是终态，重迁已完成模块须 --force（人类确认）"),
                 ModuleStatus::Blocked => {
                     Some("模块阻塞中（等依赖），reset 会清除阻塞锚点，须 --force")
+                }
+                // paused = 自动重试耗尽、待人类在「重试 vs 降级」间抉择的决策点（决策地位同
+                // degrade_*）。裸 reset 会静默塞回重试循环、绕过该抉择（ROB-01b watchdog 程序化
+                // 调 reset 时尤甚），故须 --force 显式确认「就是要重试」。
+                ModuleStatus::Paused => {
+                    Some("模块暂停中（自动重试耗尽待人类抉择），reset 会绕过降级决策点，须 --force")
                 }
                 s if s.is_degraded() => Some("降级恢复是人类决策（见设计 § Step 0.3），须 --force"),
                 _ => None,
@@ -1585,10 +1601,11 @@ mod tests {
 
     #[test]
     fn test_reset_module_guards_terminal_and_anchor_without_force() {
-        // done / blocked / degrade_* 不带 --force 应报 Config 错误（守护锚点/终态）。
+        // done / blocked / paused / degrade_* 不带 --force 应报 Config 错误（守护终态/锚点/决策点）。
         for st in [
             ModuleStatus::Done,
             ModuleStatus::Blocked,
+            ModuleStatus::Paused,
             ModuleStatus::DegradeFfi,
             ModuleStatus::DegradeManual,
             ModuleStatus::DegradeSkip,
@@ -1602,6 +1619,61 @@ mod tests {
             // 状态未被改动（守护生效）。
             assert_eq!(m.state_file().modules["a"].status, st);
         }
+    }
+
+    #[test]
+    fn test_reset_module_paused_force_recovers() {
+        // paused + --force：允许回退到 translating（人类显式确认「就是要重试」）。
+        let mut m = new_machine();
+        m.update_module("a", dirty_module(ModuleStatus::Paused));
+        let out = m.reset_module("a", true).expect("paused + force 应成功");
+        assert_eq!(out.reset_from, ModuleStatus::Paused);
+        assert_eq!(out.reset_to, ModuleStatus::Translating);
+        assert_eq!(
+            m.state_file().modules["a"].status,
+            ModuleStatus::Translating
+        );
+    }
+
+    #[test]
+    fn test_reset_module_rejected_in_graduate_even_with_force() {
+        // 项目级守护：graduate 下 reset 一律拒绝（含 --force），避免制造矛盾终态。
+        let mut m = new_machine();
+        // 推进到 graduate（init→…→graduate）。
+        for st in [
+            ProjectState::Profile,
+            ProjectState::Plan,
+            ProjectState::Scaffold,
+            ProjectState::SprintLoop,
+            ProjectState::Graduate,
+        ] {
+            m.transition(st).unwrap();
+        }
+        m.update_module("a", module_with_status(ModuleStatus::Done));
+        // 即使带 --force 也拒绝。
+        assert!(
+            matches!(m.reset_module("a", true), Err(MigrateError::Config(_))),
+            "graduate 下 reset --force 应报 Config 错误"
+        );
+        assert_eq!(m.state_file().modules["a"].status, ModuleStatus::Done);
+    }
+
+    #[test]
+    fn test_canonical_module_key_rejects_broken_partition() {
+        // member_files 跨组互斥不变量被破坏（同一文件属多组）→ release 也硬错（非静默取首个）。
+        let mut m = new_machine();
+        let mut g1 = module_with_status(ModuleStatus::Pending);
+        g1.member_files = Some(vec!["g1".to_string(), "file:shared.ts".to_string()]);
+        let mut g2 = module_with_status(ModuleStatus::Pending);
+        g2.member_files = Some(vec!["g2".to_string(), "file:shared.ts".to_string()]);
+        m.update_module("g1", g1);
+        m.update_module("g2", g2);
+        // 对同属两组的成员发 reset：应报「不变量被破坏」而非静默错归组。
+        let err = m.reset_module("file:shared.ts", false);
+        assert!(
+            matches!(&err, Err(MigrateError::Config(msg)) if msg.contains("不变量被破坏")),
+            "破坏的划分应硬错: {err:?}"
+        );
     }
 
     #[test]
