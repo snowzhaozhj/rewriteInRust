@@ -1997,12 +1997,17 @@ fn cmd_state_recover(module: &str, policy: RecoverPolicy, reason: Option<&str>) 
             }),
             RecoverPolicy::Skip => json!({
                 // skip：置 paused 决策点。下游依赖模块沿既有 blocked_by 机制标阻塞；
-                // 无依赖模块用 `state deps` 查询后继续推进（不阻塞）。
+                // 同层其他模块继续推进（不被卡死模块阻塞）。
                 "advice": format!(
                     "模块 {} 因 stall 跳过（→ paused）；headless 由编排自动 degrade_skip、交互态待人类抉择",
                     outcome.module
                 ),
-                "unblock_next": format!("state deps --module <M> 查无依赖模块继续推进；依赖 {} 的下游将标 blocked_by", outcome.module),
+                // 注：`state deps <MODULE>` 是位置参数（非 --module），查的是该模块自身依赖就绪；
+                // 编排器对同层其他模块逐个 `state deps` 判就绪后继续推进，本模块的下游标 blocked_by。
+                "unblock_next": format!(
+                    "同层其他模块用 `state deps <其他模块>` 判依赖就绪后继续推进（不被 {} 阻塞）；依赖 {} 的下游将标 blocked_by",
+                    outcome.module, outcome.module
+                ),
             }),
         }
     };
