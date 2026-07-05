@@ -63,5 +63,16 @@ argument-hint: "[analyze|run|workflow|review] [module]"
 - **守护**：`done`（终态）/ `blocked`（依赖锚点）/ `paused`（自动重试耗尽待人类抉择）/ `degrade_*`（降级须人类确认）须显式 `--force`，否则报错；项目 `graduate` 态下一律拒绝（含 `--force`）。
 - **产物清理归编排器**：CLI 不删 `rust_root` 下的 `.rs`（不猜路径）。**先看 `data.was_noop`**：`true`（`cleanup.skip=true`）→ 无产物需清理、直接 `run <M> --retry`；`false` → 据 `data.cleanup.member_files`（模块源作用域）删这些源文件对应的部分 `.rs` 产物，**删后回读核对目标 `.rs` 已不存在**（把「漏删」从静默腐蚀变可观测），再 `run <M> --retry`；`intermediate/attempts/*` 与审计产物始终保留。
 
+### Watchdog stall 检测与恢复：`state recover`（M4-ROB-01b）
+SubAgent/后台长命令可能 **stdout 静默卡死**（agent 假死、外部命令 hang）——这与「产出物校验失败」不同：没有返回、没有报错，只是不再产出。编排器负责**检测**（CLI 观测不到子进程 stdout），检测到后统一走 `state recover` 做确定性、幂等恢复：
+
+- **检测**：长命令用 `run_in_background` 派发（无人值守用主会话 background bash 驱动，勿让后台 Agent 跑长命令——静默超 600s 会被判失败），轮询 `BashOutput`；**stdout 静默超 `[orchestration].stall_timeout_secs`（默认 600s）** 判 stall。这是与 `subagent_timeout_secs`（单次调用**总**超时）正交的**静默**阈值——持续产出的长命令不算 stall。
+- **策略解析**：据 `[orchestration].stall_recovery_policy`（默认 `retry_then_skip`）+ 本模块已重试轮次（对齐 `max_retries_per_step`）解析出 `--policy`：未超重试上限 → `retry`；超出 / 策略为 `always_skip` → `skip`。
+- **恢复**：`rustmigrate state recover --module <M> --policy <retry|skip> --reason "stall: stdout 静默 <N>s"`：
+  - `retry` → 复用 `reset` 语义回退干净重译入口，据 `data.recovery.member_files` 删部分 `.rs`（同上「失败/中途模块回滚」，删后回读核对），再 `run <M> --retry`。
+  - `skip` → 置 `paused`（决策点，headless 由既有编排自动 `degrade_skip`）；据 `data.recovery.unblock_next` 用 `state deps` 查**无依赖模块继续推进**（不阻塞），依赖本模块的下游沿 `blocked_by` 机制自动阻塞。
+  - **幂等**：`data.was_noop=true`（`recovery.skip=true`）→ 已在目标恢复态、无副作用，不重复删+重跑（无人值守/断点续跑安全）。
+- **守护**：`done`/`blocked` 非 stall 态、`graduate` 项目态 → `recover` 报错（不误清终态/锚点）。
+
 ### 产出物根目录
 所有产出物在源项目下的 `.rust-migration/` 目录（`init` 创建）。关键文件：`migration-state.json`、`source-graph.db`、`porting/`（迁移规则）、`PARITY.md`、`AGENTS.md`、`test-fixtures/golden/`。写 `migration-state.json` 统一走 CLI（原子写：tmp→fsync→rename）。

@@ -680,6 +680,71 @@ fn smoke_state_reset() {
 }
 
 #[test]
+fn smoke_state_recover() {
+    // M4-ROB-01b：state recover 从 watchdog stall 幂等恢复（retry / skip / noop）。
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+
+        // retry：中途失败模块回退到 translating + cleanup 作用域（同 reset）。
+        inject_module("compile_fixing");
+        let (code, json) = run(&[
+            "state",
+            "recover",
+            "--module",
+            "a",
+            "--policy",
+            "retry",
+            "--reason",
+            "stall: stdout 静默 620s",
+        ]);
+        assert_eq!(code, 0, "retry 恢复应成功: {json}");
+        assert_eq!(json["data"]["policy"], "retry");
+        assert_eq!(json["data"]["recover_from"], "compile_fixing");
+        assert_eq!(json["data"]["recover_to"], "translating");
+        assert_eq!(json["data"]["was_noop"], false);
+        assert_eq!(json["data"]["recovery"]["member_files"][0], "a");
+        assert!(json["data"]["recovery"]["next"]
+            .as_str()
+            .unwrap()
+            .contains("--retry"));
+
+        // retry 二次：已在干净入口 → 幂等 noop，recovery 给 skip 信号。
+        let (code, json) = run(&["state", "recover", "--module", "a", "--policy", "retry"]);
+        assert_eq!(code, 0);
+        assert_eq!(
+            json["data"]["was_noop"], true,
+            "recover;recover 应幂等: {json}"
+        );
+        assert_eq!(json["data"]["recovery"]["skip"], true);
+
+        // skip：中途模块 → paused（决策点）+ advice。
+        inject_module("testing");
+        let (code, json) = run(&[
+            "state", "recover", "--module", "a", "--policy", "skip", "--reason", "stall",
+        ]);
+        assert_eq!(code, 0, "skip 恢复应成功: {json}");
+        assert_eq!(json["data"]["policy"], "skip");
+        assert_eq!(json["data"]["recover_to"], "paused");
+        assert!(json["data"]["recovery"]["advice"]
+            .as_str()
+            .unwrap()
+            .contains("paused"));
+
+        // skip 二次：已 paused → noop。
+        let (code, json) = run(&["state", "recover", "--module", "a", "--policy", "skip"]);
+        assert_eq!(code, 0);
+        assert_eq!(json["data"]["was_noop"], true);
+
+        // done：非 stall 态，两策略均拒绝。
+        inject_module("done");
+        let (code, json) = run(&["state", "recover", "--module", "a", "--policy", "retry"]);
+        assert_eq!(code, 1, "done recover 应报错: {json}");
+        assert_eq!(json["status"], "error");
+    });
+}
+
+#[test]
 fn smoke_state_record_subagent_call() {
     let tmp = tempfile::tempdir().unwrap();
     with_cwd(tmp.path(), || {

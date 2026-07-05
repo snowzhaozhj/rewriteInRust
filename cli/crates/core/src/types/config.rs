@@ -227,11 +227,30 @@ impl Default for TestingConfig {
     }
 }
 
+/// watchdog stall 恢复策略（M4-ROB-01b）。
+///
+/// 编排器检测到 agent 静默超时后据此 + 自身 retry-round 计数解析出本次 `state recover --policy`：
+/// - `RetryThenSkip`（默认）：未超 `max_retries_per_step` 时 `retry`，超出则 `skip`（→ 降级）。
+/// - `AlwaysRetry`：每次 stall 都 `retry`（依赖上层 `max_retries_per_step` 兜底防死循环）。
+/// - `AlwaysSkip`：每次 stall 直接 `skip`（并发/易卡模块激进降级）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum StallRecoveryPolicy {
+    /// 先重试（至 `max_retries_per_step`）后跳过。
+    #[default]
+    RetryThenSkip,
+    /// 每次 stall 都重试。
+    AlwaysRetry,
+    /// 每次 stall 直接跳过（降级）。
+    AlwaysSkip,
+}
+
 /// 编排配置。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OrchestrationConfig {
-    /// SubAgent 超时秒数。
+    /// SubAgent 超时秒数（单次调用**总**超时预算）。
     pub subagent_timeout_secs: u64,
     /// 每步最大重试次数。
     pub max_retries_per_step: u32,
@@ -239,6 +258,12 @@ pub struct OrchestrationConfig {
     pub lock_timeout_secs: u64,
     /// 重试退避间隔序列（秒）。
     pub retry_backoff_secs: Vec<u64>,
+    /// watchdog stall 阈值秒数（M4-ROB-01b）：后台命令 stdout **静默**超此值判 stall。
+    /// 区别于 `subagent_timeout_secs`（总调用超时）——一个 agent 可持续产出 20min 不算 stall，
+    /// 但静默超 `stall_timeout_secs` 即判卡死。编排器据此轮询 BashOutput（CLI 不观测 stdout）。
+    pub stall_timeout_secs: u64,
+    /// stall 恢复策略（M4-ROB-01b）：编排器据此解析 `state recover --policy`。
+    pub stall_recovery_policy: StallRecoveryPolicy,
 }
 
 impl Default for OrchestrationConfig {
@@ -248,6 +273,8 @@ impl Default for OrchestrationConfig {
             max_retries_per_step: 2,
             lock_timeout_secs: 300,
             retry_backoff_secs: vec![5, 15],
+            stall_timeout_secs: 600,
+            stall_recovery_policy: StallRecoveryPolicy::default(),
         }
     }
 }
@@ -406,5 +433,37 @@ mod tests {
             !py.contains(&"node_modules".to_string()),
             "Python 不应含 TS 的 node_modules"
         );
+    }
+
+    /// M4-ROB-01b：OrchestrationConfig stall 字段默认值 + serde round-trip。
+    #[test]
+    fn orchestration_stall_defaults_and_round_trip() {
+        let c = OrchestrationConfig::default();
+        assert_eq!(c.stall_timeout_secs, 600);
+        assert_eq!(c.stall_recovery_policy, StallRecoveryPolicy::RetryThenSkip);
+
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"stall_recovery_policy\":\"retry_then_skip\""));
+        let back: OrchestrationConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, c);
+    }
+
+    /// 旧 config（无 stall 字段）经 `#[serde(default)]` 补默认值，不反序列化失败。
+    #[test]
+    fn orchestration_old_config_backfills_stall_defaults() {
+        let old = r#"{"subagent_timeout_secs":300,"max_retries_per_step":3}"#;
+        let c: OrchestrationConfig = serde_json::from_str(old).unwrap();
+        assert_eq!(c.subagent_timeout_secs, 300);
+        assert_eq!(c.max_retries_per_step, 3);
+        assert_eq!(c.stall_timeout_secs, 600, "缺字段补默认");
+        assert_eq!(c.stall_recovery_policy, StallRecoveryPolicy::RetryThenSkip);
+    }
+
+    /// 策略枚举 snake_case 序列化稳定（编排器/CLI 依赖字符串标识）。
+    #[test]
+    fn stall_recovery_policy_snake_case() {
+        assert_eq!(StallRecoveryPolicy::AlwaysSkip.to_string(), "always_skip");
+        let p: StallRecoveryPolicy = serde_json::from_str("\"always_retry\"").unwrap();
+        assert_eq!(p, StallRecoveryPolicy::AlwaysRetry);
     }
 }
