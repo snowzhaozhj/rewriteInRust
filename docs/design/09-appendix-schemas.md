@@ -221,6 +221,8 @@ blocked → {原状态}（阻塞解除后恢复到进入 blocked 前的状态 pr
 degrade_* → translating（通过 /migrate run --module=X --force 恢复）
 ```
 
+> **引擎级异常操作绕过本矩阵**：`state reset`（M4-ROB-01a）与 `state recover`（M4-ROB-01b）是失败/stall 恢复的确定性回退，会产生本图不存在的边（如 `state recover --policy skip` 的 `translating → paused`），**刻意绕过 `can_transition_to` 矩阵**——它们是异常恢复路径而非正常编排转换。守护与语义见 [MDR-015](../decisions/015-reset-idempotent-retry-boundary.md) / [MDR-016](../decisions/016-watchdog-stall-recovery-boundary.md)。
+
 **到达 `done` 的前置条件**：除测试通过率 ≥ 预期、clippy 无 warning 外，该模块的 `TODO(port)` 计数须 = 0（由 verifier 在 [附录 B § /migrate run Step 5 TODO(port) 检查点](#附录-bmvp-skill-的-skillmd-骨架)保证）；此外，该模块所有 `bug_replica: true` 的 MDR 须已填充 `human_decision`（取值 `fix` 或 `accept_replica`），未填充则视为 incomplete。不满足则标记 incomplete，停留在 `reviewing`/`testing` 而非进入 `done`。
 
 **blocked 状态处理**：

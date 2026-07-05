@@ -596,14 +596,17 @@ impl MigrationStateMachine {
     ///   （`was_noop`）、进度清理、`member_files` 作用域。非 noop 时额外追加一条 `stall-recover:retry`
     ///   审计；noop 则整体 noop（保 `recover;recover == recover`）。
     /// - [`RecoverPolicy::Skip`]：**直接**置 `status → paused`（决策点，headless 由既有编排 prose
-    ///   自动 `degrade_skip`）。**绕过 `can_transition_to` 矩阵**——stall 可发生在 `translating`
-    ///   （Phase A），而 `translating → paused` 不在矩阵（见 `ModuleStatus::can_transition_to`），
-    ///   故仿 `reset_module` 破坏性直设。已是 `paused`/`degrade_*` → 幂等 noop。
+    ///   自动 `degrade_skip`）并清 `substatus`（活跃态瞬态标记，挂 paused 上语义不符；进度字段保留
+    ///   供降级分析）。**绕过 `can_transition_to` 矩阵**——stall 可发生在 `translating`（Phase A），
+    ///   而 `translating → paused` 不在矩阵（见 `ModuleStatus::can_transition_to`），故仿 `reset_module`
+    ///   破坏性直设。已是 `paused` → 幂等 noop。
     ///
-    /// **守护**（先于策略，force 不可绕过）：`graduate`（毕业终态，同 reset）/ `done`（唯一真终态，
-    /// 不会 stall）/ `blocked`（在等依赖、无运行中 agent，非 stall 态）一律拒绝——避免制造矛盾终态
-    /// 或误清阻塞锚点。**不做**下游 `blocked_by` 传播（沿用 workflow.md 既有机制，见 MDR-016）。
-    /// module key 归一同 [`transition_module`](Self::transition_module)。
+    /// **守护**（先于策略，无 `--force` 逃生口）：仅放行**可能 stall 的运行态**
+    /// （`translating`/`compile_fixing`/`testing`/`reviewing`）**+ stall 落点 `paused`**；`pending`
+    /// （未起步、无运行 agent）/ `done`（终态）/ `blocked`（等依赖、无运行 agent）/ `degrade_*`
+    /// （**人类降级决策，recover 不得撤销**——否则 retry 绕 `--force` 撤销降级）一律拒绝；项目
+    /// `graduate` 态拒绝（同 reset）。**不做**下游 `blocked_by` 传播（沿用 workflow.md 既有机制，
+    /// 见 MDR-016）。module key 归一同 [`transition_module`](Self::transition_module)。
     pub fn recover_module(
         &mut self,
         name: &str,
@@ -630,8 +633,21 @@ impl MigrationStateMachine {
             .clone()
             .unwrap_or_else(|| vec![canonical.clone()]);
 
-        // 终态 / 锚点守护：done（不会 stall）、blocked（等依赖、无运行 agent）非 stall 态，拒绝。
+        // 守护：recover 仅适用于「可能 stall 的运行态 + stall 落点 paused」。其余态无运行中
+        // agent（pending/blocked）或是人类决策终态语义（done/degrade_*）→ 拒绝。全枚举显式 match
+        // （未来新增状态编译器强制处理），无 `--force` 逃生口：recover 是程序化 stall 入口，误用暴露为错。
         match from {
+            // 放行：有运行中 agent 可能 stall 的活跃态 + stall 后重试耗尽的常见落点 paused。
+            ModuleStatus::Translating
+            | ModuleStatus::CompileFixing
+            | ModuleStatus::Testing
+            | ModuleStatus::Reviewing
+            | ModuleStatus::Paused => {}
+            ModuleStatus::Pending => {
+                return Err(MigrateError::Config(
+                    "pending 尚未起步、无运行中 agent，非 stall 态；stall 恢复不适用".to_string(),
+                ));
+            }
             ModuleStatus::Done => {
                 return Err(MigrateError::Config(
                     "done 是终态、不会 stall；如需重迁已完成模块用 state reset --force".to_string(),
@@ -643,7 +659,15 @@ impl MigrationStateMachine {
                         .to_string(),
                 ));
             }
-            _ => {}
+            // degrade_* 是人类降级决策终态语义——watchdog 程序化 recover **不得撤销**（否则
+            // `retry` 会 `degrade_* → translating` 绕过 `--force` 人类确认；`retry;skip` 更会把依赖侧
+            // 已视终态的模块变回非终态）。如确需恢复已降级模块，走 `state reset --force`（人类显式）。
+            ModuleStatus::DegradeFfi | ModuleStatus::DegradeManual | ModuleStatus::DegradeSkip => {
+                return Err(MigrateError::Config(
+                    "模块已降级（degrade_*，人类降级决策），recover 不撤销；如需恢复重译用 state reset --force"
+                        .to_string(),
+                ));
+            }
         }
 
         match policy {
@@ -664,8 +688,8 @@ impl MigrationStateMachine {
                 })
             }
             RecoverPolicy::Skip => {
-                // 幂等：已 paused / degrade_* → 已跳过/待决策，noop（不重复记录）。
-                if from == ModuleStatus::Paused || from.is_degraded() {
+                // 幂等：已 paused（唯一放行的非活跃态，degrade_* 已被守护拒绝）→ 已在决策点，noop。
+                if from == ModuleStatus::Paused {
                     return Ok(RecoverOutcome {
                         module: canonical,
                         policy,
@@ -675,8 +699,13 @@ impl MigrationStateMachine {
                         member_files,
                     });
                 }
-                // 直接置 paused（绕过转换矩阵，理由见方法级 doc）。
+                // 直接置 paused（绕过转换矩阵，理由见方法级 doc）。清 `substatus`——它是活跃态的
+                // 瞬态阶段标记（如 `phase_a_complete_awaiting_review`），挂到 paused 上语义不符；
+                // stall 原因由 attempts 的 `stall-recover:skip` 承载。**保留**其他进度字段
+                // （phase_a_version/test_pass_rate/coverage/known_differences）供后续降级分析读取
+                // ——skip≠reset（reset 是完全回退重译才清进度）。
                 module.status = ModuleStatus::Paused;
+                module.substatus = None;
                 self.push_recover_audit(&canonical, RecoverPolicy::Skip, reason);
                 Ok(RecoverOutcome {
                     module: canonical,
@@ -1962,6 +1991,14 @@ mod tests {
         assert!(!out.was_noop);
         let md = &m.state_file().modules["a"];
         assert_eq!(md.status, ModuleStatus::Paused);
+        // substatus（translating 瞬态标记）清空；进度字段保留供降级分析。
+        assert!(md.substatus.is_none(), "skip 应清 substatus（语义不符）");
+        assert_eq!(
+            md.phase_a_version,
+            Some("hash-abc".to_string()),
+            "进度字段保留"
+        );
+        assert_eq!(md.coverage, Some(42), "进度字段保留");
         assert_eq!(
             md.attempts.last().unwrap().result,
             "stall-recover:skip reason=stall"
@@ -1999,20 +2036,37 @@ mod tests {
     }
 
     #[test]
-    fn test_recover_skip_already_degraded_noop() {
-        // 已 degrade_* → skip 为 noop（已跳过）。
-        let mut m = new_machine();
-        m.update_module("a", module_with_status(ModuleStatus::DegradeSkip));
-        let out = m.recover_module("a", RecoverPolicy::Skip, None).unwrap();
-        assert!(out.was_noop);
-        assert_eq!(out.from, ModuleStatus::DegradeSkip);
-        assert_eq!(out.to, ModuleStatus::DegradeSkip);
+    fn test_recover_rejects_degrade_no_force_bypass() {
+        // degrade_* 是人类降级决策——recover 两策略均拒绝（防 retry 绕 --force 撤销降级、
+        // 防 retry;skip 把依赖侧已视终态的模块变回非终态）。如需恢复走 state reset --force。
+        for st in [
+            ModuleStatus::DegradeSkip,
+            ModuleStatus::DegradeFfi,
+            ModuleStatus::DegradeManual,
+        ] {
+            for policy in [RecoverPolicy::Retry, RecoverPolicy::Skip] {
+                let mut m = new_machine();
+                m.update_module("a", module_with_status(st));
+                assert!(
+                    matches!(
+                        m.recover_module("a", policy, None),
+                        Err(MigrateError::Config(_))
+                    ),
+                    "{st} + {policy:?} recover 应拒绝（不撤销人类降级）"
+                );
+                assert_eq!(m.state_file().modules["a"].status, st, "守护应保状态不变");
+            }
+        }
     }
 
     #[test]
-    fn test_recover_guards_done_and_blocked() {
-        // done（不会 stall）/ blocked（等依赖、无运行 agent）非 stall 态 → 两策略均拒绝。
-        for st in [ModuleStatus::Done, ModuleStatus::Blocked] {
+    fn test_recover_guards_non_stall_states() {
+        // pending（未起步）/ done（终态）/ blocked（等依赖）非 stall 态 → 两策略均拒绝、状态不变。
+        for st in [
+            ModuleStatus::Pending,
+            ModuleStatus::Done,
+            ModuleStatus::Blocked,
+        ] {
             for policy in [RecoverPolicy::Retry, RecoverPolicy::Skip] {
                 let mut m = new_machine();
                 m.update_module("a", module_with_status(st));
