@@ -68,9 +68,11 @@ pub fn parse_template_rule_version(md_content: &str) -> Result<BTreeMap<String, 
             "porting-template.md 缺少 YAML frontmatter（首行须为 `---`，闭合行 `---`）".to_owned(),
         )
     })?;
+    // 仅匹配**顶层**字段（行首无缩进）；缩进的 nested `rule_version:`（如 `meta:` 下）不算
+    // 模板声明的规则版本，避免误用 nested 字段的值。
     let raw = frontmatter
         .lines()
-        .find_map(|l| l.trim_start().strip_prefix("rule_version:"))
+        .find_map(|l| l.strip_prefix("rule_version:"))
         .ok_or_else(|| {
             MigrateError::Config(
                 "porting-template.md frontmatter 缺少 rule_version 字段".to_owned(),
@@ -278,6 +280,55 @@ mod tests {
         let md = "---\nlanguage_id: go\nrule_version: RULE-2:v1.0.0, RULE-3:v2.0.0\n---\n# body\n";
         let got = parse_template_rule_version(md).unwrap();
         assert_eq!(got, versions(&[("RULE-2", "v1.0.0"), ("RULE-3", "v2.0.0")]));
+    }
+
+    #[test]
+    fn parses_rule_version_from_crlf_frontmatter() {
+        // CRLF 行尾同样能抽取 frontmatter 并解析（模板可能以 Windows 行尾提交）。
+        let md = "---\r\nlanguage_id: go\r\nrule_version: RULE-2:v1.0.0\r\n---\r\n# body\r\n";
+        let got = parse_template_rule_version(md).unwrap();
+        assert_eq!(got, versions(&[("RULE-2", "v1.0.0")]));
+    }
+
+    #[test]
+    fn parse_ignores_nested_rule_version() {
+        // 缩进的 nested `rule_version:`（`meta:` 之下）不是顶层字段，须被忽略，
+        // 只采顶层声明——否则 nested 字段先出现时会误用其版本（M4-GOV-01 审查 important-A）。
+        let md = "---\nmeta:\n  rule_version: RULE-9:v9.9.9\nrule_version: RULE-2:v1.0.0\n---\n";
+        let got = parse_template_rule_version(md).unwrap();
+        assert_eq!(got, versions(&[("RULE-2", "v1.0.0")]));
+    }
+
+    #[test]
+    fn parse_nested_only_rule_version_errors() {
+        // 只有缩进的 nested `rule_version:`、无顶层声明 → 视为「缺 rule_version」报错。
+        let md = "---\nmeta:\n  rule_version: RULE-9:v9.9.9\n---\n";
+        assert!(parse_template_rule_version(md).is_err());
+    }
+
+    #[test]
+    fn parse_empty_value_errors() {
+        // 顶层 `rule_version:` 有键无值（空）→ 显式失败，不静默当作「无不一致」。
+        let md = "---\nrule_version:\n---\n";
+        assert!(parse_template_rule_version(md).is_err());
+    }
+
+    #[test]
+    fn load_empty_registry_errors() {
+        // rules 为空的清单无法校验一致性——零规则不能被误判为「全一致」，须显式报错。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty-registry.json");
+        std::fs::write(&path, r#"{"schema_version":"1.0","rules":{}}"#).unwrap();
+        assert!(load_rule_registry(&path).is_err());
+    }
+
+    #[test]
+    fn load_missing_registry_file_errors() {
+        let missing = std::path::Path::new("/nonexistent/rule-registry.json");
+        assert!(matches!(
+            load_rule_registry(missing),
+            Err(MigrateError::FileNotFound(_))
+        ));
     }
 
     #[test]

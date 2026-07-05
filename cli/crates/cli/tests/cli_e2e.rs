@@ -2600,6 +2600,25 @@ fn e2e_validate_rules_enforce_true_drift_errors() {
                 .contains("rule_version"),
             "错误信息应指明 rule_version 不一致: {json}"
         );
+        // important-B：报错时结构化 checks 仍经 details flatten 提升到 data 顶层，
+        // 供 CI（默认 enforce=true）机读逐条不一致清单，而非仅拿到一句 message。
+        let checks = json["data"]["checks"]
+            .as_array()
+            .unwrap_or_else(|| panic!("报错响应应保留 data.checks: {json}"));
+        assert_eq!(checks.len(), 3, "应保留全部 3 个适配器的校验结果: {json}");
+        let all_kinds: Vec<&str> = checks
+            .iter()
+            .flat_map(|c| c["issues"].as_array().unwrap())
+            .map(|i| i["kind"].as_str().unwrap())
+            .collect();
+        assert!(
+            all_kinds.contains(&"version_mismatch"),
+            "应含版本不符: {json}"
+        );
+        assert!(
+            all_kinds.contains(&"missing_in_template"),
+            "应含模板缺失: {json}"
+        );
     });
 }
 
@@ -2626,12 +2645,11 @@ fn e2e_validate_rules_enforce_false_drift_warns() {
         assert_eq!(json["status"], "warning");
         assert_eq!(json["data"]["consistent"], false);
         assert_eq!(json["data"]["enforce"], false);
-        // 机读逐条 issue：某模板含 version_mismatch(RULE-3) 与 missing_in_template(RULE-99)。
+        // 机读逐条 issue：跨全部模板聚合，含 version_mismatch(RULE-3) 与 missing_in_template(RULE-99)。
         let checks = json["data"]["checks"].as_array().unwrap();
-        let kinds: Vec<&str> = checks[0]["issues"]
-            .as_array()
-            .unwrap()
+        let kinds: Vec<&str> = checks
             .iter()
+            .flat_map(|c| c["issues"].as_array().unwrap())
             .map(|i| i["kind"].as_str().unwrap())
             .collect();
         assert!(kinds.contains(&"version_mismatch"), "应含版本不符: {json}");
