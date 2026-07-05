@@ -5,6 +5,6 @@
 pub mod machine;
 
 pub use machine::{
-    MigrationStateMachine, ResetOutcome, SprintAdvanceResult, STATE_SCHEMA_VERSION,
-    SUBSTATUS_AGENT_DONE,
+    MigrationStateMachine, RecoverOutcome, RecoverPolicy, ResetOutcome, SprintAdvanceResult,
+    STATE_SCHEMA_VERSION, SUBSTATUS_AGENT_DONE,
 };

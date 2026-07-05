@@ -92,7 +92,7 @@ rustmigrate state get modules
 
 所有 SubAgent 回传 `agent_done`（或失败进入 `paused`）后进入合并阶段。
 
-**失败不阻塞**：某模块翻译失败（重试耗尽）→ 按 run.md 失败恢复标 `paused`（headless 下自动 `degrade_skip`，见下文），继续处理同层其他模块。
+**失败不阻塞**：某模块翻译失败（重试耗尽）→ 按 run.md 失败恢复标 `paused`（headless 下自动 `degrade_skip`，见下文），继续处理同层其他模块。**worktree agent stall（stdout 静默卡死）** 同理不阻塞：编排器轮询 `BashOutput` 检测静默超 `stall_timeout_secs` → `state recover --module <M> --policy <retry|skip>`（见 SKILL.md「Watchdog stall 检测与恢复」）→ `skip` 时置 `paused` 并用 `state deps` 取同层无依赖模块继续，卡死的 worktree 不拖住整层。
 
 #### 2c. 合并（git merge）
 

@@ -52,6 +52,48 @@ pub struct ResetOutcome {
     pub member_files: Vec<String>,
 }
 
+/// [`recover_module`](MigrationStateMachine::recover_module) 的 stall 恢复策略（M4-ROB-01b）。
+///
+/// 编排器检测到 agent 静默超时（watchdog stall）后，据 `[orchestration].stall_recovery_policy`
+/// 配置 + 自身 retry-round 计数解析出本次策略，显式传入 CLI（CLI 不读 config、不计数，确定性执行）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoverPolicy {
+    /// 重试：回退到干净重译入口（复用 [`reset_module`](MigrationStateMachine::reset_module)
+    /// 语义），供编排器重派翻译。
+    Retry,
+    /// 跳过：置 `paused` 决策点（headless 由既有编排 prose 自动 `degrade_skip`；交互态待人类抉择）。
+    Skip,
+}
+
+impl RecoverPolicy {
+    /// 策略的稳定字符串标识（用于审计记录 / CLI 输出）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RecoverPolicy::Retry => "retry",
+            RecoverPolicy::Skip => "skip",
+        }
+    }
+}
+
+/// [`recover_module`](MigrationStateMachine::recover_module) 的结果——描述 stall 恢复把模块从
+/// 什么状态恢复到什么状态、应用了哪个策略、是否为幂等空操作。
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecoverOutcome {
+    /// 归一后的组代表 module key（入参传非代表成员时为其所属组代表）。
+    pub module: String,
+    /// 本次应用的恢复策略。
+    pub policy: RecoverPolicy,
+    /// 恢复前的模块状态。
+    pub from: ModuleStatus,
+    /// 恢复后的模块状态（retry → `translating`/`pending`；skip → `paused`）。
+    pub to: ModuleStatus,
+    /// 是否为幂等空操作（重复 recover 无副作用，调用方可省略 save）。
+    pub was_noop: bool,
+    /// 模块的源文件作用域（NodeId）：composite → `member_files`；单文件 → `[module]`。
+    /// retry 时 CLI 据此构造产物清理指令（同 [`ResetOutcome::member_files`]）。
+    pub member_files: Vec<String>,
+}
+
 impl MigrationStateMachine {
     /// 从文件加载状态。
     ///
@@ -541,6 +583,127 @@ impl MigrationStateMachine {
             was_noop: false,
             member_files,
         })
+    }
+
+    /// 从 watchdog stall（agent 静默超时）确定性、幂等地恢复单个模块（M4-ROB-01b）。
+    ///
+    /// 编排器（run.md）负责**检测** stall（后台命令 stdout 静默超 `stall_timeout_secs`——CLI
+    /// 无法观测子进程 stdout）并据 `stall_recovery_policy` 解析出 `policy`；本方法据 `policy`
+    /// 执行确定性回退，`reason` 记入模块 `attempts` 审计（append-only）。见 MDR-016。
+    ///
+    /// - [`RecoverPolicy::Retry`]：委派 [`reset_module`](Self::reset_module)`(force=true)`——stall
+    ///   时模块常在 `paused`/进行态，force 跨守护回退到干净重译入口，复用其**幂等**
+    ///   （`was_noop`）、进度清理、`member_files` 作用域。非 noop 时额外追加一条 `stall-recover:retry`
+    ///   审计；noop 则整体 noop（保 `recover;recover == recover`）。
+    /// - [`RecoverPolicy::Skip`]：**直接**置 `status → paused`（决策点，headless 由既有编排 prose
+    ///   自动 `degrade_skip`）。**绕过 `can_transition_to` 矩阵**——stall 可发生在 `translating`
+    ///   （Phase A），而 `translating → paused` 不在矩阵（见 `ModuleStatus::can_transition_to`），
+    ///   故仿 `reset_module` 破坏性直设。已是 `paused`/`degrade_*` → 幂等 noop。
+    ///
+    /// **守护**（先于策略，force 不可绕过）：`graduate`（毕业终态，同 reset）/ `done`（唯一真终态，
+    /// 不会 stall）/ `blocked`（在等依赖、无运行中 agent，非 stall 态）一律拒绝——避免制造矛盾终态
+    /// 或误清阻塞锚点。**不做**下游 `blocked_by` 传播（沿用 workflow.md 既有机制，见 MDR-016）。
+    /// module key 归一同 [`transition_module`](Self::transition_module)。
+    pub fn recover_module(
+        &mut self,
+        name: &str,
+        policy: RecoverPolicy,
+        reason: Option<&str>,
+    ) -> Result<RecoverOutcome> {
+        // 项目级守护（先于策略）：graduate 下把模块回退成非终态制造「项目终态 + 非终态模块」矛盾。
+        if self.state_file.state == ProjectState::Graduate {
+            return Err(MigrateError::Config(
+                "项目已毕业（graduate），stall 恢复会制造「项目终态 + 非终态模块」矛盾且无合法回退路径；\
+                 如需重迁请先重开迁移"
+                    .to_string(),
+            ));
+        }
+        let canonical = self.canonical_module_key(name)?;
+        let module = self
+            .state_file
+            .modules
+            .get_mut(&canonical)
+            .expect("canonical 已校验存在");
+        let from = module.status;
+        let member_files = module
+            .member_files
+            .clone()
+            .unwrap_or_else(|| vec![canonical.clone()]);
+
+        // 终态 / 锚点守护：done（不会 stall）、blocked（等依赖、无运行 agent）非 stall 态，拒绝。
+        match from {
+            ModuleStatus::Done => {
+                return Err(MigrateError::Config(
+                    "done 是终态、不会 stall；如需重迁已完成模块用 state reset --force".to_string(),
+                ));
+            }
+            ModuleStatus::Blocked => {
+                return Err(MigrateError::Config(
+                    "模块阻塞中（等依赖、无运行中 agent），非 stall 态；stall 恢复不适用"
+                        .to_string(),
+                ));
+            }
+            _ => {}
+        }
+
+        match policy {
+            RecoverPolicy::Retry => {
+                // 复用 reset_module（force=true）：stall 时模块常在 paused/进行态，须跨守护回退。
+                let reset = self.reset_module(&canonical, true)?;
+                // 非 noop 追加 stall 审计（noop 整体 noop，双调用安全）。
+                if !reset.was_noop {
+                    self.push_recover_audit(&reset.module, RecoverPolicy::Retry, reason);
+                }
+                Ok(RecoverOutcome {
+                    module: reset.module,
+                    policy,
+                    from: reset.reset_from,
+                    to: reset.reset_to,
+                    was_noop: reset.was_noop,
+                    member_files: reset.member_files,
+                })
+            }
+            RecoverPolicy::Skip => {
+                // 幂等：已 paused / degrade_* → 已跳过/待决策，noop（不重复记录）。
+                if from == ModuleStatus::Paused || from.is_degraded() {
+                    return Ok(RecoverOutcome {
+                        module: canonical,
+                        policy,
+                        from,
+                        to: from,
+                        was_noop: true,
+                        member_files,
+                    });
+                }
+                // 直接置 paused（绕过转换矩阵，理由见方法级 doc）。
+                module.status = ModuleStatus::Paused;
+                self.push_recover_audit(&canonical, RecoverPolicy::Skip, reason);
+                Ok(RecoverOutcome {
+                    module: canonical,
+                    policy,
+                    from,
+                    to: ModuleStatus::Paused,
+                    was_noop: false,
+                    member_files,
+                })
+            }
+        }
+    }
+
+    /// 向指定模块 `attempts` 追加一条 `stall-recover:<policy>[ reason=<r>]` 审计记录。
+    fn push_recover_audit(&mut self, canonical: &str, policy: RecoverPolicy, reason: Option<&str>) {
+        let module = self
+            .state_file
+            .modules
+            .get_mut(canonical)
+            .expect("canonical 已校验存在");
+        let suffix = reason.map(|r| format!(" reason={r}")).unwrap_or_default();
+        module.attempts.push(AttemptRecord {
+            timestamp: Timestamp::new(chrono::Utc::now().to_rfc3339()),
+            result: format!("stall-recover:{}{suffix}", policy.as_str()),
+            retry_count: 0,
+            checkpoint: None,
+        });
     }
 
     /// 追加一条 SubAgent 调用记录到顶层 `subagent_calls` 数组（append-only，不去重）。
@@ -1732,6 +1895,179 @@ mod tests {
             m.reset_module("nonexistent", false),
             Err(MigrateError::Config(_))
         ));
+    }
+
+    // === M4-ROB-01b：recover_module（watchdog stall 恢复）===
+
+    #[test]
+    fn test_recover_retry_rolls_back_and_records() {
+        // retry 策略：委派 reset（force）回退 + 追加 stall-recover:retry 审计（保留 reset 审计）。
+        let mut m = new_machine();
+        m.update_module("a", dirty_module(ModuleStatus::CompileFixing));
+        let out = m
+            .recover_module("a", RecoverPolicy::Retry, Some("stdout 静默 620s"))
+            .expect("retry 恢复应成功");
+        assert_eq!(out.policy, RecoverPolicy::Retry);
+        assert_eq!(out.from, ModuleStatus::CompileFixing);
+        assert_eq!(out.to, ModuleStatus::Translating);
+        assert!(!out.was_noop);
+        assert_eq!(out.member_files, vec!["a".to_string()]);
+
+        let md = &m.state_file().modules["a"];
+        assert_eq!(md.status, ModuleStatus::Translating);
+        assert!(md.substatus.is_none());
+        // attempts：既有 1 + reset 审计 1 + stall-recover 审计 1 = 3。
+        assert_eq!(md.attempts.len(), 3);
+        assert_eq!(md.attempts[1].result, "reset:compile_fixing→translating");
+        assert_eq!(
+            md.attempts[2].result,
+            "stall-recover:retry reason=stdout 静默 620s"
+        );
+    }
+
+    #[test]
+    fn test_recover_retry_from_paused_forces_through() {
+        // stall 常把模块留在 paused（重试耗尽）：retry 应跨守护 force-reset 回 translating。
+        let mut m = new_machine();
+        m.update_module("a", dirty_module(ModuleStatus::Paused));
+        let out = m
+            .recover_module("a", RecoverPolicy::Retry, None)
+            .expect("paused retry 恢复应成功");
+        assert_eq!(out.to, ModuleStatus::Translating);
+        assert_eq!(
+            m.state_file().modules["a"].status,
+            ModuleStatus::Translating
+        );
+        // 无 reason 时审计后缀为空。
+        let attempts = &m.state_file().modules["a"].attempts;
+        assert_eq!(attempts.last().unwrap().result, "stall-recover:retry");
+    }
+
+    #[test]
+    fn test_recover_skip_sets_paused_bypassing_matrix() {
+        // skip 策略：stall 发生在 translating（Phase A），translating→paused 不在转换矩阵，
+        // recover 须绕过矩阵直设 paused（决策点）。
+        let mut m = new_machine();
+        assert!(
+            !ModuleStatus::Translating.can_transition_to(ModuleStatus::Paused),
+            "前提：translating→paused 不在矩阵"
+        );
+        m.update_module("a", dirty_module(ModuleStatus::Translating));
+        let out = m
+            .recover_module("a", RecoverPolicy::Skip, Some("stall"))
+            .expect("skip 恢复应成功");
+        assert_eq!(out.policy, RecoverPolicy::Skip);
+        assert_eq!(out.from, ModuleStatus::Translating);
+        assert_eq!(out.to, ModuleStatus::Paused);
+        assert!(!out.was_noop);
+        let md = &m.state_file().modules["a"];
+        assert_eq!(md.status, ModuleStatus::Paused);
+        assert_eq!(
+            md.attempts.last().unwrap().result,
+            "stall-recover:skip reason=stall"
+        );
+    }
+
+    #[test]
+    fn test_recover_idempotent_noop() {
+        // retry 已在干净入口 → noop（复用 reset 幂等，不追加审计）。
+        let mut m = new_machine();
+        m.update_module("a", module_with_status(ModuleStatus::Translating));
+        let out = m
+            .recover_module("a", RecoverPolicy::Retry, Some("x"))
+            .unwrap();
+        assert!(out.was_noop);
+        assert!(m.state_file().modules["a"].attempts.is_empty());
+
+        // skip 已 paused → noop（不重复置态/记录）。recover;recover == recover。
+        let mut m2 = new_machine();
+        m2.update_module("b", dirty_module(ModuleStatus::Testing));
+        let first = m2
+            .recover_module("b", RecoverPolicy::Skip, Some("s"))
+            .unwrap();
+        assert!(!first.was_noop);
+        let after_first = m2.state_file().modules["b"].clone();
+        let second = m2
+            .recover_module("b", RecoverPolicy::Skip, Some("s"))
+            .unwrap();
+        assert!(second.was_noop, "第二次 skip 应幂等 noop");
+        assert_eq!(
+            &after_first,
+            &m2.state_file().modules["b"],
+            "recover;recover 状态应一致（无多余审计）"
+        );
+    }
+
+    #[test]
+    fn test_recover_skip_already_degraded_noop() {
+        // 已 degrade_* → skip 为 noop（已跳过）。
+        let mut m = new_machine();
+        m.update_module("a", module_with_status(ModuleStatus::DegradeSkip));
+        let out = m.recover_module("a", RecoverPolicy::Skip, None).unwrap();
+        assert!(out.was_noop);
+        assert_eq!(out.from, ModuleStatus::DegradeSkip);
+        assert_eq!(out.to, ModuleStatus::DegradeSkip);
+    }
+
+    #[test]
+    fn test_recover_guards_done_and_blocked() {
+        // done（不会 stall）/ blocked（等依赖、无运行 agent）非 stall 态 → 两策略均拒绝。
+        for st in [ModuleStatus::Done, ModuleStatus::Blocked] {
+            for policy in [RecoverPolicy::Retry, RecoverPolicy::Skip] {
+                let mut m = new_machine();
+                m.update_module("a", module_with_status(st));
+                assert!(
+                    matches!(
+                        m.recover_module("a", policy, None),
+                        Err(MigrateError::Config(_))
+                    ),
+                    "{st} + {policy:?} recover 应报 Config 错误"
+                );
+                assert_eq!(m.state_file().modules["a"].status, st, "守护应保状态不变");
+            }
+        }
+    }
+
+    #[test]
+    fn test_recover_rejected_in_graduate() {
+        // 项目级守护：graduate 下 recover 一律拒绝（含两策略）。
+        let mut m = new_machine();
+        for st in [
+            ProjectState::Profile,
+            ProjectState::Plan,
+            ProjectState::Scaffold,
+            ProjectState::SprintLoop,
+            ProjectState::Graduate,
+        ] {
+            m.transition(st).unwrap();
+        }
+        m.update_module("a", dirty_module(ModuleStatus::Translating));
+        assert!(matches!(
+            m.recover_module("a", RecoverPolicy::Retry, None),
+            Err(MigrateError::Config(_))
+        ));
+        assert!(matches!(
+            m.recover_module("a", RecoverPolicy::Skip, None),
+            Err(MigrateError::Config(_))
+        ));
+    }
+
+    #[test]
+    fn test_recover_normalizes_member_and_scope() {
+        // 传折叠组非代表成员：归一到组代表；skip 回传全组 member_files 作用域。
+        let mut m = new_machine();
+        let mut grp = dirty_module(ModuleStatus::Testing);
+        grp.member_files = Some(vec!["grp".to_string(), "file:helper.ts".to_string()]);
+        m.update_module("grp", grp);
+        let out = m
+            .recover_module("file:helper.ts", RecoverPolicy::Skip, None)
+            .expect("成员 recover 应归一成功");
+        assert_eq!(out.module, "grp");
+        assert_eq!(
+            out.member_files,
+            vec!["grp".to_string(), "file:helper.ts".to_string()]
+        );
+        assert_eq!(m.state_file().modules["grp"].status, ModuleStatus::Paused);
     }
 
     #[test]

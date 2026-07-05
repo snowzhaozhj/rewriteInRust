@@ -29,7 +29,9 @@ use rustmigrate_core::profile::{
 };
 use rustmigrate_core::response::{ErrorData, Response, Status};
 use rustmigrate_core::scaffold::scaffold_project;
-use rustmigrate_core::state::{MigrationStateMachine, ResetOutcome, SprintAdvanceResult};
+use rustmigrate_core::state::{
+    MigrationStateMachine, RecoverOutcome, RecoverPolicy, ResetOutcome, SprintAdvanceResult,
+};
 use rustmigrate_core::stats::{compare_structure, count_loc, detect_community_deviation};
 use rustmigrate_core::types::common::{DangerCategory, NodeId, Timestamp};
 use rustmigrate_core::types::graph::{EdgeType, NodeType};
@@ -335,6 +337,44 @@ pub enum StateCommands {
         #[arg(long)]
         force: bool,
     },
+    /// 从 watchdog stall（agent 静默超时）确定性、幂等地恢复模块（M4-ROB-01b）。
+    ///
+    /// 编排器检测到后台命令 stdout 静默超 `[orchestration].stall_timeout_secs`（CLI 不观测
+    /// 子进程 stdout）后，据 `stall_recovery_policy` + 自身 retry-round 解析 `--policy` 调用本命令：
+    /// - `retry`：复用 `reset` 语义回退到干净重译入口（跨守护，输出 `cleanup` 作用域供编排器清产物）；
+    /// - `skip`：置 `paused` 决策点（headless 由编排 prose 自动 `degrade_skip`），输出 `advice`。
+    ///
+    /// **幂等**：retry 已在干净入口 / skip 已 paused|degrade → noop。**守护**：`done`/`blocked`
+    /// 拒绝（非 stall 态），`graduate` 项目态拒绝。见 MDR-016。
+    Recover {
+        /// 模块 key（组代表 NodeId，或折叠组的非代表成员，自动归一到组代表）。
+        #[arg(long)]
+        module: String,
+        /// 恢复策略：`retry`（回退重译）/ `skip`（置 paused → 降级）。
+        #[arg(long, value_enum)]
+        policy: RecoverPolicyArg,
+        /// stall 原因（可选，追加到 attempts 审计，形如 `stall: stdout 静默 620s`）。
+        #[arg(long)]
+        reason: Option<String>,
+    },
+}
+
+/// `state recover --policy` 的 CLI 取值（映射到核心 [`RecoverPolicy`]）。
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum RecoverPolicyArg {
+    /// 重试：回退到干净重译入口。
+    Retry,
+    /// 跳过：置 paused 决策点（headless 自动降级）。
+    Skip,
+}
+
+impl From<RecoverPolicyArg> for RecoverPolicy {
+    fn from(a: RecoverPolicyArg) -> Self {
+        match a {
+            RecoverPolicyArg::Retry => RecoverPolicy::Retry,
+            RecoverPolicyArg::Skip => RecoverPolicy::Skip,
+        }
+    }
 }
 
 /// Stats 子命令。
@@ -517,6 +557,14 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
             ),
             StateCommands::AdvanceSprint => emit(writer, cmd_state_advance_sprint()),
             StateCommands::Reset { module, force } => emit(writer, cmd_state_reset(module, *force)),
+            StateCommands::Recover {
+                module,
+                policy,
+                reason,
+            } => emit(
+                writer,
+                cmd_state_recover(module, (*policy).into(), reason.as_deref()),
+            ),
             StateCommands::Update {
                 module,
                 status,
@@ -1915,6 +1963,57 @@ fn cmd_state_reset(module: &str, force: bool) -> CmdResult {
             "reset_to": outcome.reset_to.to_string(),
             "was_noop": outcome.was_noop,
             "cleanup": cleanup,
+        }),
+        warnings,
+    ))
+}
+
+/// `state recover --module <M> --policy <retry|skip> [--reason <r>]`：watchdog stall 恢复
+/// （M4-ROB-01b）。委派 [`MigrationStateMachine::recover_module`] 做确定性、幂等回退，输出
+/// `recovery`——retry → `cleanup`（产物作用域，同 reset）；skip → `advice`（失败原因 + 无依赖模块
+/// 推进指引）；noop → `skip` 信号（供编排器不触发多余删+重跑）。见 MDR-016。
+fn cmd_state_recover(module: &str, policy: RecoverPolicy, reason: Option<&str>) -> CmdResult {
+    let path = state_path();
+    let (mut machine, warnings) = load_state_with_warnings(&path)?;
+    let outcome: RecoverOutcome = machine.recover_module(module, policy, reason)?;
+    // 幂等 noop 免落盘（同 reset）；从 backup 恢复时即使 noop 也 save 一次自愈损坏主文件。
+    if !outcome.was_noop || machine.recovered_from_backup() {
+        machine.save(&path)?;
+    }
+    // recovery：按策略给可判读的编排指令。
+    let recovery = if outcome.was_noop {
+        json!({
+            "skip": true,
+            "reason": "幂等空操作：模块已在目标恢复态，无需回退/产物清理",
+        })
+    } else {
+        match policy {
+            RecoverPolicy::Retry => json!({
+                // retry：同 reset 的 cleanup 作用域——编排器据 member_files 删部分 .rs 后重派。
+                "member_files": outcome.member_files,
+                "rust_artifacts": "删除 rust_root 下 member_files 对应的部分 .rs 产物（重译前清理）",
+                "preserve": "intermediate/attempts/* 及审计产物保留（不删）",
+                "next": format!("/migrate run {} --retry", outcome.module),
+            }),
+            RecoverPolicy::Skip => json!({
+                // skip：置 paused 决策点。下游依赖模块沿既有 blocked_by 机制标阻塞；
+                // 无依赖模块用 `state deps` 查询后继续推进（不阻塞）。
+                "advice": format!(
+                    "模块 {} 因 stall 跳过（→ paused）；headless 由编排自动 degrade_skip、交互态待人类抉择",
+                    outcome.module
+                ),
+                "unblock_next": format!("state deps --module <M> 查无依赖模块继续推进；依赖 {} 的下游将标 blocked_by", outcome.module),
+            }),
+        }
+    };
+    Ok((
+        json!({
+            "module": outcome.module,
+            "policy": policy.as_str(),
+            "recover_from": outcome.from.to_string(),
+            "recover_to": outcome.to.to_string(),
+            "was_noop": outcome.was_noop,
+            "recovery": recovery,
         }),
         warnings,
     ))
