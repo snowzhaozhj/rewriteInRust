@@ -352,10 +352,23 @@ impl Default for PersistenceConfig {
 #[serde(default)]
 pub struct ValidationConfig {}
 
-/// 规则配置（M2 预留）。
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+/// 规则治理配置（`06 § 11.1` `[rules]` 段）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct RulesConfig {}
+pub struct RulesConfig {
+    /// 规则版本一致性强制开关（M4-GOV-01）：`true` 时 `validate rules` 检出各适配器
+    /// `porting-template.md` 的 `rule_version` 与权威清单不一致即返回**错误**（非静默阻断）；
+    /// `false` 时降级为 warning。默认 `true`（对齐 `06 § 11.1` 缺省）。
+    pub enforce_rule_version_consistency: bool,
+}
+
+impl Default for RulesConfig {
+    fn default() -> Self {
+        Self {
+            enforce_rule_version_consistency: true,
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

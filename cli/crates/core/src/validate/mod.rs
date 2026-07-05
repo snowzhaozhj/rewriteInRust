@@ -3,6 +3,7 @@
 //! 提供状态文件完整性检查、前置条件验证、blocked 模块检查与自动解除。
 
 pub mod rules;
+pub mod tiers;
 
 use std::collections::{HashMap, HashSet};
 

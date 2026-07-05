@@ -192,14 +192,14 @@ Step 3: PR-C3 (Validation)     → GO-08 + GO-09          [工时 ~2.5d]
 | M4-ROB-01b | **watchdog stall 检测 + 恢复路径**：识别 agent 静默超时（后台长命令 stdout 静默超 600s）→ 标记当前模块失败 → 跳过或重试（可配置策略）→ 不阻塞后续无依赖模块推进；输出明确的失败原因和恢复建议 | 1d | ROB-01a |
 | M4-ROB-01c | **额度耗尽优雅暂停 + 续跑**：检测 token 预算/API 额度逼近上限 → 保存当前进度（含进行中模块的中间状态）→ 输出续跑指令（断点位置 + 恢复命令）→ 下次从断点恢复，已完成模块不重跑 | 1d | ROB-01a |
 | M4-ORCH-01 | **worktree 生命周期代码化**：当前 worktree 创建/合并/清理散在 run.md 文字约定 → 落为代码层管理（防泄漏/冲突）。**不含程序化状态机调度器**（当前 SKILL.md 编排满足 2-3 门语言调度需求，程序化状态机投入大、当前 ROI 不足，推迟） | 1d | — |
-| M4-GOV-01 | **规则版本陈旧检测**：CLI 校验各 `porting-template.md` frontmatter `rule_version` vs 权威清单一致性；落地设计已留的 `[rules].enforce_rule_version_consistency` 开关；不一致返回明确错误（复用 `profile/tools.rs` JSON 框架）。**砍 index.json 自动生成**（3 门语言规模未到回本点，数据模型投机，YAGNI） | 1.5d | — |
+| M4-GOV-01 ✅ | **规则版本陈旧检测**：CLI 校验各 `porting-template.md` frontmatter `rule_version` vs 权威清单一致性；落地设计已留的 `[rules].enforce_rule_version_consistency` 开关；不一致返回明确错误（复用 `profile/tools.rs` JSON 框架）。**砍 index.json 自动生成**（3 门语言规模未到回本点，数据模型投机，YAGNI）。**交付**（PR 待审）：`rule-registry.json` 权威清单 + `validate rules` 命令 + `rule_version.rs`（缺失/版本不符/未知规则三类 issue）；enforce=true 报错退出码 1、false 降级 warning；13 新测（9 单测 + 4 cli_e2e 含真实模板一致回归守卫）；MDR-014 | 1.5d | — |
 
 **验收标准**：
 - [ ] 模拟单模块失败/中断，续跑不丢状态、可重入、幂等（重跑不腐蚀已有产物）
 - [ ] 模拟 watchdog stall（agent 静默超时），系统自动标记失败 + 跳过/重试 + 后续模块不阻塞
 - [ ] 模拟额度耗尽，系统优雅暂停 + 输出续跑指令 + 下次断点恢复
 - [ ] worktree 生命周期有代码层管理（创建/合并/清理），不再纯文字约定
-- [ ] `rule_version` 与权威清单不一致时 CLI 报错（非静默）
+- [x] `rule_version` 与权威清单不一致时 CLI 报错（非静默）——GOV-01 ✅ `validate rules`（enforce=true→退出码 1）
 - [ ] TS/Python/Go 既有路径无回归
 
 ---

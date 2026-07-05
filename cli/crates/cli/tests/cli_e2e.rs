@@ -2514,3 +2514,166 @@ fn e2e_stats_quality_empty_project() {
         assert!(modules.is_empty());
     });
 }
+
+// === M4-GOV-01：validate rules（规则版本陈旧检测）===
+
+/// 仓库根目录（`fixtures/` 的父目录）。
+fn repo_root() -> PathBuf {
+    fixtures_dir().parent().unwrap().to_path_buf()
+}
+
+/// 权威规则清单 + 适配器根目录（随插件发布）。
+fn shipped_registry() -> PathBuf {
+    repo_root().join("plugin/skills/migrate/references/rule-registry.json")
+}
+fn shipped_adapters() -> PathBuf {
+    repo_root().join("plugin/skills/migrate/adapters")
+}
+
+/// 回归守卫：随发布的各适配器 `porting-template.md` 的 `rule_version` 与权威清单一致。
+/// 任一模板 bump 规则版本却漏改清单（或反之）会红于此。
+#[test]
+fn e2e_validate_rules_shipped_templates_consistent() {
+    // 在无 .rustmigrate.toml 的临时 cwd 运行 → enforce 取默认 true；一致则不受影响。
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let (code, json) = run(&[
+            "validate",
+            "rules",
+            "--registry",
+            shipped_registry().to_str().unwrap(),
+            "--adapters-dir",
+            shipped_adapters().to_str().unwrap(),
+        ]);
+        assert_eq!(code, 0, "随发布模板应与权威清单一致: {json}");
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["data"]["consistent"], true);
+        assert_eq!(json["data"]["enforce"], true);
+        // 三个适配器（go/python/typescript）均无 issue。
+        let checks = json["data"]["checks"].as_array().unwrap();
+        assert_eq!(checks.len(), 3, "应扫描到 3 个适配器模板: {json}");
+        for c in checks {
+            assert!(
+                c["issues"].as_array().unwrap().is_empty(),
+                "适配器 {} 不应有不一致项: {json}",
+                c["adapter"]
+            );
+        }
+    });
+}
+
+/// 写一个「漂移」权威清单到临时目录（RULE-3 版本不符 + 新增未在模板声明的 RULE-99）。
+fn write_drifted_registry(dir: &Path) -> PathBuf {
+    let path = dir.join("bad-registry.json");
+    std::fs::write(
+        &path,
+        r#"{"schema_version":"1.0","rules":{
+            "RULE-2":"v1.0.0","RULE-3":"v2.0.0","RULE-6":"v1.0.0","RULE-7":"v1.0.0",
+            "RULE-8":"v1.0.0","RULE-10":"v1.0.0","RULE-12":"v1.0.0","RULE-15":"v1.0.0",
+            "RULE-20":"v1.0.0","RULE-99":"v1.0.0"}}"#,
+    )
+    .unwrap();
+    path
+}
+
+/// enforce 默认 true：模板与清单漂移时返回错误（退出码 1，非静默）。
+#[test]
+fn e2e_validate_rules_enforce_true_drift_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    let registry = write_drifted_registry(tmp.path());
+    with_cwd(tmp.path(), || {
+        let (code, json) = run(&[
+            "validate",
+            "rules",
+            "--registry",
+            registry.to_str().unwrap(),
+            "--adapters-dir",
+            shipped_adapters().to_str().unwrap(),
+        ]);
+        assert_eq!(code, 1, "enforce=true 漂移应退出码 1: {json}");
+        assert_eq!(json["status"], "error");
+        assert_eq!(json["data"]["error_code"], "E008");
+        assert!(
+            json["data"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("rule_version"),
+            "错误信息应指明 rule_version 不一致: {json}"
+        );
+        // important-B：报错时结构化 checks 仍经 details flatten 提升到 data 顶层，
+        // 供 CI（默认 enforce=true）机读逐条不一致清单，而非仅拿到一句 message。
+        let checks = json["data"]["checks"]
+            .as_array()
+            .unwrap_or_else(|| panic!("报错响应应保留 data.checks: {json}"));
+        assert_eq!(checks.len(), 3, "应保留全部 3 个适配器的校验结果: {json}");
+        let all_kinds: Vec<&str> = checks
+            .iter()
+            .flat_map(|c| c["issues"].as_array().unwrap())
+            .map(|i| i["kind"].as_str().unwrap())
+            .collect();
+        assert!(
+            all_kinds.contains(&"version_mismatch"),
+            "应含版本不符: {json}"
+        );
+        assert!(
+            all_kinds.contains(&"missing_in_template"),
+            "应含模板缺失: {json}"
+        );
+    });
+}
+
+/// enforce=false：漂移降级为 warning（退出码 0），逐条不一致项落 `data.checks[].issues`。
+#[test]
+fn e2e_validate_rules_enforce_false_drift_warns() {
+    let tmp = tempfile::tempdir().unwrap();
+    let registry = write_drifted_registry(tmp.path());
+    with_cwd(tmp.path(), || {
+        std::fs::write(
+            ".rustmigrate.toml",
+            "[rules]\nenforce_rule_version_consistency = false\n",
+        )
+        .unwrap();
+        let (code, json) = run(&[
+            "validate",
+            "rules",
+            "--registry",
+            registry.to_str().unwrap(),
+            "--adapters-dir",
+            shipped_adapters().to_str().unwrap(),
+        ]);
+        assert_eq!(code, 0, "enforce=false 漂移应退出码 0: {json}");
+        assert_eq!(json["status"], "warning");
+        assert_eq!(json["data"]["consistent"], false);
+        assert_eq!(json["data"]["enforce"], false);
+        // 机读逐条 issue：跨全部模板聚合，含 version_mismatch(RULE-3) 与 missing_in_template(RULE-99)。
+        let checks = json["data"]["checks"].as_array().unwrap();
+        let kinds: Vec<&str> = checks
+            .iter()
+            .flat_map(|c| c["issues"].as_array().unwrap())
+            .map(|i| i["kind"].as_str().unwrap())
+            .collect();
+        assert!(kinds.contains(&"version_mismatch"), "应含版本不符: {json}");
+        assert!(
+            kinds.contains(&"missing_in_template"),
+            "应含模板缺失: {json}"
+        );
+    });
+}
+
+/// 清单文件不存在：返回错误（不静默通过）。
+#[test]
+fn e2e_validate_rules_missing_registry_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let (code, json) = run(&[
+            "validate",
+            "rules",
+            "--registry",
+            "does-not-exist.json",
+            "--adapters-dir",
+            shipped_adapters().to_str().unwrap(),
+        ]);
+        assert_eq!(code, 1, "清单不存在应退出码 1: {json}");
+        assert_eq!(json["status"], "error");
+    });
+}
