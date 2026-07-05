@@ -5,7 +5,6 @@ pub mod lang;
 pub mod process;
 pub mod profile;
 pub mod response;
-pub mod rule_version;
 pub mod scaffold;
 pub mod state;
 pub mod stats;

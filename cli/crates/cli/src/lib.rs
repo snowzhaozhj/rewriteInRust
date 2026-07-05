@@ -28,7 +28,6 @@ use rustmigrate_core::profile::{
     check_adapter_tools, check_cargo_nextest, load_analysis_tools, profile_project, ToolStatus,
 };
 use rustmigrate_core::response::{ErrorData, Response, Status};
-use rustmigrate_core::rule_version::{check_adapters_dir, load_rule_registry};
 use rustmigrate_core::scaffold::scaffold_project;
 use rustmigrate_core::state::{MigrationStateMachine, SprintAdvanceResult};
 use rustmigrate_core::stats::{compare_structure, count_loc, detect_community_deviation};
@@ -38,6 +37,7 @@ use rustmigrate_core::types::state::{
     humanize_module_key, CompositeKind, ModuleState, ModuleStatus, ModuleTier, ProjectState,
     SprintState,
 };
+use rustmigrate_core::validate::rules::{check_adapters_dir, load_rule_registry};
 use rustmigrate_core::validate::{
     auto_unblock_modules, check_blocked_modules, detect_blocked_cycles, validate_state,
 };
@@ -1764,10 +1764,10 @@ fn cmd_validate_rules<W: Write>(writer: &mut W, registry_path: &Path, adapters_d
     0
 }
 
-/// [`RuleVersionIssueKind`](rustmigrate_core::rule_version::RuleVersionIssueKind) 的中文摘要词
+/// [`RuleVersionIssueKind`](rustmigrate_core::validate::rules::RuleVersionIssueKind) 的中文摘要词
 /// （仅用于人读的错误/warning 文案；机读走 `data.checks[].issues[].kind` 的 snake_case）。
-fn issue_kind_str(kind: rustmigrate_core::rule_version::RuleVersionIssueKind) -> &'static str {
-    use rustmigrate_core::rule_version::RuleVersionIssueKind::*;
+fn issue_kind_str(kind: rustmigrate_core::validate::rules::RuleVersionIssueKind) -> &'static str {
+    use rustmigrate_core::validate::rules::RuleVersionIssueKind::*;
     match kind {
         MissingInTemplate => "模板缺失",
         VersionMismatch => "版本不符",

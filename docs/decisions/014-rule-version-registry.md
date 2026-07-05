@@ -20,12 +20,12 @@ PLAN-M4 GOV-01 要求：CLI 校验各 `porting-template.md` frontmatter `rule_ve
 - **为何不违反「砍 index.json」**：被砍的 `index.json` 是**自动生成的模块数据聚合**（投机数据模型、3 门语言规模未到回本点）。本清单是**手工维护的治理清单**（当前 9 条核心规则），直接支撑 GOV-01 一致性校验，非投机。规则作者变更某规则版本时同步 bump 清单——这正是治理动作本身。
 - **放 `references/`**：与已有 `patterns/`/`anti-patterns/` 同级，属跨适配器的核心规则资产（非某语言 adapter 私有），不放进 `adapters/<lang>/`（那是 MDR-009 两文件契约，只含 `analysis-tools.json` + `porting-template.md`）。
 
-### 决策 2：新增 CLI 子命令 `validate rules`，不复用 `validate/rules.rs`
+### 决策 2：新增 CLI 子命令 `validate rules`，核心逻辑落 `validate/rules.rs`（并把老同名文件让位为 `tiers.rs`）
 
-命令挂在 `validate` 族下：`validate rules --registry <json> --adapters-dir <dir>`。核心逻辑落**新模块** `core/src/rule_version.rs`（`load_rule_registry` / `parse_template_rule_version` / `check_template_consistency` / `check_adapters_dir`）。
+命令挂在 `validate` 族下：`validate rules --registry <json> --adapters-dir <dir>`。核心逻辑落 `core/src/validate/rules.rs`（模块 `validate::rules`，`load_rule_registry` / `parse_template_rule_version` / `check_template_consistency` / `check_adapters_dir`）——**命令 `validate rules` ↔ 模块 `validate::rules` 同名对齐**。
 
-- **为何不放 `validate/rules.rs`**：该文件已存在，语义是 **CI 验证管线 tier**（cargo check/clippy/nextest 分层），与「porting 规则版本治理」是不同域，同名易混。用独立顶层模块 `rule_version` 避免概念污染。
-- **并彻底消歧——老 `validate/rules.rs` → `validate/tiers.rs`**：仅避让新命令还不够，老文件名 `rules` 与本 PR 的 `rule_version` + CLI `validate rules` 三重撞名。老模块核心是 `ValidationTier`（三层验证），且外部**零调用**（M1-STATE-03 定义待接线），故 `git mv` 重命名为 `tiers.rs`（模块 `validate::tiers`）零调用点风险，一并在本 PR 消歧。类型名 `ValidationTier`/`ValidationRule` 自带 `Validation` 前缀无歧义，保持不变。
+- **命名收敛过程**（两步，审查驱动）：初版为避让当时的老 `validate/rules.rs`（语义是 **CI 验证管线 tier**，cargo check/clippy/nextest 分层）而落在独立顶层 `core/src/rule_version.rs`。审查指出老文件名 `rules` 与新 `rule_version` + CLI `validate rules` 三重撞名，遂**彻底消歧**：老模块核心是 `ValidationTier`（三层验证）、外部**零调用**（M1-STATE-03 定义待接线），`git mv` 为 `validate/tiers.rs`（模块 `validate::tiers`）零风险让出 `rules` 名；新模块随即从顶层 `rule_version.rs` 移入 `validate/rules.rs`——既归位到语义所属的 `validate` 族，又与命令名对齐，`rule_version` 这个冗余模块名一并去掉。
+- **类型名不变**：`RuleVersionIssue` / `RuleRegistry` / `TemplateRuleCheck`（新）与 `ValidationTier` / `ValidationRule`（老）各自精确，不随模块改名——模块名表「命令域」，类型名表「概念」，两者正交。
 - **路径显式传参（不内建定位）**：`--registry` / `--adapters-dir` 由调用方（plugin SKILL/hooks）传插件相对路径，与既有 `profile --adapter-tools <json>` 显式传适配器资产路径的模式一致。CLI 运行在**目标迁移项目**目录，插件资产不在目标项目内，故必须外部传入。
 - **命令清单归属**：设计 `05 § 6.2` 曾把确定性版本校验列为 M2「备选」命令 `validate rules --check-module-versions`（未纳入 M2 5 命令）。GOV-01 由 PLAN-M4 显式授权正式落地为 `validate rules`（scope 收窄为**适配器模板级**校验，非模块级），已同步 `06 § 10.0.1` 命令清单。
 
@@ -49,7 +49,7 @@ PLAN-M4 GOV-01 要求：CLI 校验各 `porting-template.md` frontmatter `rule_ve
 
 ## 影响
 
-- **新增**：`plugin/skills/migrate/references/rule-registry.json`；`core/src/rule_version.rs`（9 单测）；`validate rules` CLI 命令 + `cmd_validate_rules`（4 cli_e2e：真实模板一致回归守卫 / enforce=true 报错 / enforce=false 降级 / 清单缺失报错）。
+- **新增**：`plugin/skills/migrate/references/rule-registry.json`；`core/src/validate/rules.rs`（模块 `validate::rules`，13 单测）；`validate rules` CLI 命令 + `cmd_validate_rules`（5 cli_e2e：真实模板一致回归守卫 / enforce=true 报错含结构化 checks / enforce=false 降级 / 清单缺失报错）。
 - **改**：`RulesConfig` 加字段（默认 true）；`06 § 10.0.1` 命令清单 + `§ 11.1` `[rules]` 注释同步。
 - **回归守卫**：`e2e_validate_rules_shipped_templates_consistent` 断言随发布的三模板与清单一致——任一处 bump 漏同步会红。
 

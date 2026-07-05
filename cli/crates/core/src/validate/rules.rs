@@ -13,6 +13,9 @@
 //! - `docs/decisions/014-rule-version-registry.md`（权威清单选型 + CLI 命令面）
 //!
 //! 命令面复用 `profile/tools.rs` 的 serde JSON 加载框架（`load_analysis_tools` 同构）。
+//!
+//! **归属 `validate`**：本模块即 CLI `validate rules` 命令的核心逻辑（命令↔模块同名）；与同目录
+//! [`super::tiers`]（迁移产物三层质量门 `ValidationTier`）区分——都含「rule」但域不同。
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
