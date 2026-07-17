@@ -17,16 +17,18 @@ use crate::types::graph::{EdgeType, NodeType};
 
 use super::SourceGraph;
 
-/// 迁移序列：包含迁移顺序、可并行组和环信息。
+/// 迁移序列：包含迁移顺序、SCC 迁移单位和环信息。
 ///
 /// 纯数据结构体，字段 `pub`（Rust 惯例：无字段间不变量、不跨 crate 发布、外部仅 `&` 只读，
 /// 无需私有化 + getter）。仅由本模块 [`migration_sequence`] 构造。
+///
+/// 「可并行层」信息由 [`SccGroup::sprint`] 承载：同 sprint 号的组拓扑独立、可并行迁移
+/// （ORCH-01 收口——原 `parallel_groups` 纯拓扑分层字段已被 `scc_groups` 取代并删除，
+/// 后者同时覆盖破环单元与并行分层，避免双分组概念歧义）。
 #[derive(Debug, Clone, Serialize)]
 pub struct MigrationSequence {
     /// 迁移顺序（叶节点在前）。
     pub order: Vec<NodeId>,
-    /// 可并行迁移的分组（同组内节点无依赖关系；组索引可映射为 sprint 序号）。
-    pub parallel_groups: Vec<Vec<NodeId>>,
     /// 所有检测到的环。
     pub cycles: Vec<Vec<NodeId>>,
     /// 缩点后的 SCC 迁移单位（破环：每个 SCC 折叠为一个编译门禁单元）。
@@ -107,7 +109,7 @@ pub fn detect_cycles(graph: &SourceGraph) -> Vec<Vec<NodeId>> {
 ///
 /// 即使存在环也会尽力生成排序（基于 SCC 凝缩图的拓扑序）。
 pub fn migration_sequence(graph: &SourceGraph) -> MigrationSequence {
-    let (file_graph, index_to_id, id_to_index) = build_file_import_graph(graph);
+    let (file_graph, index_to_id, _) = build_file_import_graph(graph);
 
     // 单次 Tarjan SCC 计算，同时提取环信息和有环时的排序
     let sccs = algo::tarjan_scc(&file_graph);
@@ -146,12 +148,8 @@ pub fn migration_sequence(graph: &SourceGraph) -> MigrationSequence {
             .collect()
     };
 
-    // 计算并行分组
-    let parallel_groups = compute_parallel_groups(&file_graph, &index_to_id, &id_to_index);
-
     MigrationSequence {
         order,
-        parallel_groups,
         cycles,
         scc_groups,
     }
@@ -231,10 +229,7 @@ fn build_scc_groups(
 /// 计算缩点 DAG 中单个 SCC 节点的层级（迭代式 DFS + 记忆化）。
 ///
 /// 层级 0 = 叶组（无出边），层级 n = 依赖链最长为 n 的组。缩点图本身无环，
-/// `on_path` 仅作防御。复用与 [`compute_level`] 相同的「Enter/Exit 显式栈」骨架。
-///
-/// TODO(refactor): 与 [`compute_level`] 是同构算法（仅键类型 usize vs NodeIndex、
-/// 后继来源 succ slice vs graph.edges_directed 不同），可抽成泛型层级计算共用，消除重复。
+/// `on_path` 仅作防御。用「Enter/Exit 显式栈」骨架（非递归）避免超深依赖链栈溢出。
 fn compute_scc_level(start: usize, succ: &[HashSet<usize>], levels: &mut [Option<usize>]) {
     enum Work {
         Enter(usize),
@@ -346,99 +341,6 @@ fn detect_cycles_internal(
         .collect()
 }
 
-/// 计算可并行迁移的分组。
-///
-/// 基于拓扑层级：无出边（无 imports）的节点为第 0 层，
-/// 仅依赖第 0 层的节点为第 1 层，以此类推。
-/// 同层节点间无依赖关系，可并行迁移。
-fn compute_parallel_groups(
-    file_graph: &StableGraph<NodeId, ()>,
-    index_to_id: &HashMap<NodeIndex, NodeId>,
-    id_to_index: &HashMap<NodeId, NodeIndex>,
-) -> Vec<Vec<NodeId>> {
-    if id_to_index.is_empty() {
-        return Vec::new();
-    }
-
-    // 计算每个节点的层级（到叶节点的最长路径距离）
-    let mut levels: HashMap<NodeIndex, usize> = HashMap::new();
-    // 排序根节点遍历顺序，保证有环图中各节点层级计算确定（id_to_index 是 HashMap）
-    let mut indices: Vec<NodeIndex> = id_to_index.values().copied().collect();
-    indices.sort();
-
-    for &idx in &indices {
-        if !levels.contains_key(&idx) {
-            compute_level(idx, file_graph, &mut levels);
-        }
-    }
-
-    // 按层级分组
-    let max_level = levels.values().copied().max().unwrap_or(0);
-    let mut groups: Vec<Vec<NodeId>> = vec![Vec::new(); max_level + 1];
-
-    for (&idx, &level) in &levels {
-        if let Some(id) = index_to_id.get(&idx) {
-            groups[level].push(id.clone());
-        }
-    }
-
-    // 过滤空组，并对每组内节点按 ID 排序，保证输出确定（levels 是 HashMap）
-    let mut result: Vec<Vec<NodeId>> = groups.into_iter().filter(|g| !g.is_empty()).collect();
-    for group in &mut result {
-        group.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-    }
-    result
-}
-
-/// 计算节点层级（显式栈的迭代式 DFS + 记忆化），结果写入 `levels`。
-///
-/// 层级 0 = 叶节点（无出边），层级 n = 依赖链最长为 n 的节点。
-/// 环上的后边贡献 0（不参与 +1），避免无限递归。
-/// 使用显式栈而非递归，避免超深依赖链导致调用栈溢出。
-fn compute_level(
-    start: NodeIndex,
-    graph: &StableGraph<NodeId, ()>,
-    levels: &mut HashMap<NodeIndex, usize>,
-) {
-    enum Work {
-        Enter(NodeIndex),
-        Exit(NodeIndex),
-    }
-    let mut stack = vec![Work::Enter(start)];
-    // 当前 DFS 路径上的节点（用于后边/环检测）
-    let mut on_path: HashSet<NodeIndex> = HashSet::new();
-
-    while let Some(work) = stack.pop() {
-        match work {
-            Work::Enter(idx) => {
-                if levels.contains_key(&idx) || on_path.contains(&idx) {
-                    continue;
-                }
-                on_path.insert(idx);
-                // 先压 Exit（后于所有后代出栈），再压未访问的后继
-                stack.push(Work::Exit(idx));
-                for edge in graph.edges_directed(idx, Direction::Outgoing) {
-                    let succ = edge.target();
-                    if !levels.contains_key(&succ) && !on_path.contains(&succ) {
-                        stack.push(Work::Enter(succ));
-                    }
-                }
-            }
-            Work::Exit(idx) => {
-                // 此刻所有非后边的后继都已记忆化；后边（仍在 on_path、未记忆化）贡献 0
-                let level = graph
-                    .edges_directed(idx, Direction::Outgoing)
-                    .map(|e| levels.get(&e.target()).copied().unwrap_or(0))
-                    .max()
-                    .map(|l| l + 1)
-                    .unwrap_or(0);
-                on_path.remove(&idx);
-                levels.insert(idx, level);
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -487,24 +389,21 @@ mod tests {
     }
 
     #[test]
-    fn compute_level_handles_deep_chain_without_overflow() {
-        // 超深线性依赖链：递归实现会栈溢出，迭代实现应正常计算
+    fn compute_scc_level_handles_deep_chain_without_overflow() {
+        // 超深线性依赖链的缩点 DAG：递归实现会栈溢出，迭代式 compute_scc_level 应正常计算。
+        // succ[i] = {i+1}（组 i 依赖组 i+1），链尾无出边 = 叶组层级 0。
         let n: usize = 50_000;
-        let mut g: StableGraph<NodeId, ()> = StableGraph::new();
-        let first = g.add_node(NodeId::new("file:0.ts"));
-        let mut prev = first;
-        for i in 1..n {
-            let cur = g.add_node(NodeId::new(format!("file:{i}.ts")));
-            g.add_edge(prev, cur, ()); // i-1 imports i（importer → imported）
-            prev = cur;
+        let mut succ: Vec<HashSet<usize>> = vec![HashSet::new(); n];
+        for i in 0..n - 1 {
+            succ[i].insert(i + 1);
         }
 
-        let mut levels: HashMap<NodeIndex, usize> = HashMap::new();
-        compute_level(first, &g, &mut levels);
+        let mut levels: Vec<Option<usize>> = vec![None; n];
+        compute_scc_level(0, &succ, &mut levels);
 
-        // 链头（0.ts）依赖链最长，层级应为 n-1；链尾为叶子，层级 0
-        assert_eq!(levels.get(&first).copied(), Some(n - 1));
-        assert_eq!(levels.get(&prev).copied(), Some(0));
+        // 链头（组 0）依赖链最长，层级应为 n-1；链尾为叶组，层级 0
+        assert_eq!(levels[0], Some(n - 1));
+        assert_eq!(levels[n - 1], Some(0));
     }
 
     // === linear-deps 测试 ===
@@ -539,18 +438,20 @@ mod tests {
         assert!(!seq.has_cycles(), "linear-deps 不应有环");
         assert!(seq.cycles.is_empty());
         assert!(!seq.order.is_empty());
-        assert!(!seq.parallel_groups.is_empty());
+        assert!(!seq.scc_groups.is_empty());
 
-        // 验证并行组的层级关系
-        // 第 0 组应包含叶节点（utils.ts），最后一组应包含根节点（index.ts）
-        let first_group = &seq.parallel_groups[0];
-        let has_leaf = first_group.iter().any(|id| {
-            let s = id.as_str();
-            s.ends_with("utils.ts")
-        });
+        // 验证 SCC 组的并行分层关系（sprint 号 = 可并行层）：
+        // sprint 1 组应包含叶节点（utils.ts），最大 sprint 组应含根节点（index.ts）。
+        let sprint1_members: Vec<&str> = seq
+            .scc_groups
+            .iter()
+            .filter(|g| g.sprint == 1)
+            .flat_map(|g| g.members.iter().map(|id| id.as_str()))
+            .collect();
+        let has_leaf = sprint1_members.iter().any(|s| s.ends_with("utils.ts"));
         assert!(
             has_leaf,
-            "第一组应包含叶节点 utils.ts，实际: {first_group:?}"
+            "sprint 1（首并行层）应包含叶节点 utils.ts，实际: {sprint1_members:?}"
         );
     }
 
@@ -754,7 +655,7 @@ mod tests {
         let graph = SourceGraph::new();
         let seq = migration_sequence(&graph);
         assert!(seq.order.is_empty());
-        assert!(seq.parallel_groups.is_empty());
+        assert!(seq.scc_groups.is_empty());
         assert!(!seq.has_cycles());
         assert!(seq.cycles.is_empty());
     }

@@ -220,7 +220,8 @@ proptest! {
         }
     }
 
-    /// parallel_groups 无依赖：同一 group 内的节点互无 Imports 依赖边。
+    /// 并行层无依赖：同一 sprint 层内的节点互无 Imports 依赖边。
+    /// （ORCH-01 收口后并行层由 scc_groups 按 sprint 聚合得到，取代原 parallel_groups。）
     #[test]
     fn proptest_parallel_groups_no_internal_deps(graph in arb_dag()) {
         let seq = migration_sequence(&graph);
@@ -232,17 +233,25 @@ proptest! {
             .map(|e| (e.source.as_str(), e.target.as_str()))
             .collect();
 
-        for (group_idx, group) in seq.parallel_groups.iter().enumerate() {
-            let group_ids: HashSet<&str> = group.iter().map(|id| id.as_str()).collect();
+        // 按 sprint 聚合 scc_groups 成员 → 并行层。
+        let mut layers: std::collections::BTreeMap<u32, Vec<&str>> = std::collections::BTreeMap::new();
+        for g in &seq.scc_groups {
+            for id in &g.members {
+                layers.entry(g.sprint).or_default().push(id.as_str());
+            }
+        }
 
-            // 检查组内任意两个节点间无依赖边
-            for &a in &group_ids {
-                for &b in &group_ids {
+        for (sprint, members) in &layers {
+            let layer_ids: HashSet<&str> = members.iter().copied().collect();
+
+            // 检查同层任意两个节点间无依赖边
+            for &a in &layer_ids {
+                for &b in &layer_ids {
                     if a != b {
                         prop_assert!(
                             !edges.contains(&(a, b)),
-                            "并行组 {} 内节点 {} 和 {} 之间存在依赖边",
-                            group_idx, a, b
+                            "并行层 sprint={} 内节点 {} 和 {} 之间存在依赖边",
+                            sprint, a, b
                         );
                     }
                 }
@@ -250,7 +259,7 @@ proptest! {
         }
     }
 
-    /// parallel_groups 覆盖所有节点：所有 group 的节点并集等于全部 File 节点集。
+    /// 并行分层覆盖所有节点：所有 scc_groups 成员的并集等于全部 File 节点集。
     #[test]
     fn proptest_parallel_groups_cover_all_nodes(graph in arb_dag()) {
         let seq = migration_sequence(&graph);
@@ -262,15 +271,15 @@ proptest! {
             .collect();
 
         let group_ids: HashSet<&str> = seq
-            .parallel_groups
+            .scc_groups
             .iter()
-            .flat_map(|g| g.iter().map(|id| id.as_str()))
+            .flat_map(|g| g.members.iter().map(|id| id.as_str()))
             .collect();
 
         prop_assert_eq!(
             file_ids,
             group_ids,
-            "并行分组应覆盖所有文件节点"
+            "SCC 迁移单位应覆盖所有文件节点"
         );
     }
 }

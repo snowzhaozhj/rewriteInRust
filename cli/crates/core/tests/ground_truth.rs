@@ -545,13 +545,20 @@ fn ground_truth_linear_deps_migration_sequence() {
 
     assert!(!seq.has_cycles(), "linear-deps 不应有环");
     assert!(!seq.order.is_empty(), "迁移序列不应为空");
-    assert!(!seq.parallel_groups.is_empty(), "应有至少一个并行组");
+    assert!(!seq.scc_groups.is_empty(), "应有至少一个 SCC 迁移单位");
 
-    let first_group = &seq.parallel_groups[0];
-    let has_leaf = first_group
+    // sprint 1（首并行层）应包含叶节点 utils.ts。
+    let sprint1_members: Vec<&str> = seq
+        .scc_groups
         .iter()
-        .any(|id| id.as_str().contains("utils.ts"));
-    assert!(has_leaf, "第一组应包含叶节点 utils.ts: {first_group:?}");
+        .filter(|g| g.sprint == 1)
+        .flat_map(|g| g.members.iter().map(|id| id.as_str()))
+        .collect();
+    let has_leaf = sprint1_members.iter().any(|s| s.contains("utils.ts"));
+    assert!(
+        has_leaf,
+        "sprint 1（首并行层）应包含叶节点 utils.ts: {sprint1_members:?}"
+    );
 }
 
 #[test]

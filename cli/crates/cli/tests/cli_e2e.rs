@@ -181,9 +181,68 @@ fn e2e_topo_sort_reverse() {
     });
 }
 
-// === 各命令 smoke：合法 JSON + status 正确 ===
+// === graph parallel-groups：并行层输出（ORCH-01）===
 
 #[test]
+fn e2e_parallel_groups_diamond_has_multi_group_layer() {
+    // diamond-deps：barrel.ts 与 index.ts 拓扑独立，应落在同一 sprint 层（可并行）。
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("diamond-deps"), tmp.path());
+    with_cwd(tmp.path(), || {
+        assert_eq!(run(&["init"]).0, 0);
+        assert_eq!(run(&["graph", "build", "--root", "src"]).0, 0);
+
+        let (code, json) = run(&["graph", "parallel-groups"]);
+        assert_eq!(code, 0, "parallel-groups 应成功: {json}");
+        assert_eq!(json["status"], "ok");
+
+        let layers = json["data"]["layers"].as_array().expect("应含 layers");
+        // sprint 1 应为叶节点层（types.ts）。
+        let first = &layers[0];
+        assert_eq!(first["sprint"], 1, "首层 sprint 应为 1: {json}");
+
+        // 至少一层含 >1 个组（真并行层）——证明不是纯线性退化。
+        let has_parallel_layer = layers
+            .iter()
+            .any(|l| l["groups"].as_array().map(|g| g.len() > 1).unwrap_or(false));
+        assert!(has_parallel_layer, "应存在含多个组的并行层: {json}");
+    });
+}
+
+#[test]
+fn e2e_parallel_groups_circular_folds_and_returns_zero() {
+    // 与 topo-sort 相反：有环时 parallel-groups 不报错（环已折叠为 SCC 组）。
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("circular-deps"), tmp.path());
+    with_cwd(tmp.path(), || {
+        assert_eq!(run(&["init"]).0, 0);
+        assert_eq!(run(&["graph", "build", "--root", "src"]).0, 0);
+
+        let (code, json) = run(&["graph", "parallel-groups"]);
+        assert_eq!(code, 0, "有环时 parallel-groups 仍应零退出: {json}");
+        assert_eq!(json["status"], "ok");
+
+        // 环成员折叠成一个 is_cycle=true 的组。
+        let layers = json["data"]["layers"].as_array().expect("应含 layers");
+        let has_cycle_group = layers.iter().any(|l| {
+            l["groups"]
+                .as_array()
+                .map(|gs| {
+                    gs.iter().any(|g| {
+                        g["is_cycle"] == true
+                            && g["members"]
+                                .as_array()
+                                .map(|m| m.len() > 1)
+                                .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false)
+        });
+        assert!(has_cycle_group, "环应折叠为多成员 is_cycle 组: {json}");
+    });
+}
+
+// === 各命令 smoke：合法 JSON + status 正确 ===
 fn smoke_init() {
     let tmp = tempfile::tempdir().unwrap();
     with_cwd(tmp.path(), || {
