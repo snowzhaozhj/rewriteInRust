@@ -197,9 +197,24 @@ fn e2e_parallel_groups_diamond_has_multi_group_layer() {
         assert_eq!(json["status"], "ok");
 
         let layers = json["data"]["layers"].as_array().expect("应含 layers");
-        // sprint 1 应为叶节点层（types.ts）。
+        // sprint 1 应为叶节点层，且含叶节点 types.ts。
         let first = &layers[0];
         assert_eq!(first["sprint"], 1, "首层 sprint 应为 1: {json}");
+        let sprint1_has_leaf = first["groups"]
+            .as_array()
+            .map(|gs| {
+                gs.iter().any(|g| {
+                    g["members"]
+                        .as_array()
+                        .map(|m| {
+                            m.iter()
+                                .any(|x| x.as_str().unwrap_or("").ends_with("types.ts"))
+                        })
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false);
+        assert!(sprint1_has_leaf, "sprint 1 应含叶节点 types.ts: {json}");
 
         // 至少一层含 >1 个组（真并行层）——证明不是纯线性退化。
         let has_parallel_layer = layers
@@ -242,7 +257,31 @@ fn e2e_parallel_groups_circular_folds_and_returns_zero() {
     });
 }
 
+#[test]
+fn e2e_parallel_groups_empty_graph_zero_layers() {
+    // 空图（无源文件）：layer_count/group_count 均为 0，layers 为空，仍零退出。
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        assert_eq!(run(&["init"]).0, 0);
+        // 空目录 build 出空图（status 可能 warning：source_root 回退）。
+        let (code, _) = run(&["graph", "build", "--root", "."]);
+        assert_eq!(code, 0, "空目录 graph build 应零退出");
+
+        let (code, json) = run(&["graph", "parallel-groups"]);
+        assert_eq!(code, 0, "空图 parallel-groups 应零退出: {json}");
+        assert_eq!(json["data"]["layer_count"], 0, "空图应无层: {json}");
+        assert_eq!(json["data"]["group_count"], 0, "空图应无组: {json}");
+        assert_eq!(
+            json["data"]["layers"].as_array().map(|a| a.len()),
+            Some(0),
+            "空图 layers 应为空数组: {json}"
+        );
+    });
+}
+
 // === 各命令 smoke：合法 JSON + status 正确 ===
+
+#[test]
 fn smoke_init() {
     let tmp = tempfile::tempdir().unwrap();
     with_cwd(tmp.path(), || {

@@ -1052,6 +1052,9 @@ fn cmd_graph_topo_sort<W: Write>(writer: &mut W, reverse: bool) -> i32 {
 fn cmd_graph_parallel_groups() -> CmdResult {
     use std::collections::BTreeMap;
     let graph = load_graph()?;
+    // 透传图完整性告警：图不完整（integrity=partial）时静默产出残缺分层会误导
+    // ORCH-01 编排器的并行派发（对齐 MDR-003 约束8 图缺陷检测）。
+    let warnings = graph.warnings().to_vec();
     let sequence = migration_sequence(&graph);
 
     // 按 sprint 聚合 scc_groups → 并行层（BTreeMap 保证 sprint 升序确定性）。
@@ -1092,7 +1095,7 @@ fn cmd_graph_parallel_groups() -> CmdResult {
             "group_count": sequence.scc_groups.len(),
             "layers": layer_views,
         }),
-        Vec::new(),
+        warnings,
     ))
 }
 

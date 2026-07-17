@@ -394,8 +394,8 @@ mod tests {
         // succ[i] = {i+1}（组 i 依赖组 i+1），链尾无出边 = 叶组层级 0。
         let n: usize = 50_000;
         let mut succ: Vec<HashSet<usize>> = vec![HashSet::new(); n];
-        for i in 0..n - 1 {
-            succ[i].insert(i + 1);
+        for (i, s) in succ.iter_mut().enumerate().take(n - 1) {
+            s.insert(i + 1);
         }
 
         let mut levels: Vec<Option<usize>> = vec![None; n];
