@@ -135,6 +135,11 @@ pub enum GraphCommands {
         #[arg(long)]
         reverse: bool,
     },
+    /// 输出可并行迁移的层（同 sprint 号的 SCC 组拓扑独立，可并行派发翻译）。
+    ///
+    /// 破环：循环依赖已在 `migration_sequence` 折叠为 SCC 组，故本命令有环不报错
+    /// （与 `topo-sort` 相反）——ORCH-01 编排器读此分层做同层并行派发。
+    ParallelGroups,
     /// 查询模块的正向依赖（imports 边的传递闭包）。
     Deps { module: String },
     /// 查询模块的反向依赖（imports 入边的传递闭包）。
@@ -493,6 +498,7 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
             } => emit(writer, cmd_graph_build(root, *full, *profile)),
             // topo-sort 有环时需非零退出，单独处理退出码。
             GraphCommands::TopoSort { reverse } => cmd_graph_topo_sort(writer, *reverse),
+            GraphCommands::ParallelGroups => emit(writer, cmd_graph_parallel_groups()),
             GraphCommands::Deps { module } => emit(writer, cmd_graph_deps(module)),
             GraphCommands::Rdeps { module } => emit(writer, cmd_graph_rdeps(module)),
             GraphCommands::Interfaces {
@@ -1035,6 +1041,67 @@ fn cmd_graph_topo_sort<W: Write>(writer: &mut W, reverse: bool) -> i32 {
         }
         Err(err) => emit(writer, Err(err)),
     }
+}
+
+/// `graph parallel-groups`：输出可并行迁移的层。
+///
+/// 复用 `migration_sequence()`（破环：环已折叠为 SCC 组，故有环不报错），
+/// 按 `SccGroup::sprint` 聚合为并行层——同 sprint 号的组拓扑独立，编排器可
+/// 同层并行派发翻译（ORCH-01）。每组输出 `group_key`（首成员）、`members`、
+/// `is_cycle`，供编排器按 `composite_kind` 分派前定位组。
+///
+/// **原子调度不变量**：编排器必须把每个 `group` 当**原子调度单位**并行——
+/// 「同 sprint 组间无依赖」只在**组粒度**成立；`is_cycle=true` 组的 `members`
+/// 之间存在 Imports 边（本就互相依赖），**绝不能拆分 members 并行**（拆分由
+/// SCC 契约+逐文件填空路径处理，见 MDR-006）。
+fn cmd_graph_parallel_groups() -> CmdResult {
+    use std::collections::BTreeMap;
+    let graph = load_graph()?;
+    // 透传图完整性告警：图不完整（integrity=partial）时静默产出残缺分层会误导
+    // ORCH-01 编排器的并行派发（对齐 MDR-003 约束8 图缺陷检测）。
+    let warnings = graph.warnings().to_vec();
+    let sequence = migration_sequence(&graph);
+
+    // 按 sprint 聚合 scc_groups → 并行层（BTreeMap 保证 sprint 升序确定性）。
+    let mut layers: BTreeMap<u32, Vec<&rustmigrate_core::graph::topo::SccGroup>> = BTreeMap::new();
+    for group in &sequence.scc_groups {
+        layers.entry(group.sprint).or_default().push(group);
+    }
+
+    let layer_views: Vec<serde_json::Value> = layers
+        .iter()
+        .map(|(sprint, groups)| {
+            let group_views: Vec<serde_json::Value> = groups
+                .iter()
+                .map(|g| {
+                    let group_key = g
+                        .members
+                        .first()
+                        .map(|id| id.to_string())
+                        .unwrap_or_default();
+                    let members: Vec<String> = g.members.iter().map(|id| id.to_string()).collect();
+                    json!({
+                        "group_key": group_key,
+                        "members": members,
+                        "is_cycle": g.is_cycle,
+                    })
+                })
+                .collect();
+            json!({
+                "sprint": sprint,
+                "groups": group_views,
+            })
+        })
+        .collect();
+
+    Ok((
+        json!({
+            "layer_count": layers.len(),
+            "group_count": sequence.scc_groups.len(),
+            "layers": layer_views,
+        }),
+        warnings,
+    ))
 }
 
 /// `graph deps <module>`：模块正向依赖（imports 边的传递闭包，BFS）。

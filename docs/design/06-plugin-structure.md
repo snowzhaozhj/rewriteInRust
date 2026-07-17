@@ -110,6 +110,7 @@ Plugin 中的确定性计算由独立的 Rust CLI 工具 `rustmigrate` 承担，
 | `rustmigrate profile` | 分析源码项目画像（语言检测、框架识别、代码统计、外部工具可用性检测——按 `analysis-tools.json` 逐项验证安装与最低版本，缺失时输出 `ADAPTER_TOOL_MISSING` 警告；同时检测 Tier 0 Rust 外部二进制 `cargo-nextest` 可用性，缺失时输出 `RUST_TOOL_MISSING` 警告） |
 | `rustmigrate graph build` | 使用 tree-sitter 解析源码，构建源码图（存储到 `source-graph.db`）；默认增量（检测 file_fingerprints 跳过未变更文件），`--full` 强制全量重建并重置 graph_integrity 为 full（用于熔断恢复，见 [04 § 5.7.5-5.7.6](./04-toolchain.md#575-图完整性与熔断)）；`--profile` 输出性能画像 JSON（见 [04 § 5.7.4.1](./04-toolchain.md#5741-性能基准与扩展性)） |
 | `rustmigrate graph topo-sort` | 对依赖图执行拓扑排序，输出迁移顺序（纯排序原语，Kahn 算法，不支持有环图；检测到环则返回 E002 非零退出并列出环路径。**破环不在此命令**：源码环由 `state populate-modules` 缩点折叠为 composite 模块组，见 [04 § 5.7.6](./04-toolchain.md#576-图查询能力清单)、[MDR-004](../decisions/004-scc-fold-break-cycle.md)。完整 SCC 检测见 M2 `graph cycles`。`--reverse`：逆序输出（依赖在前），纯排序变体不破环，见 [MDR-012](../decisions/012-m3-debt-batch-a-deviations.md)） |
+| `rustmigrate graph parallel-groups` | 输出可并行迁移的层：按 `SccGroup.sprint` 聚合 `migration_sequence()`，同 sprint 号的组拓扑独立可并行派发翻译（ORCH-01 编排器读此分层）。与 `topo-sort` 相反，**有环不报错**——环已折叠为 SCC 组（`is_cycle=true`），输出 `{layer_count, group_count, layers[{sprint, groups[{group_key, members, is_cycle}]}]}`。**原子调度不变量**：编排器须把每个 `group` 当原子单位并行——「同 sprint 组间无依赖」只在组粒度成立，`is_cycle` 组的 `members` 互有依赖边、不可拆分并行（由 SCC 契约+逐文件路径处理，见 [MDR-006](../decisions/006-scc-per-file-stub-first.md)）。见 [MDR-018](../decisions/018-keep-parallel-migration.md) |
 | `rustmigrate graph deps <module>` | 查询模块的正向依赖树 |
 | `rustmigrate graph interfaces <module>` | 输出模块的导出接口签名文本（查询 source-graph.db 中 `is_exported=true` 节点，按 `line_range` 从 source-ref/ 提取）；`--deps-of <target>` 批量输出 target 的直接依赖模块（imports 边的 1-hop 邻居）的导出接口签名（区别于 `graph deps` 的 BFS 传递闭包）；含每条签名的 token 估算（bytes/4） |
 | `rustmigrate graph stats` | 图统计信息（节点/边计数、度分布） |
@@ -187,7 +188,7 @@ SKILL.md 通过 Bash tool 调用 CLI，所有输出为统一 JSON 格式：
 | ast-grep-core | 代码模式搜索/重写 | `profile`（惯用法检测）、`graph build`（calls 等边的模式补充解析） |
 | tokei | 代码行数统计 | `stats loc`, `stats compare` |
 | syn + quote | Rust 代码生成/分析（M2：自定义 lint crate） | M2 条件引入（MVP `scaffold workspace` 用 toml_edit 生成 TOML） |
-| petgraph | 依赖图数据结构（StableGraph + newtype 索引） | `graph build/topo-sort/deps/rdeps/cycles` |
+| petgraph | 依赖图数据结构（StableGraph + newtype 索引） | `graph build/topo-sort/parallel-groups/deps/rdeps/cycles` |
 | rusqlite | SQLite 图持久化（FTS5 全文搜索 M2 才启用，见 [04 § 5.7.3](./04-toolchain.md#573-持久化存储)） | `graph build`（写入）, `graph export`（M2 查询） |
 | jsonschema | JSON Schema 校验 | `validate state`, `validate config` |
 

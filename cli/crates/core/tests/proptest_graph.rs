@@ -109,6 +109,66 @@ fn arb_cyclic_graph() -> impl Strategy<Value = SourceGraph> {
         })
 }
 
+/// 生成含**多个独立 SCC**的有环图（区别于 `arb_cyclic_graph` 全图一个大环）。
+///
+/// 策略：把节点切成 k 个大小为 2~3 的小簇，每簇内部成环（形成独立 SCC），
+/// 再在**簇之间**只加「低编号簇 → 高编号簇」方向的边（保证缩点 DAG 无环、可分层）。
+/// 用于验证「同 sprint 的不同 SCC 之间无依赖边」这一编排器原子调度依赖的不变量。
+fn arb_multi_scc_graph() -> impl Strategy<Value = SourceGraph> {
+    // 簇数 2~8，簇间边数 0~40
+    (2..=8usize, 0..=40usize)
+        .prop_flat_map(|(k, max_edges)| {
+            // 每簇大小 2 或 3
+            let sizes = prop::collection::vec(2..=3usize, k);
+            let edges = prop::collection::vec((0..k, 0..k), 0..=max_edges);
+            (Just(k), sizes, edges)
+        })
+        .prop_map(|(_k, sizes, cluster_edges)| {
+            let mut graph = SourceGraph::new();
+
+            // 为每簇分配连续节点编号；cluster_start[c] = 簇 c 首节点全局编号。
+            let mut cluster_start = Vec::with_capacity(sizes.len());
+            let mut next = 0usize;
+            for &sz in &sizes {
+                cluster_start.push(next);
+                next += sz;
+            }
+            let total = next;
+
+            for i in 0..total {
+                let id = NodeId::new(format!("file:{i}.ts"));
+                let node =
+                    SourceNode::new(id, NodeType::File, format!("{i}.ts"), format!("{i}.ts"));
+                graph.add_node(node);
+            }
+
+            let edge = |g: &mut SourceGraph, a: usize, b: usize| {
+                g.add_edge(Dependency::new(
+                    NodeId::new(format!("file:{a}.ts")),
+                    NodeId::new(format!("file:{b}.ts")),
+                    EdgeType::Imports,
+                ));
+            };
+
+            // 簇内成环（大小 2 或 3 均形成真 SCC）。
+            for (c, &sz) in sizes.iter().enumerate() {
+                let start = cluster_start[c];
+                for j in 0..sz {
+                    edge(&mut graph, start + j, start + (j + 1) % sz);
+                }
+            }
+
+            // 簇间边：仅低编号簇 → 高编号簇（缩点 DAG 无环），连各自首节点。
+            for (src_c, tgt_c) in cluster_edges {
+                if src_c < tgt_c {
+                    edge(&mut graph, cluster_start[src_c], cluster_start[tgt_c]);
+                }
+            }
+
+            graph
+        })
+}
+
 // =========================================================================
 // 属性测试
 // =========================================================================
@@ -220,7 +280,8 @@ proptest! {
         }
     }
 
-    /// parallel_groups 无依赖：同一 group 内的节点互无 Imports 依赖边。
+    /// 并行层无依赖：同一 sprint 层内的节点互无 Imports 依赖边。
+    /// （ORCH-01 收口后并行层由 scc_groups 按 sprint 聚合得到，取代原 parallel_groups。）
     #[test]
     fn proptest_parallel_groups_no_internal_deps(graph in arb_dag()) {
         let seq = migration_sequence(&graph);
@@ -232,17 +293,25 @@ proptest! {
             .map(|e| (e.source.as_str(), e.target.as_str()))
             .collect();
 
-        for (group_idx, group) in seq.parallel_groups.iter().enumerate() {
-            let group_ids: HashSet<&str> = group.iter().map(|id| id.as_str()).collect();
+        // 按 sprint 聚合 scc_groups 成员 → 并行层。
+        let mut layers: std::collections::BTreeMap<u32, Vec<&str>> = std::collections::BTreeMap::new();
+        for g in &seq.scc_groups {
+            for id in &g.members {
+                layers.entry(g.sprint).or_default().push(id.as_str());
+            }
+        }
 
-            // 检查组内任意两个节点间无依赖边
-            for &a in &group_ids {
-                for &b in &group_ids {
+        for (sprint, members) in &layers {
+            let layer_ids: HashSet<&str> = members.iter().copied().collect();
+
+            // 检查同层任意两个节点间无依赖边
+            for &a in &layer_ids {
+                for &b in &layer_ids {
                     if a != b {
                         prop_assert!(
                             !edges.contains(&(a, b)),
-                            "并行组 {} 内节点 {} 和 {} 之间存在依赖边",
-                            group_idx, a, b
+                            "并行层 sprint={} 内节点 {} 和 {} 之间存在依赖边",
+                            sprint, a, b
                         );
                     }
                 }
@@ -250,7 +319,7 @@ proptest! {
         }
     }
 
-    /// parallel_groups 覆盖所有节点：所有 group 的节点并集等于全部 File 节点集。
+    /// 并行分层覆盖所有节点：所有 scc_groups 成员的并集等于全部 File 节点集。
     #[test]
     fn proptest_parallel_groups_cover_all_nodes(graph in arb_dag()) {
         let seq = migration_sequence(&graph);
@@ -262,15 +331,61 @@ proptest! {
             .collect();
 
         let group_ids: HashSet<&str> = seq
-            .parallel_groups
+            .scc_groups
             .iter()
-            .flat_map(|g| g.iter().map(|id| id.as_str()))
+            .flat_map(|g| g.members.iter().map(|id| id.as_str()))
             .collect();
 
         prop_assert_eq!(
             file_ids,
             group_ids,
-            "并行分组应覆盖所有文件节点"
+            "SCC 迁移单位应覆盖所有文件节点"
         );
+    }
+
+    /// 有环图的并行层独立性（编排器原子调度的正确性基础）：
+    /// 同一 sprint 号的**任意两个不同 SCC 组**之间无 Imports 边——即同层组可安全并行。
+    ///
+    /// 用多 SCC 生成器（每簇内成环形成独立 SCC，簇间单向）覆盖 `arb_cyclic_graph`
+    /// 无法测的场景：后者全图一个大环（单 SCC），测不到「多 SCC 同层并行」。
+    /// 这是收口后 scc_groups.sprint 在有环图下取代 parallel_groups 的关键不变量
+    /// （异构审查 PR-1 指出的覆盖缺口）。
+    #[test]
+    fn proptest_scc_groups_same_sprint_independent_cyclic(graph in arb_multi_scc_graph()) {
+        let seq = migration_sequence(&graph);
+
+        // Imports 边集（source -> target）。
+        let edges: HashSet<(&str, &str)> = graph
+            .edges()
+            .filter(|e| e.edge_type == EdgeType::Imports)
+            .map(|e| (e.source.as_str(), e.target.as_str()))
+            .collect();
+
+        // 按 sprint 聚合组索引。
+        let mut by_sprint: HashMap<u32, Vec<usize>> = HashMap::new();
+        for (gi, g) in seq.scc_groups.iter().enumerate() {
+            by_sprint.entry(g.sprint).or_default().push(gi);
+        }
+
+        // 同 sprint 的任意两个不同组之间，双向都不应存在 Imports 边。
+        for (sprint, group_indices) in &by_sprint {
+            for (a_pos, &ga) in group_indices.iter().enumerate() {
+                for &gb in &group_indices[a_pos + 1..] {
+                    let a_members: Vec<&str> =
+                        seq.scc_groups[ga].members.iter().map(|id| id.as_str()).collect();
+                    let b_members: Vec<&str> =
+                        seq.scc_groups[gb].members.iter().map(|id| id.as_str()).collect();
+                    for &am in &a_members {
+                        for &bm in &b_members {
+                            prop_assert!(
+                                !edges.contains(&(am, bm)) && !edges.contains(&(bm, am)),
+                                "同 sprint={} 的两组间存在依赖边：{} <-> {}",
+                                sprint, am, bm
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }
