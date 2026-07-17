@@ -132,10 +132,10 @@ cargo test 2>&1
 
 **判定逻辑**：
 
-- **全部通过** → `batch_transition_done`：对每个 `agent_done` 模块执行 `reviewing → done` 转换。
+- **全部通过** → `batch_transition_done`：对本层所有 `agent_done` 模块一次性执行 `reviewing → done`。
   ```bash
-  # 对每个 agent_done 模块：
-  rustmigrate state transition --module <M> --to done
+  # 一条命令批量升 done（非 agent_done 模块自动跳过并降级 warning，一个失败不影响其他）：
+  rustmigrate state batch-transition-done --module <M1> --module <M2> ...
   ```
 
 - **存在失败** → 进入 compile_fixing 子流程：编排器解析 rustc 错误，按下表归因后修复。

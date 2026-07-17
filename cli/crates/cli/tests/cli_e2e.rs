@@ -730,6 +730,80 @@ fn smoke_state_transition() {
     });
 }
 
+/// 注入一个带 substatus 的模块（两层 done 测试辅助）。
+fn inject_module_with_substatus(name: &str, status: &str, substatus: &str) {
+    let path = std::path::Path::new(".rust-migration").join("migration-state.json");
+    let mut state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    state["modules"][name] = serde_json::json!({ "status": status, "substatus": substatus });
+    std::fs::write(&path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+}
+
+#[test]
+fn e2e_batch_transition_done_all_success() {
+    // 两层 done 第二层门：整组 reviewing+agent_done 模块批量升 done。
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        inject_module_with_substatus("a", "reviewing", "agent_done");
+        inject_module_with_substatus("b", "reviewing", "agent_done");
+
+        let (code, json) = run(&[
+            "state",
+            "batch-transition-done",
+            "--module",
+            "a",
+            "--module",
+            "b",
+        ]);
+        assert_eq!(code, 0, "全部 agent_done 应成功: {json}");
+        assert_eq!(json["status"], "ok");
+        let succeeded = json["data"]["succeeded"].as_array().unwrap();
+        assert_eq!(succeeded.len(), 2, "两个模块都应升 done: {json}");
+        assert!(json["data"]["skipped"].as_array().unwrap().is_empty());
+
+        // 落盘校验：均为终态 done。
+        let (_, ja) = run(&["state", "get", "a"]);
+        assert_eq!(ja["data"]["status"], "done");
+        let (_, jb) = run(&["state", "get", "b"]);
+        assert_eq!(jb["data"]["status"], "done");
+    });
+}
+
+#[test]
+fn e2e_batch_transition_done_skips_non_agent_done_and_warns() {
+    // 非 agent_done 模块被跳过，status 降级 warning，成功的仍升 done。
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        inject_module_with_substatus("a", "reviewing", "agent_done");
+        // b：reviewing 但 substatus 非 agent_done（未过 agent 自检），应被跳过。
+        inject_module_with_substatus("b", "reviewing", "other");
+
+        let (code, json) = run(&[
+            "state",
+            "batch-transition-done",
+            "--module",
+            "a",
+            "--module",
+            "b",
+        ]);
+        assert_eq!(code, 0, "部分成功仍退出 0: {json}");
+        assert_eq!(
+            json["status"], "warning",
+            "skipped 非空应降级 warning: {json}"
+        );
+        assert_eq!(json["data"]["succeeded"].as_array().unwrap(), &vec!["a"]);
+        assert_eq!(json["data"]["skipped"].as_array().unwrap(), &vec!["b"]);
+        assert!(!json["warnings"].as_array().unwrap().is_empty());
+
+        let (_, ja) = run(&["state", "get", "a"]);
+        assert_eq!(ja["data"]["status"], "done", "a 应升 done");
+        let (_, jb) = run(&["state", "get", "b"]);
+        assert_eq!(jb["data"]["status"], "reviewing", "b 应保持 reviewing");
+    });
+}
+
 #[test]
 fn smoke_state_reset() {
     // M4-ROB-01a：state reset 幂等回退失败/中途模块 + 输出 cleanup 作用域。

@@ -304,6 +304,21 @@ pub enum StateCommands {
     /// sprint N 全模块 done/degrade_* → current=N+1 + history 回填。
     /// 无可推进 sprint 或尚有非终态模块时返回 status:ok + advanced:false。
     AdvanceSprint,
+    /// 批量将 `agent_done` 模块升为最终 `done`（并行翻译两层 done 的第二层门）。
+    ///
+    /// 两层 done（MDR-003 约束6）：agent 在 worktree 内自检过只标 `agent_done`（substatus，非终态）；
+    /// 编排器把本层所有分支合并后跑整组 `cargo check`/`test`，**全部过**才调用本命令把这批模块升 `done`。
+    /// 整组 check 是唯一 done 真门——orphan rule/E0119 coherence/feature/宏/命名空间等跨并发兄弟冲突
+    /// 只有整组编译才暴露（见 06 § M2 扩展、workflow.md 步骤 2d）。
+    ///
+    /// 逐模块独立转换（`reviewing → done`），一个失败不影响其他：
+    /// substatus 非 `agent_done` 的模块被跳过（记入 `attempts` 审计），当前非 `reviewing` 的转换被矩阵拒绝。
+    /// 输出 `{requested, succeeded, skipped}`——`skipped` 非空时 status 降级 warning。
+    BatchTransitionDone {
+        /// 待升 `done` 的模块 key 列表（可重复 `--module`，如 `--module a --module b`）。
+        #[arg(long = "module", required = true)]
+        modules: Vec<String>,
+    },
     /// 乐观锁状态更新（`--cas-version` 比较并写入，版本不匹配返回冲突）。
     ///
     /// 读取 `metadata.version` 与 `--cas-version` 比较，匹配时执行模块状态转换并递增 version；
@@ -574,6 +589,9 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
                 ),
             ),
             StateCommands::AdvanceSprint => emit(writer, cmd_state_advance_sprint()),
+            StateCommands::BatchTransitionDone { modules } => {
+                emit(writer, cmd_state_batch_transition_done(modules))
+            }
             StateCommands::Reset { module, force } => emit(writer, cmd_state_reset(module, *force)),
             StateCommands::Recover {
                 module,
@@ -2792,6 +2810,47 @@ fn cmd_state_advance_sprint() -> CmdResult {
             ))
         }
     }
+}
+
+/// `state batch-transition-done --module <a> --module <b> …`：
+/// 两层 done 的第二层门——把整组 `agent_done` 模块批量升最终 `done`。
+///
+/// 设计（MDR-003 约束6 + 06 § M2 扩展）：并行翻译中 agent 在 worktree 内自检过只标 `agent_done`
+/// （substatus，非终态）；编排器合并本层全部分支后跑整组 `cargo check`/`test`，全过才调用本命令。
+/// 委托 [`MigrationStateMachine::batch_transition_done`]：逐模块 `reviewing → done`，非 `agent_done`
+/// 跳过、当前非 `reviewing` 被矩阵拒绝，一个失败不影响其他。`skipped`（请求但未成功）非空时经
+/// `emit` 将 status 降级 warning。
+fn cmd_state_batch_transition_done(modules: &[String]) -> CmdResult {
+    let path = state_path();
+    let (mut machine, mut warnings) = load_state_with_warnings(&path)?;
+
+    let succeeded = machine.batch_transition_done(modules)?;
+    machine.save(&path)?;
+
+    let succeeded_set: std::collections::HashSet<&str> =
+        succeeded.iter().map(String::as_str).collect();
+    let skipped: Vec<&str> = modules
+        .iter()
+        .map(String::as_str)
+        .filter(|m| !succeeded_set.contains(m))
+        .collect();
+
+    if !skipped.is_empty() {
+        warnings.push(format!(
+            "{} 个模块未升 done（非 agent_done 或当前非 reviewing，已记入 attempts）：{}",
+            skipped.len(),
+            skipped.join(", ")
+        ));
+    }
+
+    Ok((
+        json!({
+            "requested": modules,
+            "succeeded": succeeded,
+            "skipped": skipped,
+        }),
+        warnings,
+    ))
 }
 
 /// `state update --module <m> --status <s> --cas-version <v> [--substatus <s>] [--reason <r>]`：
