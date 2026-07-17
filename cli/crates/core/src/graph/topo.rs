@@ -66,7 +66,7 @@ impl MigrationSequence {
 /// 叶节点（无依赖的文件）排在前面，先迁移。
 /// 检测到环时返回 `MigrateError::CyclicDependency`。
 pub fn topological_sort(graph: &SourceGraph) -> Result<Vec<NodeId>> {
-    let (file_graph, index_to_id, _) = build_file_import_graph(graph);
+    let (file_graph, index_to_id) = build_file_import_graph(graph);
 
     match algo::toposort(&file_graph, None) {
         Ok(sorted) => {
@@ -101,7 +101,7 @@ pub fn topological_sort(graph: &SourceGraph) -> Result<Vec<NodeId>> {
 ///
 /// 使用 Tarjan 算法查找所有 SCC，过滤出包含多个节点的分量。
 pub fn detect_cycles(graph: &SourceGraph) -> Vec<Vec<NodeId>> {
-    let (file_graph, index_to_id, _) = build_file_import_graph(graph);
+    let (file_graph, index_to_id) = build_file_import_graph(graph);
     detect_cycles_internal(&file_graph, &index_to_id)
 }
 
@@ -109,7 +109,7 @@ pub fn detect_cycles(graph: &SourceGraph) -> Vec<Vec<NodeId>> {
 ///
 /// 即使存在环也会尽力生成排序（基于 SCC 凝缩图的拓扑序）。
 pub fn migration_sequence(graph: &SourceGraph) -> MigrationSequence {
-    let (file_graph, index_to_id, _) = build_file_import_graph(graph);
+    let (file_graph, index_to_id) = build_file_import_graph(graph);
 
     // 单次 Tarjan SCC 计算，同时提取环信息和有环时的排序
     let sccs = algo::tarjan_scc(&file_graph);
@@ -271,15 +271,10 @@ fn compute_scc_level(start: usize, succ: &[HashSet<usize>], levels: &mut [Option
 /// 返回 (子图, NodeIndex->NodeId 映射, NodeId->NodeIndex 映射)。
 fn build_file_import_graph(
     graph: &SourceGraph,
-) -> (
-    StableGraph<NodeId, ()>,
-    HashMap<NodeIndex, NodeId>,
-    HashMap<NodeId, NodeIndex>,
-) {
+) -> (StableGraph<NodeId, ()>, HashMap<NodeIndex, NodeId>) {
     let mut file_graph: StableGraph<NodeId, ()> = StableGraph::new();
     let mut orig_to_new: HashMap<NodeIndex, NodeIndex> = HashMap::new();
     let mut index_to_id: HashMap<NodeIndex, NodeId> = HashMap::new();
-    let mut id_to_index: HashMap<NodeId, NodeIndex> = HashMap::new();
 
     // 添加 File 节点
     for node in graph.nodes() {
@@ -288,7 +283,6 @@ fn build_file_import_graph(
                 let new_idx = file_graph.add_node(node.id.clone());
                 orig_to_new.insert(orig_idx, new_idx);
                 index_to_id.insert(new_idx, node.id.clone());
-                id_to_index.insert(node.id.clone(), new_idx);
             }
         }
     }
@@ -308,7 +302,7 @@ fn build_file_import_graph(
         }
     }
 
-    (file_graph, index_to_id, id_to_index)
+    (file_graph, index_to_id)
 }
 
 /// 判断一个 SCC 是否构成环：多节点 SCC，或带自环的单节点（文件自导入）。

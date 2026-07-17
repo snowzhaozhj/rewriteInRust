@@ -1049,6 +1049,11 @@ fn cmd_graph_topo_sort<W: Write>(writer: &mut W, reverse: bool) -> i32 {
 /// 按 `SccGroup::sprint` 聚合为并行层——同 sprint 号的组拓扑独立，编排器可
 /// 同层并行派发翻译（ORCH-01）。每组输出 `group_key`（首成员）、`members`、
 /// `is_cycle`，供编排器按 `composite_kind` 分派前定位组。
+///
+/// **原子调度不变量**：编排器必须把每个 `group` 当**原子调度单位**并行——
+/// 「同 sprint 组间无依赖」只在**组粒度**成立；`is_cycle=true` 组的 `members`
+/// 之间存在 Imports 边（本就互相依赖），**绝不能拆分 members 并行**（拆分由
+/// SCC 契约+逐文件填空路径处理，见 MDR-006）。
 fn cmd_graph_parallel_groups() -> CmdResult {
     use std::collections::BTreeMap;
     let graph = load_graph()?;
