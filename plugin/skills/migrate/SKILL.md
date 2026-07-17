@@ -28,7 +28,7 @@ argument-hint: "[analyze|run|workflow|review] [module]"
 - 通过 Bash 调用 `rustmigrate <子命令>`，工作目录为源项目根。所有 CLI 输出是统一 JSON：`{status, data, warnings}`。
 - **定位 CLI**：裸调 `rustmigrate` 假设其在 `$PATH`。若不确定是否安装，先运行 `BIN=$(hooks/scripts/ensure-cli.sh)` 取二进制绝对路径（解析优先级 PATH > `$RUSTMIGRATE_BIN` > 本地构建产物），后续用 `"$BIN" <子命令>` 调用；脚本未找到二进制时退出非 0 并打印安装指引，应如实转达用户。
 - **只解析 `data` 字段**取结构化结果；`status` 为 `error` 时按 `data` 中的错误码处理，不要从自然语言里猜成败。`warnings` 非空时如实转达用户，不要静默吞掉。
-- 命令清单（M1 共 14 个 + M2 新增 `state deps`）：`init`、`profile --root [--adapter-tools]`、`graph build --root [--full]`、`graph topo-sort`、`graph deps <m>`、`graph interfaces <m> [--deps-of <t>]`、`graph stats`、`validate state`、`state get <m>`、`state transition [--module] --to [--substatus] [--reason] [--force]`、`state populate-modules`、`state deps <m>`（组感知依赖门禁，破环 M2-SCALE-SCC）、`stats loc`、`stats compare`、`scaffold workspace [--target] [--name]`。
+- 常用命令（非穷举，完整清单以 `rustmigrate --help` / 各子命令 `--help` 为准）：`init`、`profile --root [--adapter-tools]`、`graph build --root [--full]`、`graph topo-sort`、`graph parallel-groups`（按 sprint 聚合并行层，ORCH-01）、`graph deps <m>`、`graph interfaces <m> [--deps-of <t>]`、`graph stats`、`validate state`、`state get <m>`、`state transition [--module] --to [--substatus] [--reason] [--force]`、`state populate-modules`、`state deps <m>`（组感知依赖门禁，破环 M2-SCALE-SCC）、`state reset`/`recover`/`resume`（断点续跑，ROB-01a/b/c）、`stats loc`、`stats compare`、`scaffold workspace [--target] [--name]`。
 - **`profile --adapter-tools` 路径自动解析**：analyze 流程步骤 3 按优先级定位 `analysis-tools.json`——①`.rustmigrate.toml` 的 `adapter_path` ② `$CLAUDE_PLUGIN_ROOT/skills/migrate/adapters/<lang>/` ③ `plugin/skills/migrate/adapters/<lang>/`（同仓相对路径）④ 全部未命中则省略参数（降级 warning）。详见 [analyze.md](./analyze.md) 步骤 3。
 
 ### 全局锁（跑 `/migrate` 命令的进程开始时取，结束或异常退出时释放）
@@ -46,7 +46,7 @@ argument-hint: "[analyze|run|workflow|review] [module]"
 - **串行模式**：单模块 `/migrate run <module>` 不派发 SubAgent 翻译时，持锁者即翻译执行者本身，取锁/释放与 M1 一致。
 
 ### SubAgent 编排
-- 用 **Agent tool** 调用 SubAgent，参数 `subagent_type` 取带插件命名空间前缀的 agent 名：`rust-migrate:analyzer` / `rust-migrate:translator` / `rust-migrate:scaffolder` / `rust-migrate:verifier`。MVP 阶段 SubAgent **串行执行**，通过 `.rust-migration/` 下的文件通信，不直接对话。
+- 用 **Agent tool** 调用 SubAgent，参数 `subagent_type` 取带插件命名空间前缀的 agent 名：`rust-migrate:analyzer` / `rust-migrate:translator` / `rust-migrate:scaffolder` / `rust-migrate:verifier`。SubAgent 间通过 `.rust-migration/` 下的文件通信，不直接对话。单模块 `/migrate run` 串行派发；`/migrate workflow` 按 sprint 层并行派发同层独立模块（见 workflow.md 的 worktree 写隔离 + 逐层合并编排）。
 - **调用前后记台账**（每次 Agent 调用都做，含重试；否则 `subagent_calls` 恒空、卡死/重试无法诊断）：
   - 调用**前**：`rustmigrate state record-subagent-call --step-index <子命令步骤号> --subagent-name <analyzer|translator|verifier|scaffolder> --status started`。
   - 调用**后**：按结果再记一条 `--status ok`（产出物校验通过）或 `--status error --error-message "<原因>"`（校验失败 / 超时）。`--step-index` 与 `--subagent-name` 同上一条对齐。

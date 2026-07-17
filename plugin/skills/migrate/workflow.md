@@ -34,7 +34,7 @@ rustmigrate state get sprint
 rustmigrate state get modules
 ```
 
-从 `modules` 中筛选 `sprint == N` 的模块。读 `migration-state.json` 的 `migration_sequence.parallel_groups`（拓扑层分组）——同组内模块无相互依赖，可安全并行。
+从 `modules` 中筛选 `sprint == N` 的模块——同一 sprint 号的模块拓扑独立、可安全并行（`sprint` 由 `populate-modules` 从 SCC 缩点层级写入 `migration-state.json` 的每个模块）。也可直接 `rustmigrate graph parallel-groups` 拿到按 sprint 聚合的并行层视图（`layers[{sprint, groups[{group_key, members, is_cycle}]}]`）。
 
 **过滤已完成模块**：`status` 为 `done` / `degrade_*` 的模块跳过（幂等支持断点续跑）。
 
@@ -42,7 +42,7 @@ rustmigrate state get modules
 
 ### 2. 逐层处理
 
-按 `parallel_groups` 索引从小到大（拓扑序）遍历每一层。每层处理流程：
+按 sprint 号从小到大（拓扑序）遍历每一层。每层处理流程：
 
 #### 2a. 同层并行派发
 
@@ -60,7 +60,7 @@ rustmigrate state get modules
    - `dependency_interfaces`：`rustmigrate graph interfaces <module> --deps-of <dep>` 收集已完成依赖的接口。**SCC 组只收跨组依赖**——组内成员互引的签名已在 `{group}-contract.md` 的 `cross_file_calls` 里冻结，不再走 `dependency_interfaces`（重复且可能与契约不一致）。
    - `porting_rules`：`.rust-migration/porting/` 下适用规则
 
-3. **派发 SubAgent**（使用 Agent tool，`isolation: "worktree"`）。**按 `composite_kind` 分派，不要按「`member_files` 多文件」判形态**——SCC 组、机械 batch、耦合逻辑簇都是多文件，必须靠 `composite_kind` 区分：
+3. **派发 SubAgent**（用 Agent tool 派发到步骤 2a.1 手动创建的 `.wt/{module}` worktree；**不要用 Agent tool 的 `isolation` 参数**——worktree 由编排器手动 `git worktree add` 管理，编排器须掌握固定路径 `.wt/{module}` 与分支名 `wt/{module}` 才能在步骤 2c 统一合并 + 2e 清理；harness 托管的 isolation worktree 路径不可知、且从 origin 建会丢失本地未 push 的 done 代码，破坏 worktree 内完整 crate 自检）。**按 `composite_kind` 分派，不要按「`member_files` 多文件」判形态**——SCC 组、机械 batch、耦合逻辑簇都是多文件，必须靠 `composite_kind` 区分：
 
    **单文件模块**（`member_files` 为空）：派一个 SubAgent，在独立 worktree 内执行完整翻译循环（run.md 步骤 2-11：translate → cargo check → compile_fix → test）。完成后 worktree 内 `git add -A && git commit`。
 
