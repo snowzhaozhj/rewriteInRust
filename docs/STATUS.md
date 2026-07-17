@@ -40,7 +40,11 @@
 - **Sprint F ORCH-01 实现进行中**（2026-07-17）：决策反转已合并（PR #70），ORCH-01 按 5-PR 规划落地（规划见 [MDR-018](decisions/018-keep-parallel-migration.md) 现状基线 + plans 文档）：**PR-1 CLI/state 并行分层落盘 ✅ 待审查（PR [#71](https://github.com/snowzhaozhj/rewriteInRust/pull/71)，分支 `feat/m4-orch-01-pr1-parallel-groups`）** → PR-2 worktree 机制统一（删 isolation）→ PR-3 两层 done 接活 → PR-4 编排集成测试（mock 派发进 CI）→ PR-5 真实项目并行演练。
   - **三项方向决策（用户拍板）**：① worktree 保留手动 `git worktree add`（删 isolation:"worktree"，因其从 origin 建会丢本地 done 代码 + 编排器拿不到路径无法统一合并）；② `parallel_groups` 收口到 `scc_groups`（已确认 `SccGroup.sprint` = 同层拓扑独立可并行）；③ 验收 = mock 集成测试进 CI + 一次真实项目并行演练。
   - **PR-1 交付**：删死字段 `MigrationSequence.parallel_groups` + `compute_parallel_groups`/`compute_level` 死函数；新增 CLI `graph parallel-groups`（按 sprint 聚合并行层，有环折叠为 is_cycle 组不报错，与 topo-sort 相反）；核实 `populate-modules` 已写 `ModuleState.sprint`（源自 scc_groups），无需新增 schema（YAGNI）；深链栈溢出守护测试迁到 `compute_scc_level`；proptest/ground_truth 不变量改按 scc_groups 聚合验证。设计 06 CLI 表同步。**4 视角审查全跑全闭环**：设计契约 PASS（6 项一致）；主审+专项共识 **1 important**（插入新 e2e 误删 `smoke_init` 的 `#[test]`，`just lint` 无 --all-targets 漏检）已修；**异构交叉 codex 确认收口在有环图下正确**（前提：编排器把 group 当原子调度单位——is_cycle 组 members 互有依赖边不可拆分并行，已写进 CLI doc + 设计 06），并抓 **1 important**（有环图并行不变量未覆盖——原循环生成器强制全图单 SCC，新增 `arb_multi_scc_graph` + proptest 1000 fuzz 验证同 sprint 组间无依赖）已修；nit（needless_range_loop / 透传 graph.warnings / 删无用 id_to_index O(V) 分配 / diamond+空图 e2e 强化）全修。`just ci` 全绿 + clippy --all-targets 干净。**等用户审阅拍板（不自行 merge）**。
-- **开放 PR**: [#71](https://github.com/snowzhaozhj/rewriteInRust/pull/71)（ORCH-01 PR-1 并行分层落 CLI，4 视角审查全闭环，待用户拍板）
+- **开放 PR**:
+  - [#71](https://github.com/snowzhaozhj/rewriteInRust/pull/71)（ORCH-01 PR-1 并行分层落 CLI，4 视角审查全闭环，待用户拍板）
+  - [#72](https://github.com/snowzhaozhj/rewriteInRust/pull/72)（ORCH-01 PR-2 worktree 机制统一，**stacked on #71**，主审无 important + 设计契约 PASS，专项/异构按豁免跳过，待用户拍板）
+    - **PR-2 交付**（纯 plugin 文档）：删 workflow.md 的 `isolation:"worktree"`（消除文件内两套 worktree 机制矛盾，统一到手动 `git worktree add`，因 isolation 从 origin 建丢本地 done 代码破坏完整 crate 自检 + 编排器拿不到路径无法统一合并）；workflow.md 改读不存在的 `migration_sequence.parallel_groups` → 按 `ModuleState.sprint` 筛并行层 + `graph parallel-groups` 命令；SKILL.md 消除「MVP 串行执行」与并行章节矛盾 + 顺手补命令清单（主审 pre-existing）。plugin validate 通过。
+    - **TODO（记账）**：SKILL.md 命令清单完整审计——现缺 quality/community/rules/graduate/advance-sprint 等十余命令，本 PR 只补 parallel-groups + reset/recover/resume，全量审计独立维护。
 
 ### M3 遗留债清理（为 M4 打地基）✅ 完成（2026-06-30）
 
