@@ -46,7 +46,7 @@ argument-hint: "[analyze|run|workflow|review] [module]"
 - **串行模式**：单模块 `/migrate run <module>` 不派发 SubAgent 翻译时，持锁者即翻译执行者本身，取锁/释放与 M1 一致。
 
 ### SubAgent 编排
-- 用 **Agent tool** 调用 SubAgent，参数 `subagent_type` 取带插件命名空间前缀的 agent 名：`rust-migrate:analyzer` / `rust-migrate:translator` / `rust-migrate:scaffolder` / `rust-migrate:verifier`。MVP 阶段 SubAgent **串行执行**，通过 `.rust-migration/` 下的文件通信，不直接对话。
+- 用 **Agent tool** 调用 SubAgent，参数 `subagent_type` 取带插件命名空间前缀的 agent 名：`rust-migrate:analyzer` / `rust-migrate:translator` / `rust-migrate:scaffolder` / `rust-migrate:verifier`。SubAgent 间通过 `.rust-migration/` 下的文件通信，不直接对话。单模块 `/migrate run` 串行派发；`/migrate workflow` 按 sprint 层并行派发同层独立模块（见 workflow.md 的 worktree 写隔离 + 逐层合并编排）。
 - **调用前后记台账**（每次 Agent 调用都做，含重试；否则 `subagent_calls` 恒空、卡死/重试无法诊断）：
   - 调用**前**：`rustmigrate state record-subagent-call --step-index <子命令步骤号> --subagent-name <analyzer|translator|verifier|scaffolder> --status started`。
   - 调用**后**：按结果再记一条 `--status ok`（产出物校验通过）或 `--status error --error-message "<原因>"`（校验失败 / 超时）。`--step-index` 与 `--subagent-name` 同上一条对齐。
