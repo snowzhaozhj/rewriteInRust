@@ -169,13 +169,11 @@ impl LanguageAdapter for GoAdapter {
         let pkg_dir = if specifier == module {
             String::new() // import module 根包
         } else {
-            match specifier
+            // 标准库/第三方 → strip 失败返回 None（外部依赖，无边）。
+            specifier
                 .strip_prefix(module)
-                .and_then(|s| s.strip_prefix('/'))
-            {
-                Some(sub) => sub.to_string(),
-                None => return None, // 标准库/第三方 → 外部依赖，无边
-            }
+                .and_then(|s| s.strip_prefix('/'))?
+                .to_string()
         };
 
         pick_representative_go_file(list_dir(&pkg_dir))
