@@ -90,15 +90,22 @@ fn git_raw(repo: &Path, args: &[&str]) -> std::process::Output {
         .expect("应能执行 git")
 }
 
-/// 在指定目录跑 `cargo check`，返回是否通过（真门）。
-fn cargo_check_passes(crate_dir: &Path) -> bool {
-    Command::new("cargo")
+/// 在指定目录跑 `cargo check`，返回 `(是否通过, 合并的 stdout+stderr)`（真门）。
+///
+/// 显式隔离 `CARGO_TARGET_DIR` 到 crate 自己的 target/：对齐设计（run.md/workflow.md
+/// 要求 per-worktree target 防并行编译锁争用），也避免外部环境导出的共享 target 让
+/// 多个同名 `demo` crate 相互踩踏。返回诊断文本供调用方断言命中的具体 rustc 错误
+/// （而非只看退出码——防基础设施故障导致的非预期非零退出被误判为「真门拦截」）。
+fn cargo_check(crate_dir: &Path) -> (bool, String) {
+    let out = Command::new("cargo")
         .current_dir(crate_dir)
+        .env("CARGO_TARGET_DIR", crate_dir.join("target"))
         .args(["check", "--quiet"])
         .output()
-        .expect("应能执行 cargo")
-        .status
-        .success()
+        .expect("应能执行 cargo");
+    let mut diag = String::from_utf8_lossy(&out.stdout).into_owned();
+    diag.push_str(&String::from_utf8_lossy(&out.stderr));
+    (out.status.success(), diag)
 }
 
 /// 建一个含初始提交的 git 仓库 + 最小可编译 lib crate。
@@ -239,11 +246,17 @@ fn orch_happy_path_two_modules_reach_done() {
         // 2a. 同层并行派发：两模块各自 worktree 翻译，写盘不冲突（各填自己的 own 文件）。
         let (ra, br_a) = dispatch_and_translate(repo, "a", "src/a.rs", "pub fn a() -> i32 { 1 }\n");
         let (rb, br_b) = dispatch_and_translate(repo, "b", "src/b.rs", "pub fn b() -> i32 { 2 }\n");
-        assert_eq!(ra.status, AgentStatus::AgentDone);
-        assert_eq!(rb.status, AgentStatus::AgentDone);
+        let results = [(ra, br_a), (rb, br_b)];
 
-        // 回传后编排器标 agent_done（substatus，非终态）。
-        for m in ["a", "b"] {
+        // 回传后编排器**据 TranslationResult 驱动**：只对 AgentStatus::AgentDone 的模块标 agent_done
+        // substatus（非终态）。用 result.module_key 而非硬编码模块名——协议类型真正驱动编排决策。
+        let agent_done: Vec<&str> = results
+            .iter()
+            .filter(|(r, _)| r.status == AgentStatus::AgentDone)
+            .map(|(r, _)| r.module_key.as_str())
+            .collect();
+        assert_eq!(agent_done, vec!["a", "b"], "两模块均应回传 agent_done");
+        for m in &agent_done {
             let (code, _) = cli(&[
                 "state",
                 "transition",
@@ -255,19 +268,20 @@ fn orch_happy_path_two_modules_reach_done() {
             assert_eq!(code, 0);
         }
 
-        // 2c. 逐层合并（写盘不冲突 → 均成功）。
+        // 2c. 逐层合并（写盘不冲突 → 均成功）。合并顺序取回传结果里的分支名。
         git_ok(repo, &["checkout", "-q", "main"]);
-        for br in [&br_a, &br_b] {
+        for (_, br) in &results {
             let out = git_raw(repo, &["merge", "-q", "--no-edit", br]);
             assert!(out.status.success(), "无冲突模块应合并成功: {br}");
         }
 
         // 2d. 整组验证真门：真跑 cargo check。
-        assert!(cargo_check_passes(repo), "整组 check 应通过");
+        let (passed, diag) = cargo_check(repo);
+        assert!(passed, "整组 check 应通过\n{diag}");
 
         // 编排器把本层模块推进到 reviewing（workflow.md 补的中间步：translating→testing→reviewing），
         // agent_done substatus 在 --to testing/reviewing 时保留（仅 Done 清空）。
-        for m in ["a", "b"] {
+        for m in &agent_done {
             for to in ["testing", "reviewing"] {
                 let (code, _) = cli(&["state", "transition", "--module", m, "--to", to]);
                 assert_eq!(code, 0, "{m} → {to} 应合法");
@@ -357,9 +371,13 @@ fn orch_merge_conflict_aborts_and_marks_rework() {
             "冲突文件应含 error.rs: {conflicts}"
         );
 
-        // 编排器 abort + 标记冲突模块重译（MDR-003 约束7 降级路径）。
-        // translating → compile_fixing 是合法「重译」边（矩阵：Translating => CompileFixing|Testing|Blocked），
-        // 对应 workflow.md reconcile/compile_fixing 子流程；reconcile 轮次耗尽后再 compile_fixing → paused。
+        // 编排器 abort + 标记冲突模块重译（workflow.md 2c reconcile：git merge --abort →
+        // 冲突模块在各自 worktree 内 rebase 后重译，概念上仍 translating；reconcile 轮次
+        // 耗尽（max_reconcile_rounds）才降级 → paused）。这里模拟轮次耗尽的降级：
+        // translating → paused 不是合法边（矩阵 Translating => CompileFixing|Testing|Blocked），
+        // 降级路径经 Blocked 中转或由 run.md 失败恢复标 paused；本测试直接验证「冲突检出 +
+        // abort + 冲突模块不进 done」这一 reconcile 核心不变量，降级态取合法的 compile_fixing
+        // （workflow.md 2d 归因表「跨模块冲突 → 相关模块整组回 compile_fixing」正是此边）。
         git_ok(repo, &["merge", "--abort"]);
         let (code, _) = cli(&[
             "state",
@@ -369,9 +387,12 @@ fn orch_merge_conflict_aborts_and_marks_rework() {
             "--to",
             "compile_fixing",
             "--reason",
-            "reconcile 冲突：src/error.rs",
+            "reconcile 冲突：src/error.rs（跨模块冲突回 compile_fixing）",
         ]);
-        assert_eq!(code, 0, "translating → compile_fixing（标记重译）应合法");
+        assert_eq!(
+            code, 0,
+            "translating → compile_fixing（跨模块冲突重译）应合法"
+        );
 
         // 冲突模块不得误升 done；已合并模块 a 仍是 translating+agent_done（未走到 done）。
         assert_eq!(
@@ -440,14 +461,20 @@ fn orch_whole_group_check_gate_blocks_done() {
             assert!(out.status.success());
         }
 
-        // 整组 check 真门：必失败。
+        // 整组 check 真门：必失败，且断言命中**预期的**未定义符号错误（E0425）——
+        // 而非任意非零退出（防基础设施故障如 target 权限/磁盘让 check 因无关原因失败而误判真门）。
+        let (passed, diag) = cargo_check(repo);
+        assert!(!passed, "含未定义符号的整组 check 必须失败（真门）");
         assert!(
-            !cargo_check_passes(repo),
-            "含未定义符号的整组 check 必须失败（真门）"
+            diag.contains("E0425") || diag.contains("nonexistent_symbol"),
+            "check 失败应因预期的未定义符号（E0425），实际诊断:\n{diag}"
         );
 
         // 真门失败 → 编排器不推进到 reviewing、不调 batch done。
         // 模拟：直接对仍处 translating+agent_done 的模块调 batch → 全被矩阵拒绝跳过。
+        // 注：此处 batch 被拒的直接原因是 status≠reviewing（编排器据真门失败**没有**执行
+        // testing→reviewing 推进）——CLI 强制的是「非 reviewing 不得 done」，整组 check 门本身
+        // 坐落编排器判断（LLM/harness），故本用例验证的是「真门失败 → 不推进 → batch 拒」这条链。
         let (code, json) = cli(&[
             "state",
             "batch-transition-done",

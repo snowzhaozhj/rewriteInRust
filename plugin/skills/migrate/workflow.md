@@ -62,7 +62,7 @@ rustmigrate state get modules
 
 3. **派发 SubAgent**（用 Agent tool 派发到步骤 2a.1 手动创建的 `.wt/{module}` worktree；**不要用 Agent tool 的 `isolation` 参数**——worktree 由编排器手动 `git worktree add` 管理，编排器须掌握固定路径 `.wt/{module}` 与分支名 `wt/{module}` 才能在步骤 2c 统一合并 + 2e 清理；harness 托管的 isolation worktree 路径不可知、且从 origin 建会丢失本地未 push 的 done 代码，破坏 worktree 内完整 crate 自检）。**按 `composite_kind` 分派，不要按「`member_files` 多文件」判形态**——SCC 组、机械 batch、耦合逻辑簇都是多文件，必须靠 `composite_kind` 区分：
 
-   **单文件模块**（`member_files` 为空）：派一个 SubAgent，在独立 worktree 内执行完整翻译循环（run.md 步骤 2-11：translate → cargo check → compile_fix → test）。完成后 worktree 内 `git add -A && git commit`。
+   **单文件模块**（`member_files` 为空）：派一个 SubAgent，在独立 worktree 内执行翻译 + 自检循环（translate → cargo check → compile_fix → test，即 run.md 的翻译到测试部分），**只在 worktree 内产码 + 自检、不改主 state 的最终状态**——完成后 worktree 内 `git add -A && git commit`，回传由编排器标 `agent_done`（升 `reviewing`/`done` 由编排器在步骤 2d 统一驱动，见下）。
 
    **机械 batch 组**（`composite_kind=batch`）：在同一 worktree 内走 run.md「Batch 组轻量路径」（一次翻完 + 编译即门禁，跳意图摘要/测试/Phase B）。完成后整组一次提交。
 
@@ -132,13 +132,15 @@ cargo test 2>&1
 
 **判定逻辑**：
 
-- **全部通过** → 先把本层模块推进到 `reviewing`，再批量升 `done`：
+- **全部通过** → 先把本层**成功模块**推进到 `reviewing`，再批量升 `done`：
   ```bash
   # ① 推进到 reviewing（并行路径必须补这两步）：SubAgent 只在 worktree 内译码 + 自检、
   #    回传后编排器只标了 substatus=agent_done，status 仍停在 translating——batch-transition-done
   #    要求 status=reviewing，故整组 check 过后编排器对每个模块补 testing→reviewing 两步转换
-  #    （agent_done substatus 在这两步保留，仅升 done 时清空）。SubAgent 不执行单模块 run.md 步骤 11。
-  for M in <M1> <M2> ...; do
+  #    （agent_done substatus 在这两步保留，仅升 done 时清空）。SubAgent 不执行单模块流程的最终 done 步。
+  #    ⚠️ 只遍历「成功合并 + substatus=agent_done」的模块：本层失败模块已停 paused/degrade_skip
+  #    （失败不阻塞，见 2b），对其执行 paused→testing 会被状态矩阵拒绝。
+  for M in <本层 agent_done 成功模块>; do
     rustmigrate state transition --module $M --to testing
     rustmigrate state transition --module $M --to reviewing
   done
