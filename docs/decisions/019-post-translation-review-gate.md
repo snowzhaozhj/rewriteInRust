@@ -57,6 +57,11 @@
 - `run.md` batch 6.5（119-123）/ SCC 快进（143）：`reviewing→done` 三步快进纳入策略判定——机械 batch 命中窄策略可放行，否则停等签批。
 - `SKILL.md`：人类决策点约定补译后门 + resume 行为（`reviewing + awaiting_final_review` = 待人类、不自动 done）。
 
+**并行路径护栏（ORCH-01 PR-3 落地 `batch-transition-done` 后暴露，异构审查确认）**
+- **batch 命令与签批门同边**：`state batch-transition-done` 走 `reviewing → done` 边，而本门坐落于**这条边本身**。落地本门后，`workflow.md` 步骤 2d 的「全过 → batch 升 done」自动路径**必须**先判自动放行策略：命中强制人工清单 / substatus 为 `awaiting_final_review` 的模块**不得**进入 batch 调用，须停 `reviewing + awaiting_final_review` 等签批。否则并行路径绕过人签批（06 命令表 `batch-transition-done` 行已注护栏）。
+- **并行回传须推进到 `reviewing`**（PR-3 遗留 TODO ①）：现 `workflow.md` 回传只设 `--substatus agent_done`（status 仍非 `reviewing`），batch 的 `→done` 会被矩阵全拒。本门落地时须明确：并行整组 merge + check 过后，编排器把该层模块推进到 `reviewing`（再按上一条判签批 / batch 放行），SubAgent 不执行 run.md 步骤 11。
+- **整组失败回退边缺失**（PR-3 遗留 TODO ②）：`workflow.md` 步骤 2d 整组 check 失败要 `reviewing → compile_fixing`，但矩阵 `Reviewing => Done | Blocked` 无此边。与本门新增的 `Reviewing → Translating` 返工路径**统一定义**（返工/编译修复都从 `reviewing` 出发回到活跃态），避免两处各加一条冗余边。
+
 **设计文档（唯一权威）**
 - `03-execution-model.md`：补「**译后签批门交互规范**」节（对标 §4.3.1 意图门规范：证据包内容 / 强制人工触发清单 / 自动放行窄策略 / 审计口径）；`627` 处补落实说明。
 - `09-appendix-schemas.md`：补 `awaiting_final_review` substatus + 自动放行策略 config schema + 分类 provenance 字段。
