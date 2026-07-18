@@ -132,11 +132,20 @@ cargo test 2>&1
 
 **判定逻辑**：
 
-- **全部通过** → `batch_transition_done`：对本层所有 `agent_done` 模块一次性执行 `reviewing → done`。
+- **全部通过** → 先把本层模块推进到 `reviewing`，再批量升 `done`：
   ```bash
-  # 一条命令批量升 done（非 agent_done 模块自动跳过并降级 warning，一个失败不影响其他）：
+  # ① 推进到 reviewing（并行路径必须补这两步）：SubAgent 只在 worktree 内译码 + 自检、
+  #    回传后编排器只标了 substatus=agent_done，status 仍停在 translating——batch-transition-done
+  #    要求 status=reviewing，故整组 check 过后编排器对每个模块补 testing→reviewing 两步转换
+  #    （agent_done substatus 在这两步保留，仅升 done 时清空）。SubAgent 不执行单模块 run.md 步骤 11。
+  for M in <M1> <M2> ...; do
+    rustmigrate state transition --module $M --to testing
+    rustmigrate state transition --module $M --to reviewing
+  done
+  # ② 一条命令批量升 done（非 agent_done / 非 reviewing / 不存在的模块自动跳过并降级 warning，一个失败不影响其他）：
   rustmigrate state batch-transition-done --module <M1> --module <M2> ...
   ```
+  > **⚠️ 译后签批门护栏**：`batch-transition-done` 走 `reviewing → done` 边，而译后签批门（尚未实现）恰坐落这条边本身。签批门落地后，命中强制人工清单 / substatus 为 `awaiting_final_review` 的模块**不得**进入本命令，须停 `reviewing` 等人签批；本自动路径仅用于「合并 + 整组 check 过 → done」。
 
 - **存在失败** → 进入 compile_fixing 子流程：编排器解析 rustc 错误，按下表归因后修复。
 
