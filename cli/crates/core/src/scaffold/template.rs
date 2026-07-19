@@ -40,6 +40,23 @@ pub fn scaffold_project(name: &str, target_dir: &Path) -> Result<()> {
         return Err(MigrateError::Config(format!("cargo init 失败: {stderr}")));
     }
 
+    write_gitignore(target_dir)?;
+
+    Ok(())
+}
+
+/// 写入 crate 级 `.gitignore`（含 `/target`），幂等（已存在则跳过）。
+///
+/// `cargo init --vcs none` 不生成 `.gitignore`；即便用 `--vcs git`，cargo 在检测到
+/// 外层已是 git 仓库时也会静默跳过。而并行编排在各 worktree 内跑 `cargo check` 自检
+/// 会产生 `target/`，若无 `.gitignore` 则被 `git add -A` 吞进提交、污染合并（M4-ORCH-01
+/// PR-5 演练撞出）。故显式生成，不依赖 cargo 的条件行为。
+fn write_gitignore(target_dir: &Path) -> Result<()> {
+    let path = target_dir.join(".gitignore");
+    if path.exists() {
+        return Ok(());
+    }
+    std::fs::write(&path, "/target\n")?;
     Ok(())
 }
 
@@ -75,6 +92,8 @@ pub fn scaffold_project_with_bin(name: &str, target_dir: &Path) -> Result<()> {
         return Err(MigrateError::Config(format!("cargo init 失败: {stderr}")));
     }
 
+    write_gitignore(target_dir)?;
+
     Ok(())
 }
 
@@ -95,6 +114,25 @@ mod tests {
 
         let cargo = std::fs::read_to_string(target.join("Cargo.toml")).unwrap();
         assert!(cargo.contains("my_project"));
+
+        // scaffold 须生成含 /target 的 .gitignore（cargo init --vcs none 不生成，
+        // 否则并行 worktree 自检产物 target/ 会被 git add 吞入提交，M4-ORCH-01 PR-5）。
+        let gitignore = std::fs::read_to_string(target.join(".gitignore")).unwrap();
+        assert!(gitignore.contains("/target"), "gitignore 应忽略 /target");
+    }
+
+    #[test]
+    fn test_scaffold_gitignore_preserved_when_exists() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("my_project");
+        std::fs::create_dir_all(&target).unwrap();
+        // 预置自定义 .gitignore：scaffold 不得覆盖（幂等）。
+        std::fs::write(target.join(".gitignore"), "/custom\n").unwrap();
+
+        scaffold_project("my_project", &target).unwrap();
+
+        let gitignore = std::fs::read_to_string(target.join(".gitignore")).unwrap();
+        assert_eq!(gitignore, "/custom\n", "已存在的 .gitignore 不应被覆盖");
     }
 
     #[test]

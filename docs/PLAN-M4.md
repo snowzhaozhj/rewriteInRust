@@ -198,7 +198,7 @@ Step 3: PR-C3 (Validation)     → GO-08 + GO-09          [工时 ~2.5d]
 - [x] 模拟单模块失败/中断，续跑不丢状态、可重入、幂等（重跑不腐蚀已有产物）——ROB-01a ✅ `state reset`（幂等回退 + `reset;reset`==`reset`）+ 全字段 round-trip 守卫，见 [MDR-015](decisions/015-reset-idempotent-retry-boundary.md)
 - [x] 模拟 watchdog stall（agent 静默超时），系统自动标记失败 + 跳过/重试 + 后续模块不阻塞——ROB-01b ✅ `state recover`（检测归编排器 + retry/skip 幂等恢复 + `state deps` 无依赖模块推进），见 [MDR-016](decisions/016-watchdog-stall-recovery-boundary.md)
 - [x] 模拟额度耗尽，系统优雅暂停 + 输出续跑指令 + 下次断点恢复——ROB-01c ✅ `state resume`（纯查询断点计划：interrupted 带 recover_command 幂等重入 / 终态不重跑 / paused 不复活），检测归编排器，见 [MDR-017](decisions/017-quota-pause-resume-boundary.md)
-- [ ] ORCH-01（重定义）：并行 + worktree 编排真正接入活路径——`parallel_groups` 落 CLI/state、worktree 机制统一、逐层合并 + 整组真门、端到端集成测试跑通（见 [MDR-018](decisions/018-keep-parallel-migration.md)；工作量待专门规划）
+- [x] ORCH-01（重定义）：并行 + worktree 编排真正接入活路径——`parallel_groups` 落 CLI/state（PR #71）、worktree 机制统一（PR #73）、两层 done 接活（PR #74）、逐层合并 + 整组真门 + 端到端集成测试跑通（PR #75）、**真实项目（textdistance）3 路并行演练跑通**（PR-5，见 [m4-orch-01-acceptance.md](m4-orch-01-acceptance.md)）（见 [MDR-018](decisions/018-keep-parallel-migration.md)）
 - [x] `rule_version` 与权威清单不一致时 CLI 报错（非静默）——GOV-01 ✅ `validate rules`（enforce=true→退出码 1）
 - [ ] TS/Python/Go 既有路径无回归
 
