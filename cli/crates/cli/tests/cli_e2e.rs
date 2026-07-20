@@ -2905,6 +2905,21 @@ fn e2e_stats_quality_with_transitions() {
         assert_eq!(code, 0, "record-metrics 应成功: {metrics_json}");
         assert_eq!(metrics_json["data"]["test_pass_rate"], "276/276");
 
+        let (code, partial_json) = run(&[
+            "state",
+            "record-metrics",
+            "--module",
+            key,
+            "--known-differences",
+            "1",
+        ]);
+        assert_eq!(code, 0, "部分更新应成功: {partial_json}");
+        assert_eq!(
+            partial_json["data"]["test_pass_rate"], "276/276",
+            "响应应返回持久化后的旧值，而非请求缺省 null: {partial_json}"
+        );
+        assert_eq!(partial_json["data"]["known_differences"], 1);
+
         let (code, json) = run(&["stats", "quality"]);
         assert_eq!(code, 0, "stats quality 应成功: {json}");
 
@@ -2921,7 +2936,7 @@ fn e2e_stats_quality_with_transitions() {
             "testing 意味着编译通过: {mq}"
         );
         assert_eq!(mq["deterministic"]["test_pass_rate"], 1.0);
-        assert_eq!(mq["behavior_coverage"], 1.0);
+        assert!((mq["behavior_coverage"].as_f64().unwrap() - 10.0 / 11.0).abs() < 1e-9);
         assert!(mq["final_score"].is_number(), "应产出 final_score: {mq}");
     });
 }
@@ -2980,6 +2995,38 @@ fn e2e_stats_quality_go_loc_ratio_scores_mechanical_module() {
                 .iter()
                 .any(|w| w.as_str().unwrap_or("").contains("项目级近似值")),
             "应披露 loc_ratio 粒度近似: {json}"
+        );
+    });
+}
+
+#[test]
+fn e2e_stats_quality_overlapping_roots_do_not_score_polluted_ratio() {
+    let project = temp_linear_project();
+    with_cwd(project.path(), || {
+        std::fs::create_dir_all("src/rust").unwrap();
+        std::fs::write("src/rust/lib.rs", "pub fn generated() {}\n").unwrap();
+        let _ = run(&["init"]);
+        let (code, _) = run(&["graph", "build", "--root", "src"]);
+        assert_eq!(code, 0);
+        let (code, _) = run(&["state", "populate-modules", "--root", "src"]);
+        assert_eq!(code, 0);
+
+        let (code, json) = run(&["stats", "quality", "--source", "src", "--rust", "src/rust"]);
+        assert_eq!(code, 0, "重叠目录应降级而非失败: {json}");
+        assert_eq!(json["status"], "warning");
+        for module in json["data"]["modules"].as_array().unwrap() {
+            assert!(
+                module["deterministic"]["loc_ratio"].is_null(),
+                "已知污染的 LOC 比不得进入评分: {json}"
+            );
+        }
+        assert!(
+            json["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w.as_str().unwrap_or("").contains("LOC 比已留空")),
+            "应明确说明重叠导致 LOC 比留空: {json}"
         );
     });
 }

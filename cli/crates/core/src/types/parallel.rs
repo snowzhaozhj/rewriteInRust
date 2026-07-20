@@ -88,6 +88,12 @@ pub struct TranslationResult {
     pub self_check: CheckStatus,
     /// 测试结果（cargo test）。
     pub test: CheckStatus,
+    /// verifier 产出的测试通过率；机械 batch / 未生成行为测试时为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_pass_rate: Option<String>,
+    /// verifier 确认的已知行为差异数；未生成行为测试时为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known_differences: Option<u32>,
 }
 
 /// Agent 自检状态。
@@ -170,6 +176,8 @@ mod tests {
             shared_touched: vec![PathBuf::from("src/error.rs"), PathBuf::from("Cargo.toml")],
             self_check: CheckStatus::Pass,
             test: CheckStatus::Pass,
+            test_pass_rate: Some("24/24".to_string()),
+            known_differences: Some(0),
         };
 
         let json = serde_json::to_string_pretty(&result).unwrap();
@@ -181,6 +189,8 @@ mod tests {
         assert_eq!(parsed.shared_touched.len(), 2);
         assert_eq!(parsed.self_check, CheckStatus::Pass);
         assert_eq!(parsed.test, CheckStatus::Pass);
+        assert_eq!(parsed.test_pass_rate.as_deref(), Some("24/24"));
+        assert_eq!(parsed.known_differences, Some(0));
     }
 
     #[test]
@@ -194,6 +204,8 @@ mod tests {
                 message: "error[E0308]: mismatched types".to_string(),
             },
             test: CheckStatus::Skipped,
+            test_pass_rate: None,
+            known_differences: None,
         };
 
         let json = serde_json::to_string_pretty(&result).unwrap();
@@ -207,6 +219,21 @@ mod tests {
             }
         );
         assert_eq!(parsed.test, CheckStatus::Skipped);
+    }
+
+    #[test]
+    fn test_translation_result_old_json_defaults_metrics_to_none() {
+        let json = r#"{
+            "module_key":"file:src/legacy.ts",
+            "status":"agent_done",
+            "own_files":[],
+            "shared_touched":[],
+            "self_check":"pass",
+            "test":"skipped"
+        }"#;
+        let parsed: TranslationResult = serde_json::from_str(json).unwrap();
+        assert!(parsed.test_pass_rate.is_none());
+        assert!(parsed.known_differences.is_none());
     }
 
     #[test]
@@ -235,6 +262,8 @@ mod tests {
             shared_touched: vec![],
             self_check: CheckStatus::Pass,
             test: CheckStatus::Skipped,
+            test_pass_rate: None,
+            known_differences: None,
         };
         let json = serde_json::to_string(&result).unwrap();
         assert!(json.contains("\"module_key\""));

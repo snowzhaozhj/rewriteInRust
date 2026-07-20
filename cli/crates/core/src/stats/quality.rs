@@ -189,7 +189,7 @@ fn infer_compile_pass(status: ModuleStatus) -> Option<bool> {
 
 /// 解析 test_pass_rate 字符串为 0.0-1.0 浮点数。
 /// 支持格式："85%"、"0.85"、"85"、"85/100"。
-fn parse_test_pass_rate(s: &str) -> Option<f64> {
+pub fn parse_test_pass_rate(s: &str) -> Option<f64> {
     let s = s.trim();
     if s.is_empty() {
         return None;
@@ -216,7 +216,7 @@ fn parse_test_pass_rate(s: &str) -> Option<f64> {
             Some(v)
         }
     };
-    result.filter(|v| v.is_finite())
+    result.filter(|v| v.is_finite() && (0.0..=1.0).contains(v))
 }
 
 /// 计算行为覆盖率。
@@ -424,6 +424,16 @@ mod tests {
     fn test_parse_test_pass_rate_infinity_rejected() {
         assert!(parse_test_pass_rate("inf").is_none());
         assert!(parse_test_pass_rate("-inf").is_none());
+    }
+
+    #[test]
+    fn test_parse_test_pass_rate_out_of_range_rejected() {
+        for invalid in ["101%", "200", "-1", "101/100"] {
+            assert!(
+                parse_test_pass_rate(invalid).is_none(),
+                "{invalid} 应因超出 [0,1] 被拒绝"
+            );
+        }
     }
 
     #[test]

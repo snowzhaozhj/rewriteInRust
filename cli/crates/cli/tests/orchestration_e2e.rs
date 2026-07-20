@@ -223,6 +223,8 @@ fn dispatch_and_translate(
         shared_touched: vec![],
         self_check: CheckStatus::Pass,
         test: CheckStatus::Skipped,
+        test_pass_rate: None,
+        known_differences: None,
     };
     (result, branch)
 }

@@ -5,6 +5,7 @@
 pub mod machine;
 
 pub use machine::{
-    InterruptedModule, MigrationStateMachine, RecoverOutcome, RecoverPolicy, ResetOutcome,
-    ResumePlan, ResumeProgress, SprintAdvanceResult, STATE_SCHEMA_VERSION, SUBSTATUS_AGENT_DONE,
+    InterruptedModule, MigrationStateMachine, RecordMetricsOutcome, RecoverOutcome, RecoverPolicy,
+    ResetOutcome, ResumePlan, ResumeProgress, SprintAdvanceResult, STATE_SCHEMA_VERSION,
+    SUBSTATUS_AGENT_DONE,
 };

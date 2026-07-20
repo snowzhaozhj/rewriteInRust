@@ -2955,14 +2955,14 @@ fn cmd_state_record_metrics(
 
     let path = state_path();
     let (mut machine, warnings) = load_state_with_warnings(&path)?;
-    machine.record_metrics(module, test_pass_rate, known_differences)?;
+    let outcome = machine.record_metrics(module, test_pass_rate, known_differences)?;
     machine.save(&path)?;
 
     Ok((
         json!({
-            "module": module,
-            "test_pass_rate": test_pass_rate,
-            "known_differences": known_differences,
+            "module": outcome.module,
+            "test_pass_rate": outcome.test_pass_rate,
+            "known_differences": outcome.known_differences,
         }),
         warnings,
     ))
@@ -3212,14 +3212,19 @@ fn cmd_stats_quality(source: Option<&Path>, rust: Option<&Path>) -> CmdResult {
     let cfg = load_config_or_default(&mut warnings);
     let (source_root, rust_root) = stats_roots(source, rust, &cfg);
 
-    if let Some(outer) = roots_overlap(&source_root, &rust_root) {
+    let roots_overlap = roots_overlap(&source_root, &rust_root);
+    if let Some(outer) = &roots_overlap {
         warnings.push(format!(
-            "source 与 rust 目录存在包含关系（{outer} 包含另一侧），质量度量的 LOC 比可能重复计数；\
+            "source 与 rust 目录存在包含关系（{outer} 包含另一侧），质量度量的 LOC 比已留空；\
              建议将 source_root / rust_root 配置为互不包含的目录"
         ));
     }
 
-    let project_loc_ratio = compute_project_loc_ratio(&source_root, &rust_root, &mut warnings);
+    let project_loc_ratio = if roots_overlap.is_some() {
+        None
+    } else {
+        compute_project_loc_ratio(&source_root, &rust_root, &mut warnings)
+    };
 
     let thresholds = rustmigrate_core::stats::quality::QualityThresholds {
         done_threshold: cfg.quality.done_threshold,

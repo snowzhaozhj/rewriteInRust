@@ -34,6 +34,17 @@ pub struct MigrationStateMachine {
     persistence_config: PersistenceConfig,
 }
 
+/// [`record_metrics`](MigrationStateMachine::record_metrics) 的写入结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordMetricsOutcome {
+    /// 归一后的组代表 module key。
+    pub module: String,
+    /// 写入完成后的实际测试通过率（部分更新时保留旧值）。
+    pub test_pass_rate: Option<String>,
+    /// 写入完成后的实际已知差异数。
+    pub known_differences: u32,
+}
+
 /// [`reset_module`](MigrationStateMachine::reset_module) 的结果——描述这次幂等回退把模块从
 /// 什么状态回退到什么状态，以及是否为空操作（已处于干净重译入口，重复 reset 无副作用）。
 #[derive(Debug, Clone, PartialEq)]
@@ -520,7 +531,15 @@ impl MigrationStateMachine {
         name: &str,
         test_pass_rate: Option<&str>,
         known_differences: Option<u32>,
-    ) -> Result<()> {
+    ) -> Result<RecordMetricsOutcome> {
+        if let Some(rate) = test_pass_rate {
+            if crate::stats::quality::parse_test_pass_rate(rate).is_none() {
+                return Err(MigrateError::Config(format!(
+                    "非法 test_pass_rate: {rate}（支持 85% / 0.85 / 85 / 85/100，且须落在 [0,1]）"
+                )));
+            }
+        }
+
         let canonical = self.canonical_module_key(name)?;
         let module = self
             .state_file
@@ -534,7 +553,11 @@ impl MigrationStateMachine {
         if let Some(count) = known_differences {
             module.known_differences = count;
         }
-        Ok(())
+        Ok(RecordMetricsOutcome {
+            module: canonical,
+            test_pass_rate: module.test_pass_rate.clone(),
+            known_differences: module.known_differences,
+        })
     }
 
     /// 归一 module key：调用方通常传组代表 key，但 run/reset 阶段也可能对折叠组的非代表成员
@@ -2044,12 +2067,34 @@ mod tests {
         module.known_differences = 2;
         m.update_module("a", module);
 
-        m.record_metrics("a", None, Some(1)).unwrap();
+        let outcome = m.record_metrics("a", None, Some(1)).unwrap();
+        assert_eq!(outcome.module, "a");
+        assert_eq!(outcome.test_pass_rate.as_deref(), Some("90%"));
+        assert_eq!(outcome.known_differences, 1);
         assert_eq!(
             m.state_file().modules["a"].test_pass_rate.as_deref(),
             Some("90%")
         );
         assert_eq!(m.state_file().modules["a"].known_differences, 1);
+    }
+
+    #[test]
+    fn test_record_metrics_rejects_invalid_rate_without_mutation() {
+        for invalid in ["garbage", "101%", "1/0", "-1"] {
+            let mut m = new_machine();
+            let mut module = module_with_status(ModuleStatus::Testing);
+            module.test_pass_rate = Some("90%".to_string());
+            m.update_module("a", module);
+
+            let result = m.record_metrics("a", Some(invalid), Some(3));
+            assert!(
+                matches!(result, Err(MigrateError::Config(_))),
+                "{invalid} 应被拒绝"
+            );
+            let unchanged = &m.state_file().modules["a"];
+            assert_eq!(unchanged.test_pass_rate.as_deref(), Some("90%"));
+            assert_eq!(unchanged.known_differences, 0);
+        }
     }
 
     #[test]
@@ -2059,8 +2104,10 @@ mod tests {
         group.member_files = Some(vec!["group".to_string(), "file:helper.ts".to_string()]);
         m.update_module("group", group);
 
-        m.record_metrics("file:helper.ts", Some("1.0"), None)
+        let outcome = m
+            .record_metrics("file:helper.ts", Some("1.0"), None)
             .expect("非代表成员应归一到组代表");
+        assert_eq!(outcome.module, "group");
         assert_eq!(
             m.state_file().modules["group"].test_pass_rate.as_deref(),
             Some("1.0")
