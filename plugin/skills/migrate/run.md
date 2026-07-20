@@ -139,7 +139,7 @@
 3. **候选选优（7a，仅 standard/full）+ 对抗审查（7b）**：同单文件路径的步骤 7，对整组产出做 verifier 选优 + 对抗审查。
 4. **结构门（步骤 8）**：`rustmigrate stats compare` 校验整组 Phase A 1:1 结构。越界→忠实重做。
 5. **Phase B（步骤 9）**：整组惯用化 + 编译修正（同单文件步骤 9）。
-6. **行为测试（步骤 10）**：verifier 对整组公共 API 生成测试并跑 `verify.sh`。done 前置硬条件同单文件（通过率 ≥ 预期、clippy 无 warning、`TODO(port)`=0、无未确认 `bug_replica`）。
+6. **行为测试（步骤 10）**：verifier 对整组公共 API 生成测试并跑 `verify.sh`。done 前置硬条件同单文件（通过率 ≥ 预期、clippy 无 warning、`TODO(port)`=0、无未确认 `bug_replica`）。测试结果就绪后、推进 reviewing 前，编排器执行 `state record-metrics --module <batch-key> --test-pass-rate <通过/总数> --known-differences <N>`，把 L2 结果落 state 供 `stats quality --source <source_root> --rust <rust_root>` 计算质量分。
 7. **最终签批（步骤 11）**：`state transition --to done`。
 
 **状态机**：沿用 `translating→testing→reviewing→done` 转换矩阵（与单文件路径同，无新 substatus）。
@@ -194,7 +194,7 @@
 > **额度耗尽优雅暂停 + 断点续跑（M4-ROB-01c）**：token 预算 / API 额度逼近上限（harness budget.remaining()）时，**当前原子步收尾后停止**（勿在写 `.rs`/改 state 半途中断——状态已逐步原子 checkpoint），commit + 更新台账做断点。续跑时先 `state resume` 拿断点计划：对 `data.interrupted`（运行态被中断模块）逐个执行其 `recover_command`（`state recover --policy retry`）幂等重入；`data.next`（pending）用 `state deps <M>` 判就绪后推进；`data.awaiting_decision`（paused）不复活；**已完成/降级模块不重跑**。详见 SKILL.md「额度耗尽优雅暂停与续跑」。
 
 ### 10. 测试验证（verifier）
-`state transition --module <M> --to testing`。调 verifier（**前/后记 subagent_call**，step_index=10）生成测试并跑 `hooks/scripts/verify.sh`（nextest + clippy + 条件 loom/shuttle），产出测试结果 JSON（**L2**：通过率 ∈[0,1]）。**done 前置硬条件**：通过率 ≥ 预期、clippy 无 warning、`TODO(port)` 计数=0、无未确认的 `bug_replica`。任一不满足标 incomplete、停在 testing：用 `state transition --module <M> --substatus "incomplete" --reason "<未满足项摘要>"`（**不带 `--to testing`**——已在 testing，同态 `--to` 会被转换矩阵拒；省略 `--to` 时 CLI 走 substatus-only 路径合法，且 `--reason` 会把原因 append 进 `attempts`）。失败 ≤2 次重试，回滚保留 Phase B 产物。通过 → `state transition --module <M> --to reviewing`。
+`state transition --module <M> --to testing`。调 verifier（**前/后记 subagent_call**，step_index=10）生成测试并跑 `hooks/scripts/verify.sh`（nextest + clippy + 条件 loom/shuttle），产出测试结果 JSON（**L2**：通过率 ∈[0,1]）。**done 前置硬条件**：通过率 ≥ 预期、clippy 无 warning、`TODO(port)` 计数=0、无未确认的 `bug_replica`。任一不满足标 incomplete、停在 testing：用 `state transition --module <M> --substatus "incomplete" --reason "<未满足项摘要>"`（**不带 `--to testing`**——已在 testing，同态 `--to` 会被转换矩阵拒；省略 `--to` 时 CLI 走 substatus-only 路径合法，且 `--reason` 会把原因 append 进 `attempts`）。失败 ≤2 次重试，回滚保留 Phase B 产物。通过后先执行 `state record-metrics --module <M> --test-pass-rate <通过/总数> --known-differences <N>`，把最新 L2 结果落 state（重跑时覆盖更新）；再 `state transition --module <M> --to reviewing`。质量仪表板调用 `stats quality --source <source_root> --rust <rust_root>`，其中 LOC 比为明确告警的项目级近似值。
 
 ### 11. 最终签批
 `state transition --module <M> --to done`（原子写）。更新 `PARITY.md`；如有架构决策写 MDR。若前置未满足（TODO(port)>0 / bug_replica 未确认 / coverage 不足），停在 `reviewing`、标 incomplete（同步骤 10：`--substatus "incomplete" --reason "<原因>"`、**不带 `--to`**，避免同态 `reviewing→reviewing` 被矩阵拒），不进 done。

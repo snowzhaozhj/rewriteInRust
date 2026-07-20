@@ -69,12 +69,13 @@ pub struct AiIndicators {
 }
 
 pub fn compute_quality(state: &MigrationStateFile) -> QualityReport {
-    compute_quality_with_thresholds(state, &QualityThresholds::default())
+    compute_quality_with_thresholds(state, &QualityThresholds::default(), None)
 }
 
 pub fn compute_quality_with_thresholds(
     state: &MigrationStateFile,
     thresholds: &QualityThresholds,
+    project_loc_ratio: Option<f64>,
 ) -> QualityReport {
     let total_modules = state.modules.len();
     let mut done_modules = 0usize;
@@ -98,7 +99,7 @@ pub fn compute_quality_with_thresholds(
             let deterministic = DeterministicIndicators {
                 compile_pass,
                 test_pass_rate: test_pass,
-                loc_ratio: None,
+                loc_ratio: project_loc_ratio,
                 function_ratio: None,
                 clippy_warnings: None,
                 unsafe_blocks: None,
@@ -499,6 +500,46 @@ mod tests {
         let score = compute_final_score(&det, None).unwrap();
         // det_avg = (100 + 95) / 2 = 97.5；无 AI 时 100% 权重
         assert!((score - 97.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_project_loc_ratio_enables_done_module_score() {
+        let mut state = empty_state();
+        state
+            .modules
+            .insert("mechanical".into(), module(ModuleStatus::Done));
+
+        let report =
+            compute_quality_with_thresholds(&state, &QualityThresholds::default(), Some(1.5));
+        let quality = &report.modules[0];
+        assert_eq!(quality.deterministic.loc_ratio, Some(1.5));
+        assert_eq!(quality.final_score, Some(100.0));
+    }
+
+    #[test]
+    fn test_project_loc_ratio_alert_penalizes_done_module() {
+        let mut state = empty_state();
+        state
+            .modules
+            .insert("inflated".into(), module(ModuleStatus::Done));
+
+        let report =
+            compute_quality_with_thresholds(&state, &QualityThresholds::default(), Some(3.0));
+        // compile=100，loc_ratio=3.0 归一为 0，均值 50。
+        assert_eq!(report.modules[0].final_score, Some(50.0));
+    }
+
+    #[test]
+    fn test_project_loc_ratio_does_not_score_pending_module() {
+        let mut state = empty_state();
+        state
+            .modules
+            .insert("pending".into(), module(ModuleStatus::Pending));
+
+        let report =
+            compute_quality_with_thresholds(&state, &QualityThresholds::default(), Some(1.5));
+        assert_eq!(report.modules[0].deterministic.loc_ratio, Some(1.5));
+        assert!(report.modules[0].final_score.is_none());
     }
 
     #[test]

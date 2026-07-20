@@ -510,6 +510,33 @@ impl MigrationStateMachine {
         Ok(())
     }
 
+    /// 记录 verifier 产出的模块质量度量（M4-QUAL-05）。
+    ///
+    /// 各参数为 `Some` 时才覆盖对应字段，允许差异测试重跑后只更新单项结果。
+    /// 不修改状态、substatus 或 attempts；调用时序由编排器保证在测试完成后、done 前。
+    /// module key 归一同 [`transition_module`](Self::transition_module)。
+    pub fn record_metrics(
+        &mut self,
+        name: &str,
+        test_pass_rate: Option<&str>,
+        known_differences: Option<u32>,
+    ) -> Result<()> {
+        let canonical = self.canonical_module_key(name)?;
+        let module = self
+            .state_file
+            .modules
+            .get_mut(&canonical)
+            .expect("canonical 已校验存在");
+
+        if let Some(rate) = test_pass_rate {
+            module.test_pass_rate = Some(rate.to_owned());
+        }
+        if let Some(count) = known_differences {
+            module.known_differences = count;
+        }
+        Ok(())
+    }
+
     /// 归一 module key：调用方通常传组代表 key，但 run/reset 阶段也可能对折叠组的非代表成员
     /// （如 `file:types.ts`）发起操作——反查其所属组代表后按组处理，避免硬失败破坏 composite
     /// 组状态推进（与 `cmd_state_deps` 的归一逻辑对称）。命中直接返回；查无则 `模块不存在`。
@@ -1985,6 +2012,59 @@ mod tests {
             "graduate 下 reset --force 应报 Config 错误"
         );
         assert_eq!(m.state_file().modules["a"].status, ModuleStatus::Done);
+    }
+
+    #[test]
+    fn test_record_metrics_updates_values_without_state_side_effects() {
+        let mut m = new_machine();
+        let mut module = module_with_status(ModuleStatus::Testing);
+        module.attempts.push(AttemptRecord {
+            timestamp: Timestamp::from("2026-07-21T00:00:00Z"),
+            result: "existing".to_string(),
+            retry_count: 0,
+            checkpoint: None,
+        });
+        m.update_module("a", module);
+
+        m.record_metrics("a", Some("276/276"), Some(0))
+            .expect("记录度量应成功");
+        let recorded = &m.state_file().modules["a"];
+        assert_eq!(recorded.test_pass_rate.as_deref(), Some("276/276"));
+        assert_eq!(recorded.known_differences, 0);
+        assert_eq!(recorded.status, ModuleStatus::Testing);
+        assert_eq!(recorded.attempts.len(), 1);
+        assert_eq!(recorded.attempts[0].result, "existing");
+    }
+
+    #[test]
+    fn test_record_metrics_supports_partial_updates() {
+        let mut m = new_machine();
+        let mut module = module_with_status(ModuleStatus::Testing);
+        module.test_pass_rate = Some("90%".to_string());
+        module.known_differences = 2;
+        m.update_module("a", module);
+
+        m.record_metrics("a", None, Some(1)).unwrap();
+        assert_eq!(
+            m.state_file().modules["a"].test_pass_rate.as_deref(),
+            Some("90%")
+        );
+        assert_eq!(m.state_file().modules["a"].known_differences, 1);
+    }
+
+    #[test]
+    fn test_record_metrics_normalizes_composite_member() {
+        let mut m = new_machine();
+        let mut group = module_with_status(ModuleStatus::Testing);
+        group.member_files = Some(vec!["group".to_string(), "file:helper.ts".to_string()]);
+        m.update_module("group", group);
+
+        m.record_metrics("file:helper.ts", Some("1.0"), None)
+            .expect("非代表成员应归一到组代表");
+        assert_eq!(
+            m.state_file().modules["group"].test_pass_rate.as_deref(),
+            Some("1.0")
+        );
     }
 
     #[test]

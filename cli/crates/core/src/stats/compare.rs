@@ -65,7 +65,7 @@ pub struct Ratio {
 }
 
 impl Ratio {
-    fn new(source: f64, rust: f64) -> Self {
+    pub fn new(source: f64, rust: f64) -> Self {
         let ratio = if source == 0.0 {
             None
         } else {

@@ -32,7 +32,7 @@ use rustmigrate_core::scaffold::scaffold_project;
 use rustmigrate_core::state::{
     MigrationStateMachine, RecoverOutcome, RecoverPolicy, ResetOutcome, SprintAdvanceResult,
 };
-use rustmigrate_core::stats::{compare_structure, count_loc, detect_community_deviation};
+use rustmigrate_core::stats::{compare_structure, count_loc, detect_community_deviation, Ratio};
 use rustmigrate_core::types::common::{DangerCategory, NodeId, Timestamp};
 use rustmigrate_core::types::graph::{EdgeType, NodeType};
 use rustmigrate_core::types::state::{
@@ -273,6 +273,18 @@ pub enum StateCommands {
         /// 模块 key（组代表 NodeId，如 `file:emitter.ts`）。
         module: String,
     },
+    /// 记录 verifier 产出的模块质量度量（M4-QUAL-05）。
+    RecordMetrics {
+        /// 模块 key；composite 非代表成员会归一到组代表。
+        #[arg(long)]
+        module: String,
+        /// 测试通过率，支持 `85%`、`0.85`、`85`、`85/100`。
+        #[arg(long)]
+        test_pass_rate: Option<String>,
+        /// 已知行为差异数量。
+        #[arg(long)]
+        known_differences: Option<u32>,
+    },
     /// 追加一条 SubAgent 调用记录到顶层 `subagent_calls`（诊断卡死 / 统计重试，append-only）。
     ///
     /// 对齐 `09-appendix-schemas.md § subagent_calls 字段说明`：每次 SubAgent 调用（含重试）
@@ -432,7 +444,14 @@ pub enum StatsCommands {
         rust: Option<PathBuf>,
     },
     /// 迁移质量度量（degrade_rate / final_score / behavior_coverage）。
-    Quality,
+    Quality {
+        /// 源码根目录（省略则取 `.rustmigrate.toml` 的 `project.source_root`）。
+        #[arg(long)]
+        source: Option<PathBuf>,
+        /// Rust 代码根目录（省略则取 `.rustmigrate.toml` 的 `project.rust_root`）。
+        #[arg(long)]
+        rust: Option<PathBuf>,
+    },
     /// 社区结构偏离度诊断（Leiden vs 目录分区 NMI/ARI）。
     Community,
 }
@@ -571,6 +590,14 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
                 cmd_state_populate_modules(root.as_deref(), *single_sprint, *budget, *no_decompose),
             ),
             StateCommands::Deps { module } => emit(writer, cmd_state_deps(module)),
+            StateCommands::RecordMetrics {
+                module,
+                test_pass_rate,
+                known_differences,
+            } => emit(
+                writer,
+                cmd_state_record_metrics(module, test_pass_rate.as_deref(), *known_differences),
+            ),
             StateCommands::RecordSubagentCall {
                 step_index,
                 subagent_name,
@@ -628,7 +655,10 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
                 writer,
                 cmd_stats_compare(source.as_deref(), rust.as_deref()),
             ),
-            StatsCommands::Quality => emit(writer, cmd_stats_quality()),
+            StatsCommands::Quality { source, rust } => emit(
+                writer,
+                cmd_stats_quality(source.as_deref(), rust.as_deref()),
+            ),
             StatsCommands::Community => emit(writer, cmd_stats_community()),
         },
         Commands::Scaffold { action } => match action {
@@ -2911,6 +2941,33 @@ fn cmd_state_update(
     ))
 }
 
+/// `state record-metrics`：记录 verifier 产出的模块质量度量。
+fn cmd_state_record_metrics(
+    module: &str,
+    test_pass_rate: Option<&str>,
+    known_differences: Option<u32>,
+) -> CmdResult {
+    if test_pass_rate.is_none() && known_differences.is_none() {
+        return Err(MigrateError::Config(
+            "state record-metrics 至少需要 --test-pass-rate 或 --known-differences".to_string(),
+        ));
+    }
+
+    let path = state_path();
+    let (mut machine, warnings) = load_state_with_warnings(&path)?;
+    machine.record_metrics(module, test_pass_rate, known_differences)?;
+    machine.save(&path)?;
+
+    Ok((
+        json!({
+            "module": module,
+            "test_pass_rate": test_pass_rate,
+            "known_differences": known_differences,
+        }),
+        warnings,
+    ))
+}
+
 /// [`SubAgentCall`] 后经 core [`MigrationStateMachine::push_subagent_call`] 入库，落盘走 tmp-fsync-rename
 /// 原子写。`started_at` schema 必填——省略时取当前 UTC 时间（编排器在调用开始即可记录、结束再补登一条）。
 fn cmd_state_record_subagent_call(
@@ -2953,12 +3010,7 @@ fn cmd_stats_loc(source: Option<&Path>, rust: Option<&Path>) -> CmdResult {
     let mut warnings: Vec<String> = Vec::new();
     // 解析路径：CLI 参数 > 配置文件 > 默认值（配置读取/解析失败会进 warnings）。
     let cfg = load_config_or_default(&mut warnings);
-    let source_root = source
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from(&cfg.project.source_root));
-    let rust_root = rust
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from(&cfg.project.rust_root));
+    let (source_root, rust_root) = stats_roots(source, rust, &cfg);
 
     // 包含关系检测：一侧是另一侧的子目录时，被包含侧的文件会被外侧 tokei 递归计入，
     // 造成跨 source/rust 重复计数 + 源码侧混入 Rust（EXCLUDED_DIRS 不含 rust_root）。
@@ -3060,6 +3112,21 @@ fn load_config_or_default(
     }
 }
 
+/// 解析 stats 子命令的双侧根目录：CLI 参数优先，否则回退配置值。
+fn stats_roots(
+    source: Option<&Path>,
+    rust: Option<&Path>,
+    cfg: &rustmigrate_core::types::config::MigrateConfig,
+) -> (PathBuf, PathBuf) {
+    let source_root = source
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(&cfg.project.source_root));
+    let rust_root = rust
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(&cfg.project.rust_root));
+    (source_root, rust_root)
+}
+
 /// `stats compare`：源码与 Rust 结构复杂度对比（LOC + 函数数 + 控制流嵌套）。
 ///
 /// 路径解析与 `stats loc` 同口径：CLI 参数 > 配置文件 > 默认值，并复用包含关系告警。
@@ -3068,12 +3135,7 @@ fn load_config_or_default(
 fn cmd_stats_compare(source: Option<&Path>, rust: Option<&Path>) -> CmdResult {
     let mut warnings: Vec<String> = Vec::new();
     let cfg = load_config_or_default(&mut warnings);
-    let source_root = source
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from(&cfg.project.source_root));
-    let rust_root = rust
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from(&cfg.project.rust_root));
+    let (source_root, rust_root) = stats_roots(source, rust, &cfg);
 
     // source_language 未设置时按 source_root 自动探测，回退 TypeScript
     let source_lang = cfg.project.source_language.unwrap_or_else(|| {
@@ -3111,11 +3173,54 @@ fn cmd_stats_compare(source: Option<&Path>, rust: Option<&Path>) -> CmdResult {
     }
 }
 
+/// 计算项目级 `rust/source` LOC 比。按顺序扫描，源码侧失败时不再扫描 Rust 侧。
+fn compute_project_loc_ratio(
+    source_root: &Path,
+    rust_root: &Path,
+    warnings: &mut Vec<String>,
+) -> Option<f64> {
+    let source_loc = match count_loc(source_root) {
+        Ok(report) => report,
+        Err(e) => {
+            warnings.push(format!("源码 LOC 统计失败，loc_ratio 留空: {e}"));
+            return None;
+        }
+    };
+    let rust_loc = match count_loc(rust_root) {
+        Ok(report) => report,
+        Err(e) => {
+            warnings.push(format!("Rust LOC 统计失败，loc_ratio 留空: {e}"));
+            return None;
+        }
+    };
+
+    let ratio = Ratio::new(source_loc.code as f64, rust_loc.code as f64).ratio;
+    if ratio.is_some() {
+        warnings.push(
+            "loc_ratio 为项目级近似值，已统一应用到各模块（per-module 结构对比未实现）".to_string(),
+        );
+    } else {
+        warnings.push("源码 LOC 为 0，无法计算 loc_ratio".to_string());
+    }
+    ratio
+}
+
 /// `stats quality`：迁移质量度量（degrade_rate / final_score / behavior_coverage）。
-fn cmd_stats_quality() -> CmdResult {
+fn cmd_stats_quality(source: Option<&Path>, rust: Option<&Path>) -> CmdResult {
     let path = state_path();
     let (machine, mut warnings) = load_state_with_warnings(&path)?;
     let cfg = load_config_or_default(&mut warnings);
+    let (source_root, rust_root) = stats_roots(source, rust, &cfg);
+
+    if let Some(outer) = roots_overlap(&source_root, &rust_root) {
+        warnings.push(format!(
+            "source 与 rust 目录存在包含关系（{outer} 包含另一侧），质量度量的 LOC 比可能重复计数；\
+             建议将 source_root / rust_root 配置为互不包含的目录"
+        ));
+    }
+
+    let project_loc_ratio = compute_project_loc_ratio(&source_root, &rust_root, &mut warnings);
+
     let thresholds = rustmigrate_core::stats::quality::QualityThresholds {
         done_threshold: cfg.quality.done_threshold,
         degrade_ffi_threshold: cfg.quality.degrade_ffi_threshold,
@@ -3123,6 +3228,7 @@ fn cmd_stats_quality() -> CmdResult {
     let report = rustmigrate_core::stats::quality::compute_quality_with_thresholds(
         machine.state_file(),
         &thresholds,
+        project_loc_ratio,
     );
     Ok((serde_json::to_value(&report)?, warnings))
 }
