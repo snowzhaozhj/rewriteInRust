@@ -2981,12 +2981,16 @@ fn e2e_stats_quality_go_loc_ratio_scores_mechanical_module() {
         );
         let module = &json["data"]["modules"][0];
         assert!(
-            module["deterministic"]["loc_ratio"].is_number(),
-            "Go 应绕开 compare_structure 的 nesting NotImplemented，产出 loc_ratio: {json}"
+            json["data"]["project_loc_ratio"].is_number(),
+            "Go 应绕开 compare_structure 的 nesting NotImplemented，产出项目级 loc_ratio: {json}"
         );
         assert!(
-            module["final_score"].is_number(),
-            "mechanical done 应靠 compile_pass + loc_ratio 产出 final_score: {json}"
+            module["deterministic"]["loc_ratio"].is_null(),
+            "项目级 LOC 比不得伪装成模块级指标: {json}"
+        );
+        assert!(
+            module["final_score"].is_null(),
+            "无行为测试的 mechanical 模块不应靠项目 LOC 比凑 final_score: {json}"
         );
         assert!(
             json["warnings"]
@@ -3014,6 +3018,10 @@ fn e2e_stats_quality_overlapping_roots_do_not_score_polluted_ratio() {
         let (code, json) = run(&["stats", "quality", "--source", "src", "--rust", "src/rust"]);
         assert_eq!(code, 0, "重叠目录应降级而非失败: {json}");
         assert_eq!(json["status"], "warning");
+        assert!(
+            json["data"]["project_loc_ratio"].is_null(),
+            "已知污染的项目 LOC 比必须留空: {json}"
+        );
         for module in json["data"]["modules"].as_array().unwrap() {
             assert!(
                 module["deterministic"]["loc_ratio"].is_null(),

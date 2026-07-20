@@ -14,6 +14,8 @@ pub struct QualityReport {
     pub degraded_modules: usize,
     pub avg_final_score: Option<f64>,
     pub revision_rate: Option<f64>,
+    /// 项目级 `rust/source` LOC 比；不下沉到模块评分，避免模块级假阳/假阴。
+    pub project_loc_ratio: Option<f64>,
     pub data_completeness: f64,
     pub modules: Vec<ModuleQuality>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -69,10 +71,19 @@ pub struct AiIndicators {
 }
 
 pub fn compute_quality(state: &MigrationStateFile) -> QualityReport {
-    compute_quality_with_thresholds(state, &QualityThresholds::default(), None)
+    compute_quality_with_thresholds(state, &QualityThresholds::default())
 }
 
+/// 使用自定义阈值计算质量报告（兼容既有公开 API）。
 pub fn compute_quality_with_thresholds(
+    state: &MigrationStateFile,
+    thresholds: &QualityThresholds,
+) -> QualityReport {
+    compute_quality_with_thresholds_and_project_loc_ratio(state, thresholds, None)
+}
+
+/// 使用自定义阈值和项目级 LOC 比计算质量报告。
+pub fn compute_quality_with_thresholds_and_project_loc_ratio(
     state: &MigrationStateFile,
     thresholds: &QualityThresholds,
     project_loc_ratio: Option<f64>,
@@ -99,7 +110,7 @@ pub fn compute_quality_with_thresholds(
             let deterministic = DeterministicIndicators {
                 compile_pass,
                 test_pass_rate: test_pass,
-                loc_ratio: project_loc_ratio,
+                loc_ratio: None,
                 function_ratio: None,
                 clippy_warnings: None,
                 unsafe_blocks: None,
@@ -166,6 +177,7 @@ pub fn compute_quality_with_thresholds(
         degraded_modules,
         avg_final_score,
         revision_rate: None,
+        project_loc_ratio,
         data_completeness,
         modules,
         below_threshold,
@@ -513,43 +525,35 @@ mod tests {
     }
 
     #[test]
-    fn test_project_loc_ratio_enables_done_module_score() {
+    fn test_project_loc_ratio_stays_at_report_scope() {
         let mut state = empty_state();
         state
             .modules
             .insert("mechanical".into(), module(ModuleStatus::Done));
 
-        let report =
-            compute_quality_with_thresholds(&state, &QualityThresholds::default(), Some(1.5));
-        let quality = &report.modules[0];
-        assert_eq!(quality.deterministic.loc_ratio, Some(1.5));
-        assert_eq!(quality.final_score, Some(100.0));
+        let report = compute_quality_with_thresholds_and_project_loc_ratio(
+            &state,
+            &QualityThresholds::default(),
+            Some(1.5),
+        );
+        assert_eq!(report.project_loc_ratio, Some(1.5));
+        assert!(report.modules[0].deterministic.loc_ratio.is_none());
+        assert!(
+            report.modules[0].final_score.is_none(),
+            "项目级 LOC 比不得作为模块指标凑分"
+        );
     }
 
     #[test]
-    fn test_project_loc_ratio_alert_penalizes_done_module() {
+    fn test_existing_threshold_api_remains_compatible() {
         let mut state = empty_state();
-        state
-            .modules
-            .insert("inflated".into(), module(ModuleStatus::Done));
+        let mut tested = module(ModuleStatus::Done);
+        tested.test_pass_rate = Some("100%".to_string());
+        state.modules.insert("tested".into(), tested);
 
-        let report =
-            compute_quality_with_thresholds(&state, &QualityThresholds::default(), Some(3.0));
-        // compile=100，loc_ratio=3.0 归一为 0，均值 50。
-        assert_eq!(report.modules[0].final_score, Some(50.0));
-    }
-
-    #[test]
-    fn test_project_loc_ratio_does_not_score_pending_module() {
-        let mut state = empty_state();
-        state
-            .modules
-            .insert("pending".into(), module(ModuleStatus::Pending));
-
-        let report =
-            compute_quality_with_thresholds(&state, &QualityThresholds::default(), Some(1.5));
-        assert_eq!(report.modules[0].deterministic.loc_ratio, Some(1.5));
-        assert!(report.modules[0].final_score.is_none());
+        let report = compute_quality_with_thresholds(&state, &QualityThresholds::default());
+        assert_eq!(report.modules[0].final_score, Some(100.0));
+        assert!(report.project_loc_ratio.is_none());
     }
 
     #[test]

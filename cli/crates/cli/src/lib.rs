@@ -3230,11 +3230,12 @@ fn cmd_stats_quality(source: Option<&Path>, rust: Option<&Path>) -> CmdResult {
         done_threshold: cfg.quality.done_threshold,
         degrade_ffi_threshold: cfg.quality.degrade_ffi_threshold,
     };
-    let report = rustmigrate_core::stats::quality::compute_quality_with_thresholds(
-        machine.state_file(),
-        &thresholds,
-        project_loc_ratio,
-    );
+    let report =
+        rustmigrate_core::stats::quality::compute_quality_with_thresholds_and_project_loc_ratio(
+            machine.state_file(),
+            &thresholds,
+            project_loc_ratio,
+        );
     Ok((serde_json::to_value(&report)?, warnings))
 }
 

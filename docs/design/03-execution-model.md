@@ -646,8 +646,9 @@ Step 4: 模块迁移完成后，生成 Rust 测试（确定性 + AI 混合）
 > `rustmigrate state record-metrics --module <M> --test-pass-rate <rate> --known-differences <n>`
 > 把测试结果写入 `ModuleState`（通过/失败结果都记录，不能只保存成功样本）；并行路径由主 worktree
 > 的集中 writer 消费 `TranslationResult` 可选度量后写回，机械 batch 无行为测试时保持空值、不伪造通过率。
-> `stats quality --source <src> --rust <rust>` 通过 tokei `count_loc` 计算项目级 `rust/source` 行数比，并作为**项目级近似值**统一应用到各模块（输出 warning
-> 明示粒度）。不复用完整 `stats compare`：后者还计算函数数/控制流嵌套，Go/C 尚未实现嵌套分析时会
+> `stats quality --source <src> --rust <rust>` 通过 tokei `count_loc` 计算项目级 `rust/source` 行数比，
+> 仅作为 `QualityReport.project_loc_ratio` 的**项目级近似值**输出（warning 明示粒度），**不下沉到
+> per-module `deterministic.loc_ratio` 或 `final_score`**，避免大型模块掩盖小模块膨胀或反向误罚。不复用完整 `stats compare`：后者还计算函数数/控制流嵌套，Go/C 尚未实现嵌套分析时会
 > 整体返回 `NotImplemented`，不应因此丢失语言无关的 LOC 比。真正的 per-module LOC 比需按
 > `member_files` 切分源/目标作用域，推迟到有真实需求时再实现。
 
@@ -686,8 +687,9 @@ final_score  = deterministic_avg × 0.7 + ai_avg × 0.3
 > **AI 指标缺失时的降级口径（既有实现登记）**：verifier 尚未提供三项 AI 指标时，
 > `stats quality` 以已有的 ≥2 项确定性指标均值输出临时 `final_score`（确定性权重 100%），并以
 > `ai_indicators: null` 明示证据不完整；这用于迁移过程中的可计算基线，**不得**当作完整 70/30
-> 成熟评分。AI 指标接线后自动切回上式 70/30。机械 batch 无行为测试时可由编译 + LOC 比形成临时分，
-> 不伪造 `test_pass_rate`；`data_completeness` 仅表示“可计算分数的模块占比”，不代表 AI 证据完整度。
+> 成熟评分。AI 指标接线后自动切回上式 70/30。机械 batch 无行为测试时不伪造
+> `test_pass_rate`，在 per-module 指标不足时 `final_score` 保持 null；项目级 LOC 比也不用于凑模块分。
+> `data_completeness` 仅表示“可计算分数的模块占比”，不代表 AI 证据完整度。
 
 verifier 须以**结构化 JSON 输出**评估结果（含三项各自分值、客观信号原始值、置信度 0-100），不输出自由文本评语，便于跨 Sprint 对标与回归检测。每 Sprint 的评分快照（含趋势）持久化为 `sprint-N-report.json`（schema 见 [09 附录 F](./09-appendix-schemas.md#附录-f评分报告-sprint-n-reportjson-schema)）。
 
