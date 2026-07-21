@@ -66,10 +66,10 @@ Go 线：                         Sprint C (Go Adapter Core) ─ Sprint D (Plugi
 | M4-LANG-01 | **Go registry 接线**：workspace `Cargo.toml` 引 `tree-sitter-go = "0.21"`（版本兼容硬约束）；`registry.rs:14` 加 `SourceLang::Go => Ok(Box::new(GoAdapter::new()?))` 臂；`lang/go.rs` 骨架（`new`/`language`/`can_handle(.go)`，其余 `todo!()` 占位）。注：`unsupported_language_returns_error` 测试已用 `SourceLang::C`、Go 实现后仍有效，无需改 | 0.5d | — |
 
 **验收标准**：
-- [ ] MDR-013 三项全落地；io RULE 归属已裁定并（若新开）登记 05 §6.2
-- [ ] `ModuleState.danger: Vec<DangerCategory>`；**旧 state 文件（`Vec<String>`）可正确反序列化**（新增双向 serde 测试 + 未知值策略测试）；23 处引用全改、`just test` 无回归
-- [ ] `create_adapter(SourceLang::Go)` 返回骨架 adapter
-- [ ] `just ci` 全过，TS/Python 路径无回归
+- [x] MDR-013 三项全落地；io RULE 归属已裁定并（若新开）登记 05 §6.2 —— Sprint A DEBT-01 裁定并入 RULE-10（不新开），DEBT-02/03 落地（PR #57）
+- [x] `ModuleState.danger: Vec<DangerCategory>`；**旧 state 文件（`Vec<String>`）可正确反序列化**（新增双向 serde 测试 + 未知值策略测试）；23 处引用全改、`just test` 无回归 —— DEBT-02（PR #57，`#[serde(other)]` 兜底 Unknown + 4 serde 测试）
+- [x] `create_adapter(SourceLang::Go)` 返回骨架 adapter —— LANG-01（PR #57）
+- [x] `just ci` 全过，TS/Python 路径无回归 —— PR #57 559 测试全绿
 
 ---
 
@@ -82,14 +82,14 @@ Go 线：                         Sprint C (Go Adapter Core) ─ Sprint D (Plugi
 | M4-QUAL-01 | **迁移质量度量框架（CLI）**：定义并落地 per-module 度量——① 源行为覆盖率（差异测试通过行为点 / 总录制点，依托设计 §7.6 差异测试）；② degrade_skip 占比（降级模块数 / 总模块，依托 §4.9 止损）；③ 人工修订率（**git-diff 口径**：done 前人工改动行数 / 自动产出行数。注：`attempts` 仅记 LLM 重试轮次、不含人工编辑，故需 git 基线；无 git 基线则**降级为可选指标**）；④ `final_score` 聚合（复用设计 03 §7.5 评分卡，落地 per-module 计算）。**①②③ 为本计划新增度量（非 §7.5 评分卡输入项），需登记设计 03 §7.5**（见 VAL-07）。输出**优先扩展现有 `stats` 子命令**（不破 13+5 命令清单）的 JSON | 2.5d | — |
 | M4-QUAL-02 | **既有语言真实基线**：用 M3 已迁的 jmespath（Python）+ 1 个 TS 真实项目，跑质量度量框架，产出基线报告（degrade 率/覆盖率/修订率）；建立「质量回归」对比起点（后续 Go 验收与之横比） | 1.5d | QUAL-01 |
 | M4-QUAL-03 | **质量度量接线 Plugin**：`/migrate review` 仪表板展示三项度量 + final_score；verifier 输出对接质量度量 schema | 1d | QUAL-01 |
-| M4-QUAL-04 | **Community 结构偏离度诊断（Tier 1）**：集成 `graphrs` Leiden 算法（workspace 引依赖，版本 0.11.x），对 `SourceGraph` 跑社区检测 → 与目录结构划分计算 NMI/ARI 一致性 → 输出结构偏离度分数（0-1，高=目录结构不反映实际耦合，迁移拆解质量风险高）。扩展 `stats` 子命令输出。**不改 MDR-011 拆解逻辑**（Tier 2 辅助拆解视真实项目需求再定） | 2d | — |
+| M4-QUAL-04 | **Community 结构偏离度诊断（Tier 1）**：对 `SourceGraph` 跑社区检测 → 与目录结构划分计算 NMI/ARI 一致性 → 输出结构偏离度分数（0-1，高=目录结构不反映实际耦合，迁移拆解质量风险高）。扩展 `stats` 子命令输出。**不改 MDR-011 拆解逻辑**（Tier 2 辅助拆解视真实项目需求再定）。**落地说明**：原计划引 `graphrs` Leiden，PR #58 审查中改为**自实现 Louvain**（`stats/community.rs`，无外部依赖） | 2d | — |
 
 **验收标准**：
-- [ ] `rustmigrate quality`（或 `stats`）对已迁模块输出 source-behavior-coverage / degrade-rate / revision-rate / final_score
-- [ ] jmespath + 1 TS 项目质量基线报告落地（`docs/m4-quality-baseline.md`）
-- [ ] `/migrate review` 仪表板展示质量度量
-- [ ] `stats` 输出含 Community 结构偏离度分数（Leiden vs 目录划分 NMI/ARI）
-- [ ] `just ci` 全过
+- [x] `rustmigrate quality`（或 `stats`）对已迁模块输出 source-behavior-coverage / degrade-rate / revision-rate / final_score —— QUAL-01 `stats quality`（PR #58）；QUAL-05 补齐 `record-metrics` 写入通路（PR #77）
+- [ ] jmespath + 1 TS 项目质量基线报告落地（`docs/m4-quality-baseline.md`）—— **未落地**：框架已具备（QUAL-01/05），但独立基线报告文档缺失；Sprint E 已在 Go 项目（semver/go-humanize）实测 final_score=100，既有 TS/Python 专门基线报告待补
+- [x] `/migrate review` 仪表板展示质量度量 —— QUAL-03 review.md 接线 `stats quality`/`stats community`（PR #58）
+- [x] `stats` 输出含 Community 结构偏离度分数（Louvain vs 目录划分 NMI/ARI；PR #58 审查中由 graphrs 依赖改为自实现 Louvain）—— QUAL-04（PR #58）
+- [x] `just ci` 全过 —— PR #58 全绿
 
 ---
 
@@ -200,7 +200,7 @@ Step 3: PR-C3 (Validation)     → GO-08 + GO-09          [工时 ~2.5d]
 - [x] 模拟额度耗尽，系统优雅暂停 + 输出续跑指令 + 下次断点恢复——ROB-01c ✅ `state resume`（纯查询断点计划：interrupted 带 recover_command 幂等重入 / 终态不重跑 / paused 不复活），检测归编排器，见 [MDR-017](decisions/017-quota-pause-resume-boundary.md)
 - [x] ORCH-01（重定义）：并行 + worktree 编排真正接入活路径——`parallel_groups` 落 CLI/state（PR #71）、worktree 机制统一（PR #73）、两层 done 接活（PR #74）、逐层合并 + 整组真门 + 端到端集成测试跑通（PR #75）、**真实项目（textdistance）3 路并行演练跑通**（PR-5，见 [m4-orch-01-acceptance.md](m4-orch-01-acceptance.md)）（见 [MDR-018](decisions/018-keep-parallel-migration.md)）
 - [x] `rule_version` 与权威清单不一致时 CLI 报错（非静默）——GOV-01 ✅ `validate rules`（enforce=true→退出码 1）
-- [ ] TS/Python/Go 既有路径无回归
+- [x] TS/Python/Go 既有路径无回归 —— Sprint E VAL-08 `just ci` 757 测试全绿（PR #79）
 
 ---
 
