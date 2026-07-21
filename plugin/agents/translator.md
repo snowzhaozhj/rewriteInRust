@@ -327,6 +327,7 @@ Go 项目须额外注意（`source_language=go`，类型映射细则以 `adapter
 - `own_files`：你翻译的模块自身文件路径列表。
 - `shared_touched`：你触碰过的共享文件清单（仅路径，无内容）。即使只 append 了一行也要列出。
 - `self_check` / `test`：worktree 内 `cargo check` 和 `cargo test` 的结果。
+- `test_pass_rate` / `known_differences`：verifier 已产出真实 L2 行为测试结果时回传（通过率格式同 `state record-metrics`，归一值须在 `[0,1]`）；机械 batch 或未生成行为测试时均为 `null`，禁止伪造通过率。编排器在主 worktree 集中写回 state。
 
 ### 注意事项
 

@@ -34,6 +34,17 @@ pub struct MigrationStateMachine {
     persistence_config: PersistenceConfig,
 }
 
+/// [`record_metrics`](MigrationStateMachine::record_metrics) 的写入结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordMetricsOutcome {
+    /// 归一后的组代表 module key。
+    pub module: String,
+    /// 写入完成后的实际测试通过率（部分更新时保留旧值）。
+    pub test_pass_rate: Option<String>,
+    /// 写入完成后的实际已知差异数。
+    pub known_differences: u32,
+}
+
 /// [`reset_module`](MigrationStateMachine::reset_module) 的结果——描述这次幂等回退把模块从
 /// 什么状态回退到什么状态，以及是否为空操作（已处于干净重译入口，重复 reset 无副作用）。
 #[derive(Debug, Clone, PartialEq)]
@@ -508,6 +519,74 @@ impl MigrationStateMachine {
             });
         }
         Ok(())
+    }
+
+    /// 记录 verifier 产出的模块质量度量（M4-QUAL-05）。
+    ///
+    /// 各参数为 `Some` 时才覆盖对应字段，允许差异测试重跑后只更新单项结果。
+    /// 仅运行态（translating/compile_fixing/testing/reviewing）可写；pending、终态、暂停/阻塞、
+    /// 降级态及项目 graduate 均拒绝。每次成功写入都会追加审计记录。
+    /// module key 归一同 [`transition_module`](Self::transition_module)。
+    pub fn record_metrics(
+        &mut self,
+        name: &str,
+        test_pass_rate: Option<&str>,
+        known_differences: Option<u32>,
+    ) -> Result<RecordMetricsOutcome> {
+        if let Some(rate) = test_pass_rate {
+            if crate::stats::quality::parse_test_pass_rate(rate).is_none() {
+                return Err(MigrateError::Config(format!(
+                    "非法 test_pass_rate: {rate}（支持 85% / 0.85 / 85 / 85/100，且须落在 [0,1]）"
+                )));
+            }
+        }
+
+        if self.state_file.state == ProjectState::Graduate {
+            return Err(MigrateError::Config(
+                "项目已 graduate，禁止改写模块质量度量".to_string(),
+            ));
+        }
+
+        let canonical = self.canonical_module_key(name)?;
+        let module = self
+            .state_file
+            .modules
+            .get_mut(&canonical)
+            .expect("canonical 已校验存在");
+        if !matches!(
+            module.status,
+            ModuleStatus::Translating
+                | ModuleStatus::CompileFixing
+                | ModuleStatus::Testing
+                | ModuleStatus::Reviewing
+        ) {
+            return Err(MigrateError::Config(format!(
+                "模块 {} 当前状态 {} 不允许写质量度量（仅运行态可写）",
+                canonical, module.status
+            )));
+        }
+
+        if let Some(rate) = test_pass_rate {
+            module.test_pass_rate = Some(rate.to_owned());
+        }
+        if let Some(count) = known_differences {
+            module.known_differences = count;
+        }
+        module.attempts.push(AttemptRecord {
+            timestamp: Timestamp::new(chrono::Utc::now().to_rfc3339()),
+            result: format!(
+                "metrics:test_pass_rate={} known_differences={}",
+                module.test_pass_rate.as_deref().unwrap_or("null"),
+                module.known_differences
+            ),
+            retry_count: 0,
+            checkpoint: None,
+        });
+        Ok(RecordMetricsOutcome {
+            module: canonical,
+            test_pass_rate: module.test_pass_rate.clone(),
+            known_differences: module.known_differences,
+        })
     }
 
     /// 归一 module key：调用方通常传组代表 key，但 run/reset 阶段也可能对折叠组的非代表成员
@@ -1985,6 +2064,121 @@ mod tests {
             "graduate 下 reset --force 应报 Config 错误"
         );
         assert_eq!(m.state_file().modules["a"].status, ModuleStatus::Done);
+    }
+
+    #[test]
+    fn test_record_metrics_updates_values_without_state_side_effects() {
+        let mut m = new_machine();
+        let mut module = module_with_status(ModuleStatus::Testing);
+        module.attempts.push(AttemptRecord {
+            timestamp: Timestamp::from("2026-07-21T00:00:00Z"),
+            result: "existing".to_string(),
+            retry_count: 0,
+            checkpoint: None,
+        });
+        m.update_module("a", module);
+
+        m.record_metrics("a", Some("276/276"), Some(0))
+            .expect("记录度量应成功");
+        let recorded = &m.state_file().modules["a"];
+        assert_eq!(recorded.test_pass_rate.as_deref(), Some("276/276"));
+        assert_eq!(recorded.known_differences, 0);
+        assert_eq!(recorded.status, ModuleStatus::Testing);
+        assert_eq!(recorded.attempts.len(), 2);
+        assert_eq!(recorded.attempts[0].result, "existing");
+        assert!(recorded.attempts[1].result.starts_with("metrics:"));
+    }
+
+    #[test]
+    fn test_record_metrics_supports_partial_updates() {
+        let mut m = new_machine();
+        let mut module = module_with_status(ModuleStatus::Testing);
+        module.test_pass_rate = Some("90%".to_string());
+        module.known_differences = 2;
+        m.update_module("a", module);
+
+        let outcome = m.record_metrics("a", None, Some(1)).unwrap();
+        assert_eq!(outcome.module, "a");
+        assert_eq!(outcome.test_pass_rate.as_deref(), Some("90%"));
+        assert_eq!(outcome.known_differences, 1);
+        assert_eq!(
+            m.state_file().modules["a"].test_pass_rate.as_deref(),
+            Some("90%")
+        );
+        assert_eq!(m.state_file().modules["a"].known_differences, 1);
+    }
+
+    #[test]
+    fn test_record_metrics_rejects_invalid_rate_without_mutation() {
+        for invalid in ["garbage", "101%", "1/0", "-1"] {
+            let mut m = new_machine();
+            let mut module = module_with_status(ModuleStatus::Testing);
+            module.test_pass_rate = Some("90%".to_string());
+            m.update_module("a", module);
+
+            let result = m.record_metrics("a", Some(invalid), Some(3));
+            assert!(
+                matches!(result, Err(MigrateError::Config(_))),
+                "{invalid} 应被拒绝"
+            );
+            let unchanged = &m.state_file().modules["a"];
+            assert_eq!(unchanged.test_pass_rate.as_deref(), Some("90%"));
+            assert_eq!(unchanged.known_differences, 0);
+        }
+    }
+
+    #[test]
+    fn test_record_metrics_rejects_non_running_and_graduate_states() {
+        for status in [
+            ModuleStatus::Pending,
+            ModuleStatus::Done,
+            ModuleStatus::Paused,
+            ModuleStatus::Blocked,
+            ModuleStatus::DegradeSkip,
+        ] {
+            let mut m = new_machine();
+            m.update_module("a", module_with_status(status));
+            assert!(
+                matches!(
+                    m.record_metrics("a", Some("100%"), Some(0)),
+                    Err(MigrateError::Config(_))
+                ),
+                "{status} 不应允许写度量"
+            );
+        }
+
+        let mut graduated = new_machine();
+        graduated.update_module("a", module_with_status(ModuleStatus::Reviewing));
+        for state in [
+            ProjectState::Profile,
+            ProjectState::Plan,
+            ProjectState::Scaffold,
+            ProjectState::SprintLoop,
+            ProjectState::Graduate,
+        ] {
+            graduated.transition(state).unwrap();
+        }
+        assert!(matches!(
+            graduated.record_metrics("a", Some("100%"), Some(0)),
+            Err(MigrateError::Config(_))
+        ));
+    }
+
+    #[test]
+    fn test_record_metrics_normalizes_composite_member() {
+        let mut m = new_machine();
+        let mut group = module_with_status(ModuleStatus::Testing);
+        group.member_files = Some(vec!["group".to_string(), "file:helper.ts".to_string()]);
+        m.update_module("group", group);
+
+        let outcome = m
+            .record_metrics("file:helper.ts", Some("1.0"), None)
+            .expect("非代表成员应归一到组代表");
+        assert_eq!(outcome.module, "group");
+        assert_eq!(
+            m.state_file().modules["group"].test_pass_rate.as_deref(),
+            Some("1.0")
+        );
     }
 
     #[test]

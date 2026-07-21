@@ -65,7 +65,8 @@ pub struct Ratio {
 }
 
 impl Ratio {
-    fn new(source: f64, rust: f64) -> Self {
+    /// 用源码侧和 Rust 侧数值构造 `rust / source` 比值；源码值为 0 时比值为 `None`。
+    pub fn new(source: f64, rust: f64) -> Self {
         let ratio = if source == 0.0 {
             None
         } else {

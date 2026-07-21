@@ -14,6 +14,8 @@ pub struct QualityReport {
     pub degraded_modules: usize,
     pub avg_final_score: Option<f64>,
     pub revision_rate: Option<f64>,
+    /// 项目级 `rust/source` LOC 比；不下沉到模块评分，避免模块级假阳/假阴。
+    pub project_loc_ratio: Option<f64>,
     pub data_completeness: f64,
     pub modules: Vec<ModuleQuality>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -72,9 +74,19 @@ pub fn compute_quality(state: &MigrationStateFile) -> QualityReport {
     compute_quality_with_thresholds(state, &QualityThresholds::default())
 }
 
+/// 使用自定义阈值计算质量报告（兼容既有公开 API）。
 pub fn compute_quality_with_thresholds(
     state: &MigrationStateFile,
     thresholds: &QualityThresholds,
+) -> QualityReport {
+    compute_quality_with_thresholds_and_project_loc_ratio(state, thresholds, None)
+}
+
+/// 使用自定义阈值和项目级 LOC 比计算质量报告。
+pub fn compute_quality_with_thresholds_and_project_loc_ratio(
+    state: &MigrationStateFile,
+    thresholds: &QualityThresholds,
+    project_loc_ratio: Option<f64>,
 ) -> QualityReport {
     let total_modules = state.modules.len();
     let mut done_modules = 0usize;
@@ -165,6 +177,7 @@ pub fn compute_quality_with_thresholds(
         degraded_modules,
         avg_final_score,
         revision_rate: None,
+        project_loc_ratio,
         data_completeness,
         modules,
         below_threshold,
@@ -188,7 +201,7 @@ fn infer_compile_pass(status: ModuleStatus) -> Option<bool> {
 
 /// 解析 test_pass_rate 字符串为 0.0-1.0 浮点数。
 /// 支持格式："85%"、"0.85"、"85"、"85/100"。
-fn parse_test_pass_rate(s: &str) -> Option<f64> {
+pub fn parse_test_pass_rate(s: &str) -> Option<f64> {
     let s = s.trim();
     if s.is_empty() {
         return None;
@@ -215,7 +228,7 @@ fn parse_test_pass_rate(s: &str) -> Option<f64> {
             Some(v)
         }
     };
-    result.filter(|v| v.is_finite())
+    result.filter(|v| v.is_finite() && (0.0..=1.0).contains(v))
 }
 
 /// 计算行为覆盖率。
@@ -426,6 +439,16 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_test_pass_rate_out_of_range_rejected() {
+        for invalid in ["101%", "200", "-1", "101/100"] {
+            assert!(
+                parse_test_pass_rate(invalid).is_none(),
+                "{invalid} 应因超出 [0,1] 被拒绝"
+            );
+        }
+    }
+
+    #[test]
     fn test_infer_compile_pass_done() {
         assert_eq!(infer_compile_pass(ModuleStatus::Done), Some(true));
     }
@@ -499,6 +522,38 @@ mod tests {
         let score = compute_final_score(&det, None).unwrap();
         // det_avg = (100 + 95) / 2 = 97.5；无 AI 时 100% 权重
         assert!((score - 97.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_project_loc_ratio_stays_at_report_scope() {
+        let mut state = empty_state();
+        state
+            .modules
+            .insert("mechanical".into(), module(ModuleStatus::Done));
+
+        let report = compute_quality_with_thresholds_and_project_loc_ratio(
+            &state,
+            &QualityThresholds::default(),
+            Some(1.5),
+        );
+        assert_eq!(report.project_loc_ratio, Some(1.5));
+        assert!(report.modules[0].deterministic.loc_ratio.is_none());
+        assert!(
+            report.modules[0].final_score.is_none(),
+            "项目级 LOC 比不得作为模块指标凑分"
+        );
+    }
+
+    #[test]
+    fn test_existing_threshold_api_remains_compatible() {
+        let mut state = empty_state();
+        let mut tested = module(ModuleStatus::Done);
+        tested.test_pass_rate = Some("100%".to_string());
+        state.modules.insert("tested".into(), tested);
+
+        let report = compute_quality_with_thresholds(&state, &QualityThresholds::default());
+        assert_eq!(report.modules[0].final_score, Some(100.0));
+        assert!(report.project_loc_ratio.is_none());
     }
 
     #[test]

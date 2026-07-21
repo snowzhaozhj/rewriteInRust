@@ -81,7 +81,15 @@ rustmigrate state get modules
 
    **回传后记台账**：按结果记 `--status ok` 或 `--status error --error-message "<原因>"`。
 
-4. **回传**（`TranslationResult`）：SubAgent 只回传 `touched-list`（own_files + shared_touched + self_check + test），代码留盘。回传后标记：
+4. **回传**（`TranslationResult`）：SubAgent 只回传 `touched-list`（own_files + shared_touched + self_check + test）与可选质量度量（`test_pass_rate` + `known_differences`），代码留盘。机械 batch 无行为测试，两项度量均为 `None`；coupled_batch / cycle / 单文件路径只在 verifier 产出真实 L2 结果时回传度量，禁止伪造通过率。**回传一到主 worktree，集中 writer 就先写可选度量，不论 AgentDone/Failed**（失败样本同样是质量事实，不能等 2d 成功门才写）：
+   ```bash
+   if <TranslationResult.test_pass_rate 或 known_differences 有值>; then
+     rustmigrate state record-metrics --module <M> \
+       [--test-pass-rate <TranslationResult.test_pass_rate>] \
+       [--known-differences <TranslationResult.known_differences>]
+   fi
+   ```
+   随后按结果标记 `agent_done` 或进入失败恢复；成功例：
    ```bash
    rustmigrate state transition --module <M> --substatus agent_done
    ```
@@ -138,6 +146,8 @@ cargo test 2>&1
   #    回传后编排器只标了 substatus=agent_done，status 仍停在 translating——batch-transition-done
   #    要求 status=reviewing，故整组 check 过后编排器对每个模块补 testing→reviewing 两步转换
   #    （agent_done substatus 在这两步保留，仅升 done 时清空）。SubAgent 不执行单模块流程的最终 done 步。
+  #    质量度量已在 TranslationResult 回传时由主 worktree 集中 writer 写入（含失败样本）；
+  #    机械 batch 的 metrics=None，明确跳过、不伪造通过率。
   #    ⚠️ 只遍历「成功合并 + substatus=agent_done」的模块：本层失败模块已停 paused/degrade_skip
   #    （失败不阻塞，见 2b），对其执行 paused→testing 会被状态矩阵拒绝。
   for M in <本层 agent_done 成功模块>; do
