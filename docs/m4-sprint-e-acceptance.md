@@ -22,7 +22,7 @@
 | VAL-04 差异测试逐条等价 | ✅ 276/276 | ✅ 87/87 | ✅ |
 | VAL-05 质量度量 final_score | ✅ 100.0 | ✅ 100.0 | ✅ |
 | VAL-06 graduate 正确识别 | ✅ | ✅ | ✅ |
-| VAL-08 全量回归 `just ci` | ✅ 757 测试全绿 | — | ✅ |
+| VAL-08 全量回归 `just ci`（本仓库级，非分项目） | ✅ 757 测试全绿 | ✅（同左） | ✅ |
 
 ## VAL-02：semver 迁移（项目 A）
 
@@ -49,7 +49,7 @@ Go 录制程序（`record/main.go`，`replace` 指向本地 `src`）录行为点
 | go-humanize | 87 | bytes/ibytes/parse_bytes/comma/commaf/si/parse_si/ftoa/ordinal/format_float/format_integer/big_bytes/big_comma/plural/word_series/oxford（16 类） | 87/87 等价 |
 
 - **编排器独立负向验证**（两项目均做）：篡改 fixture 首条期望值 → 差异测试立即报 `1/N 不一致`（打印 `Go=... Rust=...`）→ 还原恢复绿。证明断言非空跑、真实生效。
-- **断言下限守卫**：differential.rs 末尾 `assert!(total >= 80)`（humanize）/ 对应下限（semver），防 fixture 未加载导致空跑假绿。
+- **断言下限守卫**：go-humanize 的 differential.rs 末尾有 `assert!(total >= 80)` 防 fixture 未加载导致空跑假绿；semver 的 differential.rs 无 total 下限断言，靠 `failures.is_empty()` + 负向验证保证非空跑。
 
 ## VAL-05：质量度量验收（替代纯性能门，复用 Sprint B 框架）
 

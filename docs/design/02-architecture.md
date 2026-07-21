@@ -73,7 +73,7 @@
 
 **行动指南**：每种语言实现独立的 `LanguageAdapter`（见第十一章），负责类型提取，映射交给 LLM + PORTING 规则。
 
-> **已落地适配器**（截至 M4）：TypeScript（M1）、Python（M3）、Go（M4 Go 线）。三者共享同一 `LanguageAdapter` trait 契约（`language`/`can_handle`/`resolve_extensions`/`analyze_file`/`resolve_import`/`detect_tier` + `configure_project` 钩子）。Go 的包系统映射需扩 trait 暴露目录列举（D-M4-01），详见 [06 § 11.2 语言扩展架构](./06-plugin-structure.md#112-语言扩展架构)。C/C++ 推迟（D-M4-03）。
+> **已落地适配器**（截至 M4）：TypeScript（M1）、Python（M3）、Go（M4 Go 线）。三者共享同一 `LanguageAdapter` trait 契约（含 `language`/`can_handle`/`resolve_extensions`/`analyze_file`/`resolve_import`/`detect_tier`/`classify_file` 等方法 + `configure_project` 钩子）。Go 的包系统映射需扩 trait 暴露目录列举（D-M4-01），并发/cgo/unsafe 经 `classify_file` 分类降级（D-M4-05），详见 [06 § 11.2 语言扩展架构](./06-plugin-structure.md#112-语言扩展架构)。C/C++ 推迟（D-M4-03）。
 
 ### 3.2.2 拓扑排序保留，跨语言图对比砍掉
 
