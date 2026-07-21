@@ -3197,7 +3197,7 @@ fn compute_project_loc_ratio(
     let ratio = Ratio::new(source_loc.code as f64, rust_loc.code as f64).ratio;
     if ratio.is_some() {
         warnings.push(
-            "loc_ratio 为项目级近似值，已统一应用到各模块（per-module 结构对比未实现）".to_string(),
+            "loc_ratio 为项目级近似值，仅输出到 project_loc_ratio，不参与模块评分".to_string(),
         );
     } else {
         warnings.push("源码 LOC 为 0，无法计算 loc_ratio".to_string());
