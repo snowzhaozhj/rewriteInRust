@@ -128,7 +128,7 @@ Plugin 中的确定性计算由独立的 Rust CLI 工具 `rustmigrate` 承担，
 | `rustmigrate stats loc` | 统计源码和 Rust 代码行数（嵌入 tokei） |
 | `rustmigrate stats compare` | 源码与 Rust 结构复杂度对比（函数数量比、代码行数比、控制流嵌套层级）——复用 tokei + tree-sitter 函数计数，作为 Phase A 结构校验门禁（见 03 § 4.3 Step 4.5） |
 | `rustmigrate stats quality` | 迁移质量度量（per-module `final_score` / `behavior_coverage` + project-wide `degrade_rate` / `project_loc_ratio`），对齐 03 § 7.5 评分卡（M4-QUAL-01）。`--source` / `--rust`（省略则取配置）经 tokei `count_loc` 计算项目级 `rust/source` LOC 比，仅作为报告级近似值输出（warning 明示粒度），不下沉模块评分；不走 `stats compare`，避免 Go/C 尚未实现控制流嵌套分析时连 LOC 比也丢失（M4-QUAL-05） |
-| `rustmigrate stats community` | 社区结构偏离度诊断：Leiden 社区检测 vs 目录分区 NMI/ARI → `deviation_score`（M4-QUAL-04） |
+| `rustmigrate stats community` | 社区结构偏离度诊断：Louvain 社区检测 vs 目录分区 NMI/ARI → `deviation_score`（M4-QUAL-04） |
 | `rustmigrate scaffold workspace` | 生成 Cargo workspace 基础骨架（委托 `cargo init`）；dev-dependencies 与 `deny.toml` 由 scaffolder SubAgent 按项目测试需求注入 |
 
 **M2 扩展 — 5 个命令**：
