@@ -88,11 +88,11 @@ pub fn detect_community_deviation(graph: &SourceGraph) -> Result<CommunityReport
 
     let dir_partition = directory_partition(&file_ids);
 
-    let leiden_labels = partition_to_labels(&file_ids, &communities);
+    let community_labels = partition_to_labels(&file_ids, &communities);
     let dir_labels = partition_to_labels_from_map(&file_ids, &dir_partition);
 
-    let nmi = compute_nmi(&leiden_labels, &dir_labels);
-    let ari = compute_ari(&leiden_labels, &dir_labels);
+    let nmi = compute_nmi(&community_labels, &dir_labels);
+    let ari = compute_ari(&community_labels, &dir_labels);
     let deviation_score = 1.0 - nmi;
 
     let details = build_details(&communities);

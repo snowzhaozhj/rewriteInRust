@@ -32,7 +32,9 @@ use rustmigrate_core::scaffold::scaffold_project;
 use rustmigrate_core::state::{
     MigrationStateMachine, RecoverOutcome, RecoverPolicy, ResetOutcome, SprintAdvanceResult,
 };
-use rustmigrate_core::stats::{compare_structure, count_loc, detect_community_deviation, Ratio};
+use rustmigrate_core::stats::{
+    compare_structure, count_loc, count_loc_excluding_tests, detect_community_deviation, Ratio,
+};
 use rustmigrate_core::types::common::{DangerCategory, NodeId, Timestamp};
 use rustmigrate_core::types::graph::{EdgeType, NodeType};
 use rustmigrate_core::types::state::{
@@ -3179,14 +3181,16 @@ fn compute_project_loc_ratio(
     rust_root: &Path,
     warnings: &mut Vec<String>,
 ) -> Option<f64> {
-    let source_loc = match count_loc(source_root) {
+    // 翻译对照场景：两侧均排除测试文件（源侧 *_test.go/test_*.py 等、Rust 侧
+    // *_test.rs 命名的差异测试）——翻译只对照非测试代码，测试计入分母会稀释比率（issue #78）。
+    let source_loc = match count_loc_excluding_tests(source_root) {
         Ok(report) => report,
         Err(e) => {
             warnings.push(format!("源码 LOC 统计失败，loc_ratio 留空: {e}"));
             return None;
         }
     };
-    let rust_loc = match count_loc(rust_root) {
+    let rust_loc = match count_loc_excluding_tests(rust_root) {
         Ok(report) => report,
         Err(e) => {
             warnings.push(format!("Rust LOC 统计失败，loc_ratio 留空: {e}"));
@@ -3197,7 +3201,8 @@ fn compute_project_loc_ratio(
     let ratio = Ratio::new(source_loc.code as f64, rust_loc.code as f64).ratio;
     if ratio.is_some() {
         warnings.push(
-            "loc_ratio 为项目级近似值，仅输出到 project_loc_ratio，不参与模块评分".to_string(),
+            "loc_ratio 为项目级近似值（已排除测试文件），仅输出到 project_loc_ratio，不参与模块评分"
+                .to_string(),
         );
     } else {
         warnings.push("源码 LOC 为 0，无法计算 loc_ratio".to_string());
@@ -3239,7 +3244,7 @@ fn cmd_stats_quality(source: Option<&Path>, rust: Option<&Path>) -> CmdResult {
     Ok((serde_json::to_value(&report)?, warnings))
 }
 
-/// `stats community`：社区结构偏离度诊断（Leiden vs 目录分区）。
+/// `stats community`：社区结构偏离度诊断（Louvain vs 目录分区）。
 fn cmd_stats_community() -> CmdResult {
     let graph = load_graph()?;
     let report = detect_community_deviation(&graph)

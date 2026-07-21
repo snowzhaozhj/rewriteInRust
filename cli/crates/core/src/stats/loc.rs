@@ -14,6 +14,31 @@ use tokei::{Config, Languages};
 use crate::error::{MigrateError, Result};
 use crate::types::common::EXCLUDED_DIRS;
 
+/// 各源语言测试文件的 `.gitignore` 风格 glob 模式。
+///
+/// 用于「翻译对照」场景（如 `stats quality` 的 `project_loc_ratio`）排除源侧测试代码：
+/// 翻译只对照非测试源码，测试文件不应进 LOC 比分母，否则稀释比率（见 issue #78）。
+/// 注意：这些模式仅覆盖**命名约定**（各语言主流测试文件命名），无法识别放在
+/// 独立 `tests/` 目录但不带命名标记的测试；后者需目录级配置，超出本常量范围。
+pub const TEST_FILE_PATTERNS: &[&str] = &[
+    // Go
+    "**/*_test.go",
+    // TypeScript / JavaScript
+    "**/*.test.ts",
+    "**/*.test.tsx",
+    "**/*.spec.ts",
+    "**/*.spec.tsx",
+    "**/*.test.js",
+    "**/*.spec.js",
+    // Python
+    "**/test_*.py",
+    "**/*_test.py",
+    "**/conftest.py",
+    // C
+    "**/*_test.c",
+    "**/test_*.c",
+];
+
 /// 单语言的行数明细。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LocLang {
@@ -75,17 +100,36 @@ impl LocReport {
 ///
 /// 与 [`crate::profile::detect`] 的语言扫描不同：profile 只保留待迁移的**源语言**
 /// （TS/Py/C/Go）以评估迁移规模；本函数统计**全部**语言（含 Rust 目标代码），
-/// 因 `stats loc` 需同时度量源码与生成的 Rust 代码体量。
+/// 因 `stats loc` 需同时度量源码与生成的 Rust 代码体量。**统计全部文件（含测试）**——
+/// `stats loc`/`stats compare` 度量磁盘真实体量，不排除测试。翻译对照场景需排除
+/// 测试请用 [`count_loc_excluding_tests`]。
 ///
 /// 目录不存在返回 `MigrateError::FileNotFound`。
 pub fn count_loc(root: &Path) -> Result<LocReport> {
+    count_loc_with_ignored(root, &[])
+}
+
+/// 与 [`count_loc`] 相同，但额外排除各语言测试文件（[`TEST_FILE_PATTERNS`]）。
+///
+/// 用于「翻译对照」场景（`stats quality` 的 `project_loc_ratio`）：翻译只对照非测试
+/// 源码，测试文件计入 LOC 分母会稀释迁移体量比率（见 issue #78）。
+pub fn count_loc_excluding_tests(root: &Path) -> Result<LocReport> {
+    count_loc_with_ignored(root, TEST_FILE_PATTERNS)
+}
+
+/// `count_loc` 的实现内核：在默认排除目录之上追加 `extra_ignored` 模式
+/// （`.gitignore` 语法）后用 tokei 统计。
+fn count_loc_with_ignored(root: &Path, extra_ignored: &[&str]) -> Result<LocReport> {
     if !root.exists() {
         return Err(MigrateError::FileNotFound(root.to_path_buf()));
     }
 
+    let mut ignored: Vec<&str> = EXCLUDED_DIRS.to_vec();
+    ignored.extend_from_slice(extra_ignored);
+
     let mut languages = Languages::new();
     let config = Config::default();
-    languages.get_statistics(&[root.to_string_lossy().as_ref()], EXCLUDED_DIRS, &config);
+    languages.get_statistics(&[root.to_string_lossy().as_ref()], &ignored, &config);
 
     let mut by_language: BTreeMap<String, LocLang> = BTreeMap::new();
     for (lang_type, lang) in &languages {
@@ -173,5 +217,81 @@ mod tests {
         assert!(report.by_language.contains_key("Rust"));
         assert!(report.by_language.contains_key("TypeScript"));
         assert!(report.by_language["Rust"].comments >= 1);
+    }
+
+    #[test]
+    fn test_count_loc_excluding_tests_drops_test_files() {
+        let dir = tempfile::tempdir().unwrap();
+        // 非测试源码。
+        fs::write(
+            dir.path().join("humanize.go"),
+            "package h\nfunc F() int {\n\treturn 1\n}\n",
+        )
+        .unwrap();
+        // Go 测试文件——命中 **/*_test.go，应被 excluding_tests 排除。
+        fs::write(
+            dir.path().join("humanize_test.go"),
+            "package h\nfunc TestF(t *testing.T) {\n\t_ = F()\n\t_ = F()\n}\n",
+        )
+        .unwrap();
+
+        let all = count_loc(dir.path()).unwrap();
+        let no_tests = count_loc_excluding_tests(dir.path()).unwrap();
+
+        // 全量统计包含两个文件；排除测试后只剩非测试文件，code 行更少。
+        assert_eq!(all.by_language["Go"].files, 2);
+        assert_eq!(no_tests.by_language["Go"].files, 1);
+        assert!(
+            no_tests.code < all.code,
+            "排除测试后 code 应减少：all={} no_tests={}",
+            all.code,
+            no_tests.code
+        );
+    }
+
+    #[test]
+    fn test_count_loc_excluding_tests_keeps_non_test_files() {
+        let dir = tempfile::tempdir().unwrap();
+        // 纯非测试源码——两种统计结果应完全一致。
+        fs::write(
+            dir.path().join("lib.go"),
+            "package l\nfunc A() {}\nfunc B() {}\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("mod.ts"), "export const x = 1;\n").unwrap();
+
+        let all = count_loc(dir.path()).unwrap();
+        let no_tests = count_loc_excluding_tests(dir.path()).unwrap();
+        assert_eq!(all.code, no_tests.code);
+        assert_eq!(all.files, no_tests.files);
+    }
+
+    #[test]
+    fn test_count_loc_excluding_tests_python_and_ts_conventions() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("app.py"), "def f():\n    return 1\n").unwrap();
+        fs::write(
+            dir.path().join("test_app.py"),
+            "def test_f():\n    assert f() == 1\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("comp.ts"), "export const c = 1;\n").unwrap();
+        fs::write(
+            dir.path().join("comp.spec.ts"),
+            "it('c', () => {\n  expect(c).toBe(1);\n});\n",
+        )
+        .unwrap();
+
+        let no_tests = count_loc_excluding_tests(dir.path()).unwrap();
+        // Python：test_*.py 被排除，只剩 app.py（1 文件）。
+        assert_eq!(no_tests.by_language["Python"].files, 1);
+        // TS：*.spec.ts 被排除，只剩 comp.ts（1 文件）。
+        assert_eq!(no_tests.by_language["TypeScript"].files, 1);
+    }
+
+    #[test]
+    fn test_count_loc_excluding_tests_missing_root() {
+        let err = count_loc_excluding_tests(Path::new("/tmp/不存在的目录/loc")).unwrap_err();
+        assert!(matches!(err, MigrateError::FileNotFound(_)));
     }
 }
