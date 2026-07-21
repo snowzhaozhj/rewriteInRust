@@ -170,13 +170,13 @@ Step 3: PR-C3 (Validation)     → GO-08 + GO-09          [工时 ~2.5d]
 | M4-VAL-07 | **设计文档同步**：08-roadmap M4（Go 完成 / C 推迟理由 / Kani 推迟 / Community Tier 1 纳入）+ 04-toolchain Go 工具链 + 02-architecture Go adapter + PLAN.md §11 + **03 §7.5 登记质量度量框架（QUAL-01 三项新增度量 + QUAL-04 Community 偏离度）** | 1d | VAL-03 |
 | M4-VAL-08 | **全量回归 + 覆盖率**：`just ci` 全过；覆盖率 ≥70% | 0.5d | ALL |
 
-**验收标准**：
-- [ ] 2 个真实 Go 项目各完成多模块迁移、≥1 模块 done（cargo check+test+clippy 全过）
-- [ ] 差异测试：Go 原始行为与 Rust 对齐（JSON fixture 对比通过）
-- [ ] **质量度量达标**：Go 迁移 final_score 与既有语言基线同档（不显著劣化）
-- [ ] `/migrate graduate` 正确识别完成/未完成
-- [ ] TS/Python/Go 全量回归无退化、性能无明显退化
-- [ ] 设计文档 M4 交付物全部同步
+**验收标准**（见 [m4-sprint-e-acceptance.md](m4-sprint-e-acceptance.md)）：
+- [x] 2 个真实 Go 项目各完成多模块迁移、≥1 模块 done（cargo check+test+clippy 全过）——semver `collection.go` + go-humanize `big.go`
+- [x] 差异测试：Go 原始行为与 Rust 对齐（JSON fixture 对比通过）——semver 276/276 + humanize 87/87，编排器负向验证
+- [x] **质量度量达标**：Go 迁移 final_score 与既有语言基线同档（不显著劣化）——两项目 final_score=100
+- [x] `/migrate graduate` 正确识别完成/未完成
+- [x] TS/Python/Go 全量回归无退化、性能无明显退化——`just ci` 757 测试全绿
+- [x] 设计文档 M4 交付物全部同步——08/04/02/PLAN §11 + 03 §7.5
 
 ---
 

@@ -206,12 +206,17 @@ M0 收尾时依据 `DESIGN_ASSUMPTIONS.md` 的 Spike 结论，按下表确定进
 
 ### M4: 完善（持续）
 
-- C/C++ LanguageAdapter（bindgen + cbindgen）
-- Go LanguageAdapter
-- Kani 集成（关键路径形式化验证）
-- 社区反馈驱动的规则库积累
-- 多 agent 并行编排优化
-- Strangler Fig 模式工具支持
+M4 重定位为**双主线**（详见 [PLAN-M4.md](../PLAN-M4.md) D-M4-06）：巩固线（迁移质量度量框架 + Community 结构诊断 + 循环健壮性）+ Go 扩语言线。交付物及状态：
+
+- ✅ **Go LanguageAdapter**（Go 线旗舰，Sprint C/D/E）：tree-sitter-go 0.21 解析 + 包系统映射（扩 trait 暴露目录列举，D-M4-01）+ interface 隐式实现不强连（D-M4-02）+ 并发/cgo/unsafe 降级边界（D-M4-05）。**Sprint E 端到端验收达标**：2 个真实 Go 项目（semver 单包 / go-humanize 多模块）各完成多模块迁移、≥1 模块 done，差异测试逐条等价（semver 276/276、humanize 87/87），质量度量 final_score=100 与既有语言基线同档。
+- ✅ **迁移质量度量框架**（巩固线，Sprint B QUAL-01）：源行为覆盖率 / degrade 率 / 人工修订率 / `final_score`（§7.5 公式），`rustmigrate stats quality` 输出。
+- ✅ **Community 结构偏离度诊断**（巩固线，Sprint B QUAL-04，Tier 1）：自实现 Louvain 社区检测 vs 目录分区 NMI/ARI，`rustmigrate stats community` 输出。
+- ✅ **循环健壮性**（巩固线，Sprint F ROB-01a/b/c）：checkpoint 硬化 + watchdog stall 恢复 + 额度耗尽优雅暂停/续跑。
+- ✅ **并行编排收口**（巩固线，Sprint F ORCH-01）：保留并行 + worktree 写隔离（[MDR-018](../decisions/018-keep-parallel-migration.md)），`scc_groups` 拓扑分层调度。
+- ⏸️ **C/C++ LanguageAdapter（bindgen + cbindgen）**：**推迟**（D-M4-03）——无类型 IR 下 C 语义翻译 + 等价审查难度高、ROI 低（非「宏一票否决」）。
+- ⏸️ **Kani 集成（关键路径形式化验证）**：**推迟**（D-M4-04，非砍）——Kani 验证正确性（无 panic/溢出/越界）、proptest 验证等价性，互补不替代；当前 ROI 不足，推迟到 C 路线或更大项目验证阶段。
+- **社区反馈驱动的规则库积累**：部分——Sprint F GOV-01 版本检测 + Sprint B QUAL-04 结构诊断落地；社区运营非代码范围。
+- ⏸️ **Strangler Fig 模式工具支持**：降为文档——离线场景下共存需求不强。
 
 ### 13.1.1 M1→M2→M3 规则库累积效应分析
 
