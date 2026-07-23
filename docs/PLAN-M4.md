@@ -222,7 +222,7 @@ Step 3: PR-C3 (Validation)     → GO-08 + GO-09          [工时 ~2.5d]
 |------|------|
 | C/C++ adapter（含 bindgen/cbindgen FFI 方案） | 无类型 IR 下 C 弱类型/指针/手动内存语义使安全翻译+等价审查远难于 Go、ROI 不划算；**推迟**，未来走 LLMIGRATE 式 tree-sitter 拓扑路线（D-M4-03） |
 | Kani 形式化验证 | Kani（BMC）验证翻译后 Rust 代码正确性（无 panic/溢出/越界），与 proptest 差异测试（等价性）互补不替代。M4 预算有限，ROI 在当前阶段（2-3 门语言、小型项目）不如质量度量框架高；**推迟**到 C 路线（unsafe 高产出）或更大真实项目验证阶段（D-M4-04） |
-| Community 社区检测（Tier 2/3） | Tier 1 质量诊断信号已纳入 Sprint B（QUAL-04，~2d）：Leiden 跑社区检测 → 与目录结构比对 → 输出偏离度分数。Tier 2（辅助 MDR-011 拆解）和 Tier 3（完整 `NodeType::Community` 落地）视真实项目暴露需求再定；**推迟** |
+| Community 社区检测（Tier 2/3） | Tier 1 质量诊断信号已纳入 Sprint B（QUAL-04，~2d）：跑社区检测（落地为自实现 Louvain，见 QUAL-04）→ 与目录结构比对 → 输出偏离度分数。Tier 2（辅助 MDR-011 拆解）和 Tier 3（完整 `NodeType::Community` 落地）视真实项目暴露需求再定；**推迟** |
 | Strangler Fig 工具化 | 本项目是离线翻译工作台，旧代码和新代码不需要运行时共存，Strangler Fig 的核心价值（过渡期共存+逐步切流量）在此场景下需求不强。注：拓扑迁移管翻译**顺序**、Strangler Fig 管过渡期**共存**，两者正交——但离线场景下 scaffold+拓扑已覆盖编译期可用性；**降文档** |
 | 跨文件方法调用档 2（receiver 类型环境） | 质量增量、非阻塞，档 1 名称匹配够用；视真实漏边率未来立项；**推迟** |
 | TypeAlias 节点产出 | 枚举已预留，非 Go 前置；Go fixture 暴露需求再补；**推迟** |
