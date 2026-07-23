@@ -3181,8 +3181,12 @@ fn compute_project_loc_ratio(
     rust_root: &Path,
     warnings: &mut Vec<String>,
 ) -> Option<f64> {
-    // 翻译对照场景：两侧均排除测试文件（源侧 *_test.go/test_*.py 等、Rust 侧
-    // *_test.rs 命名的差异测试）——翻译只对照非测试代码，测试计入分母会稀释比率（issue #78）。
+    // 翻译对照场景：按命名约定排除测试文件（源侧 *_test.go/test_*.py/*.spec.ts 等）——
+    // 翻译只对照非测试代码，测试计入分母会稀释比率（issue #78）。
+    // 局限：Rust 目标侧的惯用测试多为文件内联 `#[cfg(test)] mod tests`，文件级 glob
+    // 无法排除；`TEST_FILE_PATTERNS` 也不含 Rust 模式（本仓库测试放 tests/ 目录或内联，
+    // 无 *_test.rs 命名）。故本比率对 Rust 侧内联测试体量敏感、可能偏低——如实记录，
+    // 契合 project_loc_ratio 仅作「项目级近似值、不进评分」的定位。
     let source_loc = match count_loc_excluding_tests(source_root) {
         Ok(report) => report,
         Err(e) => {

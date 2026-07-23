@@ -294,4 +294,52 @@ mod tests {
         let err = count_loc_excluding_tests(Path::new("/tmp/不存在的目录/loc")).unwrap_err();
         assert!(matches!(err, MigrateError::FileNotFound(_)));
     }
+
+    #[test]
+    fn test_count_loc_excluding_tests_c_and_conftest() {
+        let dir = tempfile::tempdir().unwrap();
+        // C：非测试源码 + 前缀/后缀两种测试命名。
+        fs::write(dir.path().join("lib.c"), "int f(void) { return 1; }\n").unwrap();
+        fs::write(
+            dir.path().join("lib_test.c"),
+            "int t1(void) { return 0; }\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("test_lib.c"),
+            "int t2(void) { return 0; }\n",
+        )
+        .unwrap();
+        // Python conftest.py（pytest 特例，无 test_ 命名标记）应被排除。
+        fs::write(dir.path().join("mod.py"), "x = 1\n").unwrap();
+        fs::write(dir.path().join("conftest.py"), "import pytest\n").unwrap();
+
+        let no_tests = count_loc_excluding_tests(dir.path()).unwrap();
+        // C：*_test.c 与 test_*.c 均排除，只剩 lib.c。
+        assert_eq!(no_tests.by_language["C"].files, 1);
+        // Python：conftest.py 排除，只剩 mod.py。
+        assert_eq!(no_tests.by_language["Python"].files, 1);
+    }
+
+    #[test]
+    fn test_count_loc_excluding_tests_nested_dirs() {
+        // 验证 `**/*_test.go` 的 `**` 递归语义：嵌套子目录下的测试文件也应被排除。
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("pkg").join("sub");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("svc.go"), "package sub\nfunc F() {}\n").unwrap();
+        fs::write(
+            nested.join("svc_test.go"),
+            "package sub\nfunc TestF(t *testing.T) {\n\tF()\n}\n",
+        )
+        .unwrap();
+
+        let all = count_loc(dir.path()).unwrap();
+        let no_tests = count_loc_excluding_tests(dir.path()).unwrap();
+        assert_eq!(all.by_language["Go"].files, 2);
+        assert_eq!(
+            no_tests.by_language["Go"].files, 1,
+            "深层目录 pkg/sub/svc_test.go 应被 **/*_test.go 命中"
+        );
+    }
 }
