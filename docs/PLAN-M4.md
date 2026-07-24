@@ -86,7 +86,7 @@ Go 线：                         Sprint C (Go Adapter Core) ─ Sprint D (Plugi
 
 **验收标准**：
 - [x] `rustmigrate quality`（或 `stats`）对已迁模块输出 source-behavior-coverage / degrade-rate / revision-rate / final_score —— QUAL-01 `stats quality`（PR #58）；QUAL-05 补齐 `record-metrics` 写入通路（PR #77）
-- [ ] jmespath + 1 TS 项目质量基线报告落地（`docs/m4-quality-baseline.md`）—— **未落地**：框架已具备（QUAL-01/05），但独立基线报告文档缺失；Sprint E 已在 Go 项目（semver/go-humanize）实测 final_score=100，既有 TS/Python 专门基线报告待补
+- [x] jmespath + 1 TS 项目质量基线报告落地（`docs/m4-quality-baseline.md`）—— **报告已落地**（[m4-quality-baseline.md](m4-quality-baseline.md)）：汇编 Go（semver/go-humanize，`stats quality` CLI 实测 final_score=100）+ Python（jmespath 901/902、textdistance 70/70 强等价实测换算）横比起点。**部分缺口如实标注**：Python 侧无 CLI 数值（M3 迁移早于框架落地、产物已清空）；**TS 真实项目基线仍缺**（M3/M4 真实迁移全用 Python/Go，TS 仅 fixture 级）——留待真实 TS 项目迁移补齐（~1.5d），不阻断横比起点建立
 - [x] `/migrate review` 仪表板展示质量度量 —— QUAL-03 review.md 接线 `stats quality`/`stats community`（PR #58）
 - [x] `stats` 输出含 Community 结构偏离度分数（Louvain vs 目录划分 NMI/ARI；PR #58 审查中由 graphrs 依赖改为自实现 Louvain）—— QUAL-04（PR #58）
 - [x] `just ci` 全过 —— PR #58 全绿
