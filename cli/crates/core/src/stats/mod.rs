@@ -9,5 +9,5 @@ pub mod quality;
 pub use community::{detect_community_deviation, CommunityReport};
 pub use compare::{compare_structure, CompareReport, Ratio, StructureMetrics};
 pub use coverage::{compute_stats, MigrationStats};
-pub use loc::{count_loc, LocLang, LocReport};
+pub use loc::{count_loc, count_loc_excluding_tests, LocLang, LocReport};
 pub use quality::{compute_quality, QualityReport};

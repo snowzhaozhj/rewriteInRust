@@ -646,7 +646,7 @@ Step 4: 模块迁移完成后，生成 Rust 测试（确定性 + AI 混合）
 > `rustmigrate state record-metrics --module <M> --test-pass-rate <rate> --known-differences <n>`
 > 把测试结果写入 `ModuleState`（通过/失败结果都记录，不能只保存成功样本）；并行路径由主 worktree
 > 的集中 writer 消费 `TranslationResult` 可选度量后写回，机械 batch 无行为测试时保持空值、不伪造通过率。
-> `stats quality --source <src> --rust <rust>` 通过 tokei `count_loc` 计算项目级 `rust/source` 行数比，
+> `stats quality --source <src> --rust <rust>` 通过 tokei（`count_loc_excluding_tests`，按命名约定排除源侧测试文件如 `*_test.go`/`test_*.py`，见 issue #78）计算项目级 `rust/source` 行数比，
 > 仅作为 `QualityReport.project_loc_ratio` 的**项目级近似值**输出（warning 明示粒度），**不下沉到
 > per-module `deterministic.loc_ratio` 或 `final_score`**，避免大型模块掩盖小模块膨胀或反向误罚。不复用完整 `stats compare`：后者还计算函数数/控制流嵌套，Go/C 尚未实现嵌套分析时会
 > 整体返回 `NotImplemented`，不应因此丢失语言无关的 LOC 比。真正的 per-module LOC 比需按

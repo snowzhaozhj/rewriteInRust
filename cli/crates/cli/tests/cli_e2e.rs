@@ -3003,6 +3003,47 @@ fn e2e_stats_quality_go_loc_ratio_scores_mechanical_module() {
     });
 }
 
+/// 锁定 issue #78 修复点：`stats quality` 的 `project_loc_ratio` 必须排除源侧测试文件。
+/// A/B 对比法：两个项目源码完全相同，仅 B 多一个 `demo_test.go`。两侧 ratio 应**相等**
+/// （测试文件都被排除）。若调用点回退到 `count_loc`（含测试），B 的分子被测试代码抬高
+/// → ratio 变大 → 相等断言失败。不依赖 tokei 的绝对行数计数。
+#[test]
+fn e2e_stats_quality_loc_ratio_excludes_source_test_files() {
+    let go_mod = "module example.com/demo\n\ngo 1.21\n";
+    let demo_go = "package demo\n\nfunc F() int {\n\treturn 1\n}\n";
+    let demo_rs = "pub fn f() -> i64 {\n    1\n}\n";
+    // 远大于 demo.go 的测试文件，回退到 count_loc 时会显著抬高 source LOC。
+    let demo_test_go = "package demo\n\nfunc TestF(t *testing.T) {\n\tif F() != 1 {\n\t\tt.Fatal(\"x\")\n\t}\n\tif F() != 1 {\n\t\tt.Fatal(\"y\")\n\t}\n\tif F() != 1 {\n\t\tt.Fatal(\"z\")\n\t}\n}\n";
+
+    let ratio_of = |with_test: bool| -> f64 {
+        let tmp = tempfile::tempdir().unwrap();
+        with_cwd(tmp.path(), || {
+            std::fs::create_dir_all("src").unwrap();
+            std::fs::create_dir_all("rust-src").unwrap();
+            std::fs::write("src/go.mod", go_mod).unwrap();
+            std::fs::write("src/demo.go", demo_go).unwrap();
+            std::fs::write("rust-src/demo.rs", demo_rs).unwrap();
+            if with_test {
+                std::fs::write("src/demo_test.go", demo_test_go).unwrap();
+            }
+            let _ = run(&["init"]);
+            let (code, json) = run(&["stats", "quality", "--source", "src", "--rust", "rust-src"]);
+            assert_eq!(code, 0, "quality 应成功: {json}");
+            json["data"]["project_loc_ratio"]
+                .as_f64()
+                .unwrap_or_else(|| panic!("应产出 project_loc_ratio: {json}"))
+        })
+    };
+
+    let ratio_no_test = ratio_of(false);
+    let ratio_with_test = ratio_of(true);
+    // 两侧都排除测试 → ratio 相等。回退到 count_loc 时 with_test 侧会 > no_test 侧。
+    assert!(
+        (ratio_no_test - ratio_with_test).abs() < 1e-9,
+        "含测试文件不应改变 loc_ratio（测试须排除）：no_test={ratio_no_test} with_test={ratio_with_test}"
+    );
+}
+
 #[test]
 fn e2e_stats_quality_overlapping_roots_do_not_score_polluted_ratio() {
     let project = temp_linear_project();
