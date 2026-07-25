@@ -95,6 +95,14 @@ impl ModuleStatus {
     ///   （实际恢复目标由 `pre_blocked_status` 决定，此处只校验"是可阻塞活跃态"）。
     /// - **`done` 是唯一真终态**；`degrade_*` 非终态，可经 `--force` 恢复到 `translating`
     ///   （设计 §0.3 Step / 状态图恢复边）。
+    /// - **`reviewing` 的两条回退边**（MDR-019，统一定义避免两处各加冗余边）：
+    ///   `reviewing → translating` = 人签批打回、带反馈定点返工；
+    ///   `reviewing → compile_fixing` = 整组验证失败（并行路径 workflow 步骤 2d 的跨模块冲突），
+    ///   走 `max_retry_rounds` 编译修复计数器。
+    /// - **`reviewing → done` 虽在矩阵内合法，但另有凭据门**：须经
+    ///   [`MigrationStateMachine::approve_module`](crate::state::MigrationStateMachine::approve_module)
+    ///   （人签批或预签策略放行），裸 `transition_module` 会被拒（MDR-019 译后签批门）。
+    ///   本矩阵只管「边是否存在」，不管「谁有权走」。
     pub fn can_transition_to(self, target: Self) -> bool {
         use ModuleStatus::*;
         // 可被阻塞的活跃态：可进入 blocked，也是 blocked 恢复的合法目标。
@@ -109,7 +117,9 @@ impl ModuleStatus {
             Translating => matches!(target, CompileFixing | Testing | Blocked),
             CompileFixing => matches!(target, Testing | Paused | Blocked),
             Testing => matches!(target, Reviewing | Paused | Blocked),
-            Reviewing => matches!(target, Done | Blocked),
+            // MDR-019：Done 另需批准凭据（见方法级 doc）；Translating = 签批打回返工；
+            // CompileFixing = 整组验证失败回退。
+            Reviewing => matches!(target, Done | Blocked | Translating | CompileFixing),
             Paused => matches!(
                 target,
                 Translating | DegradeFfi | DegradeManual | DegradeSkip | Blocked
@@ -163,6 +173,28 @@ pub enum CompositeKind {
     /// 含逻辑成员的耦合凝聚簇（decompose 按耦合/目录分组，含任意复杂度文件）——走完整组路径
     /// （整组翻译 → 结构门 → Phase B → 行为测试 → 审查）。run 不复用 SCC 契约重路径。
     CoupledBatch,
+}
+
+/// `danger` 分类结果的来源可信度（MDR-019：消解 `danger=[]` 的空值语义重载）。
+///
+/// `ModuleState.danger` 为空数组时有三种截然不同的含义，靠本字段区分——译后签批门的
+/// 自动放行策略**只信 [`Classified`](Self::Classified)**，其余两态一律停门等人签批
+/// （不可据「空 danger」推断模块安全，见 [MDR-019](../../../../docs/decisions/019-post-translation-review-gate.md) 背景）。
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, Display, EnumString,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum DangerProvenance {
+    /// 未跑过分类器：`state populate-modules --no-decompose` 旧路径不读源、不分类。
+    /// **默认值**——旧版 state 文件（无此字段）经 `serde(default)` 落到此态，保守视为不可信。
+    #[default]
+    Unclassified,
+    /// 全部成员源文件读取成功并跑过 `classify_file`：`danger=[]` 可信地表示「无危险信号」。
+    Classified,
+    /// 跑过分类器但**部分成员源文件读取失败**（分类不完整，`danger` 可能漏项）。
+    /// 读失败成员按空 danger 保守处理（MDR-013），故整组结果不可信。
+    PartiallyClassified,
 }
 
 /// 状态历史条目。
@@ -282,10 +314,27 @@ pub struct ModuleState {
     ///
     /// **类型安全**（M4-DEBT-02）：`Vec<DangerCategory>` 由类型层保证值域；`#[serde(other)]`
     /// 兜底 `Unknown` 变体确保旧版 state 含未知类别时不硬失败。去重 / 排序由写入路径
-    /// （`BTreeSet` 有序）保证。**空值语义重载**：`[]` 同时表示「无危险信号」与「`--no-decompose`
-    /// 未分类」，消费方（C2 plugin）不可据空值推断「安全」。
+    /// （`BTreeSet` 有序）保证。
+    ///
+    /// **空值语义已由 [`danger_provenance`](Self::danger_provenance) 消解**（MDR-019）：`[]`
+    /// 单看仍无法区分「无危险信号」/「未分类」/「分类不完整」，判定安全性须**同时**读
+    /// provenance；仅 `Classified` 时 `[]` 才可信地表示「无危险信号」。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub danger: Vec<DangerCategory>,
+    /// `danger` 的来源可信度（MDR-019 译后签批门的自动放行前置）。
+    ///
+    /// 由 `state populate-modules` 落：`--no-decompose` 旧路径 → `Unclassified`；decompose 路径
+    /// 全成员读取成功 → `Classified`，有成员读失败 → `PartiallyClassified`。
+    /// `serde(default)` 使旧版 state 文件落 `Unclassified`（保守：不可自动放行）。
+    /// 与 `danger` 同属**结构性冻结字段**：`state reset` / `state recover` 不清除。
+    #[serde(default, skip_serializing_if = "is_unclassified")]
+    pub danger_provenance: DangerProvenance,
+}
+
+/// serde 跳过条件：`danger_provenance` 为默认态 `Unclassified` 时不序列化
+/// （与本结构其余「默认值省略」约定一致，旧 state 文件读回仍是 `Unclassified`）。
+fn is_unclassified(p: &DangerProvenance) -> bool {
+    matches!(p, DangerProvenance::Unclassified)
 }
 
 /// serde 跳过条件：值为 `false` 时不序列化（与本结构其余 Option 字段的 skip 约定一致）。
@@ -426,7 +475,12 @@ mod tests {
             (Translating, Testing),
             (CompileFixing, Testing),
             (Testing, Reviewing),
+            // reviewing → done 边存在，但另有批准凭据门（MDR-019，见 approve_module）；
+            // 本矩阵只管边是否存在。
             (Reviewing, Done),
+            // MDR-019 两条回退边：签批打回返工 / 整组验证失败回编译修复。
+            (Reviewing, Translating),
+            (Reviewing, CompileFixing),
             // 失败 → paused
             (CompileFixing, Paused),
             (Testing, Paused),
@@ -486,6 +540,51 @@ mod tests {
         for to in [Translating, Testing, Reviewing, Pending, Blocked, Paused] {
             assert!(!Done.can_transition_to(to), "done 不应可转出到 {to}");
         }
+    }
+
+    /// MDR-019：provenance 三态的 snake_case 稳定性 + 默认值保守（编排器依赖字符串标识）。
+    #[test]
+    fn danger_provenance_serde_and_default_is_conservative() {
+        assert_eq!(
+            DangerProvenance::PartiallyClassified.to_string(),
+            "partially_classified"
+        );
+        assert_eq!(
+            serde_json::to_string(&DangerProvenance::Classified).unwrap(),
+            "\"classified\""
+        );
+        let p: DangerProvenance = serde_json::from_str("\"unclassified\"").unwrap();
+        assert_eq!(p, DangerProvenance::Unclassified);
+        assert_eq!(
+            DangerProvenance::default(),
+            DangerProvenance::Unclassified,
+            "默认须是最保守态：未分类 → 不可自动放行"
+        );
+    }
+
+    /// 旧版 state 文件（无 `danger_provenance` 键）读回落 `Unclassified`，不反序列化失败；
+    /// 默认值不写回（省略约定）。保证已有项目升级后不会被误判为「分类可信」。
+    #[test]
+    fn old_module_state_without_provenance_defaults_to_unclassified() {
+        let old = r#"{"status":"reviewing","known_differences":0,"danger":["concurrency"]}"#;
+        let m: ModuleState = serde_json::from_str(old).unwrap();
+        assert_eq!(m.danger_provenance, DangerProvenance::Unclassified);
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(
+            !json.contains("danger_provenance"),
+            "默认态不应写回: {json}"
+        );
+
+        // 非默认态正常往返。
+        let mut m2 = m.clone();
+        m2.danger_provenance = DangerProvenance::PartiallyClassified;
+        let json2 = serde_json::to_string(&m2).unwrap();
+        assert!(json2.contains("\"danger_provenance\":\"partially_classified\""));
+        let back: ModuleState = serde_json::from_str(&json2).unwrap();
+        assert_eq!(
+            back.danger_provenance,
+            DangerProvenance::PartiallyClassified
+        );
     }
 
     #[test]

@@ -29,6 +29,7 @@ use rustmigrate_core::profile::{
 };
 use rustmigrate_core::response::{ErrorData, Response, Status};
 use rustmigrate_core::scaffold::scaffold_project;
+use rustmigrate_core::state::Approval;
 use rustmigrate_core::state::{
     MigrationStateMachine, RecoverOutcome, RecoverPolicy, ResetOutcome, SprintAdvanceResult,
 };
@@ -38,8 +39,8 @@ use rustmigrate_core::stats::{
 use rustmigrate_core::types::common::{DangerCategory, NodeId, Timestamp};
 use rustmigrate_core::types::graph::{EdgeType, NodeType};
 use rustmigrate_core::types::state::{
-    humanize_module_key, CompositeKind, ModuleState, ModuleStatus, ModuleTier, ProjectState,
-    SprintState,
+    humanize_module_key, CompositeKind, DangerProvenance, ModuleState, ModuleStatus, ModuleTier,
+    ProjectState, SprintState,
 };
 use rustmigrate_core::validate::rules::{check_adapters_dir, load_rule_registry};
 use rustmigrate_core::validate::{
@@ -318,21 +319,34 @@ pub enum StateCommands {
     /// sprint N 全模块 done/degrade_* → current=N+1 + history 回填。
     /// 无可推进 sprint 或尚有非终态模块时返回 status:ok + advanced:false。
     AdvanceSprint,
-    /// 批量将 `agent_done` 模块升为最终 `done`（并行翻译两层 done 的第二层门）。
+    /// 批量将 `agent_done` 模块经**预签策略**升为最终 `done`（并行翻译两层 done 的第二层门）。
     ///
     /// 两层 done（MDR-003 约束6）：agent 在 worktree 内自检过只标 `agent_done`（substatus，非终态）；
-    /// 编排器把本层所有分支合并后跑整组 `cargo check`/`test`，**全部过**才调用本命令把这批模块升 `done`。
-    /// 整组 check 是唯一 done 真门——orphan rule/E0119 coherence/feature/宏/命名空间等跨并发兄弟冲突
-    /// 只有整组编译才暴露（见 06 § M2 扩展、workflow.md 步骤 2d）。
+    /// 编排器把本层所有分支合并后跑整组 `cargo check`/`test`，**全部过**才调用本命令。
+    /// 整组 check 是唯一 done **技术**真门——orphan rule/E0119 coherence/feature/宏/命名空间等跨并发
+    /// 兄弟冲突只有整组编译才暴露（见 06 § M2 扩展、workflow.md 步骤 2d）。
     ///
-    /// 逐模块独立转换（`reviewing → done`），一个失败不影响其他：
-    /// substatus 非 `agent_done` 的模块被跳过（记入 `attempts` 审计），当前非 `reviewing` 的转换被矩阵拒绝，
-    /// 模块不存在则报错跳过（不写 attempts）。重复 `--module` 按首次出现序去重。
-    /// 输出 `{requested, succeeded, skipped, duplicates}`——`skipped`/`duplicates` 非空时 status 降级 warning。
+    /// **译后签批门（MDR-019）**：整组 check 通过**不构成签批凭据**。本命令须携带
+    /// `--by-policy <id> --attest <...>`（用户在 `[review_gate].auto_approve_policies` 预签的窄策略）；
+    /// 未携带则**一个都不放行**（全部 skip，降级 warning），并行译好的模块须逐个 `state approve`
+    /// 人签批（MDR-018「并行翻译 + 串行审批」）。substatus 为 `awaiting_final_review`
+    /// （已判定需人签批）的模块**一律拒绝**，任何策略都不放行。
+    ///
+    /// 逐模块独立处理，一个失败不影响其他；重复 `--module` 按首次出现序去重。
+    /// 输出 `{requested, succeeded, skipped:[{module,code,detail}], duplicates}`
+    /// ——`skipped`/`duplicates` 非空时 status 降级 warning。
     BatchTransitionDone {
         /// 待升 `done` 的模块 key 列表（可重复 `--module`，如 `--module a --module b`）。
         #[arg(long = "module", required = true)]
         modules: Vec<String>,
+        /// 自动放行策略 id（须在 `[review_gate].auto_approve_policies` 预签）：
+        /// `batch_mechanical` / `headless_default`。省略则全部跳过（无凭据）。
+        #[arg(long)]
+        by_policy: Option<String>,
+        /// 编排器对产物级检查的逐项声明（可重复），如 `--attest todo_port_zero`。
+        /// 须覆盖策略的 `required_attestations` 全项（见 `state review-gate` 输出），缺一即拒。
+        #[arg(long = "attest")]
+        attest: Vec<String>,
     },
     /// 乐观锁状态更新（`--cas-version` 比较并写入，版本不匹配返回冲突）。
     ///
@@ -404,6 +418,47 @@ pub enum StateCommands {
     /// 额度**检测**归编排器/harness（CLI 观测不到 token 预算）；本命令只据已 checkpoint 的 state
     /// 产出计划。实际重入的状态变更复用 `state recover`（不重复实现）。见 MDR-017。
     Resume,
+    /// 译后签批门判定 + 证据包索引（MDR-019）。**纯查询、无副作用、不加载 graph**。
+    ///
+    /// `reviewing → done` 是最终签批门（设计 `02 § 3.4` / `03 § 7.4`「不自动宣布成功」）。本命令输出：
+    /// - `decision`：`mandatory_manual`（命中强制人工清单，任何策略都不得放行）/ `policy_eligible`
+    ///   （有已预签策略条件全过，编排器补齐 attestation 后可放行）/ `manual_required`（须人签批）；
+    /// - `mandatory_reasons`：命中的红线（danger 非空 / 分类来源不可信 / 已知差异 / substatus 标记
+    ///   requires_manual_review·incomplete / Phase A 结构门未过）；
+    /// - `policies`：各内置策略的启用与条件评估 + `required_attestations`；
+    /// - `state_facts`：判定所依据的 state 层事实（原样回显）；
+    /// - `evidence`：`intermediate/` 下**实际存在**的本模块产物（intent/review/degrade_report/…）；
+    /// - `evidence_commands`：编排器应补跑的命令（`stats compare`/`stats quality`/`git diff`）；
+    /// - `orchestrator_must_check`：CLI 判不了、编排器必须自查的强制项（任一命中则不得自动放行）。
+    ReviewGate {
+        /// 模块 key（组代表 NodeId，或折叠组的非代表成员，自动归一到组代表）。
+        #[arg(long)]
+        module: String,
+    },
+    /// 译后签批：把模块从 `reviewing` 升终态 `done`（MDR-019，`reviewing → done` 的唯一单模块入口）。
+    ///
+    /// 裸 `state transition --to done` 在该边被拒——门坐落在这条边**本身**。两条路径：
+    /// - **人签批**（省略 `--by-policy`）：要求模块已停在 `reviewing + awaiting_final_review`
+    ///   ——该标记由编排器展示证据包时落下，故「人签批」蕴含「证据确实展示过」；未停门则报错引导。
+    /// - **策略放行**（`--by-policy <id> --attest <...>`）：要求策略已在
+    ///   `[review_gate].auto_approve_policies` 预签、未命中强制人工清单、该策略 state 条件全过、
+    ///   attestation 覆盖 `required_attestations` 全项。CLI 逐项复核，不信调用方自称「已判过」。
+    ///
+    /// 审计写 `approved:human` / `auto_approved_by_policy:<id> attest=[..]`（不伪装「无需审查」）。
+    Approve {
+        /// 模块 key（组代表 NodeId，或折叠组的非代表成员，自动归一到组代表）。
+        #[arg(long)]
+        module: String,
+        /// 预签策略 id（省略 = 人签批）：`batch_mechanical` / `headless_default`。
+        #[arg(long)]
+        by_policy: Option<String>,
+        /// 产物级自查的逐项声明（可重复），仅 `--by-policy` 时需要。
+        #[arg(long = "attest")]
+        attest: Vec<String>,
+        /// 签批说明（追加到 `attempts` 审计，如审阅结论摘要）。
+        #[arg(long)]
+        reason: Option<String>,
+    },
 }
 
 /// `state recover --policy` 的 CLI 取值（映射到核心 [`RecoverPolicy`]）。
@@ -619,9 +674,24 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
                 ),
             ),
             StateCommands::AdvanceSprint => emit(writer, cmd_state_advance_sprint()),
-            StateCommands::BatchTransitionDone { modules } => {
-                emit(writer, cmd_state_batch_transition_done(modules))
-            }
+            StateCommands::BatchTransitionDone {
+                modules,
+                by_policy,
+                attest,
+            } => emit(
+                writer,
+                cmd_state_batch_transition_done(modules, by_policy.as_deref(), attest),
+            ),
+            StateCommands::ReviewGate { module } => emit(writer, cmd_state_review_gate(module)),
+            StateCommands::Approve {
+                module,
+                by_policy,
+                attest,
+                reason,
+            } => emit(
+                writer,
+                cmd_state_approve(module, by_policy.as_deref(), attest, reason.as_deref()),
+            ),
             StateCommands::Reset { module, force } => emit(writer, cmd_state_reset(module, *force)),
             StateCommands::Recover {
                 module,
@@ -2376,6 +2446,9 @@ fn cmd_state_populate_modules(
         /// 组内各成员危险信号类别的并集（去重 + 排序；MDR-013）。
         /// decompose 路径填真值；`--no-decompose` 旧路径恒空（不读源、不分类）。
         danger: Vec<DangerCategory>,
+        /// `danger` 来源可信度（MDR-019）：`--no-decompose` 恒 `Unclassified`；
+        /// decompose 路径按组内成员是否有读失败落 `Classified` / `PartiallyClassified`。
+        danger_provenance: DangerProvenance,
     }
 
     let (units, decomposition_snapshot) = if no_decompose {
@@ -2398,6 +2471,8 @@ fn cmd_state_populate_modules(
                     composite_kind,
                     // 旧路径不读源、不分类，danger 留空（MDR-013：透传仅在 decompose 路径）。
                     danger: Vec::new(),
+                    // 空 danger 在此路径**不代表安全**，显式落 Unclassified 供签批门识别（MDR-019）。
+                    danger_provenance: DangerProvenance::Unclassified,
                 })
             })
             .collect();
@@ -2417,6 +2492,8 @@ fn cmd_state_populate_modules(
         let mut file_kinds: HashMap<String, FileKind> = HashMap::new();
         // 每文件危险信号类别；组并集在装配 unit 时计算（MDR-013）。
         let mut danger_map: HashMap<String, Vec<DangerCategory>> = HashMap::new();
+        // 读失败成员集合（MDR-019）：这些文件未跑分类器，所在组的 danger 结果不完整。
+        let mut failed_files: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut read_failures = 0usize;
         let mut first_failure: Option<String> = None;
         for id in &file_nodes {
@@ -2436,7 +2513,9 @@ fn cmd_state_populate_modules(
                         first_failure = Some(source_root.join(rel).display().to_string());
                     }
                     file_kinds.insert(id.to_string(), FileKind::Normal);
-                    // 读失败：danger 保守视为空（MDR-013），不写 danger_map。
+                    // 读失败：danger 保守视为空（MDR-013），不写 danger_map；记入 failed_files
+                    // 使所在组落 PartiallyClassified（空 danger 不可信，MDR-019）。
+                    failed_files.insert(id.to_string());
                     0
                 }
             };
@@ -2485,6 +2564,16 @@ fn cmd_state_populate_modules(
             out
         };
 
+        // 组 provenance（MDR-019）：任一成员读失败 → 整组分类不完整（`danger` 可能漏项）。
+        // 本路径确实跑过分类器，故不会是 Unclassified。
+        let group_provenance = |members: &[String]| -> DangerProvenance {
+            if members.iter().any(|m| failed_files.contains(m)) {
+                DangerProvenance::PartiallyClassified
+            } else {
+                DangerProvenance::Classified
+            }
+        };
+
         let mut units: Vec<MigrationUnit> = Vec::with_capacity(plan.units.len());
         for u in &plan.units {
             match u.kind {
@@ -2495,6 +2584,7 @@ fn cmd_state_populate_modules(
                         sprint: u.sprint,
                         composite_kind: Some(CompositeKind::Cycle),
                         danger: union_danger(&u.members),
+                        danger_provenance: group_provenance(&u.members),
                     });
                 }
                 UnitKind::Batch => {
@@ -2524,6 +2614,7 @@ fn cmd_state_populate_modules(
                         sprint: u.sprint,
                         composite_kind: Some(kind),
                         danger: union_danger(&u.members),
+                        danger_provenance: group_provenance(&u.members),
                     });
                 }
                 UnitKind::Single | UnitKind::ManualOverBudget => {
@@ -2539,6 +2630,7 @@ fn cmd_state_populate_modules(
                         sprint: u.sprint,
                         composite_kind: None,
                         danger: union_danger(&u.members),
+                        danger_provenance: group_provenance(&u.members),
                     });
                 }
             }
@@ -2591,6 +2683,8 @@ fn cmd_state_populate_modules(
         if !u.danger.is_empty() {
             entry["danger"] = json!(u.danger);
         }
+        // provenance 始终回显（含 unclassified）——空 danger 的含义靠它区分（MDR-019）。
+        entry["danger_provenance"] = json!(u.danger_provenance.to_string());
         modules_json.push(entry);
 
         machine.update_module(
@@ -2613,6 +2707,7 @@ fn cmd_state_populate_modules(
                 decomposition_snapshot: decomposition_snapshot.clone(),
                 decomposition_frozen: decomposition_snapshot.is_some(),
                 danger: u.danger,
+                danger_provenance: u.danger_provenance,
             },
         );
     }
@@ -2848,18 +2943,24 @@ fn cmd_state_advance_sprint() -> CmdResult {
 /// `state batch-transition-done --module <a> --module <b> …`：
 /// 两层 done 的第二层门——把整组 `agent_done` 模块批量升最终 `done`。
 ///
-/// 设计（MDR-003 约束6 + 06 § M2 扩展）：并行翻译中 agent 在 worktree 内自检过只标 `agent_done`
-/// （substatus，非终态）；编排器合并本层全部分支后跑整组 `cargo check`/`test`，全过才调用本命令。
-/// 委托 [`MigrationStateMachine::batch_transition_done`]：逐模块 `reviewing → done`，非 `agent_done`
-/// 跳过、当前非 `reviewing` 被矩阵拒绝、模块不存在报错跳过，一个失败不影响其他。`skipped`（请求但
-/// 未成功）非空时经 `emit` 将 status 降级 warning。
+/// 设计（MDR-003 约束6 + 06 § M2 扩展 + MDR-019）：并行翻译中 agent 在 worktree 内自检过只标
+/// `agent_done`（substatus，非终态）；编排器合并本层全部分支后跑整组 `cargo check`/`test`，全过才
+/// 调用本命令。但整组 check 只是**技术**真门——译后签批门（MDR-019）要求本命令携带预签策略凭据
+/// （`--by-policy` + `--attest`）；无凭据时全部跳过（`approval_required`），`awaiting_final_review`
+/// 模块一律拒绝。委托 [`MigrationStateMachine::batch_transition_done`] 逐模块独立处理。
+/// `skipped` 非空时经 `emit` 将 status 降级 warning。
 ///
 /// **入口去重**：重复 `--module a --module a` 先按首次出现序去重再委托——否则第一次成功会清空
-/// substatus，第二次把已 `done` 的模块误判为跳过并追加噪声审计，且 `skipped` 的名称集合差集会
-/// 把重复项算作成功（掩盖真实计数）。去重后 `requested` 回显去重列表，`duplicates` 单列。
-fn cmd_state_batch_transition_done(modules: &[String]) -> CmdResult {
+/// substatus，第二次把已 `done` 的模块误判为跳过并追加噪声审计。去重后 `requested` 回显去重列表，
+/// `duplicates` 单列。
+fn cmd_state_batch_transition_done(
+    modules: &[String],
+    by_policy: Option<&str>,
+    attest: &[String],
+) -> CmdResult {
     let path = state_path();
     let (mut machine, mut warnings) = load_state_with_warnings(&path)?;
+    let cfg = load_config_or_default(&mut warnings);
 
     // 按首次出现序去重（保序，稳定输出）。
     let mut seen = std::collections::HashSet::new();
@@ -2871,22 +2972,41 @@ fn cmd_state_batch_transition_done(modules: &[String]) -> CmdResult {
     }
     let duplicate_count = modules.len() - deduped.len();
 
-    let succeeded = machine.batch_transition_done(&deduped)?;
+    let approval = by_policy.map(|id| Approval::Policy {
+        id: id.to_owned(),
+        attestations: attest.to_vec(),
+    });
+    if approval.is_none() && !attest.is_empty() {
+        warnings.push(
+            "给了 --attest 但没给 --by-policy：attestation 只在策略放行时生效，本次全部跳过"
+                .to_owned(),
+        );
+    }
+    let outcome = machine.batch_transition_done(
+        &deduped,
+        approval.as_ref(),
+        &cfg.review_gate,
+        cfg.testing.coverage_threshold,
+    )?;
     machine.save(&path)?;
 
-    let succeeded_set: std::collections::HashSet<&str> =
-        succeeded.iter().map(String::as_str).collect();
-    let skipped: Vec<&str> = deduped
+    let skipped: Vec<serde_json::Value> = outcome
+        .skipped
         .iter()
-        .map(String::as_str)
-        .filter(|m| !succeeded_set.contains(m))
+        .map(|(module, code, detail)| json!({"module": module, "code": code, "detail": detail}))
         .collect();
 
-    if !skipped.is_empty() {
+    if !outcome.skipped.is_empty() {
+        // 逐条列出原因码——「因签批门被拒」与「非 agent_done」是完全不同的处置，不可混为一谈。
+        let summary: Vec<String> = outcome
+            .skipped
+            .iter()
+            .map(|(m, code, _)| format!("{m}({code})"))
+            .collect();
         warnings.push(format!(
-            "{} 个模块未升 done（非 agent_done / 当前非 reviewing / 模块不存在）：{}",
-            skipped.len(),
-            skipped.join(", ")
+            "{} 个模块未升 done：{}",
+            outcome.skipped.len(),
+            summary.join(", ")
         ));
     }
     if duplicate_count > 0 {
@@ -2898,9 +3018,126 @@ fn cmd_state_batch_transition_done(modules: &[String]) -> CmdResult {
     Ok((
         json!({
             "requested": deduped,
-            "succeeded": succeeded,
+            "approval": by_policy.map(|id| format!("policy:{id}")),
+            "succeeded": outcome.succeeded,
             "skipped": skipped,
             "duplicates": duplicate_count,
+        }),
+        warnings,
+    ))
+}
+
+/// `state review-gate --module <M>`：译后签批门判定 + 证据包索引（MDR-019）。
+///
+/// **纯查询、无 mutation、不加载 graph**（同 `state resume`）。委派
+/// [`review_gate::judge`] 做确定性判定 + [`review_gate::collect_evidence`] 扫描磁盘实际存在的
+/// 本模块产物。`decision` 是编排器的分支依据：`mandatory_manual`/`manual_required` → 标
+/// `awaiting_final_review` 停门等人签批；`policy_eligible` → 跑完 `orchestrator_must_check`
+/// 后 `state approve --by-policy`。
+fn cmd_state_review_gate(module: &str) -> CmdResult {
+    use rustmigrate_core::state::review_gate;
+
+    let path = state_path();
+    let (machine, mut warnings) = load_state_with_warnings(&path)?;
+    let cfg = load_config_or_default(&mut warnings);
+
+    let canonical = machine.canonical_module_key(module)?;
+    let state = machine
+        .state_file()
+        .modules
+        .get(&canonical)
+        .expect("canonical 已校验存在");
+
+    let (_, unknown_policies) =
+        review_gate::evaluate_policies(state, &cfg.review_gate, cfg.testing.coverage_threshold);
+    if !unknown_policies.is_empty() {
+        // 预签清单里的拼写错误会静默失效（策略永不命中）→ 显式告警。
+        warnings.push(format!(
+            "[review_gate].auto_approve_policies 含未知策略 id（拼写错误？将永不生效）：{}",
+            unknown_policies.join(", ")
+        ));
+    }
+
+    let judgement = review_gate::judge(state, &cfg.review_gate, cfg.testing.coverage_threshold);
+    let migration_dir = path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let evidence = review_gate::collect_evidence(
+        &migration_dir,
+        &canonical,
+        state.member_files.as_deref().unwrap_or(&[]),
+    );
+
+    if state.status != ModuleStatus::Reviewing {
+        warnings.push(format!(
+            "模块当前 {} 非 reviewing：签批门只在 reviewing 上放行，本判定仅为预览",
+            state.status
+        ));
+    }
+
+    let report = review_gate::ReviewGateReport {
+        module: canonical.clone(),
+        decision: judgement.decision,
+        mandatory_reasons: judgement.mandatory_reasons,
+        policies: judgement.policies,
+        state_facts: review_gate::StateFacts::from_module(state),
+        evidence,
+        evidence_commands: review_gate::evidence_commands(&canonical),
+        orchestrator_must_check: review_gate::ORCHESTRATOR_MUST_CHECK
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect(),
+    };
+    Ok((serde_json::to_value(report)?, warnings))
+}
+
+/// `state approve --module <M> [--by-policy <id> --attest <k>…] [--reason <r>]`：
+/// 译后签批（MDR-019）——`reviewing → done` 的唯一单模块入口。
+///
+/// 委派 [`MigrationStateMachine::approve_module`]：人签批要求已停 `awaiting_final_review`；
+/// 策略放行经 `review_gate::check_policy_approval` 逐项复核（预签 + 非红线 + 条件 + attestation）。
+fn cmd_state_approve(
+    module: &str,
+    by_policy: Option<&str>,
+    attest: &[String],
+    reason: Option<&str>,
+) -> CmdResult {
+    let path = state_path();
+    let (mut machine, mut warnings) = load_state_with_warnings(&path)?;
+    let cfg = load_config_or_default(&mut warnings);
+
+    let approval = match by_policy {
+        Some(id) => Approval::Policy {
+            id: id.to_owned(),
+            attestations: attest.to_vec(),
+        },
+        None => {
+            if !attest.is_empty() {
+                warnings.push(
+                    "人签批路径忽略 --attest（attestation 只用于 --by-policy 策略放行）".to_owned(),
+                );
+            }
+            Approval::Human
+        }
+    };
+
+    let outcome = machine.approve_module(
+        module,
+        &approval,
+        reason,
+        &cfg.review_gate,
+        cfg.testing.coverage_threshold,
+    )?;
+    machine.save(&path)?;
+
+    Ok((
+        json!({
+            "module": outcome.module,
+            "status": ModuleStatus::Done.to_string(),
+            "approval": outcome.approval,
+            "previous_substatus": outcome.previous_substatus,
+            "audit": "已追加签批审计记录到 attempts（approved:human / auto_approved_by_policy:<id>）",
         }),
         warnings,
     ))

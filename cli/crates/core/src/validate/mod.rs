@@ -399,7 +399,9 @@ fn dfs_detect_cycle<'a>(
 mod tests {
     use super::*;
     use crate::types::common::{SourceLang, Timestamp};
-    use crate::types::state::{MigrationMetadata, ProjectInfo, StateHistoryEntry};
+    use crate::types::state::{
+        DangerProvenance, MigrationMetadata, ProjectInfo, StateHistoryEntry,
+    };
     use std::collections::HashMap;
 
     /// 辅助：构建从 Init 到目标状态的合法历史链（除末条外均带 exited_at）。
@@ -790,6 +792,7 @@ mod tests {
             decomposition_snapshot: None,
             decomposition_frozen: false,
             danger: Vec::new(),
+            danger_provenance: DangerProvenance::Unclassified,
         }
     }
 

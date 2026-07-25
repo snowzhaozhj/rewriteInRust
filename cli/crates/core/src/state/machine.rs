@@ -45,6 +45,66 @@ pub struct RecordMetricsOutcome {
     pub known_differences: u32,
 }
 
+/// `reviewing → done` 的**批准凭据**（MDR-019 译后签批门）。
+///
+/// 门坐落在 `reviewing → done` 这条边本身：无凭据的 [`transition_module`] 一律被拒。
+/// 凭据只有两种来源，且都留审计痕迹（不伪装「无需审查」）。
+///
+/// [`transition_module`]: MigrationStateMachine::transition_module
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Approval {
+    /// **人签批**：模块须已停在 `reviewing` + substatus
+    /// [`SUBSTATUS_AWAITING_FINAL_REVIEW`](crate::state::review_gate::SUBSTATUS_AWAITING_FINAL_REVIEW)
+    /// ——该标记表示证据包已汇编展示、门已停过，避免「跳过展示直接签」。
+    Human,
+    /// **预签策略放行**：`id` 须在 `[review_gate].auto_approve_policies` 中，且该策略的 state 层
+    /// 条件全过、`attestations` 覆盖其 `required_attestations` 全项（CLI 逐项复核，见
+    /// [`review_gate::check_policy_approval`](crate::state::review_gate::check_policy_approval)）。
+    Policy {
+        id: String,
+        attestations: Vec<String>,
+    },
+}
+
+impl Approval {
+    /// 审计前缀（写入 `attempts[].result`）：人签批 `approved:human`；
+    /// 策略放行 `auto_approved_by_policy:<id> attest=[..]`（MDR-019 § 决策 3 审计口径）。
+    fn audit_label(&self) -> String {
+        match self {
+            Self::Human => "approved:human".to_owned(),
+            Self::Policy { id, attestations } => {
+                format!(
+                    "auto_approved_by_policy:{id} attest=[{}]",
+                    attestations.join(",")
+                )
+            }
+        }
+    }
+}
+
+/// [`approve_module`](MigrationStateMachine::approve_module) 的结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApproveOutcome {
+    /// 归一后的组代表 module key。
+    pub module: String,
+    /// 批准来源：`human` 或 `policy:<id>`。
+    pub approval: String,
+    /// 批准前的 substatus（人签批路径恒为 `awaiting_final_review`；策略路径可能为
+    /// `agent_done`/`null`）——供审计与排查。
+    pub previous_substatus: Option<String>,
+}
+
+/// [`batch_transition_done`](MigrationStateMachine::batch_transition_done) 的逐模块结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchDoneOutcome {
+    /// 成功升 `done` 的模块（按入参序）。
+    pub succeeded: Vec<String>,
+    /// 未升 `done` 的模块及原因码 + 细节（`(module, code, detail)`）。
+    /// 原因码：`approval_required` / `awaiting_final_review` / `not_agent_done` /
+    /// `policy_rejected` / `transition_rejected` / `not_found`。
+    pub skipped: Vec<(String, String, String)>,
+}
+
 /// [`reset_module`](MigrationStateMachine::reset_module) 的结果——描述这次幂等回退把模块从
 /// 什么状态回退到什么状态，以及是否为空操作（已处于干净重译入口，重复 reset 无副作用）。
 #[derive(Debug, Clone, PartialEq)]
@@ -435,6 +495,11 @@ impl MigrationStateMachine {
     ///
     /// `name` 归一：容忍传入 composite 组的非代表成员（反查 `member_files` 映射回组代表），
     /// 与 `state deps` 的组感知一致。归一后仍找不到则返回 `MigrateError::Config`。
+    ///
+    /// **`reviewing → done` 例外**（MDR-019 译后签批门）：该边须携带批准凭据，本方法一律拒绝
+    /// （返回 `MigrateError::Config` 并引导 `state approve`）——门坐落在这条边**本身**，
+    /// 故不能靠调用方自律绕过。带凭据的转换走
+    /// [`approve_module`](Self::approve_module) / [`batch_transition_done`](Self::batch_transition_done)。
     pub fn transition_module(
         &mut self,
         name: &str,
@@ -442,6 +507,23 @@ impl MigrationStateMachine {
         substatus: Option<&str>,
         reason: Option<&str>,
         force: bool,
+    ) -> Result<()> {
+        self.transition_inner(name, to, substatus, reason, force, None)
+    }
+
+    /// [`transition_module`](Self::transition_module) 的实现体，多一个批准凭据参数。
+    ///
+    /// `approval`：`None` = 无凭据（`reviewing → done` 被拒）；`Some(_)` = 已由
+    /// [`approve_module`](Self::approve_module) / [`batch_transition_done`](Self::batch_transition_done)
+    /// 复核过凭据（人签批或预签策略），放行该边。其余边不受 `approval` 影响。
+    fn transition_inner(
+        &mut self,
+        name: &str,
+        to: Option<ModuleStatus>,
+        substatus: Option<&str>,
+        reason: Option<&str>,
+        force: bool,
+        approval: Option<&Approval>,
     ) -> Result<()> {
         // 归一 module key（组非代表成员 → 组代表，见 canonical_module_key）。
         let canonical = self.canonical_module_key(name)?;
@@ -462,6 +544,15 @@ impl MigrationStateMachine {
                     from: from.to_string(),
                     to: target.to_string(),
                 });
+            }
+            // reviewing → done 须批准凭据（MDR-019 译后签批门；`--force` 不是凭据、不可绕）。
+            if from == ModuleStatus::Reviewing && target == ModuleStatus::Done && approval.is_none()
+            {
+                return Err(MigrateError::Config(format!(
+                    "reviewing → done 是译后签批门，须经 `state approve --module {name}`（人签批）\
+                     或 `state approve --module {name} --by-policy <id> --attest <...>`（预签策略放行）；\
+                     裸 transition 不构成批准（见 MDR-019）"
+                )));
             }
             // degrade_* → translating 恢复须 --force（设计行 379-381：降级恢复是人类决策）。
             if from.is_degraded() && target == ModuleStatus::Translating && !force {
@@ -596,7 +687,7 @@ impl MigrationStateMachine {
     /// 依赖不变量：`member_files` 是文件节点的**划分**（跨组互斥，每个文件至多属一个组，见
     /// populate-modules 落盘）。该不变量成立时 `find` 命中唯一、归一确定；若被破坏（同一文件
     /// 出现在多组），`find` 取 HashMap 迭代序首个为非确定——debug 下断言钉住。
-    fn canonical_module_key(&self, name: &str) -> Result<String> {
+    pub fn canonical_module_key(&self, name: &str) -> Result<String> {
         if self.state_file.modules.contains_key(name) {
             return Ok(name.to_string());
         }
@@ -629,8 +720,8 @@ impl MigrationStateMachine {
     /// `phase_a_version` / `phase_a_audit_passed` / `test_pass_rate` / `coverage` /
     /// `known_differences` / blocked 锚点），使断点续传路由（run.md § 断点续传路由）从
     /// Phase A 起点干净重跑。**保留** `attempts`（审计历史，追加一条 `reset` 记录）、`tier`、
-    /// `member_files` / `composite_kind` / `decomposition_*` / `danger`（结构性冻结字段）——
-    /// 回退是「重试」而非「重新拆解」。
+    /// `member_files` / `composite_kind` / `decomposition_*` / `danger` / `danger_provenance`
+    /// （结构性冻结字段）——回退是「重试」而非「重新拆解」，分类事实不因重试失效。
     ///
     /// **幂等**：模块已处于干净重译入口（`translating`/`pending` 且全部进度字段为空）时为
     /// 空操作（`was_noop=true`），**不追加审计记录**——保证 `reset;reset` 与 `reset` 状态一致
@@ -1074,20 +1165,187 @@ impl MigrationStateMachine {
             .is_some_and(|m| m.substatus.as_deref() == Some(SUBSTATUS_AGENT_DONE))
     }
 
-    /// 批量将 `agent_done` 模块转为 `done`（整组 check 通过后调用）。
+    /// 人签批 / 预签策略放行，把模块从 `reviewing` 升终态 `done`（MDR-019 译后签批门）。
     ///
-    /// 对每个模块独立调用 `transition_module`（`reviewing → done`），一个失败不影响其他。
-    /// 返回实际成功转换的模块名列表；失败的模块保持原状态，错误记入 `attempts`。
+    /// 这是 `reviewing → done` 的**唯一单模块入口**（裸 [`transition_module`](Self::transition_module)
+    /// 在该边被拒）。两条路径的复核各不相同：
     ///
-    /// 前置约束：调用方应确保传入模块当前 status 为 `reviewing`、substatus 为 `agent_done`。
-    /// 不满足前置的模块会在 `transition_module` 中被矩阵拒绝，计入失败而非 panic。
-    pub fn batch_transition_done(&mut self, modules: &[String]) -> Result<Vec<String>> {
+    /// - [`Approval::Human`]：要求 `status == reviewing` 且 `substatus == awaiting_final_review`
+    ///   ——该标记由编排器在展示证据包时落下，故「人签批」蕴含「门确实停过、证据确实展示过」。
+    ///   未停门就签批会被拒（引导先跑 `state review-gate` + 标记）。
+    /// - [`Approval::Policy`]：要求 `status == reviewing`、**且**该模块**未**处于
+    ///   `awaiting_final_review`（已判定需人签批的模块任何策略都不得放行）、且
+    ///   [`check_policy_approval`](crate::state::review_gate::check_policy_approval) 全过
+    ///   （策略已预签 + 未命中强制人工清单 + 该策略 state 条件全过 + attestation 齐全）。
+    ///
+    /// 审计：追加一条 `approved:human` / `auto_approved_by_policy:<id> attest=[..]` 记录
+    /// （`reason` 非空时附 ` reason=<r>`）。`done` 的 substatus 按既有语义清空。
+    ///
+    /// `coverage_threshold` 取 `[testing].coverage_threshold`（策略条件用），由调用方注入
+    /// ——状态机不读配置文件。module key 归一同 [`transition_module`](Self::transition_module)。
+    pub fn approve_module(
+        &mut self,
+        name: &str,
+        approval: &Approval,
+        reason: Option<&str>,
+        review_gate_config: &crate::types::config::ReviewGateConfig,
+        coverage_threshold: u32,
+    ) -> Result<ApproveOutcome> {
+        use crate::state::review_gate::{check_policy_approval, SUBSTATUS_AWAITING_FINAL_REVIEW};
+
+        let canonical = self.canonical_module_key(name)?;
+        let module = self
+            .state_file
+            .modules
+            .get(&canonical)
+            .expect("canonical 已校验存在");
+        let previous_substatus = module.substatus.clone();
+        let is_awaiting = previous_substatus.as_deref() == Some(SUBSTATUS_AWAITING_FINAL_REVIEW);
+
+        if module.status != ModuleStatus::Reviewing {
+            return Err(MigrateError::Config(format!(
+                "模块 {canonical} 当前 {} 非 reviewing，译后签批门只在 reviewing 上放行",
+                module.status
+            )));
+        }
+
+        match approval {
+            Approval::Human => {
+                if !is_awaiting {
+                    return Err(MigrateError::Config(format!(
+                        "模块 {canonical} 未停在 `awaiting_final_review`（当前 substatus={}）：\
+                         人签批前须先 `state review-gate --module {canonical}` 判定并标记停门、\
+                         向用户展示证据包，避免跳过展示直接签批（MDR-019）",
+                        previous_substatus.as_deref().unwrap_or("null")
+                    )));
+                }
+            }
+            Approval::Policy { id, attestations } => {
+                if is_awaiting {
+                    return Err(MigrateError::Config(format!(
+                        "模块 {canonical} 已判定需人签批（substatus=awaiting_final_review），\
+                         策略 `{id}` 不得放行——须人工 `state approve --module {canonical}`（MDR-019）"
+                    )));
+                }
+                check_policy_approval(
+                    module,
+                    review_gate_config,
+                    coverage_threshold,
+                    id,
+                    attestations,
+                )
+                .map_err(MigrateError::Config)?;
+            }
+        }
+
+        // 凭据已复核 → 放行该边（transition_inner 据 approval 非 None 跳过硬门）。
+        self.transition_inner(
+            &canonical,
+            Some(ModuleStatus::Done),
+            None,
+            None,
+            false,
+            Some(approval),
+        )?;
+        self.push_approval_audit(&canonical, approval, reason);
+
+        Ok(ApproveOutcome {
+            module: canonical,
+            approval: match approval {
+                Approval::Human => "human".to_owned(),
+                Approval::Policy { id, .. } => format!("policy:{id}"),
+            },
+            previous_substatus,
+        })
+    }
+
+    /// 向指定模块 `attempts` 追加一条签批审计记录（MDR-019 审计口径）。
+    fn push_approval_audit(&mut self, canonical: &str, approval: &Approval, reason: Option<&str>) {
+        let module = self
+            .state_file
+            .modules
+            .get_mut(canonical)
+            .expect("canonical 已校验存在");
+        let suffix = reason.map(|r| format!(" reason={r}")).unwrap_or_default();
+        module.attempts.push(AttemptRecord {
+            timestamp: Timestamp::new(chrono::Utc::now().to_rfc3339()),
+            result: format!("{}{suffix}", approval.audit_label()),
+            retry_count: 0,
+            checkpoint: None,
+        });
+    }
+
+    /// 批量将 `agent_done` 模块经**预签策略**升 `done`（并行路径整组 check 通过后调用）。
+    ///
+    /// 两层 done 的第二层门（MDR-003 约束6）+ 译后签批门（MDR-019）的交集：
+    /// - `approval = None`（未传 `--by-policy`）→ **全部跳过**（`approval_required`）。整组 check
+    ///   通过**不构成**签批凭据；无预签策略时并行译好的模块须逐个人签批（MDR-018「并行翻译 +
+    ///   串行审批」正由此实现）。
+    /// - substatus 为 `awaiting_final_review` 的模块 → **一律跳过**（已判定需人签批，策略不得放行）。
+    /// - substatus 非 `agent_done` → 跳过（防误操作非并行路径模块）。
+    /// - 其余逐模块复核策略（条件是模块级的，逐个判），过则升 `done` + 审计留痕。
+    ///
+    /// 逐模块独立处理，一个失败不影响其他；跳过原因记入 `attempts` 与返回值。
+    pub fn batch_transition_done(
+        &mut self,
+        modules: &[String],
+        approval: Option<&Approval>,
+        review_gate_config: &crate::types::config::ReviewGateConfig,
+        coverage_threshold: u32,
+    ) -> Result<BatchDoneOutcome> {
+        use crate::state::review_gate::SUBSTATUS_AWAITING_FINAL_REVIEW;
+
         let mut succeeded = Vec::new();
+        let mut skipped: Vec<(String, String, String)> = Vec::new();
+
         for name in modules {
-            // 先检查 substatus 是否为 agent_done（防止误操作非 agent_done 模块）。
-            let is_agent = self.is_agent_done(name);
-            if !is_agent {
-                // 非 agent_done 模块：记录失败原因到 attempts，跳过。
+            // 模块不存在：不写 attempts（无处可写），直接记 skipped。
+            if self.canonical_module_key(name).is_err() {
+                skipped.push((
+                    name.clone(),
+                    "not_found".to_owned(),
+                    "模块不在 migration-state.json".to_owned(),
+                ));
+                continue;
+            }
+
+            let Some(approval) = approval else {
+                let detail = "未提供批准凭据：整组 check 通过不构成签批，须 --by-policy <id> \
+                              --attest <...> 或逐个 `state approve`（MDR-019）"
+                    .to_owned();
+                let _ = self.transition_module(
+                    name,
+                    None,
+                    None,
+                    Some("batch_transition_done: 无批准凭据，跳过"),
+                    false,
+                );
+                skipped.push((name.clone(), "approval_required".to_owned(), detail));
+                continue;
+            };
+
+            let substatus = self
+                .canonical_module_key(name)
+                .ok()
+                .and_then(|k| self.state_file.modules.get(&k))
+                .and_then(|m| m.substatus.clone());
+
+            if substatus.as_deref() == Some(SUBSTATUS_AWAITING_FINAL_REVIEW) {
+                let _ = self.transition_module(
+                    name,
+                    None,
+                    None,
+                    Some("batch_transition_done: awaiting_final_review 待人签批，策略不放行"),
+                    false,
+                );
+                skipped.push((
+                    name.clone(),
+                    "awaiting_final_review".to_owned(),
+                    "已判定需人签批，策略不得放行".to_owned(),
+                ));
+                continue;
+            }
+            if substatus.as_deref() != Some(SUBSTATUS_AGENT_DONE) {
                 let _ = self.transition_module(
                     name,
                     None,
@@ -1095,24 +1353,36 @@ impl MigrationStateMachine {
                     Some("batch_transition_done: substatus 非 agent_done，跳过"),
                     false,
                 );
+                skipped.push((
+                    name.clone(),
+                    "not_agent_done".to_owned(),
+                    format!("substatus={}", substatus.as_deref().unwrap_or("null")),
+                ));
                 continue;
             }
-            // 尝试 reviewing → done 转换。
-            match self.transition_module(name, Some(ModuleStatus::Done), None, None, false) {
-                Ok(()) => succeeded.push(name.clone()),
-                Err(_) => {
-                    // 转换失败（如 status 不是 reviewing）：记录失败原因，继续其他模块。
+
+            match self.approve_module(name, approval, None, review_gate_config, coverage_threshold)
+            {
+                Ok(_) => succeeded.push(name.clone()),
+                Err(e) => {
+                    let detail = e.to_string();
+                    let code = if detail.contains("非 reviewing") {
+                        "transition_rejected"
+                    } else {
+                        "policy_rejected"
+                    };
                     let _ = self.transition_module(
                         name,
                         None,
                         None,
-                        Some("batch_transition_done: reviewing→done 转换失败"),
+                        Some(&format!("batch_transition_done: 跳过（{detail}）")),
                         false,
                     );
+                    skipped.push((name.clone(), code.to_owned(), detail));
                 }
             }
         }
-        Ok(succeeded)
+        Ok(BatchDoneOutcome { succeeded, skipped })
     }
 
     /// 设置最后错误信息。
@@ -1273,7 +1543,7 @@ fn cleanup_old_backups(path: &Path, retention_days: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::state::{SprintEntry, SprintState};
+    use crate::types::state::{DangerProvenance, SprintEntry, SprintState};
     use tempfile::NamedTempFile;
 
     /// 辅助：构造指定状态的最小模块记录。
@@ -1296,6 +1566,7 @@ mod tests {
             decomposition_snapshot: None,
             decomposition_frozen: false,
             danger: Vec::new(),
+            danger_provenance: DangerProvenance::Unclassified,
         }
     }
 
@@ -1625,13 +1896,34 @@ mod tests {
     }
 
     #[test]
-    fn test_transition_module_to_done_clears_substatus() {
-        // graduate 到 Done 时清空 testing/review 阶段残留的 substatus。
+    fn test_transition_module_to_done_is_gated() {
+        // MDR-019：reviewing → done 是译后签批门，裸 transition 一律被拒（`--force` 也不是凭据）。
         let mut m = new_machine();
-        let mut module = module_with_status(ModuleStatus::Reviewing);
+        m.update_module("a", module_with_status(ModuleStatus::Reviewing));
+        for force in [false, true] {
+            let err = m
+                .transition_module("a", Some(ModuleStatus::Done), None, None, force)
+                .unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains("译后签批门"), "{msg}");
+            assert!(msg.contains("state approve"), "错误须引导到 approve: {msg}");
+        }
+        assert_eq!(
+            m.state_file().modules["a"].status,
+            ModuleStatus::Reviewing,
+            "被拒后状态不得改变"
+        );
+    }
+
+    #[test]
+    fn test_approve_module_clears_substatus_via_policy() {
+        // 升 Done 时清空 review 阶段残留 substatus（原 to_done_clears_substatus 的语义，
+        // 现经唯一入口 approve_module 的策略路径验证）。
+        let mut m = new_machine();
+        let mut module = approvable_batch_module();
         module.substatus = Some("phase_b_optimization_in_progress".to_owned());
         m.update_module("a", module);
-        m.transition_module("a", Some(ModuleStatus::Done), None, None, false)
+        m.approve_module("a", &batch_policy(), None, &batch_gate_cfg(), 80)
             .unwrap();
         let module = &m.state_file().modules["a"];
         assert_eq!(module.status, ModuleStatus::Done);
@@ -1639,23 +1931,160 @@ mod tests {
     }
 
     #[test]
-    fn test_transition_module_to_done_explicit_substatus_wins() {
-        // done 时显式传 substatus：清空在前、显式覆盖在后，最终应保留显式值。
+    fn test_transition_clear_then_explicit_substatus_order() {
+        // 「清空在前、显式覆盖在后」的顺序不变量（原 to_done_explicit_substatus_wins 的语义；
+        // done 边已收归 approve_module 不接受 substatus，故改在同段逻辑的另一条清空边上验证：
+        // degrade_* → translating 也清 substatus，显式值须仍能覆盖上去）。
         let mut m = new_machine();
-        let mut module = module_with_status(ModuleStatus::Reviewing);
-        module.substatus = Some("incomplete_stub".to_owned());
+        let mut module = module_with_status(ModuleStatus::DegradeManual);
+        module.substatus = Some("async_too_complex".to_owned());
         m.update_module("a", module);
         m.transition_module(
             "a",
-            Some(ModuleStatus::Done),
-            Some("graduated_with_note"),
+            Some(ModuleStatus::Translating),
+            Some("retry_after_manual_fix"),
+            None,
+            true,
+        )
+        .unwrap();
+        let module = &m.state_file().modules["a"];
+        assert_eq!(module.status, ModuleStatus::Translating);
+        assert_eq!(module.substatus.as_deref(), Some("retry_after_manual_fix"));
+    }
+
+    #[test]
+    fn test_approve_module_human_requires_awaiting_final_review() {
+        // 人签批须先停门（证据包已展示的状态痕迹），否则拒绝并引导。
+        let mut m = new_machine();
+        m.update_module("a", module_with_status(ModuleStatus::Reviewing));
+        let err = m
+            .approve_module(
+                "a",
+                &Approval::Human,
+                None,
+                &crate::types::config::ReviewGateConfig::default(),
+                80,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("awaiting_final_review"), "{err}");
+        assert!(err.contains("review-gate"), "应引导先跑判定: {err}");
+
+        // 停门后人签批通过，且审计留痕 approved:human。
+        m.transition_module(
+            "a",
+            None,
+            Some(crate::state::review_gate::SUBSTATUS_AWAITING_FINAL_REVIEW),
             None,
             false,
         )
         .unwrap();
+        let out = m
+            .approve_module(
+                "a",
+                &Approval::Human,
+                Some("人工审毕"),
+                &crate::types::config::ReviewGateConfig::default(),
+                80,
+            )
+            .unwrap();
+        assert_eq!(out.approval, "human");
+        assert_eq!(
+            out.previous_substatus.as_deref(),
+            Some("awaiting_final_review")
+        );
         let module = &m.state_file().modules["a"];
         assert_eq!(module.status, ModuleStatus::Done);
-        assert_eq!(module.substatus.as_deref(), Some("graduated_with_note"));
+        assert!(module.substatus.is_none(), "done 清 substatus");
+        assert!(
+            module
+                .attempts
+                .iter()
+                .any(|a| a.result == "approved:human reason=人工审毕"),
+            "{:?}",
+            module.attempts
+        );
+    }
+
+    #[test]
+    fn test_approve_module_policy_rejects_awaiting_final_review() {
+        // 已判定需人签批的模块，策略不得放行（否则并行路径绕过人签批）。
+        let mut m = new_machine();
+        let mut module = approvable_batch_module();
+        module.substatus =
+            Some(crate::state::review_gate::SUBSTATUS_AWAITING_FINAL_REVIEW.to_owned());
+        m.update_module("a", module);
+        let err = m
+            .approve_module("a", &batch_policy(), None, &batch_gate_cfg(), 80)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("已判定需人签批"), "{err}");
+        assert_eq!(m.state_file().modules["a"].status, ModuleStatus::Reviewing);
+    }
+
+    #[test]
+    fn test_approve_module_rejects_non_reviewing_status() {
+        // 签批门只在 reviewing 上放行（testing/translating 等一律拒）。
+        let mut m = new_machine();
+        m.update_module("a", module_with_status(ModuleStatus::Testing));
+        let err = m
+            .approve_module(
+                "a",
+                &Approval::Human,
+                None,
+                &crate::types::config::ReviewGateConfig::default(),
+                80,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("非 reviewing"), "{err}");
+    }
+
+    #[test]
+    fn test_approve_module_policy_audit_records_attestations() {
+        // 策略放行审计须含策略 id 与逐项 attestation（MDR-019 § 决策 3：不伪装「无需审查」）。
+        let mut m = new_machine();
+        m.update_module("a", approvable_batch_module());
+        m.approve_module("a", &batch_policy(), None, &batch_gate_cfg(), 80)
+            .unwrap();
+        let audit = &m.state_file().modules["a"].attempts;
+        let entry = audit
+            .iter()
+            .find(|a| a.result.starts_with("auto_approved_by_policy:"))
+            .expect("缺策略放行审计");
+        assert!(
+            entry.result.contains("batch_mechanical"),
+            "{}",
+            entry.result
+        );
+        assert!(entry.result.contains("exports_match"), "{}", entry.result);
+    }
+
+    #[test]
+    fn test_reviewing_rework_edges() {
+        // MDR-019 两条回退边：签批打回 → translating；整组验证失败 → compile_fixing。
+        let mut m = new_machine();
+        m.update_module("a", module_with_status(ModuleStatus::Reviewing));
+        m.transition_module(
+            "a",
+            Some(ModuleStatus::Translating),
+            None,
+            Some("签批打回: 错误语义不一致"),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            m.state_file().modules["a"].status,
+            ModuleStatus::Translating
+        );
+
+        m.update_module("b", module_with_status(ModuleStatus::Reviewing));
+        m.transition_module("b", Some(ModuleStatus::CompileFixing), None, None, false)
+            .unwrap();
+        assert_eq!(
+            m.state_file().modules["b"].status,
+            ModuleStatus::CompileFixing
+        );
     }
 
     #[test]
@@ -1967,6 +2396,32 @@ mod tests {
         assert_eq!(md.attempts.len(), 2);
         assert_eq!(md.attempts[1].result, "reset:compile_fixing→translating");
         assert_eq!(md.tier, Some(crate::types::state::ModuleTier::Standard));
+    }
+
+    #[test]
+    fn test_reset_and_recover_preserve_danger_provenance() {
+        // MDR-019：provenance 是结构性冻结字段（同 danger）——重试不改变「分类跑过没跑过」这个事实，
+        // 若被 reset 清成默认 Unclassified，会让本可策略放行的模块永久退化为必须人签批。
+        for name in ["reset", "recover"] {
+            let mut m = new_machine();
+            let mut dirty = dirty_module(ModuleStatus::CompileFixing);
+            dirty.danger_provenance = DangerProvenance::Classified;
+            dirty.danger = vec![crate::types::common::DangerCategory::Concurrency];
+            m.update_module("a", dirty);
+
+            if name == "reset" {
+                m.reset_module("a", false).unwrap();
+            } else {
+                m.recover_module("a", RecoverPolicy::Retry, None).unwrap();
+            }
+            let md = &m.state_file().modules["a"];
+            assert_eq!(
+                md.danger_provenance,
+                DangerProvenance::Classified,
+                "{name} 不应清除 provenance"
+            );
+            assert_eq!(md.danger.len(), 1, "{name} 不应清除 danger");
+        }
     }
 
     #[test]
@@ -2485,6 +2940,8 @@ mod tests {
             decomposition_snapshot: Some("snap-hash".to_string()),
             decomposition_frozen: true,
             danger: vec![DangerCategory::Concurrency, DangerCategory::Ffi],
+            // 非默认值：默认 Unclassified 会被 skip_serializing_if 跳过，测不出「丢字段」。
+            danger_provenance: DangerProvenance::Classified,
         };
 
         let original = MigrationStateFile {
@@ -2864,23 +3321,139 @@ mod tests {
         assert!(!m.is_agent_done("not_exist"));
     }
 
+    // === MDR-019 译后签批门：batch 路径测试辅助 ===
+
+    /// 测试辅助：满足 `batch_mechanical` 策略的并行路径模块
+    /// （reviewing + agent_done + 全机械合批组 + 分类可信）。
+    fn approvable_batch_module() -> ModuleState {
+        let mut m = module_with_status(ModuleStatus::Reviewing);
+        m.substatus = Some(SUBSTATUS_AGENT_DONE.to_owned());
+        m.composite_kind = Some(crate::types::state::CompositeKind::Batch);
+        m.danger_provenance = DangerProvenance::Classified;
+        m
+    }
+
+    /// 测试辅助：`batch_mechanical` 的完整凭据（attestation 齐全）。
+    fn batch_policy() -> Approval {
+        Approval::Policy {
+            id: crate::state::review_gate::POLICY_BATCH_MECHANICAL.to_owned(),
+            attestations: [
+                "todo_port_zero",
+                "exports_match",
+                "content_hash_unchanged",
+                "no_bug_replica",
+            ]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect(),
+        }
+    }
+
+    /// 测试辅助：预签启用 `batch_mechanical` 的配置。
+    fn batch_gate_cfg() -> crate::types::config::ReviewGateConfig {
+        crate::types::config::ReviewGateConfig {
+            auto_approve_policies: vec![
+                crate::state::review_gate::POLICY_BATCH_MECHANICAL.to_owned()
+            ],
+        }
+    }
+
     #[test]
     fn test_batch_transition_done_all_success() {
-        // 全部模块 reviewing + agent_done → 应全部成功转为 done。
+        // 全部模块 reviewing + agent_done + 策略条件全过 + 凭据齐 → 全部升 done。
         let mut m = new_machine();
         for name in ["a", "b", "c"] {
-            let mut module = module_with_status(ModuleStatus::Reviewing);
-            module.substatus = Some(SUBSTATUS_AGENT_DONE.to_owned());
-            m.update_module(name, module);
+            m.update_module(name, approvable_batch_module());
         }
         let modules: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
-        let succeeded = m.batch_transition_done(&modules).unwrap();
-        assert_eq!(succeeded.len(), 3);
+        let out = m
+            .batch_transition_done(&modules, Some(&batch_policy()), &batch_gate_cfg(), 80)
+            .unwrap();
+        assert_eq!(out.succeeded.len(), 3, "skipped={:?}", out.skipped);
         for name in ["a", "b", "c"] {
             assert_eq!(m.state_file().modules[name].status, ModuleStatus::Done);
-            // done 时 substatus 被清空（transition_module 的 Done 清空逻辑）。
+            // done 时 substatus 被清空（transition_inner 的 Done 清空逻辑）。
             assert!(m.state_file().modules[name].substatus.is_none());
+            // 审计留痕：策略放行须写 auto_approved_by_policy（MDR-019 § 决策 3）。
+            assert!(
+                m.state_file().modules[name].attempts.iter().any(|a| a
+                    .result
+                    .starts_with("auto_approved_by_policy:batch_mechanical")),
+                "缺策略放行审计: {:?}",
+                m.state_file().modules[name].attempts
+            );
         }
+    }
+
+    #[test]
+    fn test_batch_transition_done_without_approval_skips_all() {
+        // MDR-019：整组 check 通过**不构成**签批凭据——无 --by-policy 时一个都不放行。
+        let mut m = new_machine();
+        for name in ["a", "b"] {
+            m.update_module(name, approvable_batch_module());
+        }
+        let modules: Vec<String> = vec!["a".into(), "b".into()];
+        let out = m
+            .batch_transition_done(&modules, None, &batch_gate_cfg(), 80)
+            .unwrap();
+        assert!(out.succeeded.is_empty(), "无凭据不得升 done");
+        assert_eq!(out.skipped.len(), 2);
+        assert!(out
+            .skipped
+            .iter()
+            .all(|(_, code, _)| code == "approval_required"));
+        for name in ["a", "b"] {
+            assert_eq!(m.state_file().modules[name].status, ModuleStatus::Reviewing);
+        }
+    }
+
+    #[test]
+    fn test_batch_transition_done_skips_awaiting_final_review() {
+        // 已判定需人签批的模块，任何策略都不得放行（门坐落在这条边本身）。
+        let mut m = new_machine();
+        let mut waiting = approvable_batch_module();
+        waiting.substatus =
+            Some(crate::state::review_gate::SUBSTATUS_AWAITING_FINAL_REVIEW.to_owned());
+        m.update_module("waiting", waiting);
+        m.update_module("ok", approvable_batch_module());
+
+        let modules: Vec<String> = vec!["waiting".into(), "ok".into()];
+        let out = m
+            .batch_transition_done(&modules, Some(&batch_policy()), &batch_gate_cfg(), 80)
+            .unwrap();
+        assert_eq!(out.succeeded, vec!["ok".to_owned()]);
+        assert_eq!(out.skipped.len(), 1);
+        assert_eq!(out.skipped[0].1, "awaiting_final_review");
+        assert_eq!(
+            m.state_file().modules["waiting"].status,
+            ModuleStatus::Reviewing,
+            "待签批模块须保持 reviewing"
+        );
+    }
+
+    #[test]
+    fn test_batch_transition_done_skips_policy_rejected() {
+        // 策略条件不满足（provenance 不可信 → 红线）→ 跳过，不升 done。
+        let mut m = new_machine();
+        let mut untrusted = approvable_batch_module();
+        untrusted.danger_provenance = DangerProvenance::Unclassified;
+        m.update_module("untrusted", untrusted);
+
+        let modules: Vec<String> = vec!["untrusted".into()];
+        let out = m
+            .batch_transition_done(&modules, Some(&batch_policy()), &batch_gate_cfg(), 80)
+            .unwrap();
+        assert!(out.succeeded.is_empty());
+        assert_eq!(out.skipped[0].1, "policy_rejected");
+        assert!(
+            out.skipped[0].2.contains("mandatory_manual"),
+            "拒因应点明红线: {}",
+            out.skipped[0].2
+        );
+        assert_eq!(
+            m.state_file().modules["untrusted"].status,
+            ModuleStatus::Reviewing
+        );
     }
 
     #[test]
@@ -2890,23 +3463,22 @@ mod tests {
         // c: reviewing + agent_done（应成功）
         let mut m = new_machine();
 
-        let mut ma = module_with_status(ModuleStatus::Reviewing);
-        ma.substatus = Some(SUBSTATUS_AGENT_DONE.to_owned());
-        m.update_module("a", ma);
+        m.update_module("a", approvable_batch_module());
 
-        let mut mb = module_with_status(ModuleStatus::Translating);
-        mb.substatus = Some(SUBSTATUS_AGENT_DONE.to_owned());
+        let mut mb = approvable_batch_module();
+        mb.status = ModuleStatus::Translating;
         m.update_module("b", mb);
 
-        let mut mc = module_with_status(ModuleStatus::Reviewing);
-        mc.substatus = Some(SUBSTATUS_AGENT_DONE.to_owned());
-        m.update_module("c", mc);
+        m.update_module("c", approvable_batch_module());
 
         let modules: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
-        let succeeded = m.batch_transition_done(&modules).unwrap();
+        let out = m
+            .batch_transition_done(&modules, Some(&batch_policy()), &batch_gate_cfg(), 80)
+            .unwrap();
 
         // a、c 成功，b 失败。
-        assert_eq!(succeeded, vec!["a".to_owned(), "c".to_owned()]);
+        assert_eq!(out.succeeded, vec!["a".to_owned(), "c".to_owned()]);
+        assert_eq!(out.skipped[0].1, "transition_rejected");
         assert_eq!(m.state_file().modules["a"].status, ModuleStatus::Done);
         assert_eq!(
             m.state_file().modules["b"].status,
@@ -2921,17 +3493,19 @@ mod tests {
         // substatus 非 agent_done 的模块应被跳过。
         let mut m = new_machine();
 
-        let mut ma = module_with_status(ModuleStatus::Reviewing);
-        ma.substatus = Some(SUBSTATUS_AGENT_DONE.to_owned());
-        m.update_module("a", ma);
+        m.update_module("a", approvable_batch_module());
 
-        let mb = module_with_status(ModuleStatus::Reviewing); // substatus=None
+        let mut mb = approvable_batch_module();
+        mb.substatus = None; // 非 agent_done
         m.update_module("b", mb);
 
         let modules: Vec<String> = vec!["a".into(), "b".into()];
-        let succeeded = m.batch_transition_done(&modules).unwrap();
+        let out = m
+            .batch_transition_done(&modules, Some(&batch_policy()), &batch_gate_cfg(), 80)
+            .unwrap();
 
-        assert_eq!(succeeded, vec!["a".to_owned()]);
+        assert_eq!(out.succeeded, vec!["a".to_owned()]);
+        assert_eq!(out.skipped[0].1, "not_agent_done");
         assert_eq!(m.state_file().modules["a"].status, ModuleStatus::Done);
         assert_eq!(
             m.state_file().modules["b"].status,
@@ -2944,8 +3518,10 @@ mod tests {
     fn test_batch_transition_done_empty_list() {
         // 空列表应返回空结果。
         let mut m = new_machine();
-        let succeeded = m.batch_transition_done(&[]).unwrap();
-        assert!(succeeded.is_empty());
+        let out = m
+            .batch_transition_done(&[], Some(&batch_policy()), &batch_gate_cfg(), 80)
+            .unwrap();
+        assert!(out.succeeded.is_empty() && out.skipped.is_empty());
     }
 
     #[test]

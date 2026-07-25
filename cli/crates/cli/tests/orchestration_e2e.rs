@@ -150,6 +150,47 @@ fn inject_module(repo: &Path, name: &str, status: &str) {
     std::fs::write(&path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
 }
 
+/// 给模块补齐「可经 `headless_default` 策略放行」所需的 state 事实（MDR-019 译后签批门）。
+///
+/// 并行路径的模块要自动升 `done`，须有用户预签策略 + 该策略条件全过；`headless_default` 要求
+/// 真实 L2 结果（通过率 100%）+ Phase A 结构门过 + 覆盖率达阈值 + 分类可信。这里模拟
+/// verifier/record-metrics 已把这些事实落盘的现场。
+fn mark_policy_approvable(repo: &Path, name: &str) {
+    let path = state_file(repo);
+    let mut state: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let m = &mut state["modules"][name];
+    m["danger_provenance"] = serde_json::json!("classified");
+    m["test_pass_rate"] = serde_json::json!("1.0");
+    m["phase_a_audit_passed"] = serde_json::json!(true);
+    m["coverage"] = serde_json::json!(90);
+    std::fs::write(&path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+}
+
+/// 在 repo 根 `.rustmigrate.toml` 预签自动放行策略（MDR-019）。
+///
+/// `init` 已生成 `[review_gate] auto_approve_policies = []`（默认全停门），故**替换**该行
+/// 而非追加新段（追加会 duplicate key → 整个 config 解析失败并静默回退默认）。
+fn enable_review_gate_policy(repo: &Path, policy: &str) {
+    let cfg_path = repo.join(".rustmigrate.toml");
+    let cfg = std::fs::read_to_string(&cfg_path).unwrap();
+    let cfg = cfg.replace(
+        "auto_approve_policies = []",
+        &format!("auto_approve_policies = [\"{policy}\"]"),
+    );
+    assert!(cfg.contains(policy), "预签写入失败:\n{cfg}");
+    std::fs::write(&cfg_path, cfg).unwrap();
+}
+
+/// `headless_default` 策略要求的 attestation（CLI 参数序列）。
+const HEADLESS_ATTEST_ARGS: &[&str] = &[
+    "--attest",
+    "todo_port_zero",
+    "--attest",
+    "no_bug_replica",
+    "--attest",
+    "tests_passed",
+];
+
 /// 读取某模块当前 status。
 fn module_status(repo: &Path, name: &str) -> String {
     let path = state_file(repo);
@@ -290,7 +331,7 @@ fn orch_happy_path_two_modules_reach_done() {
             }
         }
 
-        // 两层 done 第二层门：整组 check 过 → batch 升 done。
+        // 译后签批门（MDR-019）：整组 check 过**不构成**签批凭据——无预签策略时一个都不放行。
         let (code, json) = cli(&[
             "state",
             "batch-transition-done",
@@ -299,12 +340,56 @@ fn orch_happy_path_two_modules_reach_done() {
             "--module",
             "b",
         ]);
+        assert_eq!(code, 0, "全 skip 非命令错误: {json}");
+        assert!(
+            json["data"]["succeeded"].as_array().unwrap().is_empty(),
+            "无凭据不得升 done: {json}"
+        );
+        assert_eq!(json["data"]["skipped"][0]["code"], "approval_required");
+        assert_eq!(module_status(repo, "a"), "reviewing", "应停在待签批");
+
+        // 预签 headless_default + 落齐该策略要求的 state 事实（模拟 verifier/record-metrics）。
+        enable_review_gate_policy(repo, "headless_default");
+        for m in &agent_done {
+            mark_policy_approvable(repo, m);
+        }
+
+        // 两层 done 第二层门 + 策略放行：整组 check 过 + 凭据齐 → batch 升 done。
+        let mut args = vec![
+            "state",
+            "batch-transition-done",
+            "--module",
+            "a",
+            "--module",
+            "b",
+            "--by-policy",
+            "headless_default",
+        ];
+        args.extend_from_slice(HEADLESS_ATTEST_ARGS);
+        let (code, json) = cli(&args);
         assert_eq!(code, 0, "batch 应成功: {json}");
-        assert_eq!(json["data"]["succeeded"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            json["data"]["succeeded"].as_array().unwrap().len(),
+            2,
+            "{json}"
+        );
         assert!(json["data"]["skipped"].as_array().unwrap().is_empty());
 
         assert_eq!(module_status(repo, "a"), "done");
         assert_eq!(module_status(repo, "b"), "done");
+
+        // 审计留痕：策略放行不伪装「无需审查」（MDR-019 § 决策 3）。
+        let state: Value =
+            serde_json::from_str(&std::fs::read_to_string(state_file(repo)).unwrap()).unwrap();
+        for m in ["a", "b"] {
+            let attempts = state["modules"][m]["attempts"].as_array().unwrap();
+            assert!(
+                attempts.iter().any(|e| e["result"]
+                    .as_str()
+                    .is_some_and(|r| r.starts_with("auto_approved_by_policy:headless_default"))),
+                "{m} 缺策略放行审计: {attempts:?}"
+            );
+        }
     });
 }
 
@@ -408,12 +493,28 @@ fn orch_merge_conflict_aborts_and_marks_rework() {
             "a 尚未走完整组门，不应是 done"
         );
 
-        // 真门守护：即便对 b 误调 batch，也因 status≠reviewing 被拒。
-        let (code, json) = cli(&["state", "batch-transition-done", "--module", "b"]);
+        // 真门守护：即便对 b 误调 batch（且带齐策略凭据），也因 status≠reviewing 被拒。
+        // 预签 + 落齐策略事实，使唯一可能的拒因就是 status——否则 approval_required 会掩盖 status 门。
+        enable_review_gate_policy(repo, "headless_default");
+        mark_policy_approvable(repo, "b");
+        let mut args = vec![
+            "state",
+            "batch-transition-done",
+            "--module",
+            "b",
+            "--by-policy",
+            "headless_default",
+        ];
+        args.extend_from_slice(HEADLESS_ATTEST_ARGS);
+        let (code, json) = cli(&args);
         assert_eq!(code, 0);
         assert!(
             json["data"]["succeeded"].as_array().unwrap().is_empty(),
             "compile_fixing 模块不应被 batch 升 done: {json}"
+        );
+        assert_eq!(
+            json["data"]["skipped"][0]["code"], "transition_rejected",
+            "拒因应是 status 非 reviewing: {json}"
         );
     });
 }
@@ -473,22 +574,37 @@ fn orch_whole_group_check_gate_blocks_done() {
         );
 
         // 真门失败 → 编排器不推进到 reviewing、不调 batch done。
-        // 模拟：直接对仍处 translating+agent_done 的模块调 batch → 全被矩阵拒绝跳过。
-        // 注：此处 batch 被拒的直接原因是 status≠reviewing（编排器据真门失败**没有**执行
-        // testing→reviewing 推进）——CLI 强制的是「非 reviewing 不得 done」，整组 check 门本身
-        // 坐落编排器判断（LLM/harness），故本用例验证的是「真门失败 → 不推进 → batch 拒」这条链。
-        let (code, json) = cli(&[
+        // 模拟：直接对仍处 translating+agent_done 的模块调 batch（带齐策略凭据，使唯一拒因是
+        // status）→ 全被拒。注：CLI 强制的是「非 reviewing 不得 done」，整组 check 门本身坐落
+        // 编排器判断（LLM/harness），故本用例验证的是「真门失败 → 不推进 → batch 拒」这条链。
+        enable_review_gate_policy(repo, "headless_default");
+        for m in ["a", "b"] {
+            mark_policy_approvable(repo, m);
+        }
+        let mut args = vec![
             "state",
             "batch-transition-done",
             "--module",
             "a",
             "--module",
             "b",
-        ]);
+            "--by-policy",
+            "headless_default",
+        ];
+        args.extend_from_slice(HEADLESS_ATTEST_ARGS);
+        let (code, json) = cli(&args);
         assert_eq!(code, 0);
         assert!(
             json["data"]["succeeded"].as_array().unwrap().is_empty(),
             "整组 check 未过时不应有模块升 done: {json}"
+        );
+        assert!(
+            json["data"]["skipped"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|s| s["code"] == "transition_rejected"),
+            "拒因应是 status 非 reviewing: {json}"
         );
         assert_ne!(module_status(repo, "a"), "done");
         assert_ne!(module_status(repo, "b"), "done");
