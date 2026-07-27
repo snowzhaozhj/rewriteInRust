@@ -47,7 +47,8 @@
 | `translating` + `phase_b_optimization_in_progress` / `phase_b_failed_at_round_N` | 跳第 9 步 |
 | `compile_fixing` | 跳第 9 步 |
 | `testing` | 跳第 10 步 |
-| `reviewing` | 跳第 11 步 |
+| `reviewing` + `awaiting_final_review` | 跳第 11 步的 **11d**——签批门已停门、证据包待展示：直接重新展示证据包 + 等签批，**不重跑 verifier / 不重跑测试**（工作已完成，只差人过目） |
+| `reviewing`（其他 substatus） | 跳第 11 步（从 11a 确定性前置起） |
 | `pending` / `translating`(substatus=null) + `composite_kind=batch` | 跑步骤 2-3（blocked 解除 + 依赖就绪门禁），然后**直接进入步骤 6「Batch 组轻量路径」**（跳过步骤 4/5 意图摘要/确认）；content-hash 决定跳过翻译或整批重派 |
 | `pending` / `translating`(substatus=null) + `composite_kind=coupled_batch` | 跑步骤 2-3，然后进入**步骤 4 意图摘要 → 5 意图确认 → 步骤 6「CoupledBatch 组完整路径」**（完整门禁，不跳步骤） |
 | `pending` / `translating`(substatus=null) | 正常从第 2 步开始（非 batch 组的默认路由） |
@@ -90,7 +91,7 @@
 
 > **前置条件**：`populate-modules` 消费 `graph decompose` 产出的 `DecompositionPlan`，将全成员 mechanical 的 `UnitKind::Batch` 单元写入 `migration-state.json`（设 `composite_kind=batch` + `member_files`），且 `decomposition_frozen=true`。`populate-modules` 默认启用 decompose（`--no-decompose` 跳过走旧路径）。
 
-> 设计权威：`docs/decomposition-redesign.md` 第 90-100 行（轻量路径规范 + 状态机接入，该区段仍有效；§7 标题"机械连续装箱"已被 MDR-011 替代但轻量路径描述保留）+ [MDR-011](../../docs/decisions/011-coupling-agglomerative-decomposition.md)。
+> 分组来源：`graph decompose` 的**目录优先两阶段凝聚合并**（同目录文件先并、再按耦合度合并，受 `--budget` 约束）。全成员机械的簇走本轻量路径，含逻辑成员的走下面 CoupledBatch 完整路径。
 
 **流程**：
 
@@ -120,7 +121,7 @@
    - `TODO(port)` 计数 = 0（grep 全部成员 `.rs`）
    - `cargo check` 通过（6.4 已保证）
    - 导出符号一致性：各成员 `.rs` 的 `pub` 导出覆盖源文件的 exported symbols（编排器逐文件核对 pub 符号集合）
-   - 全部通过 → `state transition --module <M> --to testing`，然后因机械文件无行为可测，立即 `state transition --module <M> --to reviewing`，最后 `state transition --module <M> --to done`（三步快进，兼容状态转换矩阵 `translating→testing→reviewing→done`）
+   - 全部通过 → `state transition --module <M> --to testing`，然后因机械文件无行为可测，立即 `state transition --module <M> --to reviewing`。**最后一步 `→done` 走译后签批门（步骤 11）**，不能裸 `--to done`（会被 CLI 拒）：跑 `state review-gate --module <M>`——机械 batch 无行为测试，覆盖率红线对它豁免，若用户已预签 `batch_mechanical` 策略且判定为 `policy_eligible`，核对 `orchestrator_must_check` 后 `state approve --by-policy batch_mechanical --attest <逐项>`；未预签或命中红线则停 `awaiting_final_review` 等人签批（同 11d）
 
 **跳过的步骤**：意图摘要(4) / 意图确认(5) / 多候选(7a) / 对抗审查(7b) / 结构门(8) / Phase B(9) / 测试生成(10)——机械文件无行为可测，编译即门禁。
 
@@ -140,7 +141,7 @@
 4. **结构门（步骤 8）**：`rustmigrate stats compare` 校验整组 Phase A 1:1 结构。越界→忠实重做。
 5. **Phase B（步骤 9）**：整组惯用化 + 编译修正（同单文件步骤 9）。
 6. **行为测试（步骤 10）**：verifier 对整组公共 API 生成测试并跑 `verify.sh`。done 前置硬条件同单文件（通过率 ≥ 预期、clippy 无 warning、`TODO(port)`=0、无未确认 `bug_replica`）。测试结果就绪后、推进 reviewing 前，编排器执行 `state record-metrics --module <batch-key> --test-pass-rate <通过/总数> --known-differences <N>`，把 L2 结果落 state 供 `stats quality --source <source_root> --rust <rust_root>` 计算质量分。
-7. **最终签批（步骤 11）**：`state transition --to done`。
+7. **最终签批（步骤 11）**：走译后签批门——落 `record-metrics --coverage/--phase-a-audit-passed` → `state review-gate` → 停门展示证据包 + `state approve`（或命中预签策略时 `--by-policy`）。含逻辑行为的耦合簇通常落 `mandatory_manual`/`manual_required`，即**默认停门等人签批**。
 
 **状态机**：沿用 `translating→testing→reviewing→done` 转换矩阵（与单文件路径同，无新 substatus）。
 
@@ -180,7 +181,7 @@
 调 verifier（**前/后记 subagent_call**，step_index=7b）读 `attempts/{module}-phase-a.rs`（多候选模式下为选优后的版本）+ 源码 + 规则，产出 `{module}-review.md`。**L1**：存在、非空、含差异列表。失败 ≤2 次重试；仍失败回滚（删 review.md，保留 Phase A 代码，状态保持 `phase_a_complete_awaiting_review`）。
 
 ### 8. Phase A 结构门禁
-`rustmigrate stats compare` 校验 Phase A 1:1 结构（函数数比、行数比、控制流对应）。越界 → 标"疑似已优化"，要求 translator 以忠实模式重做 Phase A（删旧 review.md，重跑第 7 步）；重做仍越界 → `paused` + `requires_manual_review`。通过则记 `phase_a_audit_passed=true` + `phase_a_version`（content hash），进第 9 步。
+`rustmigrate stats compare` 校验 Phase A 1:1 结构（函数数比、行数比、控制流对应）。越界 → 标"疑似已优化"，要求 translator 以忠实模式重做 Phase A（删旧 review.md，重跑第 7 步）；重做仍越界 → `paused` + `requires_manual_review`。通过则落 `state record-metrics --module <M> --phase-a-audit-passed true`（越界重做仍不过时落 `false`）+ 记 `phase_a_version`（content hash），进第 9 步。该字段是译后签批门的判定依据之一，不落会导致签批门按「结构门未记录通过」拒绝自动放行。
 
 ### 9. Phase B 惯用化 + 编译修正（translator）
 `state transition --module <M> --substatus phase_b_optimization_in_progress`。先 `cargo fix --allow-dirty`，剩余错误交 translator（**前/后记 subagent_call**，step_index=9；仅三类重写：并发 / 取消安全 / 局部性能）。编译失败则 `state transition --to compile_fixing --substatus "<当轮错误摘要>"`，最多 **3 轮**（`max_retry_rounds`）；失败持久化 `attempts/{module}-phase-b-partial.rs`、置 `phase_b_failed_at_round_N`（供 `--retry`）。
@@ -194,10 +195,46 @@
 > **额度耗尽优雅暂停 + 断点续跑（M4-ROB-01c）**：token 预算 / API 额度逼近上限（harness budget.remaining()）时，**当前原子步收尾后停止**（勿在写 `.rs`/改 state 半途中断——状态已逐步原子 checkpoint），commit + 更新台账做断点。续跑时先 `state resume` 拿断点计划：对 `data.interrupted`（运行态被中断模块）逐个执行其 `recover_command`（`state recover --policy retry`）幂等重入；`data.next`（pending）用 `state deps <M>` 判就绪后推进；`data.awaiting_decision`（paused）不复活；**已完成/降级模块不重跑**。详见 SKILL.md「额度耗尽优雅暂停与续跑」。
 
 ### 10. 测试验证（verifier）
-`state transition --module <M> --to testing`。调 verifier（**前/后记 subagent_call**，step_index=10）生成测试并跑 `hooks/scripts/verify.sh`（nextest + clippy + 条件 loom/shuttle），产出测试结果 JSON（**L2**：通过率 ∈[0,1]）。**测试结果一旦产出，不论通过/失败均先执行** `state record-metrics --module <M> --test-pass-rate <通过/总数> --known-differences <N>`，把最新 L2 事实落 state（重跑时覆盖更新）；不能只记录成功结果，否则会系统性美化质量统计。随后判断 **done 前置硬条件**：通过率 ≥ 预期、clippy 无 warning、`TODO(port)` 计数=0、无未确认的 `bug_replica`。任一不满足标 incomplete、停在 testing：用 `state transition --module <M> --substatus "incomplete" --reason "<未满足项摘要>"`（**不带 `--to testing`**——已在 testing，同态 `--to` 会被转换矩阵拒；省略 `--to` 时 CLI 走 substatus-only 路径合法，且 `--reason` 会把原因 append 进 `attempts`）。失败 ≤2 次重试，回滚保留 Phase B 产物。全部通过后再 `state transition --module <M> --to reviewing`。质量仪表板调用 `stats quality --source <source_root> --rust <rust_root>`，其中 LOC 比为明确告警的项目级近似值。
+`state transition --module <M> --to testing`。调 verifier（**前/后记 subagent_call**，step_index=10）生成测试并跑 `hooks/scripts/verify.sh`（nextest + clippy + 条件 loom/shuttle），产出测试结果 JSON（**L2**：通过率 ∈[0,1]）。**测试结果一旦产出，不论通过/失败均先执行** `state record-metrics --module <M> --test-pass-rate <通过/总数> --known-differences <N> --coverage <覆盖率百分比>`，把最新 L2 事实落 state（重跑时覆盖更新；覆盖率取 `verify.sh` 报告，签批门红线读它）；不能只记录成功结果，否则会系统性美化质量统计。随后判断 **done 前置硬条件**：通过率 ≥ 预期、clippy 无 warning、`TODO(port)` 计数=0、无未确认的 `bug_replica`。任一不满足标 incomplete、停在 testing：用 `state transition --module <M> --substatus "incomplete" --reason "<未满足项摘要>"`（**不带 `--to testing`**——已在 testing，同态 `--to` 会被转换矩阵拒；省略 `--to` 时 CLI 走 substatus-only 路径合法，且 `--reason` 会把原因 append 进 `attempts`）。失败 ≤2 次重试，回滚保留 Phase B 产物。全部通过后再 `state transition --module <M> --to reviewing`。质量仪表板调用 `stats quality --source <source_root> --rust <rust_root>`，其中 LOC 比为明确告警的项目级近似值。
 
-### 11. 最终签批
-`state transition --module <M> --to done`（原子写）。更新 `PARITY.md`；如有架构决策写 MDR。若前置未满足（TODO(port)>0 / bug_replica 未确认 / coverage 不足），停在 `reviewing`、标 incomplete（同步骤 10：`--substatus "incomplete" --reason "<原因>"`、**不带 `--to`**，避免同态 `reviewing→reviewing` 被矩阵拒），不进 done。
+### 11. 译后签批门（人类决策点）
+
+`reviewing → done` 是**最终签批门**：编排器不得自己宣布成功——裸 `state transition --to done` 会被 CLI 拒绝并给出引导。翻译成功只意味着「可以送审」，不意味着「通过」。
+
+**11a. 确定性前置**（同步骤 10 硬条件）：`TODO(port)`=0 / 无未确认 `bug_replica` / 通过率达标 / clippy 干净。任一不满足 → 停在 `reviewing` 标 incomplete（`--substatus "incomplete" --reason "<未满足项>"`、**不带 `--to`**，避免同态转换被矩阵拒），不进本门。
+
+**11b. 落齐判定依据**：`state record-metrics --module <M> --coverage <N> --phase-a-audit-passed <true|false>`（覆盖率取 `verify.sh` 报告；结构门结果取步骤 8 的 `stats compare` 结论）。签批门的覆盖率红线与自动放行策略都读这两个字段——不落就必然停门等人。
+
+**11c. 取判定 + 证据包索引**：`state review-gate --module <M>`（纯查询、不改状态）。按 `data.decision` 分流：
+
+| decision | 动作 |
+|---|---|
+| `mandatory_manual` | 命中强制人工红线（`data.mandatory_reasons`：危险信号 / 分类来源不可信 / 已知差异 / substatus 不干净 / 结构门未过 / 覆盖率不达标）→ 走 11d 停门等人。**任何策略都不放行** |
+| `manual_required` | 无红线但无可用预签策略 → 走 11d 停门等人 |
+| `policy_eligible` | 先逐项核对 `data.orchestrator_must_check`（CLI 判不了、只能由你判的强制项：公共 API / 错误语义 / 并发模型 / 数值边界 / I·O 副作用是否变化、L2·L3 差异测试可执行、Phase B 新增代码路径有 MDR 依据、`bug_replica` 已确认、`TODO(port)`=0、覆盖率不低于源）。**任一不成立 → 转 11d 停门**，不得声明；全部成立才走 11e |
+
+> `data.evidence` 是磁盘上**实际存在**的本模块产物清单（意图摘要 / 审查报告 / 选优 / 降级报告 / 契约 / 进度 / Phase A·B 尝试）；`data.state_facts` 回显判定依据；`data.coverage_threshold` 与 `data.enabled_policies` 回显生效配置（配置键拼错会静默回落默认，据此核对）。warnings 非空须如实转达（如证据目录读取失败 ≠ 无证据、同名模块证据可能串包）。
+
+**11d. 停门 + 展示证据包 + 等签批**：
+
+```bash
+rustmigrate state transition --module <M> --substatus awaiting_final_review
+```
+
+然后向用户展示证据包：`review-gate` 的 `data.evidence`（逐个读给用户看要点）+ 补跑 `data.evidence_commands`（`stats compare` / `stats quality` / `git diff`）+ `data.state_facts` + `data.mandatory_reasons`。人审查的是「**为何可以相信它等价**」，不是从零读代码——所以证据要成包给全，别让用户自己去翻。
+
+- **批准** → `state approve --module <M> --reason "<审阅结论>"`。命中红线时 `--reason` **必填**（CLI 拒绝无理由的红线覆盖），审计会记 `approved:human overrides=[<红线码>] reason=<...>`。
+- **打回** → `state transition --module <M> --to translating --reason "签批打回: <具体反馈>"`，带反馈重译。该转换**作废上一轮签批证据**（清停门标记 + 通过率 + 覆盖率 + 结构门结果），故第二轮必须重新测、重新落 11b、重新停门。≤2 轮；第 3 轮仍不通过 → `--to paused --substatus requires_manual_review`。
+
+**11e. 预签策略放行**（仅 `policy_eligible` 且 11c 自查全过）：
+
+```bash
+rustmigrate state approve --module <M> --by-policy <id> --attest <逐项>
+```
+
+`<id>` 与 attest 全集取 `data.policies[]` 里该策略的 `required_attestations`（缺一项即拒）。策略须已在 `.rustmigrate.toml` 的 `[review_gate].auto_approve_policies` 预签，否则 CLI 拒（`policy_not_enabled`）。审计写 `auto_approved_by_policy:<id> attest=[...]`——**不伪装「无需审查」**。给了 `--attest` 却漏 `--by-policy` 会被硬拒（不会静默降级成人签批）。
+
+**11f. done 后**：更新 `PARITY.md`；如有架构决策写 MDR。
 
 ## Headless 模式（M2-ADV-07）
 
@@ -231,12 +268,12 @@ headless 下模块进入 `paused`（3 轮失败）时，**不等人工确认**�
 3. **回传（SubAgent → 编排器）**：只回传 `TranslationResult`（touched-list：own_files + shared_touched + self_check + test；有真实 L2 行为结果时附 `test_pass_rate` + `known_differences`），代码留盘（上下文经济）。机械 batch 的度量字段为 null，不伪造通过率；主 worktree 的集中 writer 收到后立即写可选 metrics（成功/失败样本都写），再处理 `agent_done` 或失败恢复。
 4. **合并（编排器，git merge）**：编排器在主分支上逐个合并 worktree 分支——`git checkout main && git merge wt/{module}`。git 自动处理文件合并（包括 Cargo.toml、lib.rs 等）。
 5. **reconcile（仅 git 冲突时）**：合并冲突时 `git merge --abort`，标记冲突模块需重译。冲突模块按依赖序在各自 worktree 内 rebase 到已合并主线重译（非 LLM 手解冲突块）。轮次上限默认 3，超限降级串行/转人工。冲突文件列表用 `git diff --name-only --diff-filter=U` 获取。
-6. **真门（整组 check）**：全部分支合并后，在主 worktree 上执行整组 `cargo check` / `cargo test`。通过 → `agent_done` 升 `done`；不通过 → compile_fixing 子流程。**这是唯一 done 真门**。
+6. **真门（整组 check）**：全部分支合并后，在主 worktree 上执行整组 `cargo check` / `cargo test`。通过 → 推 `testing`→`reviewing` 后逐模块过译后签批门（`state review-gate` → `state approve` / 停门待签批，见步骤 11 与 workflow.md 步骤 2d）；不通过 → compile_fixing 子流程。**这是唯一 done 真门**（整组 check 是 done 的必要条件，不是签批凭据）。
 7. **清理**：`git worktree remove .wt/{module} && git branch -D wt/{module}`。
 
 ### 两层 done
 
-worktree 自检过 = `agent_done`（substatus，非终态）；只有步骤 6 整组 check 过才升最终 `done`。orphan rule/coherence(E0119)/feature 冲突/宏展开等跨并发兄弟冲突只能整组编译暴露。
+worktree 自检过 = `agent_done`（substatus，非终态）；只有步骤 6 整组 check 过才有资格送审。orphan rule/coherence(E0119)/feature 冲突/宏展开等跨并发兄弟冲突只能整组编译暴露。**整组 check 过之后仍要过译后签批门才升 `done`**（步骤 11）——两层 done 的第二层是「整组验证 + 签批」，不是「整组验证」。
 
 ### 类型定义
 

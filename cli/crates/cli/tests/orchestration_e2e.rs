@@ -181,15 +181,30 @@ fn enable_review_gate_policy(repo: &Path, policy: &str) {
     std::fs::write(&cfg_path, cfg).unwrap();
 }
 
-/// `headless_default` 策略要求的 attestation（CLI 参数序列）。
-const HEADLESS_ATTEST_ARGS: &[&str] = &[
-    "--attest",
-    "todo_port_zero",
-    "--attest",
-    "no_bug_replica",
-    "--attest",
-    "tests_passed",
-];
+/// 从 `state review-gate` 输出取某策略的 `required_attestations`，展开成 `--attest <k>` 参数序列。
+///
+/// 不硬编码：required = 策略特有项 ∪ CLI 判不了的强制项（`ORCHESTRATOR_MUST_CHECK`），项数随
+/// 策略定义演进；从输出动态取同时钉住「review-gate 报的 required 就是 approve 要的」这条契约。
+fn attest_args_from_gate(module: &str, policy: &str) -> Vec<String> {
+    let (code, json) = cli(&["state", "review-gate", "--module", module]);
+    assert_eq!(code, 0, "review-gate 应成功: {json}");
+    json["data"]["policies"]
+        .as_array()
+        .expect("policies 应为数组")
+        .iter()
+        .find(|p| p["id"] == policy)
+        .unwrap_or_else(|| panic!("策略 {policy} 应在评估结果中: {json}"))["required_attestations"]
+        .as_array()
+        .expect("required_attestations 应为数组")
+        .iter()
+        .flat_map(|a| {
+            [
+                "--attest".to_owned(),
+                a.as_str().expect("attestation 应为字符串").to_owned(),
+            ]
+        })
+        .collect()
+}
 
 /// 读取某模块当前 status。
 fn module_status(repo: &Path, name: &str) -> String {
@@ -355,6 +370,7 @@ fn orch_happy_path_two_modules_reach_done() {
         }
 
         // 两层 done 第二层门 + 策略放行：整组 check 过 + 凭据齐 → batch 升 done。
+        let attest = attest_args_from_gate("a", "headless_default");
         let mut args = vec![
             "state",
             "batch-transition-done",
@@ -365,7 +381,7 @@ fn orch_happy_path_two_modules_reach_done() {
             "--by-policy",
             "headless_default",
         ];
-        args.extend_from_slice(HEADLESS_ATTEST_ARGS);
+        args.extend(attest.iter().map(String::as_str));
         let (code, json) = cli(&args);
         assert_eq!(code, 0, "batch 应成功: {json}");
         assert_eq!(
@@ -497,6 +513,7 @@ fn orch_merge_conflict_aborts_and_marks_rework() {
         // 预签 + 落齐策略事实，使唯一可能的拒因就是 status——否则 approval_required 会掩盖 status 门。
         enable_review_gate_policy(repo, "headless_default");
         mark_policy_approvable(repo, "b");
+        let attest = attest_args_from_gate("b", "headless_default");
         let mut args = vec![
             "state",
             "batch-transition-done",
@@ -505,7 +522,7 @@ fn orch_merge_conflict_aborts_and_marks_rework() {
             "--by-policy",
             "headless_default",
         ];
-        args.extend_from_slice(HEADLESS_ATTEST_ARGS);
+        args.extend(attest.iter().map(String::as_str));
         let (code, json) = cli(&args);
         assert_eq!(code, 0);
         assert!(
@@ -513,7 +530,7 @@ fn orch_merge_conflict_aborts_and_marks_rework() {
             "compile_fixing 模块不应被 batch 升 done: {json}"
         );
         assert_eq!(
-            json["data"]["skipped"][0]["code"], "transition_rejected",
+            json["data"]["skipped"][0]["code"], "not_reviewing",
             "拒因应是 status 非 reviewing: {json}"
         );
     });
@@ -581,6 +598,7 @@ fn orch_whole_group_check_gate_blocks_done() {
         for m in ["a", "b"] {
             mark_policy_approvable(repo, m);
         }
+        let attest = attest_args_from_gate("a", "headless_default");
         let mut args = vec![
             "state",
             "batch-transition-done",
@@ -591,7 +609,7 @@ fn orch_whole_group_check_gate_blocks_done() {
             "--by-policy",
             "headless_default",
         ];
-        args.extend_from_slice(HEADLESS_ATTEST_ARGS);
+        args.extend(attest.iter().map(String::as_str));
         let (code, json) = cli(&args);
         assert_eq!(code, 0);
         assert!(
@@ -603,7 +621,7 @@ fn orch_whole_group_check_gate_blocks_done() {
                 .as_array()
                 .unwrap()
                 .iter()
-                .all(|s| s["code"] == "transition_rejected"),
+                .all(|s| s["code"] == "not_reviewing"),
             "拒因应是 status 非 reviewing: {json}"
         );
         assert_ne!(module_status(repo, "a"), "done");

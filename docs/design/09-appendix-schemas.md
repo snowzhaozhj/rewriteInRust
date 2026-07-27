@@ -186,7 +186,7 @@
 
 **substatus 字段说明**：
 
-每个模块除 `status` 外，还有一个可选的 `substatus` 字段（自由文本，`string | null`）。`substatus` 用于描述当前模块在该状态下的具体阻塞原因或进展细节，方便排查和状态报告。示例值：
+每个模块除 `status` 外，还有一个可选的 `substatus` 字段（`string | null`；除下表**保留值**外为自由文本）。`substatus` 用于描述当前模块在该状态下的具体阻塞原因或进展细节，方便排查和状态报告。示例值：
 
 | status | substatus 示例 | 含义 |
 |--------|---------------|------|
@@ -202,7 +202,7 @@
 | `reviewing` | `"awaiting_final_review"` | **译后签批门已停门、证据包已展示、等人签批**（M4 MDR-019 保留值）。断点续跑据此路由到「展示 + 等签批」而**不重跑 verifier**；`state approve`（人签批）**要求**此标记；`state batch-transition-done` 与策略放行对此标记**一律拒绝**（已判定需人签批的模块任何策略都不得放行） |
 | `done` | `null` | 无需额外说明 |
 
-`substatus` 在 `translating` 状态下使用上表 3 个保留值参与 Step 0.3 断点续传路由（前两个须精确全等匹配，`phase_b_failed_at_round_` 因含变量后缀用 `starts_with` 前缀匹配）；其余状态下为自由文本，仅用于辅助沟通。
+**保留值**（须精确全等匹配，参与确定性路由/门判定，不可当自由文本写）：`translating` 的 `phase_a_complete_awaiting_review` / `phase_b_optimization_in_progress`（`phase_b_failed_at_round_` 因含变量后缀用 `starts_with` 前缀匹配）参与 Step 0.3 断点续传路由；`reviewing` 的 `agent_done` / `awaiting_final_review` 参与译后签批门判定——**这两个值是签批门的 substatus 白名单**，`reviewing` 下写任何其他值都会命中红线 `substatus_not_clean`（不自动放行、须人签批）。其余状态-取值组合为自由文本，仅用于辅助沟通。
 
 **Phase A 解耦字段**（用于 verifier 责任归因，见 [02 § 3.2.4](./02-architecture.md#324-subagent-合并7--4)）：
 
@@ -249,6 +249,23 @@ reviewing → compile_fixing  （整组验证失败：并行路径 workflow 步�
 | 键 | 类型 | 默认 | 含义 |
 |----|------|------|------|
 | `auto_approve_policies` | `string[]` | `[]`（**全停门等人签批**） | 用户**预签**的自动放行策略 id 白名单。内置 `batch_mechanical`（`composite_kind=batch` 全机械组）/ `headless_default`（通过率 100% + Phase A 结构门过 + coverage ≥ `[testing].coverage_threshold`）。未列入的 id 传给 `--by-policy` 一律拒（`policy_not_enabled`）；清单内的未知 id 由 `state review-gate` 告警（防拼写错误静默失效）。预签只是**必要条件**——强制人工红线命中时任何策略都不放行 |
+
+**`orchestrator_must_check` 值域（M4 MDR-019）**：CLI 判不了（要读产物、跑命令、读 MDR）而必须由编排器逐项自查的强制项。`state review-gate` 原样输出该清单；策略放行时**每一项都要出现在 `--attest` 里**（策略实际必需集 = 策略特有项 ∪ 本清单），缺一项即 `missing_attestations`。
+
+| 声明项 | 含义 |
+|--------|------|
+| `l2_l3_differential_executable` | L2/L3 差异测试确实可执行（不是写了不跑） |
+| `phase_b_new_paths_have_mdr` | Phase B 新增的代码路径都有 MDR 依据 |
+| `public_api_unchanged` | 公共 API 形状未变（相对源） |
+| `error_semantics_unchanged` | 错误语义未变（错误类型/传播/可恢复性） |
+| `numeric_boundary_unchanged` | 数值边界行为未变（溢出/精度/舍入） |
+| `concurrency_model_unchanged` | 并发模型未变（并发度/顺序/取消语义） |
+| `io_side_effects_unchanged` | I/O 副作用未变（顺序/时机/失败模式） |
+| `coverage_not_below_source` | 覆盖率不低于源侧（**绝对阈值**由红线 `coverage_below_threshold` 判，**与源比较**只能声明——`state` 里没有源侧覆盖率） |
+| `bug_replica_confirmed` | 所有 `bug_replica: true` 的 MDR 已填 `human_decision` |
+| `todo_port_zero` | `TODO(port)` 计数 = 0 |
+
+> **机制的诚实说明**：CLI **不校验声明的真实性**（判不了），它校验的是「声明齐全」并把 `attest=[…]` 写进审计——即 03 § 7.4「Approval Token」精神：不接受「我判过了」这种整体性断言，只接受逐项、可追溯、事后可追责的声明。
 
 **blocked 状态处理**：
 - 当模块 A 依赖的模块 B 降级或阻塞时，A 进入 `blocked` 状态
@@ -422,7 +439,9 @@ CLI 构建基础图（contains/imports 边），存储到 `.rust-migration/sourc
 - translating + substatus.starts_with("phase_b_failed_at_round_") → 跳至 Step 4（等同 --retry）
 - compile_fixing                 → 跳至 Step 4（编译修正循环继续）
 - testing                        → 跳至 Step 5（测试验证继续）
-- reviewing                      → 跳至 Step 6（状态收尾：测试已通过，仅需 --to done）
+- reviewing + substatus == "awaiting_final_review" → 跳至 Step 6 的**等签批**分支（已停在译后签批门，
+                                  证据包已展示过：不重跑 verifier、不 recover retry，只等 `state approve`）
+- reviewing (其他 substatus)      → 跳至 Step 6（测试已通过，从签批门判定 `state review-gate` 起）
 - pending / translating(substatus=null) → 正常从 Step 0.5 开始
 ```
 
@@ -556,10 +575,14 @@ Skill 主上下文调用 `rustmigrate stats compare`（确定性脚本门禁）�
 
 **检查点**：测试通过率 ≥ 预期，clippy 无 warning，TODO(port) 计数 = 0（否则标记 incomplete）。
 
-执行 `rustmigrate state transition --module <M> --to reviewing`（测试通过后进入最终签批，使断点续传可路由到 Step 6）。
+先落判定依据：`rustmigrate state record-metrics --module <M> --test-pass-rate <通过/总数> --coverage <覆盖率> --phase-a-audit-passed <true|false>`（签批门的覆盖率红线与自动放行策略读这些字段，不落则必然停门等人）。再执行 `rustmigrate state transition --module <M> --to reviewing`（测试通过后进入最终签批，使断点续传可路由到 Step 6）。
 
-### Step 6: 状态更新
-通过 `rustmigrate state transition --module <M> --to done` 更新该模块状态（确保 tmp-fsync-rename 原子写入，见 [06 § 10.8](./06-plugin-structure.md#108-持久化与崩溃安全mvp)）。
+### Step 6: 译后签批门 + 状态更新
+`reviewing → done` 是最终签批门（MDR-019），**裸 `state transition --to done` 会被 CLI 拒绝**（`--force` 不是凭据）。先 `rustmigrate state review-gate --module <M>` 取判定 + 证据包索引（纯查询），再按 `decision` 走两条路之一：
+- `mandatory_manual` / `manual_required` → `state transition --module <M> --substatus awaiting_final_review` 停门，展示证据包（`evidence` + 补跑 `evidence_commands` + `state_facts` + `mandatory_reasons`）等人签批；批准 `state approve --module <M> --reason "<审阅结论>"`（命中红线时 `--reason` 必填），打回 `state transition --module <M> --to translating --reason "签批打回: <反馈>"`（作废上一轮证据，须重测重停门）。
+- `policy_eligible` → 逐项核对 `orchestrator_must_check` 后 `state approve --module <M> --by-policy <id> --attest <逐项>`。
+
+签批通过即写入 `done`（确保 tmp-fsync-rename 原子写入，见 [06 § 10.8](./06-plugin-structure.md#108-持久化与崩溃安全mvp)）。
 更新 `PARITY.md` 中该模块的进度行。
 如有架构决策，写入 MDR。
 ```

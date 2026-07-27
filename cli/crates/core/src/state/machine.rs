@@ -43,6 +43,10 @@ pub struct RecordMetricsOutcome {
     pub test_pass_rate: Option<String>,
     /// 写入完成后的实际已知差异数。
     pub known_differences: u32,
+    /// 写入完成后的实际覆盖率（MDR-019：签批门红线读它）。
+    pub coverage: Option<u32>,
+    /// 写入完成后的 Phase A 结构门结果（MDR-019：`headless_default` 策略读它）。
+    pub phase_a_audit_passed: Option<bool>,
 }
 
 /// `reviewing → done` 的**批准凭据**（MDR-019 译后签批门）。
@@ -92,6 +96,11 @@ pub struct ApproveOutcome {
     /// 批准前的 substatus（人签批路径恒为 `awaiting_final_review`；策略路径可能为
     /// `agent_done`/`null`）——供审计与排查。
     pub previous_substatus: Option<String>,
+    /// 人签批**覆盖**的强制人工红线码（策略路径恒空——红线命中时策略一律被拒）。
+    /// 非空表示签批人在明知这些红线的前提下放行，已连同 `--reason` 写入审计。
+    pub overridden_mandatory_reasons: Vec<String>,
+    /// 实际写入 `attempts` 的审计文本（供 CLI 回显，免得调用方回读 state 才知道记了什么）。
+    pub audit: String,
 }
 
 /// [`batch_transition_done`](MigrationStateMachine::batch_transition_done) 的逐模块结果。
@@ -103,6 +112,32 @@ pub struct BatchDoneOutcome {
     /// 原因码：`approval_required` / `awaiting_final_review` / `not_agent_done` /
     /// `policy_rejected` / `transition_rejected` / `not_found`。
     pub skipped: Vec<(String, String, String)>,
+}
+
+/// 从 `approve_module` 的错误文本中提取稳定机读拒因码（`review_gate` 侧以 `<code>: ` 前缀返回）。
+///
+/// 只认白名单前缀——避免把任意含冒号的错误文本当成拒因码。返回 `None` 表示不是策略复核类拒因
+/// （如状态守卫），由调用方归到自己的码。
+fn approval_error_code(detail: &str) -> Option<&'static str> {
+    const CODES: &[&str] = &[
+        // review_gate::check_policy_approval 的策略复核拒因
+        "unknown_policy",
+        "policy_not_enabled",
+        "mandatory_manual",
+        "policy_conditions_unmet",
+        "missing_attestations",
+        // approve_module 自有的状态/凭据守卫拒因
+        "not_reviewing",
+        "not_awaiting_final_review",
+        "awaiting_requires_human",
+        "mandatory_override_requires_reason",
+    ];
+    // 错误文本可能被 `MigrateError::Config` 包了前缀（如「配置错误: 」），故用 contains 定位
+    // `<code>:` 而非 starts_with。
+    CODES
+        .iter()
+        .find(|c| detail.contains(&format!("{c}:")))
+        .copied()
 }
 
 /// [`reset_module`](MigrationStateMachine::reset_module) 的结果——描述这次幂等回退把模块从
@@ -181,6 +216,12 @@ pub struct ResumePlan {
     pub interrupted: Vec<InterruptedModule>,
     /// `paused` 决策点模块——待人类/降级决策，续跑**不复活**（不给 retry 命令）。字典序。
     pub awaiting_decision: Vec<String>,
+    /// `reviewing + awaiting_final_review` 模块——译后签批门已停门、**等人签批**（MDR-019）。
+    /// 与 `interrupted` 分列的理由：这类模块的工作**已完成**，只差人过目；若混进 `interrupted`
+    /// 并按其 `recover_command`（= reset 语义）重入，会把已完成的译果连同 L2 结论一起清掉
+    /// （MDR-019 落地清单①正是为此要求区分「等签批」vs「审到一半被中断」）。续跑对它们只应
+    /// **展示证据包 + 等签批**，不复活、不重译。字典序。
+    pub awaiting_approval: Vec<String>,
     /// `pending` 模块——下一步候选（编排器用 `state deps <M>` 判就绪后推进）。字典序。
     pub next: Vec<String>,
     /// `blocked` 模块——等依赖。字典序。
@@ -200,6 +241,7 @@ impl ResumePlan {
         let pending = self.next.len();
         let blocked = self.blocked.len();
         let awaiting_decision = self.awaiting_decision.len();
+        let awaiting_approval = self.awaiting_approval.len();
         ResumeProgress {
             done: self.done,
             degraded: self.degraded,
@@ -207,7 +249,14 @@ impl ResumePlan {
             pending,
             blocked,
             awaiting_decision,
-            total: self.done + self.degraded + in_progress + pending + blocked + awaiting_decision,
+            awaiting_approval,
+            total: self.done
+                + self.degraded
+                + in_progress
+                + pending
+                + blocked
+                + awaiting_decision
+                + awaiting_approval,
         }
     }
 }
@@ -242,6 +291,8 @@ pub struct ResumeProgress {
     pub blocked: usize,
     /// `paused` 决策点模块数（= `awaiting_decision` 长度）。
     pub awaiting_decision: usize,
+    /// `reviewing + awaiting_final_review` 待人签批模块数（= `awaiting_approval` 长度，MDR-019）。
+    pub awaiting_approval: usize,
     /// 全部模块数（= 上述各桶之和）。
     pub total: usize,
 }
@@ -445,6 +496,10 @@ impl MigrationStateMachine {
     /// 仅用于首次登记模块或整体重建场景。运行时的状态流转应走
     /// [`transition_module`](Self::transition_module)，以免把 `done` 等终态非法改回 `pending`、
     /// 破坏断点续传语义。
+    ///
+    /// **也不过译后签批门**（MDR-019）：本方法整体替换 `ModuleState`，能写入任意 `status`（含
+    /// `done`）而不经 [`approve_module`](Self::approve_module) 的凭据复核。CLI 层只在
+    /// `populate-modules`（写 `pending`）使用它，**不得**用于推进模块到 `done`——那会绕过签批门。
     pub fn update_module(&mut self, name: &str, module: ModuleState) {
         self.state_file.modules.insert(name.to_owned(), module);
     }
@@ -549,9 +604,12 @@ impl MigrationStateMachine {
             if from == ModuleStatus::Reviewing && target == ModuleStatus::Done && approval.is_none()
             {
                 return Err(MigrateError::Config(format!(
-                    "reviewing → done 是译后签批门，须经 `state approve --module {name}`（人签批）\
-                     或 `state approve --module {name} --by-policy <id> --attest <...>`（预签策略放行）；\
-                     裸 transition 不构成批准（见 MDR-019）"
+                    "reviewing → done 是译后签批门，裸 transition 不构成批准（见 MDR-019）。两条路径：\
+                     ① 人签批——先 `state review-gate --module {name}` 拿判定与证据包索引（纯查询）、\
+                     再 `state transition --module {name} --substatus awaiting_final_review` 停门、\
+                     向用户展示证据包，最后 `state approve --module {name} --reason <审阅结论>`；\
+                     ② 预签策略放行——`state approve --module {name} --by-policy <id> --attest <...>`\
+                     （策略须在 [review_gate].auto_approve_policies 预签，attestation 见 review-gate 输出）"
                 )));
             }
             // degrade_* → translating 恢复须 --force（设计行 379-381：降级恢复是人类决策）。
@@ -584,6 +642,23 @@ impl MigrationStateMachine {
                 module.substatus = None;
                 module.attempts.clear();
             }
+            // MDR-019 两条回退边：**作废签批证据**。返工/编译修复后代码会变，上一轮的
+            // `awaiting_final_review` 停门标记与 L2 结论（通过率/覆盖率/结构门）都不再成立；
+            // 若留着，第二轮回到 `reviewing` 时人签批会被陈旧标记直接放行、策略会凭陈旧通过率
+            // 自动放行（测试审查 I3 实证的绕门路径）。清理集合 = `reset_module` 的进度字段子集，
+            // 但**保留 attempts 审计**（打回记录本身是证据）与结构冻结字段。
+            if from == ModuleStatus::Reviewing
+                && matches!(
+                    target,
+                    ModuleStatus::Translating | ModuleStatus::CompileFixing
+                )
+            {
+                module.substatus = None;
+                module.test_pass_rate = None;
+                module.coverage = None;
+                module.known_differences = 0;
+                module.phase_a_audit_passed = None;
+            }
             module.status = target;
             // graduate 到 Done：清空 testing/review 阶段残留的 substatus（如
             // phase_b_optimization_in_progress / incomplete_*），避免污染 review 仪表板。
@@ -595,8 +670,28 @@ impl MigrationStateMachine {
         }
 
         // 显式 substatus 覆盖（在转换副作用之后，允许恢复转换同时指定新 substatus）。
+        let cleared_stop_gate_marker = substatus.is_some()
+            && substatus != Some(crate::state::review_gate::SUBSTATUS_AWAITING_FINAL_REVIEW)
+            && module.substatus.as_deref()
+                == Some(crate::state::review_gate::SUBSTATUS_AWAITING_FINAL_REVIEW);
         if let Some(s) = substatus {
             module.substatus = Some(s.to_owned());
+        }
+
+        // 抹掉停门标记必留痕（MDR-019）：`awaiting_final_review` 是「已判定需人签批」这个事实的
+        // 唯一载体，而 substatus 可被任意 substatus-only 写操作覆盖（写操作连 reason 都可省）。
+        // CLI 无法阻止覆盖（substatus 按设计是自由文本），但可以让它**可追溯**——否则「模块曾被
+        // 判定需人签批」会被静默抹除（主审 I5）。
+        if cleared_stop_gate_marker {
+            let new_value = substatus.unwrap_or("null");
+            module.attempts.push(AttemptRecord {
+                timestamp: Timestamp::new(chrono::Utc::now().to_rfc3339()),
+                result: format!(
+                    "stop-gate-marker-cleared: awaiting_final_review → {new_value}（签批门停门标记被覆盖）"
+                ),
+                retry_count: 0,
+                checkpoint: None,
+            });
         }
 
         // reason 审计落盘：append 到 attempts。
@@ -612,17 +707,25 @@ impl MigrationStateMachine {
         Ok(())
     }
 
-    /// 记录 verifier 产出的模块质量度量（M4-QUAL-05）。
+    /// 记录 verifier 产出的模块质量度量（M4-QUAL-05；MDR-019 扩 coverage / 结构门结果）。
     ///
     /// 各参数为 `Some` 时才覆盖对应字段，允许差异测试重跑后只更新单项结果。
     /// 仅运行态（translating/compile_fixing/testing/reviewing）可写；pending、终态、暂停/阻塞、
     /// 降级态及项目 graduate 均拒绝。每次成功写入都会追加审计记录。
     /// module key 归一同 [`transition_module`](Self::transition_module)。
+    ///
+    /// `coverage` / `phase_a_audit_passed` 由 MDR-019 补入：这两个字段 schema 里早就有、
+    /// 译后签批门的红线与 `headless_default` 策略都要读，但**此前没有任何 CLI 写入口**
+    /// （run.md 步骤 8「记 phase_a_audit_passed」是一句无命令可执行的约定），
+    /// 导致策略在真实工作流里永不可满足、只能靠手工编辑 state——与 QUAL-05 修 `test_pass_rate`
+    /// 时的缺口同类（静默失败审查 HIGH-3 / 异构审查 I3）。
     pub fn record_metrics(
         &mut self,
         name: &str,
         test_pass_rate: Option<&str>,
         known_differences: Option<u32>,
+        coverage: Option<u32>,
+        phase_a_audit_passed: Option<bool>,
     ) -> Result<RecordMetricsOutcome> {
         if let Some(rate) = test_pass_rate {
             if crate::stats::quality::parse_test_pass_rate(rate).is_none() {
@@ -663,12 +766,26 @@ impl MigrationStateMachine {
         if let Some(count) = known_differences {
             module.known_differences = count;
         }
+        if let Some(c) = coverage {
+            module.coverage = Some(c);
+        }
+        if let Some(passed) = phase_a_audit_passed {
+            module.phase_a_audit_passed = Some(passed);
+        }
         module.attempts.push(AttemptRecord {
             timestamp: Timestamp::new(chrono::Utc::now().to_rfc3339()),
             result: format!(
-                "metrics:test_pass_rate={} known_differences={}",
+                "metrics:test_pass_rate={} known_differences={} coverage={} phase_a_audit_passed={}",
                 module.test_pass_rate.as_deref().unwrap_or("null"),
-                module.known_differences
+                module.known_differences,
+                module
+                    .coverage
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "null".to_owned()),
+                module
+                    .phase_a_audit_passed
+                    .map(|b| b.to_string())
+                    .unwrap_or_else(|| "null".to_owned()),
             ),
             retry_count: 0,
             checkpoint: None,
@@ -677,6 +794,8 @@ impl MigrationStateMachine {
             module: canonical,
             test_pass_rate: module.test_pass_rate.clone(),
             known_differences: module.known_differences,
+            coverage: module.coverage,
+            phase_a_audit_passed: module.phase_a_audit_passed,
         })
     }
 
@@ -972,22 +1091,33 @@ impl MigrationStateMachine {
 
     /// 生成额度耗尽/中断后续跑的**断点计划**（M4-ROB-01c）——纯查询、无 mutation、不加载 graph。
     ///
-    /// 遍历全部模块按状态归 5 桶（见 [`ResumePlan`]）：运行态→`interrupted`（需 recover retry
-    /// 幂等重入）、`paused`→`awaiting_decision`（待决策，续跑不复活）、`pending`→`next`、
-    /// `blocked`→`blocked`、终态（done/degrade_*）仅计入 progress（**不重跑**）。各列表按 module
-    /// key 字典序排序（`modules` 是 HashMap，排序保输出确定性）。
+    /// 遍历全部模块按状态归 6 桶（见 [`ResumePlan`]）：运行态→`interrupted`（需 recover retry
+    /// 幂等重入）、**`reviewing + awaiting_final_review`→`awaiting_approval`**（译后签批门已停门、
+    /// 等人签批，续跑只展示证据包**不重译**，MDR-019）、`paused`→`awaiting_decision`（待决策，
+    /// 续跑不复活）、`pending`→`next`、`blocked`→`blocked`、终态（done/degrade_*）仅计入 progress
+    /// （**不重跑**）。各列表按 module key 字典序排序（`modules` 是 HashMap，排序保输出确定性）。
     ///
     /// **关键**：运行态与 `paused` 分列——运行态是被额度打断的进行中工作、应 retry；`paused` 是
     /// 前次 skip 留下的人类决策点，续跑重入不得把它复活重译（否则绕过降级抉择，见 MDR-017）。
     pub fn resume_plan(&self) -> ResumePlan {
         let mut interrupted: Vec<InterruptedModule> = Vec::new();
         let mut awaiting_decision: Vec<String> = Vec::new();
+        let mut awaiting_approval: Vec<String> = Vec::new();
         let mut next: Vec<String> = Vec::new();
         let mut blocked: Vec<String> = Vec::new();
         let mut done = 0usize;
         let mut degraded = 0usize;
 
         for (key, m) in &self.state_file.modules {
+            // 译后签批门已停门的模块先摘出来（MDR-019）：它的工作已完成、只差人签批，
+            // 归 interrupted 会让续跑按 recover retry 把译果清掉。
+            if m.status == ModuleStatus::Reviewing
+                && m.substatus.as_deref()
+                    == Some(crate::state::review_gate::SUBSTATUS_AWAITING_FINAL_REVIEW)
+            {
+                awaiting_approval.push(key.clone());
+                continue;
+            }
             match m.status {
                 ModuleStatus::Translating
                 | ModuleStatus::CompileFixing
@@ -1012,6 +1142,7 @@ impl MigrationStateMachine {
 
         interrupted.sort_by(|a, b| a.module.cmp(&b.module));
         awaiting_decision.sort();
+        awaiting_approval.sort();
         next.sort();
         blocked.sort();
 
@@ -1019,6 +1150,7 @@ impl MigrationStateMachine {
             sprint: self.state_file.sprint.as_ref().map(|s| s.current),
             interrupted,
             awaiting_decision,
+            awaiting_approval,
             next,
             blocked,
             done,
@@ -1204,27 +1336,54 @@ impl MigrationStateMachine {
 
         if module.status != ModuleStatus::Reviewing {
             return Err(MigrateError::Config(format!(
-                "模块 {canonical} 当前 {} 非 reviewing，译后签批门只在 reviewing 上放行",
+                "not_reviewing: 模块 {canonical} 当前 {} 非 reviewing，译后签批门只在 reviewing 上放行",
                 module.status
             )));
         }
+
+        // 人签批覆盖的红线（复算判定，仅 Human 路径用；Policy 路径由 check_policy_approval 拦红线）。
+        let mut overridden: Vec<String> = Vec::new();
 
         match approval {
             Approval::Human => {
                 if !is_awaiting {
                     return Err(MigrateError::Config(format!(
-                        "模块 {canonical} 未停在 `awaiting_final_review`（当前 substatus={}）：\
-                         人签批前须先 `state review-gate --module {canonical}` 判定并标记停门、\
-                         向用户展示证据包，避免跳过展示直接签批（MDR-019）",
+                        "not_awaiting_final_review: 模块 {canonical} 未停在 `awaiting_final_review`\
+                         （当前 substatus={}）：人签批前须先 `state review-gate --module {canonical}` \
+                         取判定与证据包索引，再 `state transition --module {canonical} \
+                         --substatus awaiting_final_review` 停门（review-gate 是纯查询、不写状态），\
+                         并向用户展示证据包——避免跳过展示直接签批（MDR-019）",
                         previous_substatus.as_deref().unwrap_or("null")
+                    )));
+                }
+                // 人有权覆盖强制人工红线（那正是「人签批」的意义），但**必须留痕 + 说明依据**：
+                // 否则事后无法区分「人明知红线仍放行」与「人根本没看到判定结果」（静默失败审查 HIGH-3）。
+                let judgement = crate::state::review_gate::judge(
+                    module,
+                    review_gate_config,
+                    coverage_threshold,
+                );
+                overridden = judgement
+                    .mandatory_reasons
+                    .iter()
+                    .map(|r| r.code.clone())
+                    .collect();
+                if !overridden.is_empty() && reason.is_none() {
+                    return Err(MigrateError::Config(format!(
+                        "mandatory_override_requires_reason: 模块 {canonical} 命中 {} 条强制人工红线\
+                         （{}），人签批可以覆盖但须用 `--reason <依据>` 说明为何仍可相信其等价\
+                         ——该理由会写入 attempts 审计（MDR-019）",
+                        overridden.len(),
+                        overridden.join(", ")
                     )));
                 }
             }
             Approval::Policy { id, attestations } => {
                 if is_awaiting {
                     return Err(MigrateError::Config(format!(
-                        "模块 {canonical} 已判定需人签批（substatus=awaiting_final_review），\
-                         策略 `{id}` 不得放行——须人工 `state approve --module {canonical}`（MDR-019）"
+                        "awaiting_requires_human: 模块 {canonical} 已判定需人签批\
+                         （substatus=awaiting_final_review），策略 `{id}` 不得放行——\
+                         须人工 `state approve --module {canonical} --reason <审阅结论>`（MDR-019）"
                     )));
                 }
                 check_policy_approval(
@@ -1247,7 +1406,7 @@ impl MigrationStateMachine {
             false,
             Some(approval),
         )?;
-        self.push_approval_audit(&canonical, approval, reason);
+        let audit = self.push_approval_audit(&canonical, approval, reason, &overridden);
 
         Ok(ApproveOutcome {
             module: canonical,
@@ -1256,20 +1415,57 @@ impl MigrationStateMachine {
                 Approval::Policy { id, .. } => format!("policy:{id}"),
             },
             previous_substatus,
+            overridden_mandatory_reasons: overridden,
+            audit,
         })
     }
 
-    /// 向指定模块 `attempts` 追加一条签批审计记录（MDR-019 审计口径）。
-    fn push_approval_audit(&mut self, canonical: &str, approval: &Approval, reason: Option<&str>) {
+    /// 向指定模块 `attempts` 追加一条签批审计记录（MDR-019 审计口径），返回写入的审计文本。
+    ///
+    /// `overridden` 非空时在标签里显式列出**被人签批覆盖的强制人工红线码**——审计要能回答
+    /// 「签批时门报了什么」，否则事后无法区分「明知红线仍放行」与「没看到判定」。
+    fn push_approval_audit(
+        &mut self,
+        canonical: &str,
+        approval: &Approval,
+        reason: Option<&str>,
+        overridden: &[String],
+    ) -> String {
         let module = self
             .state_file
             .modules
             .get_mut(canonical)
             .expect("canonical 已校验存在");
+        let overrides = if overridden.is_empty() {
+            String::new()
+        } else {
+            format!(" overrides=[{}]", overridden.join(","))
+        };
         let suffix = reason.map(|r| format!(" reason={r}")).unwrap_or_default();
+        let text = format!("{}{overrides}{suffix}", approval.audit_label());
         module.attempts.push(AttemptRecord {
             timestamp: Timestamp::new(chrono::Utc::now().to_rfc3339()),
-            result: format!("{}{suffix}", approval.audit_label()),
+            result: text.clone(),
+            retry_count: 0,
+            checkpoint: None,
+        });
+        text
+    }
+
+    /// 向指定模块 `attempts` 追加一条 batch 跳过审计（已归一 canonical，无失败路径）。
+    ///
+    /// 直接操作已归一的 key（不再经 `transition_module` 的 `let _ =` 丢弃返回值）——
+    /// 审计写入静默失败是最难查的一类缺陷，且未来给 `transition_inner` 加前置守护时
+    /// 那种写法会让审计无声消失（静默失败审查 MEDIUM-7）。
+    fn push_skip_audit(&mut self, canonical: &str, reason: &str) {
+        let module = self
+            .state_file
+            .modules
+            .get_mut(canonical)
+            .expect("canonical 已校验存在");
+        module.attempts.push(AttemptRecord {
+            timestamp: Timestamp::new(chrono::Utc::now().to_rfc3339()),
+            result: format!("batch_transition_done: {reason}"),
             retry_count: 0,
             checkpoint: None,
         });
@@ -1286,6 +1482,8 @@ impl MigrationStateMachine {
     /// - 其余逐模块复核策略（条件是模块级的，逐个判），过则升 `done` + 审计留痕。
     ///
     /// 逐模块独立处理，一个失败不影响其他；跳过原因记入 `attempts` 与返回值。
+    /// `succeeded`/`skipped` 回显**归一后的组代表 key**（与 `approve` / `review-gate` 的 `module`
+    /// 口径一致，编排器可直接拿去 `state get`）；`not_found` 无 canonical 可归一，回显原始入参。
     pub fn batch_transition_done(
         &mut self,
         modules: &[String],
@@ -1299,62 +1497,46 @@ impl MigrationStateMachine {
         let mut skipped: Vec<(String, String, String)> = Vec::new();
 
         for name in modules {
-            // 模块不存在：不写 attempts（无处可写），直接记 skipped。
-            if self.canonical_module_key(name).is_err() {
+            // 模块不存在：不写 attempts（无处可写），直接记 skipped（此时无 canonical 可回显）。
+            let Ok(canonical) = self.canonical_module_key(name) else {
                 skipped.push((
                     name.clone(),
                     "not_found".to_owned(),
                     "模块不在 migration-state.json".to_owned(),
                 ));
                 continue;
-            }
+            };
 
             let Some(approval) = approval else {
-                let detail = "未提供批准凭据：整组 check 通过不构成签批，须 --by-policy <id> \
-                              --attest <...> 或逐个 `state approve`（MDR-019）"
+                let detail = "未提供批准凭据：整组 check 通过不构成签批。或补 --by-policy <id> \
+                              --attest <...>（预签策略放行），或逐个走人签批——先 \
+                              `state transition --module <M> --substatus awaiting_final_review` 停门 \
+                              + 展示证据包，再 `state approve --module <M>`（MDR-019）"
                     .to_owned();
-                let _ = self.transition_module(
-                    name,
-                    None,
-                    None,
-                    Some("batch_transition_done: 无批准凭据，跳过"),
-                    false,
-                );
-                skipped.push((name.clone(), "approval_required".to_owned(), detail));
+                self.push_skip_audit(&canonical, "无批准凭据，跳过");
+                skipped.push((canonical.clone(), "approval_required".to_owned(), detail));
                 continue;
             };
 
             let substatus = self
-                .canonical_module_key(name)
-                .ok()
-                .and_then(|k| self.state_file.modules.get(&k))
+                .state_file
+                .modules
+                .get(&canonical)
                 .and_then(|m| m.substatus.clone());
 
             if substatus.as_deref() == Some(SUBSTATUS_AWAITING_FINAL_REVIEW) {
-                let _ = self.transition_module(
-                    name,
-                    None,
-                    None,
-                    Some("batch_transition_done: awaiting_final_review 待人签批，策略不放行"),
-                    false,
-                );
+                self.push_skip_audit(&canonical, "awaiting_final_review 待人签批，策略不放行");
                 skipped.push((
-                    name.clone(),
+                    canonical.clone(),
                     "awaiting_final_review".to_owned(),
                     "已判定需人签批，策略不得放行".to_owned(),
                 ));
                 continue;
             }
             if substatus.as_deref() != Some(SUBSTATUS_AGENT_DONE) {
-                let _ = self.transition_module(
-                    name,
-                    None,
-                    None,
-                    Some("batch_transition_done: substatus 非 agent_done，跳过"),
-                    false,
-                );
+                self.push_skip_audit(&canonical, "substatus 非 agent_done，跳过");
                 skipped.push((
-                    name.clone(),
+                    canonical.clone(),
                     "not_agent_done".to_owned(),
                     format!("substatus={}", substatus.as_deref().unwrap_or("null")),
                 ));
@@ -1363,22 +1545,18 @@ impl MigrationStateMachine {
 
             match self.approve_module(name, approval, None, review_gate_config, coverage_threshold)
             {
-                Ok(_) => succeeded.push(name.clone()),
+                Ok(outcome) => succeeded.push(outcome.module),
                 Err(e) => {
                     let detail = e.to_string();
-                    let code = if detail.contains("非 reviewing") {
-                        "transition_rejected"
-                    } else {
-                        "policy_rejected"
-                    };
-                    let _ = self.transition_module(
-                        name,
-                        None,
-                        None,
-                        Some(&format!("batch_transition_done: 跳过（{detail}）")),
-                        false,
-                    );
-                    skipped.push((name.clone(), code.to_owned(), detail));
+                    // 拒因码取自 `check_policy_approval` 的稳定机读前缀（`mandatory_manual:` /
+                    // `policy_not_enabled:` / `missing_attestations:` / …）；无前缀的（如
+                    // 「当前 X 非 reviewing」这类状态守卫）归 `transition_rejected`。
+                    // **不做中文文案匹配**——改一个字就会静默错分类。
+                    // 未识别的拒因给独立码而非复用 policy_rejected——未来给 approve_module 加
+                    // 新守卫（如 graduate 拒绝）时不会被误报成「策略被拒」（静默失败审查 MEDIUM-2）。
+                    let code = approval_error_code(&detail).unwrap_or("unexpected_rejection");
+                    self.push_skip_audit(&canonical, &format!("跳过（{detail}）"));
+                    skipped.push((canonical.clone(), code.to_owned(), detail));
                 }
             }
         }
@@ -1917,12 +2095,10 @@ mod tests {
 
     #[test]
     fn test_approve_module_clears_substatus_via_policy() {
-        // 升 Done 时清空 review 阶段残留 substatus（原 to_done_clears_substatus 的语义，
-        // 现经唯一入口 approve_module 的策略路径验证）。
+        // 升 Done 时清空允许策略放行的 review 阶段残留 substatus（这里使用 agent_done；
+        // 其他非 clean substatus 会命中强制人工红线，不能借策略清除）。
         let mut m = new_machine();
-        let mut module = approvable_batch_module();
-        module.substatus = Some("phase_b_optimization_in_progress".to_owned());
-        m.update_module("a", module);
+        m.update_module("a", approvable_batch_module());
         m.approve_module("a", &batch_policy(), None, &batch_gate_cfg(), 80)
             .unwrap();
         let module = &m.state_file().modules["a"];
@@ -1950,6 +2126,21 @@ mod tests {
         let module = &m.state_file().modules["a"];
         assert_eq!(module.status, ModuleStatus::Translating);
         assert_eq!(module.substatus.as_deref(), Some("retry_after_manual_fix"));
+    }
+
+    #[test]
+    fn test_cas_update_cannot_bypass_review_gate() {
+        // 门的封闭性：`state update --cas-version` 走 transition_module（无凭据），
+        // 故 reviewing → done 同样被拒——CAS 不是签批凭据的旁路。
+        let mut m = new_machine();
+        m.update_module("a", module_with_status(ModuleStatus::Reviewing));
+        let err = m
+            .update_with_cas("a", ModuleStatus::Done, 0, None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("译后签批门"), "{err}");
+        assert_eq!(m.state_file().modules["a"].status, ModuleStatus::Reviewing);
+        assert_eq!(m.metadata_version(), 0, "被拒时不得递增 CAS 版本");
     }
 
     #[test]
@@ -1997,10 +2188,10 @@ mod tests {
         assert_eq!(module.status, ModuleStatus::Done);
         assert!(module.substatus.is_none(), "done 清 substatus");
         assert!(
-            module
-                .attempts
-                .iter()
-                .any(|a| a.result == "approved:human reason=人工审毕"),
+            module.attempts.iter().any(|a| {
+                a.result.starts_with("approved:human overrides=[")
+                    && a.result.ends_with(" reason=人工审毕")
+            }),
             "{:?}",
             module.attempts
         );
@@ -2085,6 +2276,24 @@ mod tests {
             m.state_file().modules["b"].status,
             ModuleStatus::CompileFixing
         );
+    }
+
+    #[test]
+    fn test_reviewing_rework_invalidates_approval_evidence() {
+        // 返工即「已验结论作废」：打回后旧的通过率/覆盖率/Phase A 结论不得残留，
+        // 否则重译一轮后模块带着上一轮的证据直接够到策略放行条件。
+        for target in [ModuleStatus::Translating, ModuleStatus::CompileFixing] {
+            let mut m = new_machine();
+            m.update_module("a", approvable_batch_module());
+            m.transition_module("a", Some(target), None, Some("签批打回"), false)
+                .unwrap();
+            let module = &m.state_file().modules["a"];
+            assert!(module.substatus.is_none(), "{target}");
+            assert!(module.test_pass_rate.is_none(), "{target}");
+            assert!(module.coverage.is_none(), "{target}");
+            assert_eq!(module.known_differences, 0, "{target}");
+            assert!(module.phase_a_audit_passed.is_none(), "{target}");
+        }
     }
 
     #[test]
@@ -2533,7 +2742,7 @@ mod tests {
         });
         m.update_module("a", module);
 
-        m.record_metrics("a", Some("276/276"), Some(0))
+        m.record_metrics("a", Some("276/276"), Some(0), None, None)
             .expect("记录度量应成功");
         let recorded = &m.state_file().modules["a"];
         assert_eq!(recorded.test_pass_rate.as_deref(), Some("276/276"));
@@ -2552,7 +2761,7 @@ mod tests {
         module.known_differences = 2;
         m.update_module("a", module);
 
-        let outcome = m.record_metrics("a", None, Some(1)).unwrap();
+        let outcome = m.record_metrics("a", None, Some(1), None, None).unwrap();
         assert_eq!(outcome.module, "a");
         assert_eq!(outcome.test_pass_rate.as_deref(), Some("90%"));
         assert_eq!(outcome.known_differences, 1);
@@ -2571,7 +2780,7 @@ mod tests {
             module.test_pass_rate = Some("90%".to_string());
             m.update_module("a", module);
 
-            let result = m.record_metrics("a", Some(invalid), Some(3));
+            let result = m.record_metrics("a", Some(invalid), Some(3), None, None);
             assert!(
                 matches!(result, Err(MigrateError::Config(_))),
                 "{invalid} 应被拒绝"
@@ -2595,7 +2804,7 @@ mod tests {
             m.update_module("a", module_with_status(status));
             assert!(
                 matches!(
-                    m.record_metrics("a", Some("100%"), Some(0)),
+                    m.record_metrics("a", Some("100%"), Some(0), None, None),
                     Err(MigrateError::Config(_))
                 ),
                 "{status} 不应允许写度量"
@@ -2614,7 +2823,7 @@ mod tests {
             graduated.transition(state).unwrap();
         }
         assert!(matches!(
-            graduated.record_metrics("a", Some("100%"), Some(0)),
+            graduated.record_metrics("a", Some("100%"), Some(0), None, None),
             Err(MigrateError::Config(_))
         ));
     }
@@ -2627,7 +2836,7 @@ mod tests {
         m.update_module("group", group);
 
         let outcome = m
-            .record_metrics("file:helper.ts", Some("1.0"), None)
+            .record_metrics("file:helper.ts", Some("1.0"), None, None, None)
             .expect("非代表成员应归一到组代表");
         assert_eq!(outcome.module, "group");
         assert_eq!(
@@ -3333,19 +3542,21 @@ mod tests {
         m
     }
 
-    /// 测试辅助：`batch_mechanical` 的完整凭据（attestation 齐全）。
+    /// 测试辅助：`batch_mechanical` 的完整凭据（attestation 取该策略 required 全集）。
+    ///
+    /// 不硬编码清单——required = 策略特有项 ∪ CLI 判不了的强制项（`ORCHESTRATOR_MUST_CHECK`），
+    /// 随策略定义演进；从判定输出取可避免测试与实现各写一份清单而漂移。
     fn batch_policy() -> Approval {
+        let attestations =
+            crate::state::review_gate::judge(&approvable_batch_module(), &batch_gate_cfg(), 80)
+                .policies
+                .into_iter()
+                .find(|p| p.id == crate::state::review_gate::POLICY_BATCH_MECHANICAL)
+                .expect("内置策略必在评估结果中")
+                .required_attestations;
         Approval::Policy {
             id: crate::state::review_gate::POLICY_BATCH_MECHANICAL.to_owned(),
-            attestations: [
-                "todo_port_zero",
-                "exports_match",
-                "content_hash_unchanged",
-                "no_bug_replica",
-            ]
-            .iter()
-            .map(|s| (*s).to_owned())
-            .collect(),
+            attestations,
         }
     }
 
@@ -3444,7 +3655,7 @@ mod tests {
             .batch_transition_done(&modules, Some(&batch_policy()), &batch_gate_cfg(), 80)
             .unwrap();
         assert!(out.succeeded.is_empty());
-        assert_eq!(out.skipped[0].1, "policy_rejected");
+        assert_eq!(out.skipped[0].1, "mandatory_manual");
         assert!(
             out.skipped[0].2.contains("mandatory_manual"),
             "拒因应点明红线: {}",
@@ -3478,7 +3689,7 @@ mod tests {
 
         // a、c 成功，b 失败。
         assert_eq!(out.succeeded, vec!["a".to_owned(), "c".to_owned()]);
-        assert_eq!(out.skipped[0].1, "transition_rejected");
+        assert_eq!(out.skipped[0].1, "not_reviewing");
         assert_eq!(m.state_file().modules["a"].status, ModuleStatus::Done);
         assert_eq!(
             m.state_file().modules["b"].status,

@@ -129,7 +129,7 @@ git merge wt/{module_2}
 
 > **两道门别混淆**：SCC 组内部有「**契约门**」（步骤 2a 第一波，stub `cargo check`——锁住跨文件签名一致，在逐文件填空*之前*）；本步是「**实现门 / done 真门**」（全部模块合并后整组 `cargo check`/`test`——验真实实现 + 跨并发兄弟冲突）。契约门保证「签名自洽、能填」，实现门保证「填对了、跨模块无冲突」。
 
-> 实现门是**唯一 done 真门**：agent 级 worktree 自检通过只升 `agent_done`（substatus），orphan rule / E0119 coherence / feature 冲突 / 宏展开 / 命名空间撞名等**跨并发兄弟冲突只能整组编译才暴露**，故必须整组验证后才升最终 `done`。
+> 实现门是**唯一 done 真门**：agent 级 worktree 自检通过只升 `agent_done`（substatus），orphan rule / E0119 coherence / feature 冲突 / 宏展开 / 命名空间撞名等**跨并发兄弟冲突只能整组编译才暴露**，故必须整组验证通过才有资格送审。**通过之后仍要过译后签批门（`reviewing → done`，MDR-019）才升 `done`**——整组 check 是 done 的必要条件，不是签批凭据。
 
 全部分支合并后，在主 worktree 上执行整组 cargo check/test：
 
@@ -140,11 +140,11 @@ cargo test 2>&1
 
 **判定逻辑**：
 
-- **全部通过** → 先把本层**成功模块**推进到 `reviewing`，再批量升 `done`：
+- **全部通过** → 先把本层**成功模块**推进到 `reviewing`，再逐模块过译后签批门（`reviewing → done` 的唯一入口，MDR-019）：
   ```bash
   # ① 推进到 reviewing（并行路径必须补这两步）：SubAgent 只在 worktree 内译码 + 自检、
-  #    回传后编排器只标了 substatus=agent_done，status 仍停在 translating——batch-transition-done
-  #    要求 status=reviewing，故整组 check 过后编排器对每个模块补 testing→reviewing 两步转换
+  #    回传后编排器只标了 substatus=agent_done，status 仍停在 translating——签批门只在
+  #    status=reviewing 上放行，故整组 check 过后编排器对每个模块补 testing→reviewing 两步转换
   #    （agent_done substatus 在这两步保留，仅升 done 时清空）。SubAgent 不执行单模块流程的最终 done 步。
   #    质量度量已在 TranslationResult 回传时由主 worktree 集中 writer 写入（含失败样本）；
   #    机械 batch 的 metrics=None，明确跳过、不伪造通过率。
@@ -154,10 +154,33 @@ cargo test 2>&1
     rustmigrate state transition --module $M --to testing
     rustmigrate state transition --module $M --to reviewing
   done
-  # ② 一条命令批量升 done（非 agent_done / 非 reviewing / 不存在的模块自动跳过并降级 warning，一个失败不影响其他）：
-  rustmigrate state batch-transition-done --module <M1> --module <M2> ...
+
+  # ② 逐模块取签批门判定（纯查询，不改状态）。按 data.decision 分流，不要跳过这一步直接批量升 done。
+  for M in <同上>; do
+    rustmigrate state review-gate --module $M
+  done
   ```
-  > **⚠️ 译后签批门护栏**：`batch-transition-done` 走 `reviewing → done` 边，而译后签批门（尚未实现）恰坐落这条边本身。签批门落地后，命中强制人工清单 / substatus 为 `awaiting_final_review` 的模块**不得**进入本命令，须停 `reviewing` 等人签批；本自动路径仅用于「合并 + 整组 check 过 → done」。
+
+  **② 的分流**（判定语义、红线清单、证据包字段见 [run.md](./run.md) 第 11 步，此处只讲并行路径的批量处置）：
+
+  | decision | 并行路径处置 |
+  |---|---|
+  | `policy_eligible` | 先逐项核对该模块的 `data.orchestrator_must_check`（CLI 判不了、只能由你判的强制项）。全成立 → 归入「同策略批量放行」清单；任一不成立 → 按下一行停门 |
+  | `mandatory_manual` / `manual_required` | `rustmigrate state transition --module $M --substatus awaiting_final_review` 停门，归入「待签批」清单。**不得进入批量放行命令**（进了也会被跳过，`skipped[].code=awaiting_final_review`） |
+
+  ```bash
+  # ③ 批量放行：仅对「同一策略、且自查全过」的模块一次调用。attest 全集取该模块
+  #    review-gate 输出里该策略的 required_attestations（缺一项即整模块被拒，不会静默放行）。
+  rustmigrate state batch-transition-done --module <M1> --module <M2> \
+    --by-policy <策略 id> --attest <项1> --attest <项2> ...
+  ```
+  - **不给 `--by-policy` 时一个都不升 done**（整组 check 通过不构成签批凭据），全部落 `skipped[].code=approval_required` 并降级 warning。
+  - 逐条读 `data.skipped[]`：`code` 区分处置——`awaiting_final_review`（等人签批，正常）/ `not_agent_done` / `not_reviewing` / `mandatory_manual` / `missing_attestations` / `policy_not_enabled` / `not_found`。不要把它们混成一句「部分失败」。
+  - 策略须已在 `.rustmigrate.toml` 的 `[review_gate].auto_approve_policies` 预签（默认空 = 全停门等人签批），否则整批被拒。
+
+  **④ 收尾**：待签批清单不阻塞本层其他模块，也不阻塞下一层的**无依赖**模块（依赖待签批模块的下游按 `blocked_by` 机制自动阻塞——待签批模块非 `done`，层间依赖门禁不放行）。
+  - **headless 下**：不逐个等人，收尾时汇总一句「N 个模块停在译后签批门待签批：<清单>」，并说明各自的 `mandatory_reasons` 码；这些模块保持 `reviewing + awaiting_final_review`，续跑时由 `state resume` 的 `data.awaiting_approval` 列出，**不重跑验证、不 `recover retry`**。
+  - **非 headless**：逐个按 run.md 第 11 步展示证据包 + 等签批（批准 `state approve --module $M --reason "<审阅结论>"`；打回 `state transition --module $M --to translating --reason "签批打回: <反馈>"`，该转换作废上一轮证据，须重测重停门）。
 
 - **存在失败** → 进入 compile_fixing 子流程：编排器解析 rustc 错误，按下表归因后修复。
 

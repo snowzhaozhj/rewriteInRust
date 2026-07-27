@@ -277,6 +277,8 @@ fn classify_py(root: Node, source: &str) -> FileClassification {
     FileClassification {
         file_kind,
         danger: danger.into_iter().collect(),
+        // 走到这里说明解析成功且无语法错误 → 危险扫描结果可信（MDR-019）。
+        classified: true,
     }
 }
 

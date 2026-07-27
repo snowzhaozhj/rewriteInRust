@@ -222,6 +222,8 @@ impl LanguageAdapter for GoAdapter {
         FileClassification {
             file_kind: FileKind::Normal,
             danger: signals.danger.into_iter().collect(),
+            // 解析成功且无语法错误 → 危险扫描结果可信（MDR-019）。
+            classified: true,
         }
     }
 

@@ -739,6 +739,15 @@ fn inject_module_with_substatus(name: &str, status: &str, substatus: &str) {
     std::fs::write(&path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
 }
 
+/// 改写某模块的 `danger_provenance`（MDR-019 测试辅助：模拟分类器已跑且完整）。
+fn set_module_provenance(name: &str, provenance: &str) {
+    let path = std::path::Path::new(".rust-migration").join("migration-state.json");
+    let mut state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    state["modules"][name]["danger_provenance"] = serde_json::json!(provenance);
+    std::fs::write(&path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+}
+
 /// 注入一个「策略可放行」的并行路径模块（MDR-019 测试辅助）：
 /// reviewing + agent_done + 全机械合批组 + 分类可信。
 fn inject_approvable_batch_module(name: &str, status: &str, substatus: &str) {
@@ -776,17 +785,37 @@ fn enable_review_gate_policies(policies: &[&str]) {
     std::fs::write(".rustmigrate.toml", cfg).unwrap();
 }
 
-/// `batch_mechanical` 策略要求的全部 attestation 参数（展开成 CLI 参数序列）。
-const BATCH_ATTEST_ARGS: &[&str] = &[
-    "--attest",
-    "todo_port_zero",
-    "--attest",
-    "exports_match",
-    "--attest",
-    "content_hash_unchanged",
-    "--attest",
-    "no_bug_replica",
-];
+/// 从 `state review-gate` 输出取某策略的 `required_attestations`，展开成 `--attest <k>` 参数序列。
+///
+/// **不硬编码清单**：required = 策略特有项 ∪ `ORCHESTRATOR_MUST_CHECK`（CLI 判不了的强制项也要
+/// 逐项声明），项数会随策略定义演进。从输出动态取还顺带钉住一条契约——**review-gate 报的
+/// required 就是 approve 实际要求的**，两边不一致会立刻红（否则编排器照报告拼命令必被拒）。
+fn attest_args_from_gate(module: &str, policy: &str) -> Vec<String> {
+    let (code, json) = run(&["state", "review-gate", "--module", module]);
+    assert_eq!(code, 0, "review-gate 应成功: {json}");
+    let required = json["data"]["policies"]
+        .as_array()
+        .expect("policies 应为数组")
+        .iter()
+        .find(|p| p["id"] == policy)
+        .unwrap_or_else(|| panic!("策略 {policy} 应在评估结果中: {json}"))["required_attestations"]
+        .as_array()
+        .expect("required_attestations 应为数组")
+        .clone();
+    assert!(
+        !required.is_empty(),
+        "required_attestations 不应为空: {json}"
+    );
+    required
+        .iter()
+        .flat_map(|a| {
+            [
+                "--attest".to_owned(),
+                a.as_str().expect("attestation 应为字符串").to_owned(),
+            ]
+        })
+        .collect()
+}
 
 #[test]
 fn e2e_batch_transition_done_all_success() {
@@ -798,6 +827,7 @@ fn e2e_batch_transition_done_all_success() {
         inject_approvable_batch_module("a", "reviewing", "agent_done");
         inject_approvable_batch_module("b", "reviewing", "agent_done");
 
+        let attest = attest_args_from_gate("a", "batch_mechanical");
         let mut args = vec![
             "state",
             "batch-transition-done",
@@ -808,14 +838,17 @@ fn e2e_batch_transition_done_all_success() {
             "--by-policy",
             "batch_mechanical",
         ];
-        args.extend_from_slice(BATCH_ATTEST_ARGS);
+        args.extend(attest.iter().map(String::as_str));
         let (code, json) = run(&args);
         assert_eq!(code, 0, "策略齐备应成功: {json}");
         assert_eq!(json["status"], "ok", "{json}");
         let succeeded = json["data"]["succeeded"].as_array().unwrap();
         assert_eq!(succeeded.len(), 2, "两个模块都应升 done: {json}");
         assert!(json["data"]["skipped"].as_array().unwrap().is_empty());
-        assert_eq!(json["data"]["approval"], "policy:batch_mechanical");
+        assert_eq!(
+            json["data"]["requested_approval"],
+            "policy:batch_mechanical"
+        );
 
         // 落盘校验：均为终态 done，且审计留策略放行痕迹（不伪装「无需审查」）。
         for name in ["a", "b"] {
@@ -863,6 +896,7 @@ fn e2e_batch_transition_done_rejects_awaiting_final_review() {
         inject_approvable_batch_module("waiting", "reviewing", "awaiting_final_review");
         inject_approvable_batch_module("ok", "reviewing", "agent_done");
 
+        let attest = attest_args_from_gate("ok", "batch_mechanical");
         let mut args = vec![
             "state",
             "batch-transition-done",
@@ -873,7 +907,7 @@ fn e2e_batch_transition_done_rejects_awaiting_final_review() {
             "--by-policy",
             "batch_mechanical",
         ];
-        args.extend_from_slice(BATCH_ATTEST_ARGS);
+        args.extend(attest.iter().map(String::as_str));
         let (code, json) = run(&args);
         assert_eq!(code, 0);
         assert_eq!(json["status"], "warning");
@@ -900,6 +934,7 @@ fn e2e_batch_transition_done_rejects_missing_attestation_and_unsigned_policy() {
         // 故意不预签策略。
         inject_approvable_batch_module("a", "reviewing", "agent_done");
 
+        let attest = attest_args_from_gate("a", "batch_mechanical");
         let mut args = vec![
             "state",
             "batch-transition-done",
@@ -908,10 +943,10 @@ fn e2e_batch_transition_done_rejects_missing_attestation_and_unsigned_policy() {
             "--by-policy",
             "batch_mechanical",
         ];
-        args.extend_from_slice(BATCH_ATTEST_ARGS);
+        args.extend(attest.iter().map(String::as_str));
         let (_, json) = run(&args);
         assert!(json["data"]["succeeded"].as_array().unwrap().is_empty());
-        assert_eq!(json["data"]["skipped"][0]["code"], "policy_rejected");
+        assert_eq!(json["data"]["skipped"][0]["code"], "policy_not_enabled");
         assert!(
             json["data"]["skipped"][0]["detail"]
                 .as_str()
@@ -957,6 +992,7 @@ fn e2e_batch_transition_done_skips_non_agent_done_and_warns() {
         // b：reviewing 但 substatus 非 agent_done（未过 agent 自检），应被跳过。
         inject_approvable_batch_module("b", "reviewing", "other");
 
+        let attest = attest_args_from_gate("a", "batch_mechanical");
         let mut args = vec![
             "state",
             "batch-transition-done",
@@ -967,7 +1003,7 @@ fn e2e_batch_transition_done_skips_non_agent_done_and_warns() {
             "--by-policy",
             "batch_mechanical",
         ];
-        args.extend_from_slice(BATCH_ATTEST_ARGS);
+        args.extend(attest.iter().map(String::as_str));
         let (code, json) = run(&args);
         assert_eq!(code, 0, "部分成功仍退出 0: {json}");
         assert_eq!(
@@ -997,6 +1033,7 @@ fn e2e_batch_transition_done_skips_wrong_status_and_missing() {
         // b：translating + agent_done → 非 reviewing，应跳过。
         inject_approvable_batch_module("b", "translating", "agent_done");
 
+        let attest = attest_args_from_gate("a", "batch_mechanical");
         let mut args = vec![
             "state",
             "batch-transition-done",
@@ -1009,7 +1046,7 @@ fn e2e_batch_transition_done_skips_wrong_status_and_missing() {
             "--by-policy",
             "batch_mechanical",
         ];
-        args.extend_from_slice(BATCH_ATTEST_ARGS);
+        args.extend(attest.iter().map(String::as_str));
         let (code, json) = run(&args);
         assert_eq!(code, 0);
         assert_eq!(json["status"], "warning");
@@ -1024,7 +1061,7 @@ fn e2e_batch_transition_done_skips_wrong_status_and_missing() {
             .iter()
             .map(|s| (s["module"].as_str().unwrap(), s["code"].as_str().unwrap()))
             .collect();
-        assert_eq!(by_module.get("b"), Some(&"transition_rejected"), "{json}");
+        assert_eq!(by_module.get("b"), Some(&"not_reviewing"), "{json}");
         assert_eq!(by_module.get("ghost"), Some(&"not_found"), "{json}");
         assert_eq!(json["data"]["duplicates"], 0);
     });
@@ -1039,6 +1076,7 @@ fn e2e_batch_transition_done_dedups_repeated_module() {
         enable_review_gate_policies(&["batch_mechanical"]);
         inject_approvable_batch_module("a", "reviewing", "agent_done");
 
+        let attest = attest_args_from_gate("a", "batch_mechanical");
         let mut args = vec![
             "state",
             "batch-transition-done",
@@ -1049,7 +1087,7 @@ fn e2e_batch_transition_done_dedups_repeated_module() {
             "--by-policy",
             "batch_mechanical",
         ];
-        args.extend_from_slice(BATCH_ATTEST_ARGS);
+        args.extend(attest.iter().map(String::as_str));
         let (code, json) = run(&args);
         assert_eq!(code, 0);
         // 去重后 requested 只剩一个 a，succeeded 一个，无 skipped。
@@ -1207,6 +1245,7 @@ fn e2e_review_gate_policy_eligible_and_approve_by_policy() {
             .contains("missing_attestations"));
 
         // 齐全 → 放行 + 审计含策略 id 与 attestation。
+        let attest = attest_args_from_gate("a", "batch_mechanical");
         let mut args = vec![
             "state",
             "approve",
@@ -1215,7 +1254,7 @@ fn e2e_review_gate_policy_eligible_and_approve_by_policy() {
             "--by-policy",
             "batch_mechanical",
         ];
-        args.extend_from_slice(BATCH_ATTEST_ARGS);
+        args.extend(attest.iter().map(String::as_str));
         let (code, json) = run(&args);
         assert_eq!(code, 0, "{json}");
         assert_eq!(json["data"]["approval"], "policy:batch_mechanical");
@@ -1284,6 +1323,24 @@ fn e2e_review_gate_lists_existing_evidence_files() {
         );
         assert!(kinds.contains(&"phase_a_attempt"), "{json}");
         assert_eq!(evidence.len(), 3, "不得混入他模块产物: {json}");
+        assert_eq!(json["data"]["module"], "file:src/utils.ts", "回显规范键");
+
+        // 组的非代表成员键也须归一到组代表——编排器可能按成员文件发起判定，
+        // 不归一会得到「模块不存在」而不是该组的门判定。
+        let path = std::path::Path::new(".rust-migration").join("migration-state.json");
+        let mut state: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        state["modules"]["file:src/head.ts"] = serde_json::json!({
+            "status": "reviewing",
+            "substatus": "agent_done",
+            "composite_kind": "batch",
+            "member_files": ["file:src/head.ts", "file:src/tail.ts"],
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+
+        let (code, j2) = run(&["state", "review-gate", "--module", "file:src/tail.ts"]);
+        assert_eq!(code, 0, "{j2}");
+        assert_eq!(j2["data"]["module"], "file:src/head.ts", "{j2}");
     });
 }
 
@@ -1326,6 +1383,197 @@ fn e2e_populate_modules_records_danger_provenance() {
                 .all(|m| m["danger_provenance"] == "unclassified"),
             "--no-decompose 须落 unclassified: {json}"
         );
+    });
+}
+
+#[test]
+fn e2e_populate_modules_partially_classified_on_parse_failure() {
+    // MDR-019：语法错误文件分类降级（conservative）→ 整组 partially_classified，
+    // 不得冒充 classified 让策略放行（`danger` 可能漏项）。
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        std::fs::create_dir_all("src").unwrap();
+        std::fs::write("src/ok.ts", "export const A = 1;\n").unwrap();
+        std::fs::write("src/broken.ts", "export const = = ;\nfunction (\n").unwrap();
+        let (code, _) = run(&["graph", "build", "--root", "."]);
+        assert_eq!(code, 0);
+
+        let (code, json) = run(&["state", "populate-modules", "--root", "."]);
+        assert_eq!(code, 0, "{json}");
+        let modules = json["data"]["modules"].as_array().unwrap();
+        let broken = modules
+            .iter()
+            .find(|m| m["id"].as_str().unwrap_or("").contains("broken"))
+            .unwrap_or_else(|| panic!("应含 broken 模块: {json}"));
+        assert_eq!(
+            broken["danger_provenance"], "partially_classified",
+            "分类降级须落 partially_classified: {json}"
+        );
+
+        // 该模块推到 reviewing 后，红线命中 provenance 不可信 → 任何策略都放行不了。
+        let key = broken["id"].as_str().unwrap().to_owned();
+        let key = key.as_str();
+        let (code, _) = run(&[
+            "state",
+            "transition",
+            "--module",
+            key,
+            "--to",
+            "translating",
+        ]);
+        assert_eq!(code, 0);
+        for to in ["testing", "reviewing"] {
+            let (code, _) = run(&["state", "transition", "--module", key, "--to", to]);
+            assert_eq!(code, 0);
+        }
+        enable_review_gate_policies(&["headless_default"]);
+        let (_, json) = run(&["state", "review-gate", "--module", key]);
+        assert_eq!(json["data"]["decision"], "mandatory_manual", "{json}");
+        assert!(
+            json["data"]["mandatory_reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["code"] == "danger_provenance_untrusted"),
+            "{json}"
+        );
+    });
+}
+
+#[test]
+fn e2e_review_gate_coverage_threshold_comes_from_config() {
+    // 覆盖率红线的阈值取自 `[testing].coverage_threshold`（非硬编码 80）：
+    // 阈值 95 + coverage 90 → 红线；把 coverage 提到 95 → 放行。
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        enable_review_gate_policies(&["headless_default"]);
+        let cfg = std::fs::read_to_string(".rustmigrate.toml").unwrap();
+        assert!(
+            cfg.contains("coverage_threshold = 80"),
+            "init 默认阈值应为 80:\n{cfg}"
+        );
+        std::fs::write(
+            ".rustmigrate.toml",
+            cfg.replace("coverage_threshold = 80", "coverage_threshold = 95"),
+        )
+        .unwrap();
+
+        inject_module_with_substatus("a", "reviewing", "agent_done");
+        let (code, _) = run(&[
+            "state",
+            "record-metrics",
+            "--module",
+            "a",
+            "--test-pass-rate",
+            "100%",
+            "--coverage",
+            "90",
+            "--phase-a-audit-passed",
+            "true",
+        ]);
+        assert_eq!(code, 0);
+        set_module_provenance("a", "classified");
+
+        let (_, json) = run(&["state", "review-gate", "--module", "a"]);
+        assert_eq!(json["data"]["coverage_threshold"], 95, "{json}");
+        assert_eq!(json["data"]["decision"], "mandatory_manual", "{json}");
+        assert!(
+            json["data"]["mandatory_reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["code"] == "coverage_below_threshold"),
+            "{json}"
+        );
+
+        // 覆盖率补到阈值线上 → 红线消失，策略可放行。
+        let (code, _) = run(&[
+            "state",
+            "record-metrics",
+            "--module",
+            "a",
+            "--coverage",
+            "95",
+        ]);
+        assert_eq!(code, 0);
+        let (_, json) = run(&["state", "review-gate", "--module", "a"]);
+        assert_eq!(json["data"]["decision"], "policy_eligible", "{json}");
+    });
+}
+
+#[test]
+fn e2e_review_gate_is_pure_query() {
+    // `review-gate` 是纯查询：跑两次 state 文件字节不变（不写审计、不改 substatus）。
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        inject_module_with_substatus("a", "reviewing", "agent_done");
+        let path = std::path::Path::new(".rust-migration").join("migration-state.json");
+        let before = std::fs::read(&path).unwrap();
+        for _ in 0..2 {
+            let (code, _) = run(&["state", "review-gate", "--module", "a"]);
+            assert_eq!(code, 0);
+        }
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "review-gate 不得写盘"
+        );
+    });
+}
+
+#[test]
+fn e2e_state_approve_rejects_attest_without_policy_and_ghost_module() {
+    // `--attest` 只对 `--by-policy` 有意义：单给 attest 是命令用法错误，硬拒而非静默忽略
+    //（静默会让编排器以为「已逐项声明」而实际走了人签批路径）。
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        inject_module_with_substatus("a", "reviewing", "awaiting_final_review");
+
+        let (code, json) = run(&[
+            "state",
+            "approve",
+            "--module",
+            "a",
+            "--attest",
+            "todo_port_zero",
+            "--reason",
+            "人工审毕",
+        ]);
+        assert_eq!(code, 1, "attest 无 policy 须拒: {json}");
+        assert!(serde_json::to_string(&json["data"])
+            .unwrap()
+            .contains("attest_without_policy"));
+        let (_, ja) = run(&["state", "get", "a"]);
+        assert_eq!(ja["data"]["status"], "reviewing", "被拒后状态不变");
+
+        // 幽灵模块：approve / review-gate 都须报错而非静默成功。
+        for args in [
+            vec!["state", "approve", "--module", "ghost", "--reason", "x"],
+            vec!["state", "review-gate", "--module", "ghost"],
+        ] {
+            let (code, json) = run(&args);
+            assert_eq!(code, 1, "{args:?} 应报错: {json}");
+            assert_eq!(json["status"], "error", "{json}");
+        }
+    });
+}
+
+#[test]
+fn e2e_review_gate_fails_closed_on_broken_config() {
+    // 配置损坏时不得静默回退默认（那会让「阈值/预签清单」变成未知量）——须报错停下。
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        inject_module_with_substatus("a", "reviewing", "agent_done");
+        std::fs::write(".rustmigrate.toml", "[review_gate\nauto_approve = ").unwrap();
+
+        let (code, json) = run(&["state", "review-gate", "--module", "a"]);
+        assert_eq!(code, 1, "config 损坏须 fail-closed: {json}");
+        assert_eq!(json["status"], "error", "{json}");
     });
 }
 
@@ -1457,6 +1705,8 @@ fn smoke_state_resume() {
             "pau":{ "status": "paused" },
             "p":  { "status": "pending" },
             "b":  { "status": "blocked" },
+            // 已停在译后签批门的模块：既不是「中断待恢复」也不是 paused 决策点。
+            "sign":{ "status": "reviewing", "substatus": "awaiting_final_review" },
         });
         std::fs::write(&path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
 
@@ -1492,6 +1742,11 @@ fn smoke_state_resume() {
 
         // paused 单列 awaiting_decision，不进 interrupted（续跑不复活）。
         assert_eq!(json["data"]["awaiting_decision"][0], "pau");
+        // MDR-019：停门待签批模块单列 awaiting_approval——不得进 interrupted，
+        // 否则续跑会 `recover retry` 清掉刚落的通过率/覆盖率证据。
+        assert_eq!(json["data"]["awaiting_approval"][0], "sign", "{json}");
+        assert_eq!(json["data"]["progress"]["awaiting_approval"], 1, "{json}");
+        assert!(!interrupted.iter().any(|m| m["module"] == "sign"), "{json}");
         // pending → next；blocked → blocked。
         assert_eq!(json["data"]["next"][0], "p");
         assert_eq!(json["data"]["blocked"][0], "b");
@@ -1511,7 +1766,7 @@ fn smoke_state_resume() {
         assert_eq!(p["awaiting_decision"], 1);
         assert_eq!(p["pending"], 1);
         assert_eq!(p["blocked"], 1);
-        assert_eq!(p["total"], 5);
+        assert_eq!(p["total"], 6, "六个桶各 1，含 awaiting_approval");
     });
 }
 

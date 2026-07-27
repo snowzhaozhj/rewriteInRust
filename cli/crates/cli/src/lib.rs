@@ -276,7 +276,11 @@ pub enum StateCommands {
         /// 模块 key（组代表 NodeId，如 `file:emitter.ts`）。
         module: String,
     },
-    /// 记录 verifier 产出的模块质量度量（M4-QUAL-05）。
+    /// 记录 verifier 产出的模块质量度量（M4-QUAL-05；MDR-019 扩 coverage / 结构门结果）。
+    ///
+    /// 四项均为可选、给了才覆盖（差异测试重跑可只更新单项）。`--coverage` 与
+    /// `--phase-a-audit-passed` 是译后签批门的判定依据（覆盖率红线 / `headless_default` 策略），
+    /// 补齐后 run.md 步骤 8「记 phase_a_audit_passed」才有命令可执行。
     RecordMetrics {
         /// 模块 key；composite 非代表成员会归一到组代表。
         #[arg(long)]
@@ -287,6 +291,12 @@ pub enum StateCommands {
         /// 已知行为差异数量。
         #[arg(long)]
         known_differences: Option<u32>,
+        /// 测试覆盖率百分比（0-100）。签批门红线：低于 `[testing].coverage_threshold` 强制人工。
+        #[arg(long)]
+        coverage: Option<u32>,
+        /// Phase A 结构门（`stats compare` 1:1 校验）是否通过。
+        #[arg(long)]
+        phase_a_audit_passed: Option<bool>,
     },
     /// 追加一条 SubAgent 调用记录到顶层 `subagent_calls`（诊断卡死 / 统计重试，append-only）。
     ///
@@ -651,9 +661,17 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
                 module,
                 test_pass_rate,
                 known_differences,
+                coverage,
+                phase_a_audit_passed,
             } => emit(
                 writer,
-                cmd_state_record_metrics(module, test_pass_rate.as_deref(), *known_differences),
+                cmd_state_record_metrics(
+                    module,
+                    test_pass_rate.as_deref(),
+                    *known_differences,
+                    *coverage,
+                    *phase_a_audit_passed,
+                ),
             ),
             StateCommands::RecordSubagentCall {
                 step_index,
@@ -2264,14 +2282,17 @@ fn cmd_state_resume() -> CmdResult {
                 "pending": progress.pending,
                 "blocked": progress.blocked,
                 "awaiting_decision": progress.awaiting_decision,
+                "awaiting_approval": progress.awaiting_approval,
                 "total": progress.total,
             },
             "interrupted": interrupted,
             "awaiting_decision": plan.awaiting_decision,
+            "awaiting_approval": plan.awaiting_approval,
             "next": plan.next,
             "blocked": plan.blocked,
             "advice": "对 interrupted 逐个执行 recover_command 保证幂等重入；已完成/降级模块不重跑；\
-                       next 模块用 `state deps <M>` 判依赖就绪后推进；awaiting_decision（paused）待人类/降级决策，续跑不复活",
+                       next 模块用 `state deps <M>` 判依赖就绪后推进；awaiting_decision（paused）待人类/降级决策，续跑不复活；\
+                       awaiting_approval（reviewing + awaiting_final_review）已停在译后签批门，只等 `state approve`，不重跑验证也不 recover",
         }),
         warnings,
     ))
@@ -2492,10 +2513,14 @@ fn cmd_state_populate_modules(
         let mut file_kinds: HashMap<String, FileKind> = HashMap::new();
         // 每文件危险信号类别；组并集在装配 unit 时计算（MDR-013）。
         let mut danger_map: HashMap<String, Vec<DangerCategory>> = HashMap::new();
-        // 读失败成员集合（MDR-019）：这些文件未跑分类器，所在组的 danger 结果不完整。
+        // 分类不可信的成员集合（MDR-019）：读失败**或**解析降级（语法错误 / grammar 版本不符）
+        // 的文件都没真正扫过危险信号，所在组的 danger 结果不完整。
         let mut failed_files: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut read_failures = 0usize;
         let mut first_failure: Option<String> = None;
+        // 解析降级计数（与读失败分列：读失败是路径问题，解析降级是源码/grammar 问题）。
+        let mut unclassified_files = 0usize;
+        let mut first_unclassified: Option<String> = None;
         for id in &file_nodes {
             let rel = id.file_path().unwrap_or_default();
             let self_tokens = match std::fs::read_to_string(source_root.join(rel)) {
@@ -2504,6 +2529,15 @@ fn cmd_state_populate_modules(
                     file_kinds.insert(id.to_string(), cls.file_kind);
                     if !cls.danger.is_empty() {
                         danger_map.insert(id.to_string(), cls.danger);
+                    }
+                    // 分类降级（解析失败 / 语言未实现）：空 danger 是「没扫」而非「扫过没发现」，
+                    // 记入 failed_files 使所在组落 PartiallyClassified（MDR-019 fail-closed）。
+                    if !cls.classified {
+                        failed_files.insert(id.to_string());
+                        unclassified_files += 1;
+                        if first_unclassified.is_none() {
+                            first_unclassified = Some(rel.to_string());
+                        }
                     }
                     src.len().div_ceil(4)
                 }
@@ -2545,6 +2579,19 @@ fn cmd_state_populate_modules(
             ));
         }
 
+        if unclassified_files > 0 {
+            let sample = first_unclassified
+                .as_deref()
+                .map(|p| format!("，如 `{p}`"))
+                .unwrap_or_default();
+            warnings.push(format!(
+                "{unclassified_files}/{} 个源文件的危险信号扫描降级（语法解析失败或该语言未实现分类{sample}）：\
+                 所在模块的 `danger_provenance` 落 `partially_classified`，译后签批门将拒绝自动放行、\
+                 要求人签批（空 danger 在此不代表安全）",
+                file_nodes.len()
+            ));
+        }
+
         let plan = plan_decomposition(&graph, &sequence, &self_sizes, &footprints, budget);
         let snapshot = plan.canonical_hash();
 
@@ -2564,8 +2611,8 @@ fn cmd_state_populate_modules(
             out
         };
 
-        // 组 provenance（MDR-019）：任一成员读失败 → 整组分类不完整（`danger` 可能漏项）。
-        // 本路径确实跑过分类器，故不会是 Unclassified。
+        // 组 provenance（MDR-019）：任一成员**读失败或分类降级** → 整组分类不完整
+        // （`danger` 可能漏项）。本路径确实调过分类器，故不会是 Unclassified。
         let group_provenance = |members: &[String]| -> DangerProvenance {
             if members.iter().any(|m| failed_files.contains(m)) {
                 DangerProvenance::PartiallyClassified
@@ -2960,7 +3007,8 @@ fn cmd_state_batch_transition_done(
 ) -> CmdResult {
     let path = state_path();
     let (mut machine, mut warnings) = load_state_with_warnings(&path)?;
-    let cfg = load_config_or_default(&mut warnings);
+    let cfg = load_config_for_gate()?;
+    warn_unknown_review_gate_policies(&cfg, &mut warnings);
 
     // 按首次出现序去重（保序，稳定输出）。
     let mut seen = std::collections::HashSet::new();
@@ -3018,7 +3066,8 @@ fn cmd_state_batch_transition_done(
     Ok((
         json!({
             "requested": deduped,
-            "approval": by_policy.map(|id| format!("policy:{id}")),
+            // 回显**请求的**凭据（非结果）：全 skip 时 succeeded 为空即可判断没放行任何模块。
+            "requested_approval": by_policy.map(|id| format!("policy:{id}")),
             "succeeded": outcome.succeeded,
             "skipped": skipped,
             "duplicates": duplicate_count,
@@ -3039,7 +3088,7 @@ fn cmd_state_review_gate(module: &str) -> CmdResult {
 
     let path = state_path();
     let (machine, mut warnings) = load_state_with_warnings(&path)?;
-    let cfg = load_config_or_default(&mut warnings);
+    let cfg = load_config_for_gate()?;
 
     let canonical = machine.canonical_module_key(module)?;
     let state = machine
@@ -3048,26 +3097,28 @@ fn cmd_state_review_gate(module: &str) -> CmdResult {
         .get(&canonical)
         .expect("canonical 已校验存在");
 
-    let (_, unknown_policies) =
-        review_gate::evaluate_policies(state, &cfg.review_gate, cfg.testing.coverage_threshold);
-    if !unknown_policies.is_empty() {
-        // 预签清单里的拼写错误会静默失效（策略永不命中）→ 显式告警。
-        warnings.push(format!(
-            "[review_gate].auto_approve_policies 含未知策略 id（拼写错误？将永不生效）：{}",
-            unknown_policies.join(", ")
-        ));
-    }
+    warn_unknown_review_gate_policies(&cfg, &mut warnings);
 
     let judgement = review_gate::judge(state, &cfg.review_gate, cfg.testing.coverage_threshold);
     let migration_dir = path
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    let evidence = review_gate::collect_evidence(
+    let (evidence, scan_warnings) = review_gate::collect_evidence(
         &migration_dir,
         &canonical,
         state.member_files.as_deref().unwrap_or(&[]),
     );
+    // 证据目录读不到 ≠ 没有证据：扫描诊断必须透出，否则用户会对着空证据包签批。
+    warnings.extend(scan_warnings);
+    // 同名末段的其他模块会共用产物前缀（产物文件名不含目录）→ 证据可能串包，提示人工核对。
+    let ambiguous = ambiguous_evidence_siblings(&machine, &canonical);
+    if !ambiguous.is_empty() {
+        warnings.push(format!(
+            "以下模块与本模块的显示名末段相同，产物命名无法区分、证据包可能串包，请人工核对归属：{}",
+            ambiguous.join(", ")
+        ));
+    }
 
     if state.status != ModuleStatus::Reviewing {
         warnings.push(format!(
@@ -3082,6 +3133,8 @@ fn cmd_state_review_gate(module: &str) -> CmdResult {
         mandatory_reasons: judgement.mandatory_reasons,
         policies: judgement.policies,
         state_facts: review_gate::StateFacts::from_module(state),
+        coverage_threshold: cfg.testing.coverage_threshold,
+        enabled_policies: cfg.review_gate.auto_approve_policies.clone(),
         evidence,
         evidence_commands: review_gate::evidence_commands(&canonical),
         orchestrator_must_check: review_gate::ORCHESTRATOR_MUST_CHECK
@@ -3090,6 +3143,57 @@ fn cmd_state_review_gate(module: &str) -> CmdResult {
             .collect(),
     };
     Ok((serde_json::to_value(report)?, warnings))
+}
+
+/// 预签清单里的未知策略 id 会静默失效（策略永不命中）→ 在**所有**读该配置的命令上告警。
+///
+/// 三个命令（`review-gate` / `approve` / `batch-transition-done`）共用：拼写错误只在其中一个
+/// 命令上报会让另外两个静默按「更严」执行，用户排查不到根因（静默失败审查 LOW-2）。
+fn warn_unknown_review_gate_policies(
+    cfg: &rustmigrate_core::types::config::MigrateConfig,
+    warnings: &mut Vec<String>,
+) {
+    use rustmigrate_core::state::review_gate;
+    let known = [
+        review_gate::POLICY_BATCH_MECHANICAL,
+        review_gate::POLICY_HEADLESS_DEFAULT,
+    ];
+    let unknown: Vec<&str> = cfg
+        .review_gate
+        .auto_approve_policies
+        .iter()
+        .map(String::as_str)
+        .filter(|id| !known.contains(id))
+        .collect();
+    if !unknown.is_empty() {
+        warnings.push(format!(
+            "[review_gate].auto_approve_policies 含未知策略 id（拼写错误？将永不生效，内置策略：{}）：{}",
+            known.join(" / "),
+            unknown.join(", ")
+        ));
+    }
+}
+
+/// 找出与 `canonical` 的显示名**末段相同**的其他模块——它们的 `intermediate/` 产物与本模块
+/// 同名前缀、无法区分（产物文件名不含目录），故证据包可能串包（异构审查 I6 / 测试审查 nit12）。
+fn ambiguous_evidence_siblings(
+    machine: &rustmigrate_core::state::MigrationStateMachine,
+    canonical: &str,
+) -> Vec<String> {
+    let last_segment = |key: &str| -> String {
+        let d = humanize_module_key(key);
+        d.rsplit('/').next().unwrap_or(&d).to_owned()
+    };
+    let mine = last_segment(canonical);
+    let mut out: Vec<String> = machine
+        .state_file()
+        .modules
+        .keys()
+        .filter(|k| k.as_str() != canonical && last_segment(k) == mine)
+        .cloned()
+        .collect();
+    out.sort();
+    out
 }
 
 /// `state approve --module <M> [--by-policy <id> --attest <k>…] [--reason <r>]`：
@@ -3105,21 +3209,26 @@ fn cmd_state_approve(
 ) -> CmdResult {
     let path = state_path();
     let (mut machine, mut warnings) = load_state_with_warnings(&path)?;
-    let cfg = load_config_or_default(&mut warnings);
+    let cfg = load_config_for_gate()?;
+    warn_unknown_review_gate_policies(&cfg, &mut warnings);
 
     let approval = match by_policy {
         Some(id) => Approval::Policy {
             id: id.to_owned(),
             attestations: attest.to_vec(),
         },
-        None => {
-            if !attest.is_empty() {
-                warnings.push(
-                    "人签批路径忽略 --attest（attestation 只用于 --by-policy 策略放行）".to_owned(),
-                );
-            }
-            Approval::Human
+        // 给了 --attest 却漏了 --by-policy：**硬错，不静默降级为人签批**。
+        // 人签批路径只校验停门标记、不校验强制人工红线，静默切到这条权限更大的路径会让
+        // 红线模块被放行并留下 `approved:human` 审计（= 审计撒谎，静默失败审查 HIGH-2 实测）。
+        None if !attest.is_empty() => {
+            return Err(MigrateError::Config(
+                "attest_without_policy: 给了 --attest 但缺 --by-policy <id>。attestation 只用于策略\
+                 放行；若本意是人签批请去掉 --attest（人签批须已停门 + 覆盖红线时须 --reason），\
+                 若本意是策略放行请补 --by-policy（MDR-019）"
+                    .to_owned(),
+            ));
         }
+        None => Approval::Human,
     };
 
     let outcome = machine.approve_module(
@@ -3137,7 +3246,10 @@ fn cmd_state_approve(
             "status": ModuleStatus::Done.to_string(),
             "approval": outcome.approval,
             "previous_substatus": outcome.previous_substatus,
-            "audit": "已追加签批审计记录到 attempts（approved:human / auto_approved_by_policy:<id>）",
+            // 回显**实际写入**的审计文本（含 attest 列表 / overrides），免得编排器回读 state 才知道记了什么。
+            "audit": outcome.audit,
+            // 人签批覆盖的强制人工红线码（策略路径恒空）——非空说明是「明知红线仍放行」。
+            "overridden_mandatory_reasons": outcome.overridden_mandatory_reasons,
         }),
         warnings,
     ))
@@ -3185,16 +3297,38 @@ fn cmd_state_record_metrics(
     module: &str,
     test_pass_rate: Option<&str>,
     known_differences: Option<u32>,
+    coverage: Option<u32>,
+    phase_a_audit_passed: Option<bool>,
 ) -> CmdResult {
-    if test_pass_rate.is_none() && known_differences.is_none() {
+    if test_pass_rate.is_none()
+        && known_differences.is_none()
+        && coverage.is_none()
+        && phase_a_audit_passed.is_none()
+    {
         return Err(MigrateError::Config(
-            "state record-metrics 至少需要 --test-pass-rate 或 --known-differences".to_string(),
+            "state record-metrics 至少需要 --test-pass-rate / --known-differences / --coverage /              --phase-a-audit-passed 之一"
+                .to_string(),
         ));
+    }
+    // 覆盖率是百分比：>100 必是口径搞错（如传了 0.9 的千分数或错列），拒绝而非静默落盘——
+    // 它是签批门红线的判定依据，错值会让门失效或误拦。
+    if let Some(c) = coverage {
+        if c > 100 {
+            return Err(MigrateError::Config(format!(
+                "非法 coverage: {c}（须为 0-100 的百分比整数）"
+            )));
+        }
     }
 
     let path = state_path();
     let (mut machine, warnings) = load_state_with_warnings(&path)?;
-    let outcome = machine.record_metrics(module, test_pass_rate, known_differences)?;
+    let outcome = machine.record_metrics(
+        module,
+        test_pass_rate,
+        known_differences,
+        coverage,
+        phase_a_audit_passed,
+    )?;
     machine.save(&path)?;
 
     Ok((
@@ -3202,6 +3336,8 @@ fn cmd_state_record_metrics(
             "module": outcome.module,
             "test_pass_rate": outcome.test_pass_rate,
             "known_differences": outcome.known_differences,
+            "coverage": outcome.coverage,
+            "phase_a_audit_passed": outcome.phase_a_audit_passed,
         }),
         warnings,
     ))
@@ -3322,6 +3458,28 @@ fn count_loc_side(root: &Path, label: &str, warnings: &mut Vec<String>) -> serde
             warnings.push(format!("{label} LOC 统计失败: {e}"));
             serde_json::Value::Null
         }
+    }
+}
+
+/// 译后签批门专用配置加载：**fail-closed**（MDR-019）。
+///
+/// 门的判定直接依赖 `[review_gate].auto_approve_policies` 与 `[testing].coverage_threshold`。
+/// 走 [`load_config_or_default`] 的「回退默认 + warning」在这里是 **fail-open**：用户配的
+/// `coverage_threshold = 95` 会被静默换成默认 80（更松），而 warning 未必被编排器读。
+/// 故这里只在「配置文件不存在」时用默认（配置本就可选），文件存在但读/解析失败一律报错停下。
+fn load_config_for_gate() -> Result<rustmigrate_core::types::config::MigrateConfig, MigrateError> {
+    use rustmigrate_core::types::config::MigrateConfig;
+    match std::fs::read_to_string(config_path()) {
+        Ok(s) => toml::from_str::<MigrateConfig>(&s).map_err(|e| {
+            MigrateError::Config(format!(
+                "{CONFIG_FILE} 解析失败，译后签批门不接受回退默认配置\
+                 （阈值/预签清单会变成未知量，见 MDR-019）：{e}"
+            ))
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(MigrateConfig::default()),
+        Err(e) => Err(MigrateError::Config(format!(
+            "{CONFIG_FILE} 读取失败，译后签批门不接受回退默认配置：{e}"
+        ))),
     }
 }
 
