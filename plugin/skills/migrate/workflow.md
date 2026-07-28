@@ -16,7 +16,7 @@
 - `migration-state.json` 存在，项目 state 为 `sprint_loop`。
 - `.rust-migration/porting/` 存在且含规则文件。
 - `modules` 非空，目标 sprint 的模块已被 `populate-modules` 分配。
-- Rust workspace 已搭建（`scaffold workspace` 已执行）。
+- Rust 项目骨架已搭建（`scaffold workspace` 已执行；产出单 crate，命令名中的 workspace 是历史沿称）。
 
 不满足说明 `/migrate analyze` 未完成，应提示用户先跑 analyze。
 

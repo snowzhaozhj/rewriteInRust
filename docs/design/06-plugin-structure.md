@@ -162,7 +162,7 @@ cli/
 │   │   │   ├── graph.rs    # 图引擎：petgraph StableGraph + SQLite 持久化 + Query→Resolve→Set API
 │   │   │   ├── profile.rs  # 项目画像分析（tree-sitter + tokei）
 │   │   │   ├── state.rs    # 状态机管理
-│   │   │   ├── scaffold.rs # workspace 骨架生成
+│   │   │   ├── scaffold.rs # 迁移目标项目骨架生成（单 crate）
 │   │   │   └── validate.rs # 配置/状态校验（jsonschema）
 │   │   └── Cargo.toml
 │   └── cli/                # CLI 入口（clap）
@@ -195,7 +195,7 @@ SKILL.md 通过 Bash tool 调用 CLI，所有输出为统一 JSON 格式：
 | tree-sitter + 语言绑定 | 多语言 AST 解析 | `graph build`, `profile` |
 | ast-grep-core | 代码模式搜索/重写 | `profile`（惯用法检测）、`graph build`（calls 等边的模式补充解析） |
 | tokei | 代码行数统计 | `stats loc`, `stats compare` |
-| syn + quote | Rust 代码生成/分析（M2：自定义 lint crate） | M2 条件引入；**均未引入**——`scaffold workspace` 最终委托 `cargo init` 生成骨架，既不手写 TOML 也不用 toml_edit（原文「用 toml_edit 生成 TOML」失实，toml_edit 不在依赖清单） |
+| syn + quote | Rust 代码生成/分析（M2：自定义 lint crate） | M2 条件引入；**均未作为直接依赖引入**——`scaffold workspace` 最终委托 `cargo init` 生成骨架，既不手写 TOML 也不用 `toml_edit`（原文「用 toml_edit 生成 TOML」失实）。三者在 `Cargo.lock` 中均**存在但仅为传递依赖**：`syn`/`quote` 来自 serde/clap/thiserror/strum 的 proc-macro 链，`toml_edit` 由本仓直接依赖的 `toml 0.8` 拉入；源码零处 `use` 它们 |
 | petgraph | 依赖图数据结构（StableGraph + newtype 索引） | `graph build/topo-sort/parallel-groups/deps/rdeps/cycles` |
 | rusqlite | SQLite 图持久化（FTS5 全文搜索 M2 才启用，见 [04 § 5.7.3](./04-toolchain.md#573-持久化存储)） | `graph build`（写入）, `graph export`（M2 查询） |
 | jsonschema | JSON Schema 校验 | `validate state`, `validate config` |

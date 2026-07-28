@@ -8,8 +8,9 @@
 //! - 表有而 CLI 无 → 幽灵命令（编排器照抄会 cli_parse 失败）。
 //! - 表头声明的计数与表行数不符 → 计数漂移。
 //!
-//! **比对粒度 = 叶子命令**（`state approve` 而非 `state`）：表里登记的正是叶子，
-//! 中间层 `state` / `graph` 自身不可单独执行。
+//! **比对粒度 = 叶子命令**（`state approve` 而非 `state`）：表里登记的正是叶子。
+//! 中间层 `state` / `graph` 不做实际工作——裸调只打印 help（实测退出码 0），
+//! 故不该出现在命令表里。
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -27,7 +28,10 @@ fn design_06_path() -> PathBuf {
 
 /// 递归收集 clap 命令树的全部叶子命令路径（不含 `rustmigrate` 前缀）。
 ///
-/// clap 自动生成的 `help` 子命令不是业务命令，排除。
+/// `help` 排除是**防御性**的：主审实证 `Cli::command()` 此时尚未 `build()`，clap 还没注入
+/// 自动生成的 `help` 子命令，故当前删掉这个分支 8 个测试依然全绿。保留它是因为
+/// clap 何时注入 `help` 属实现细节（升级或改用 `command().build()` 都可能变），
+/// 而 `help` 一旦混进来就是一条永远登记不进 06 表的幽灵命令。
 fn collect_leaf_commands(cmd: &clap::Command, prefix: &str, out: &mut BTreeSet<String>) {
     let mut has_child = false;
     for sub in cmd.get_subcommands() {
@@ -113,6 +117,8 @@ struct DesignTable {
     unparsed_rows: Vec<String>,
     /// 是否找到并进入过「### CLI 命令概览」章节。
     in_overview: bool,
+    /// 落在「原 M2 推迟命令」段的命令——该段是历史沿革快照，不该增长。
+    deferred_commands: BTreeSet<String>,
 }
 
 fn parse_design_table() -> DesignTable {
@@ -147,6 +153,7 @@ fn scan_table(text: &str) -> DesignTable {
     let mut implemented = (0usize, 0usize);
     let mut deferred = (0usize, 0usize);
     let mut unparsed_rows = Vec::new();
+    let mut deferred_commands = BTreeSet::new();
     // 当前所处的表头段：0=未进入 1=已实现 2=原 M2 推迟
     let mut section = 0u8;
     let mut in_overview = false;
@@ -176,12 +183,15 @@ fn scan_table(text: &str) -> DesignTable {
         }
 
         if let Some(cmd) = parse_command_from_row(line) {
-            commands.insert(cmd);
             match section {
                 1 => implemented.1 += 1,
-                2 => deferred.1 += 1,
+                2 => {
+                    deferred.1 += 1;
+                    deferred_commands.insert(cmd.clone());
+                }
                 _ => panic!("命令行出现在任何表头声明之前，06 表结构已变: {line}"),
             }
+            commands.insert(cmd);
         } else if is_table_body_row(line) {
             unparsed_rows.push(line.to_string());
         }
@@ -193,6 +203,7 @@ fn scan_table(text: &str) -> DesignTable {
         deferred,
         unparsed_rows,
         in_overview,
+        deferred_commands,
     }
 }
 
@@ -251,17 +262,57 @@ fn design_06_table_declared_counts_match_row_counts() {
     );
 }
 
-/// 守卫解析器本身：若 06 表格式变化导致抽取不到命令，上面两个测试会「空集比空集」假绿。
+/// 「原 M2 推迟命令」段的成员固定为当初那 5 条——它是历史沿革快照，不该增长或换人。
+///
+/// 审查实证的缺口：把命令从「已实现」段挪到「原 M2 推迟」段并同步两个声明数
+/// （30→29、5→6），此前 3 个测试全 PASS——没有任何断言检查命令的**段归属**，
+/// 而该段语义是「当初推迟、后来补上」的记录，新命令混进去会篡改设计沿革。
+#[test]
+fn design_06_deferred_section_membership_is_frozen() {
+    let table = parse_design_table();
+    let expected: BTreeSet<String> = [
+        "graph rdeps",
+        "graph cycles",
+        "graph export",
+        "validate config",
+        "state update",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    assert_eq!(
+        table.deferred_commands, expected,
+        "「原 M2 推迟命令」段成员应恒为当初那 5 条（历史沿革快照）——新命令请登记到\
+         「已实现命令」段；若确有沿革变更，请连同本断言一起改并说明理由"
+    );
+}
+
+///
+/// 守卫解析器本身：确保它真的从 06 抽到了东西。
+///
+/// 注意它的价值**不是**防「空集比空集」假绿——主审实证订正：表侧解析为空时
+/// `cli.difference(&table.commands)` 等于全部 35 条命令，前两个测试必然失败，不存在假绿。
+/// 真实价值是**改善归因**：把「35 条命令全未登记」这种噪声报错，换成「解析器与表格式脱节」。
 #[test]
 fn design_table_parser_extracts_nonempty_set() {
     let table = parse_design_table();
+    // 阈值取 CLI 叶子命令总数而非写死 30——审查实证 `>= 30` 挡不住「整个第二段丢失」
+    // （第一段恰好 30 条、正好卡在阈值上）。
+    let expected = cli_leaf_commands().len();
     assert!(
-        table.commands.len() >= 30,
-        "从 06 只解析出 {} 条命令，解析器与表格式已脱节（预期 ≥30）",
+        table.commands.len() >= expected,
+        "从 06 只解析出 {} 条命令，少于 CLI 叶子命令总数 {expected}——解析器与表格式已脱节，\
+         或有整段表被漏扫",
         table.commands.len()
     );
-    // 抽样锚点：三段不同层级的命令都应被解析到。
-    for anchor in ["init", "graph build", "state batch-transition-done"] {
+    // 抽样锚点：覆盖不同层级**且跨两个表段**——三个锚点全在第一段时，
+    // 整个第二段丢失也不会被发现（审查实证）。`graph rdeps` 属「原 M2 推迟」段。
+    for anchor in [
+        "init",
+        "graph build",
+        "state batch-transition-done",
+        "graph rdeps",
+    ] {
         assert!(
             table.commands.contains(anchor),
             "解析结果缺锚点命令 `{anchor}`，解析器可能只吃到部分表行"
