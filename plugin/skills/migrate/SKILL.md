@@ -32,7 +32,7 @@ argument-hint: "[analyze|run|workflow|review] [module]"
   - **建图/查图**：`graph build --root [--full]`、`graph topo-sort`、`graph parallel-groups`（按 sprint 聚合并行层，ORCH-01）、`graph deps <m>`、`graph rdeps <m>`（反向依赖，改动影响面）、`graph interfaces <m> [--deps-of <t>]`、`graph cycles`（完整 SCC 环路径）、`graph stats`、`graph export [--format json|dot|mermaid]`、`graph decompose [--root] [--budget]`（拆解 dry-run，不写状态不派翻译）
   - **状态推进**：`state get <m>`、`state transition [--module] [--to] [--substatus] [--reason] [--force]`（**`--to` 可省略**——模块级省略时只更新 substatus、status 不变，并行回传标 `agent_done` 就用这个形态）、`state update --module --status --cas-version [--substatus] [--reason]`（乐观锁写入，版本不匹配返冲突）、`state populate-modules`、`state deps <m>`（组感知依赖门禁，破环 M2-SCALE-SCC）、`state advance-sprint`（当前 sprint 全终态才推进；否则返回 `advanced:false` 而非报错）
   - **签批门（MDR-019）**：`state review-gate --module <m>`（判定 + 证据包索引）、`state approve --module <m> [--reason] [--by-policy <id> --attest <项>...]`（`reviewing → done` 的唯一单模块入口）、`state batch-transition-done --module <m>... [--by-policy --attest]`
-  - **度量/台账**：`state record-metrics --module [--test-pass-rate] [--coverage] [--known-differences] [--phase-a-audit-passed]`（四项度量至少给一项）、`state record-subagent-call --step-index --subagent-name --status [--started-at] [--ended-at] [--error-message]`（前三项必填；`--started-at` 省略时 CLI 取当前 UTC）
+  - **度量/台账**：`state record-metrics --module [--test-pass-rate] [--coverage] [--known-differences] [--phase-a-audit-passed]`（四项度量至少给一项）、`state record-subagent-call --step-index --subagent-name --status [--started-at] [--ended-at] [--error-message]`（前三项必填；`--status` 只接受 `started`/`ok`/`error`/`timeout` 四值，其它值直接被拒；`--started-at` 省略时 CLI 取当前 UTC）
   - **断点续跑（ROB-01a/b/c）**：`state reset --module <m> [--force]`、`state recover --module <m> --policy <retry|skip> [--reason]`（`--module`/`--policy` 均必填）、`state resume`（无参数）
   - **校验**：`validate state`、`validate config`、`validate rules --registry <路径> --adapters-dir <路径>`（两项必填；适配器 `rule_version` 与权威清单一致性，GOV-01）
   - **统计/度量**：`stats loc`、`stats compare [--source] [--rust]`、`stats quality [--source] [--rust]`（degrade_rate / final_score / behavior_coverage）、`stats community`（Louvain 社区检测 vs 目录分区结构偏离度）
@@ -57,7 +57,8 @@ argument-hint: "[analyze|run|workflow|review] [module]"
 - 用 **Agent tool** 调用 SubAgent，参数 `subagent_type` 取带插件命名空间前缀的 agent 名：`rust-migrate:analyzer` / `rust-migrate:translator` / `rust-migrate:scaffolder` / `rust-migrate:verifier`。SubAgent 间通过 `.rust-migration/` 下的文件通信，不直接对话。单模块 `/migrate run` 串行派发；`/migrate workflow` 按 sprint 层并行派发同层独立模块（见 workflow.md 的 worktree 写隔离 + 逐层合并编排）。
 - **调用前后记台账**（每次 Agent 调用都做，含重试；否则 `subagent_calls` 恒空、卡死/重试无法诊断）：
   - 调用**前**：`rustmigrate state record-subagent-call --step-index <子命令步骤号> --subagent-name <analyzer|translator|verifier|scaffolder> --status started`。
-  - 调用**后**：按结果再记一条 `--status ok`（产出物校验通过）或 `--status error --error-message "<原因>"`（校验失败 / 超时）。`--step-index` 与 `--subagent-name` 同上一条对齐。
+  - 调用**后**：按结果再记一条 `--status ok`（产出物校验通过）、`--status error --error-message "<原因>"`（校验失败）或 `--status timeout --error-message "<原因>"`（超时 / watchdog 判 stall）。`--step-index` 与 `--subagent-name` 同上一条对齐。
+  - `--status` 值域**只有** `started`/`ok`/`error`/`timeout` 四值（CLI 强校验，写别的直接报错退出）。`started` 是卡死判定的锚点——有 `started` 而无对应终态记录即卡死信号，所以前置那条不能省。
   - 子命令各调用点已标注本步的 `step_index`；统一用该步整数号，便于按步聚合统计。
 - **不解析 SubAgent 的返回文本判断成功**。每次调用后只做产出物的确定性校验：
   - **L1 存在性**：文件存在、非空、含关键标题（Markdown / 代码 / 配置产出物）。

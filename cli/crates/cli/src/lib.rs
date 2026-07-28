@@ -311,9 +311,9 @@ pub enum StateCommands {
         /// SubAgent 名称（如 translator / verifier / analyzer / scaffolder）。
         #[arg(long)]
         subagent_name: String,
-        /// 调用结果状态（如 success / timeout / failed）。
-        #[arg(long)]
-        status: String,
+        /// 调用结果状态：started（调用前）/ ok / error / timeout（调用后）。
+        #[arg(long, value_enum)]
+        status: SubagentCallStatusArg,
         /// 调用开始时间（ISO8601）。省略则取当前 UTC 时间。
         #[arg(long)]
         started_at: Option<String>,
@@ -478,6 +478,39 @@ pub enum RecoverPolicyArg {
     Retry,
     /// 跳过：置 paused 决策点（headless 自动降级）。
     Skip,
+}
+
+/// `state record-subagent-call --status` 的值域。
+///
+/// 此前 `--status` 是自由字符串、CLI 不做校验，三处口径各说一套（clap 帮助
+/// 「success/timeout/failed」× 附录 A 示例 `success` × SKILL.md 约定 `started`/`ok`/`error`）——
+/// 拼错也静默落盘，`subagent_calls` 就无法按状态聚合统计。
+///
+/// 收敛到 SKILL.md 实际在用的四值：`started` 是诊断卡死的必需锚点（有 started 无终态
+/// 即卡死信号，`success/timeout/failed` 那套缺它），`timeout` 与 `error` 分列以便
+/// watchdog stall（ROB-01b）单独统计。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum SubagentCallStatusArg {
+    /// 调用前置台账：已派发、尚无结果。
+    Started,
+    /// 调用后：产出物校验通过。
+    Ok,
+    /// 调用后：产出物校验失败 / SubAgent 报错。
+    Error,
+    /// 调用后：超时或 watchdog 判定 stall（见 MDR-016）。
+    Timeout,
+}
+
+impl SubagentCallStatusArg {
+    /// 落盘到 `SubAgentCall.status` 的字面值（与 SKILL.md / workflow.md 的命令行取值同形）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Started => "started",
+            Self::Ok => "ok",
+            Self::Error => "error",
+            Self::Timeout => "timeout",
+        }
+    }
 }
 
 impl From<RecoverPolicyArg> for RecoverPolicy {
@@ -685,7 +718,7 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
                 cmd_state_record_subagent_call(
                     *step_index,
                     subagent_name,
-                    status,
+                    *status,
                     started_at.as_deref(),
                     ended_at.as_deref(),
                     error_message.as_deref(),
@@ -3345,10 +3378,13 @@ fn cmd_state_record_metrics(
 
 /// [`SubAgentCall`] 后经 core [`MigrationStateMachine::push_subagent_call`] 入库，落盘走 tmp-fsync-rename
 /// 原子写。`started_at` schema 必填——省略时取当前 UTC 时间（编排器在调用开始即可记录、结束再补登一条）。
+///
+/// `status` 由 clap [`SubagentCallStatusArg`] 强校验（非法值在参数解析期即拒、不落盘），
+/// 落盘字面值见其 `as_str`。
 fn cmd_state_record_subagent_call(
     step_index: u32,
     subagent_name: &str,
-    status: &str,
+    status: SubagentCallStatusArg,
     started_at: Option<&str>,
     ended_at: Option<&str>,
     error_message: Option<&str>,
@@ -3359,7 +3395,7 @@ fn cmd_state_record_subagent_call(
     let count = machine.push_subagent_call(
         step_index,
         subagent_name.to_owned(),
-        status.to_owned(),
+        status.as_str().to_owned(),
         started_at.map(Timestamp::from),
         ended_at.map(Timestamp::from),
         error_message.map(str::to_owned),

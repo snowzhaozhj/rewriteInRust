@@ -1785,7 +1785,7 @@ fn smoke_state_record_subagent_call() {
             "--subagent-name",
             "translator",
             "--status",
-            "success",
+            "ok",
             "--started-at",
             "2026-06-14T09:05:00Z",
             "--ended-at",
@@ -1803,7 +1803,7 @@ fn smoke_state_record_subagent_call() {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0]["step_index"], 1);
         assert_eq!(calls[0]["subagent_name"], "translator");
-        assert_eq!(calls[0]["status"], "success");
+        assert_eq!(calls[0]["status"], "ok");
         assert_eq!(calls[0]["started_at"], "2026-06-14T09:05:00Z");
         assert_eq!(calls[0]["ended_at"], "2026-06-14T09:08:30Z");
 
@@ -1852,7 +1852,7 @@ fn e2e_record_subagent_call_without_init_errors() {
             "--subagent-name",
             "translator",
             "--status",
-            "success",
+            "ok",
         ]);
         assert_eq!(code, 1, "无 init 应报错: {json}");
         assert_eq!(json["status"], "error");
@@ -1860,6 +1860,82 @@ fn e2e_record_subagent_call_without_init_errors() {
         assert!(
             msg.contains("文件不存在"),
             "错误信息应提示状态文件不存在: {json}"
+        );
+    });
+}
+
+/// `--status` 四值全部被接受，且落盘字面值与命令行取值同形。
+///
+/// 值域是 SKILL.md / workflow.md 的命令行直接照抄对象——若 clap 的 kebab 化规则
+/// 与文档取值不一致（如 `Ok` 变 `ok` 之外的形态），编排器照抄就会解析失败。
+#[test]
+fn e2e_record_subagent_call_accepts_all_four_statuses() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        for (i, status) in ["started", "ok", "error", "timeout"].iter().enumerate() {
+            let (code, json) = run(&[
+                "state",
+                "record-subagent-call",
+                "--step-index",
+                "1",
+                "--subagent-name",
+                "translator",
+                "--status",
+                status,
+            ]);
+            assert_eq!(code, 0, "--status {status} 应被接受: {json}");
+            assert_eq!(json["data"]["subagent_calls_count"], i + 1);
+        }
+
+        let path = std::path::Path::new(".rust-migration").join("migration-state.json");
+        let state: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let calls = state["subagent_calls"].as_array().expect("应为数组");
+        let landed: Vec<&str> = calls
+            .iter()
+            .map(|c| c["status"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(
+            landed,
+            vec!["started", "ok", "error", "timeout"],
+            "落盘字面值须与命令行取值同形（文档照抄的前提）"
+        );
+    });
+}
+
+/// 非法 `--status` 在 clap 解析期即被拒，且不落盘。
+///
+/// 此前 `--status` 是自由字符串，`sucess` 这类拼写错误静默入库、
+/// `subagent_calls` 便无法按状态聚合统计。
+#[test]
+fn e2e_record_subagent_call_rejects_unknown_status() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        // 旧 clap 帮助曾写 success/failed，属已废弃口径，须与拼写错误一样被拒。
+        for bad in ["success", "failed", "sucess", ""] {
+            let (code, json) = run(&[
+                "state",
+                "record-subagent-call",
+                "--step-index",
+                "1",
+                "--subagent-name",
+                "translator",
+                "--status",
+                bad,
+            ]);
+            assert_ne!(code, 0, "非法 --status {bad:?} 应被拒: {json}");
+        }
+
+        // 一条都不应落盘。
+        let path = std::path::Path::new(".rust-migration").join("migration-state.json");
+        let state: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(
+            state["subagent_calls"]
+                .as_array()
+                .is_some_and(|a| a.is_empty()),
+            "非法取值不得落盘: {}",
+            state["subagent_calls"]
         );
     });
 }
@@ -2219,6 +2295,20 @@ fn smoke_scaffold_workspace() {
         assert_eq!(code, 0, "scaffold workspace 应成功: {json}");
         assert_eq!(json["status"], "ok");
         assert!(target.join("Cargo.toml").exists(), "应生成 Cargo.toml");
+
+        // 产出物是**单 crate**，不是 Cargo workspace——命令名里的 workspace 是历史沿称，
+        // 单 crate 输出是既定设计（06 § M2 写隔离约束：worktree 是并行机制，与输出 crate
+        // 结构正交，M2 沿用单 crate 输出）。钉住此断言，防文档描述再次漂回「生成 workspace」。
+        let manifest = std::fs::read_to_string(target.join("Cargo.toml")).unwrap();
+        assert!(
+            manifest.contains("[package]"),
+            "应产出 [package] 单 crate: {manifest}"
+        );
+        assert!(
+            !manifest.contains("[workspace]"),
+            "不产出 [workspace] 段（命令名为历史沿称，勿据名改语义）: {manifest}"
+        );
+        assert!(target.join("src/lib.rs").exists(), "应为 --lib 骨架");
     });
 }
 
