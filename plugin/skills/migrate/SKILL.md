@@ -34,7 +34,7 @@ argument-hint: "[analyze|run|workflow|review] [module]"
   - **签批门（MDR-019）**：`state review-gate --module <m>`（判定 + 证据包索引）、`state approve --module <m> [--reason] [--by-policy <id> --attest <项>...]`（`reviewing → done` 的唯一单模块入口）、`state batch-transition-done --module <m>... [--by-policy --attest]`
   - **度量/台账**：`state record-metrics --module [--test-pass-rate] [--coverage] [--known-differences] [--phase-a-audit-passed]`、`state record-subagent-call --step-index --subagent-name --status [--error-message]`
   - **断点续跑（ROB-01a/b/c）**：`state reset`/`recover`/`resume`
-  - **校验**：`validate state`、`validate config`、`validate rules [--registry] [--adapters-dir]`（适配器 `rule_version` 与权威清单一致性，GOV-01）
+  - **校验**：`validate state`、`validate config`、`validate rules --registry <路径> --adapters-dir <路径>`（两项必填；适配器 `rule_version` 与权威清单一致性，GOV-01）
   - **统计/度量**：`stats loc`、`stats compare [--source] [--rust]`、`stats quality [--source] [--rust]`（degrade_rate / final_score / behavior_coverage）、`stats community`（Louvain 社区检测 vs 目录分区结构偏离度）
   - **其他**：`init`、`profile --root [--adapter-tools]`、`scaffold workspace [--target] [--name]`、`graduate`（项目级毕业评估，全模块终态才推进）
 - **`profile --adapter-tools` 路径自动解析**：analyze 流程步骤 3 按优先级定位 `analysis-tools.json`——①`.rustmigrate.toml` 的 `adapter_path` ② `$CLAUDE_PLUGIN_ROOT/skills/migrate/adapters/<lang>/` ③ `plugin/skills/migrate/adapters/<lang>/`（同仓相对路径）④ 全部未命中则省略参数（降级 warning）。详见 [analyze.md](./analyze.md) 步骤 3。

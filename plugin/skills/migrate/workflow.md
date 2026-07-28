@@ -115,12 +115,21 @@ git merge wt/{module_2}
 # ...依次合并
 ```
 
-**冲突处理**（reconcile）——**先分辨冲突类型，再决定是否重译**：
+**冲突处理**（reconcile）——**默认走重译；只有一类冲突可程序化合并，且判据按「实体身份」不按行文本**：
 
-- **聚合文件的纯 append 冲突 → 结构化合并，不要 abort 重译**。`lib.rs` / `mod.rs` 里各 translator 各自 append 自己的 `pub mod <name>;`，落在相邻行触发 git 冲突，但这些声明**语义独立、不互斥**。重译无法消除它——新 translator 仍会 append 同一行。正确处理是程序化 union：删掉冲突标记、保留**双方全部**声明（去重后可排序），`git add` 后 `git commit` 完成合并。Cargo.toml 的 `[dependencies]` 新增项同理。
-- **真实语义冲突**（同一函数体/类型定义被两边改成不同实现、签名不一致）→ `git merge --abort`，标记冲突模块需重译；冲突模块在各自 worktree 内 rebase 到已合并主线后重译。
-- 判别方法：`git diff --name-only --diff-filter=U` 取冲突文件列表，逐个看冲突块——**冲突两侧都只是新增彼此不重叠的声明/条目**即 append 型；两侧改动同一实体则是语义型。
-- **轮次上限**：默认 3（`max_reconcile_rounds`），仅对语义冲突重译计数（append 型合并不占轮次）。
+- **可合并的唯一情形：同一聚合点、双方新增的是不同实体**。典型是 `lib.rs`/`mod.rs` 里各 translator 各自 append 自己的 `pub mod <name>;` 落在相邻行。这类冲突**重译消除不了**（新 translator 仍会 append），故不 abort，用程序化 union 保留双方声明。
+- **判别按实体身份，不看「行文本是否重叠」**——文本不重叠但实体撞名的情形都算语义冲突，必须重译：
+  | 情形 | 为何是语义冲突 |
+  |------|--------------|
+  | 双方 `pub mod foo;` **同名** | 去重后仍可能一侧建 `foo.rs`、另一侧建 `foo/mod.rs` → `E0761` 模块文件二义 |
+  | 双方 `use`/`pub use` 引入**同一本地名**（`use a::Foo` vs `use b::Foo`） | `E0252` 名字重复定义；`pub use` 还改公开 API |
+  | 同名 helper/trait/impl（单 crate 命名空间撞名） | `E0428`/孤儿规则冲突，整组 check 才暴露 |
+  | 声明带 `#[cfg]`/`#[path]`/`#[macro_use]`/doc comment | 属性与声明是**不可拆分整体**，拆开或重排会改条件编译与宏可见性 |
+- **Cargo.toml 不适用上面的 union**。同一 dependency key 出现两次直接是非法 TOML（解析即失败），且 `features`/`default-features`/`optional`/`target` 有语义、不必然可并。处理：仅当 package/version/source/features/default-features 全兼容才合并，否则当语义冲突；合并后必须 `cargo metadata` 解析通过 + Cargo.lock 重解析，再进 2d 整组 check。
+- **语义冲突** → `git merge --abort`，标记冲突模块重译；冲突模块在各自 worktree 内 rebase 到已合并主线后重译（**不要让 agent 手解语义冲突块**）。
+- **合并的后置条件**（不满足就当合并失败）：冲突文本可能是 `zdiff3` 风格、除 `<<<<<<<`/`=======`/`>>>>>>>` 外还有 `|||||||` **基线段**（基线内容不是第三份声明，不能保留）。所以别从冲突文本删行——用 `git show :2:<file>` / `:3:<file>` 取 ours/theirs 两侧原文再合。`git commit` 前须：`git ls-files -u` 为空、四类标记无残留、`git diff --cached --check` 过。`git add` 会让 git 认为已解决，**残留标记不会报错**，所以这步必须自己查。
+- **每个冲突文件只尝试一次程序化合并**：解析失败 / 实体撞名 / 标记残留 / 后置条件不过 → 立即升级为语义冲突走重译，并计入轮次（否则反复尝试既不计 reconcile 也不计 compile-fix，会活锁）。
+- **轮次上限**：默认 3（`max_reconcile_rounds`）。成功的一次性 union 不占轮次（它不会引发对方重译，无活锁风险）；语义冲突重译与上面「升级」的情形都计数。
 - 超限 → 降级串行处理或转人工：
   ```bash
   rustmigrate state transition --module <M> --to paused --reason "reconcile 3轮冲突未解"

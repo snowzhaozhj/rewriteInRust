@@ -267,7 +267,7 @@ headless 下模块进入 `paused`（3 轮失败）时，**不等人工确认**�
 2. **翻译+自检（worktree 内隔离）**：SubAgent 在自己 worktree 内执行完整 M1 翻译循环（translate → cargo check → compile_fix → test），保留 per-module 编译反馈环。完成后 SubAgent 在 worktree 内 `git add -A && git commit`。
 3. **回传（SubAgent → 编排器）**：只回传 `TranslationResult`（touched-list：own_files + shared_touched + self_check + test；有真实 L2 行为结果时附 `test_pass_rate` + `known_differences`），代码留盘（上下文经济）。机械 batch 的度量字段为 null，不伪造通过率；主 worktree 的集中 writer 收到后立即写可选 metrics（成功/失败样本都写），再处理 `agent_done` 或失败恢复。
 4. **合并（编排器，git merge）**：编排器在主分支上逐个合并 worktree 分支——`git checkout main && git merge wt/{module}`。git 自动处理文件合并（包括 Cargo.toml、lib.rs 等）。
-5. **reconcile（仅 git 冲突时）**：合并冲突时 `git merge --abort`，标记冲突模块需重译。冲突模块按依赖序在各自 worktree 内 rebase 到已合并主线重译（非 LLM 手解冲突块）。轮次上限默认 3，超限降级串行/转人工。冲突文件列表用 `git diff --name-only --diff-filter=U` 获取。
+5. **reconcile（仅 git 冲突时）**：默认 `git merge --abort` + 标记冲突模块重译（按依赖序在各自 worktree 内 rebase 到已合并主线后重译，**不让 agent 手解语义冲突块**）；轮次上限默认 3，超限降级串行/转人工。冲突文件列表用 `git diff --name-only --diff-filter=U` 获取。**例外**：`lib.rs`/`mod.rs` 里双方 append **不同名** `pub mod` 这类冲突重译消除不了，走程序化 union——判据、Cargo.toml 特例与合并后置条件见 workflow.md 步骤 2c（勿在此另立一套）。
 6. **真门（整组 check）**：全部分支合并后，在主 worktree 上执行整组 `cargo check` / `cargo test`。通过 → 推 `testing`→`reviewing` 后逐模块过译后签批门（`state review-gate` → `state approve` / 停门待签批，见步骤 11 与 workflow.md 步骤 2d）；不通过 → compile_fixing 子流程。**这是唯一 done 真门**（整组 check 是 done 的必要条件，不是签批凭据）。
 7. **清理**：`git worktree remove .wt/{module} && git branch -D wt/{module}`。
 
