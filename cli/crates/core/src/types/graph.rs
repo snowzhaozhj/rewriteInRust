@@ -37,7 +37,8 @@ pub enum NodeType {
     TypeAlias,
     /// 模块级常量/变量（M2 预留枚举，M4-GO-04 起 Go adapter 实际产出）。
     Variable,
-    /// 功能聚类（M2 扩展，Leiden 算法产出）。
+    /// 功能聚类（预留枚举，当前无产出点）。`stats community` 的 Louvain 社区检测
+    /// 只在 File 节点上算结构偏离度诊断分数，不把社区落成图节点。
     Community,
 }
 

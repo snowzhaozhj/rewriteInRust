@@ -115,15 +115,16 @@ git merge wt/{module_2}
 # ...依次合并
 ```
 
-**冲突处理**（reconcile）：
-- 合并冲突时 `git merge --abort`，标记冲突模块需重译。
-- 冲突模块在各自 worktree 内 rebase 到已合并主线后重译。
-- **轮次上限**：默认 3（`max_reconcile_rounds`）。
+**冲突处理**（reconcile）——**先分辨冲突类型，再决定是否重译**：
+
+- **聚合文件的纯 append 冲突 → 结构化合并，不要 abort 重译**。`lib.rs` / `mod.rs` 里各 translator 各自 append 自己的 `pub mod <name>;`，落在相邻行触发 git 冲突，但这些声明**语义独立、不互斥**。重译无法消除它——新 translator 仍会 append 同一行。正确处理是程序化 union：删掉冲突标记、保留**双方全部**声明（去重后可排序），`git add` 后 `git commit` 完成合并。Cargo.toml 的 `[dependencies]` 新增项同理。
+- **真实语义冲突**（同一函数体/类型定义被两边改成不同实现、签名不一致）→ `git merge --abort`，标记冲突模块需重译；冲突模块在各自 worktree 内 rebase 到已合并主线后重译。
+- 判别方法：`git diff --name-only --diff-filter=U` 取冲突文件列表，逐个看冲突块——**冲突两侧都只是新增彼此不重叠的声明/条目**即 append 型；两侧改动同一实体则是语义型。
+- **轮次上限**：默认 3（`max_reconcile_rounds`），仅对语义冲突重译计数（append 型合并不占轮次）。
 - 超限 → 降级串行处理或转人工：
   ```bash
   rustmigrate state transition --module <M> --to paused --reason "reconcile 3轮冲突未解"
   ```
-- 冲突文件列表用 `git diff --name-only --diff-filter=U` 获取。
 
 #### 2d. 整组验证（真门）
 
