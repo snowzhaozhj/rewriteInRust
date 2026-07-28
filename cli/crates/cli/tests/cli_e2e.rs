@@ -1911,9 +1911,33 @@ fn e2e_record_subagent_call_accepts_all_four_statuses() {
 fn e2e_record_subagent_call_rejects_unknown_status() {
     let tmp = tempfile::tempdir().unwrap();
     with_cwd(tmp.path(), || {
-        let _ = run(&["init"]);
+        assert_eq!(
+            run(&["init"]).0,
+            0,
+            "init 须成功——否则下面的非法值即便被接受也会\
+                   因「状态文件不存在」而退出码非 0，命题未被真正验证"
+        );
+
+        // 先落一条合法记录作为「污染检测」基线。
+        let (code, json) = run(&[
+            "state",
+            "record-subagent-call",
+            "--step-index",
+            "1",
+            "--subagent-name",
+            "translator",
+            "--status",
+            "started",
+        ]);
+        assert_eq!(code, 0, "合法基线记录应成功: {json}");
+
         // 旧 clap 帮助曾写 success/failed，属已废弃口径，须与拼写错误一样被拒。
-        for bad in ["success", "failed", "sucess", ""] {
+        // 大小写变体一并钉住：clap `ValueEnum` 默认 `ignore_case = false`，故 `OK`/`Ok`/`Started`
+        // 现在被拒。若日后为「对编排器宽容」给 `--status` 加 `ignore_case = true`，
+        // SKILL.md「只接受四值」即失实——没有这几个用例，那行 attribute 可以静默加上去。
+        for bad in [
+            "success", "failed", "sucess", "", "OK", "Ok", "Started", "TIMEOUT",
+        ] {
             let (code, json) = run(&[
                 "state",
                 "record-subagent-call",
@@ -1927,17 +1951,49 @@ fn e2e_record_subagent_call_rejects_unknown_status() {
             assert_ne!(code, 0, "非法 --status {bad:?} 应被拒: {json}");
         }
 
-        // 一条都不应落盘。
+        // 一条都不应落盘——先落一条合法记录，再断言非法尝试既没追加也没污染它
+        // （只断言「数组为空」太弱：init 后本就是空，删掉整块断言测试仍会绿）。
         let path = std::path::Path::new(".rust-migration").join("migration-state.json");
         let state: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert!(
-            state["subagent_calls"]
-                .as_array()
-                .is_some_and(|a| a.is_empty()),
-            "非法取值不得落盘: {}",
-            state["subagent_calls"]
+        let calls = state["subagent_calls"].as_array().expect("应为数组");
+        assert_eq!(calls.len(), 1, "非法取值不得追加记录: {calls:?}");
+        assert_eq!(
+            calls[0]["status"], "started",
+            "既有合法记录不得被非法尝试污染: {calls:?}"
         );
     });
+}
+
+/// `as_str()` 的落盘字面值必须等于 clap 派生的取值名。
+///
+/// 二者是**两套独立真值源**：`as_str()` 手写字符串，clap 对变体名做 kebab 化。现有
+/// e2e 只钉住现存四值，对**新增第五个变体**无保护——`match` 穷尽性只强迫你写一个分支，
+/// 不检查返回值与 clap 取值名是否一致。写错则文档/提示词照抄的命令行会解析失败。
+///
+/// 仿 `types::common` 的 `as_str_matches_serde_serialize` 先例（专项审查建议）。
+#[test]
+fn subagent_call_status_as_str_matches_clap_value_name() {
+    use clap::ValueEnum;
+    use rustmigrate_cli::SubagentCallStatusArg;
+
+    let variants = SubagentCallStatusArg::value_variants();
+    assert_eq!(
+        variants.len(),
+        4,
+        "值域应为四值，新增变体须同步文档四处口径"
+    );
+    for v in variants {
+        let clap_name = v
+            .to_possible_value()
+            .expect("变体不应被 clap 跳过")
+            .get_name()
+            .to_owned();
+        assert_eq!(
+            v.as_str(),
+            clap_name,
+            "as_str() 与 clap 取值名不一致（文档照抄命令行会解析失败）: {v:?}"
+        );
+    }
 }
 
 #[test]

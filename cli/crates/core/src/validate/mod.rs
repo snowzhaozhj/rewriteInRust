@@ -112,6 +112,27 @@ pub fn validate_state(state_file: &MigrationStateFile) -> Result<Vec<String>> {
         }
     }
 
+    // M4 防御性可观测：`--status` 的四值域只在 CLI 参数层强校验，读侧此前完全无约束——
+    // 旧 state 文件里的已废弃值（`success`/`failed`）、手工编辑的错拼、或绕过 CLI 直调
+    // `push_subagent_call` 写入的任意字符串，反序列化都不报错。将来真按状态聚合统计时，
+    // 这些值会被当未知态默默漏算，正是收窄值域要消灭的失败模式换到读侧。
+    // 不硬判损坏（旧文件仍可读），但必须告警。
+    const SUBAGENT_CALL_STATUSES: [&str; 4] = ["started", "ok", "error", "timeout"];
+    let mut unknown_statuses: Vec<&str> = state_file
+        .subagent_calls
+        .iter()
+        .map(|call| call.status.as_str())
+        .filter(|status| !SUBAGENT_CALL_STATUSES.contains(status))
+        .collect();
+    if !unknown_statuses.is_empty() {
+        unknown_statuses.sort_unstable();
+        unknown_statuses.dedup();
+        warnings.push(format!(
+            "subagent_calls 含非法 status 值 {unknown_statuses:?}（合法值域 {SUBAGENT_CALL_STATUSES:?}）\
+             ——已废弃的 success/failed 或手工编辑所致，按状态聚合统计时会被漏算"
+        ));
+    }
+
     Ok(warnings)
 }
 
@@ -843,6 +864,45 @@ mod tests {
                 "{audit} 应视为已签批: {warnings:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_validate_warns_unknown_subagent_call_status() {
+        // M4：`--status` 四值域只在 CLI 参数层强校验，读侧此前无约束——旧文件里的
+        // 已废弃 `success`/`failed`、手工错拼、绕过 CLI 直调写入的值，反序列化都不报错。
+        let mut state = minimal_init_state();
+        let call = |status: &str| crate::types::state::SubAgentCall {
+            step_index: 1,
+            subagent_name: "translator".to_owned(),
+            started_at: Timestamp::new("2026-07-28T00:00:00Z"),
+            ended_at: None,
+            status: status.to_owned(),
+            error_message: None,
+        };
+
+        // 四个合法值都不该告警。
+        state.subagent_calls = ["started", "ok", "error", "timeout"].map(call).to_vec();
+        let warnings = validate_state(&state).unwrap();
+        assert!(
+            !warnings.iter().any(|w| w.contains("subagent_calls")),
+            "合法四值不应告警: {warnings:?}"
+        );
+
+        // 已废弃值 + 拼写错误 → 告警且逐个列出（去重后字典序）。
+        state.subagent_calls = ["success", "failed", "sucess", "ok", "success"]
+            .map(call)
+            .to_vec();
+        let warnings = validate_state(&state).unwrap();
+        let hit = warnings
+            .iter()
+            .find(|w| w.contains("subagent_calls"))
+            .unwrap_or_else(|| panic!("应告警非法 status: {warnings:?}"));
+        for bad in ["success", "failed", "sucess"] {
+            assert!(hit.contains(bad), "告警应列出 {bad}: {hit}");
+        }
+        // 重复值应去重（避免 N 条记录刷屏）。注意 `success` 是 `sucess` 的子串，
+        // 故不能数 `matches("success")`——按带引号的完整条目计数。
+        assert_eq!(hit.matches("\"success\"").count(), 1, "重复值应去重: {hit}");
     }
 
     #[test]

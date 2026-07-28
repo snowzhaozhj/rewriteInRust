@@ -559,7 +559,11 @@ pub enum StatsCommands {
 /// Scaffold 子命令。
 #[derive(clap::Subcommand)]
 pub enum ScaffoldCommands {
-    /// 生成 Cargo workspace 骨架。
+    /// 生成迁移目标 Rust 项目的基础骨架（产出**单 crate**：`Cargo.toml` + `src/lib.rs`
+    /// + `.gitignore`，不含 `[workspace]` 段）。
+    ///
+    /// 命令名中的 workspace 是历史沿称——单 crate 输出是既定设计
+    /// （见 `06-plugin-structure.md` § M2 写隔离约束）。
     Workspace {
         /// 目标目录（默认 `rust/`）。
         #[arg(long, default_value = "rust")]

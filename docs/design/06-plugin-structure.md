@@ -332,7 +332,7 @@ Plugin 不支持 `rules/` 目录分发，因此采用混合策略将规则按特
 | `analyzer` | 源码分析、项目画像、依赖图语义增强、惯用法检查 | tree-sitter, dependency-cruiser, Mypy, tokei |
 | `translator` | 迁移规则生成、Phase A 忠实翻译 + Phase B 惯用化优化、多候选生成 [M2+] | LLM, ast-grep |
 | `verifier` | 等价性验证、**模块级测试生成**、Phase A→B 中间的对抗性审查、不等价证据收集、性能对比 | cargo-test, proptest, criterion, Miri |
-| `scaffolder` | 测试基础设施搭建、行为录制、黄金测试集管理、Cargo workspace 骨架生成 | insta, cargo-fuzz, mitmproxy |
+| `scaffolder` | 测试基础设施搭建、行为录制、黄金测试集管理、Rust 项目骨架生成（`scaffold workspace`，产出单 crate——命令名为历史沿称，见该命令表行） | insta, cargo-fuzz, mitmproxy |
 
 ### SubAgent 输入/输出接口表
 
@@ -733,7 +733,9 @@ CLI 的成功输出为 `{status, data, warnings}`（见 § 10.0.1）。失败时
 | `ADAPTER_TOOL_MISSING` | `rustmigrate profile` 检测到适配器所需外部工具（如 dependency-cruiser、mypy）未安装或版本不满足 | 按 `error_context.install_hint` 安装缺失工具后重新执行 |
 | `RUST_TOOL_MISSING` | `rustmigrate profile` 检测到 Tier 0 Rust 外部二进制（`cargo-nextest`）未安装 | 按 `error_context.install_hint`（如 `cargo install cargo-nextest`）安装后重新执行 |
 
-> **校验工具故障 vs 产出物失效的区分（R2-D5-04）**：L2 校验本身是 CLI 子命令 `rustmigrate validate state`，其执行可能因超时 / OOM / Schema 损坏而失败。SKILL.md 检查点须按 CLI 返回的 `error_code` 区分：若为 `VALIDATION_TIMEOUT` / `VALIDATION_OOM` / `VALIDATION_SCHEMA_CORRUPTED` 三者之一，记入 `subagent_calls` 的 substatus 为 `validation_tool_error_<type>`，**不进入 `max_retries_per_step` 重试循环**（重试无意义），而是向用户输出「校验工具故障，请检查环境（增大超时 / 内存 / 重新 init）后重试一次」；其余 error_code（JSON Schema 违反、SQLite 表结构缺失等产出物真失效）才进入正常重试循环。区分逻辑骨架见 [09-appendix-schemas.md 附录 B 检查点](./09-appendix-schemas.md#附录-bmvp-skill-的-skillmd-骨架)。
+> **校验工具故障 vs 产出物失效的区分（R2-D5-04）**：L2 校验本身是 CLI 子命令 `rustmigrate validate state`，其执行可能因超时 / OOM / Schema 损坏而失败。SKILL.md 检查点须按 CLI 返回的 `error_code` 区分：若为 `VALIDATION_TIMEOUT` / `VALIDATION_OOM` / `VALIDATION_SCHEMA_CORRUPTED` 三者之一，记一条 `state record-subagent-call --status error --error-message "validation_tool_error_<type>: <详情>"`，**不进入 `max_retries_per_step` 重试循环**（重试无意义），而是向用户输出「校验工具故障，请检查环境（增大超时 / 内存 / 重新 init）后重试一次」；其余 error_code（JSON Schema 违反、SQLite 表结构缺失等产出物真失效）才进入正常重试循环。区分逻辑骨架见 [09-appendix-schemas.md 附录 B 检查点](./09-appendix-schemas.md#附录-bmvp-skill-的-skillmd-骨架)。
+>
+> **落地口径订正（M4）**：原文写「记入 `subagent_calls` 的 substatus 为 `validation_tool_error_<type>`」——`SubAgentCall` **从无 `substatus` 字段**（只有 `{step_index, subagent_name, started_at, ended_at, status, error_message}`），且 `--status` 现已收窄为 `started`/`ok`/`error`/`timeout` 四值强校验，`validation_tool_error_*` 无处安放。故 `<type>` 改由 `--error-message` 承载：状态取 `error`（工具故障不是 agent 卡死超时，不占 `timeout`），类型前缀写进消息文本，仍可按前缀 grep 聚合且不计入重试。
 
 > **Hook 失败输出一致性**：`verify.sh` 和 `full-verify.sh` 失败时，输出格式须与上述 CLI error JSON 兼容——脚本内部调用的 cargo/clippy 诊断自动转换为 `{error_code, suggested_fix}` 结构，便于 Skill 与 CI 统一解析。
 >

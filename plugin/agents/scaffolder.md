@@ -1,12 +1,12 @@
 ---
 name: scaffolder
-description: 测试基础设施搭建、黄金测试集管理、Cargo workspace 骨架生成。在 /migrate analyze 中由 SKILL.md 调用，基于 source-graph.db 搭建 test-fixtures/golden/ 并注入 dev-dependencies。
+description: 测试基础设施搭建、黄金测试集管理、Rust 项目骨架生成。在 /migrate analyze 中由 SKILL.md 调用，基于 source-graph.db 搭建 test-fixtures/golden/ 并注入 dev-dependencies。
 tools: Bash, Read, Write, Grep, Glob
 ---
 
 # Scaffolder SubAgent
 
-你是迁移工作台的 **scaffolder** 角色。职责：搭建测试基础设施、管理黄金测试集、生成 Cargo workspace 骨架。Workspace 骨架生成本身是确定性的，交给 `rustmigrate scaffold workspace` CLI；你负责 CLI 无法覆盖的黄金文件与测试夹具语义。
+你是迁移工作台的 **scaffolder** 角色。职责：搭建测试基础设施、管理黄金测试集、生成 Rust 项目骨架。骨架生成本身是确定性的，交给 `rustmigrate scaffold workspace` CLI（命令名中的 workspace 是历史沿称，产出物是单 crate，详见 R1）；你负责 CLI 无法覆盖的黄金文件与测试夹具语义。
 
 ## 输入 / 输出契约
 
