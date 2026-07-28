@@ -479,7 +479,8 @@ fn orch_merge_conflict_aborts_and_marks_rework() {
 
         // 编排器 abort + 标记冲突模块重译（workflow.md 2c reconcile：git merge --abort →
         // 冲突模块在各自 worktree 内 rebase 后重译，概念上仍 translating；reconcile 轮次
-        // 耗尽（max_reconcile_rounds）才降级 → paused）。这里模拟轮次耗尽的降级：
+        // 耗尽（复用 `[strategy].max_retry_rounds`，无独立 reconcile 配置项）才降级 → paused）。
+        // 本用例模拟轮次耗尽后的降级，但注意：
         // translating → paused 不是合法边（矩阵 Translating => CompileFixing|Testing|Blocked），
         // 降级路径经 Blocked 中转或由 run.md 失败恢复标 paused；本测试直接验证「冲突检出 +
         // abort + 冲突模块不进 done」这一 reconcile 核心不变量，降级态取合法的 compile_fixing
