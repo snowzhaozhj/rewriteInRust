@@ -78,22 +78,25 @@ fn parse_command_from_row(line: &str) -> Option<String> {
     }
 }
 
-/// 这一行「看起来是命令行」吗——用于把「表行格式没被解析器认出」与「此行本就不是命令行」
-/// 区分开。只看是否为表格行且首列提到 `rustmigrate`，不依赖反引号写法。
+/// 这一行是否落在表格体内、按构造**必须**是一条命令行。
 ///
-/// 没有它，格式变动（如把 `` `cmd` `` 写成 ``` ``cmd`` ```）会让该行被静默当作非命令行跳过，
-/// 报错信息则显示为「CLI 命令未登记」——失败方向是安全的（宁可误报不漏报），但归因误导，
-/// 维护者会去翻表找那条「缺失」的行，而真正的问题在解析器与格式脱节。
-fn looks_like_command_row(line: &str) -> bool {
+/// 判据按**位置**而非内容：概览章节内、以 `|` 开头、既不是分隔行（`|---|`）也不是
+/// 列标题行（首列为 `子命令`）的行，就是表格体的数据行——06 的这两张表除命令外不放别的行。
+///
+/// 早先版本按内容判（首列 `contains("rustmigrate")`），被审查实证击穿：把
+/// `` | `rustmigrate state deps <module>` | `` 写成 `` | `state deps <module>` | ``（丢命令名前缀）
+/// 时该行既解析不出、又不满足启发式，于是被静默当作非命令行跳过，最终仍误报成
+/// 「CLI 命令未登记」。任何依赖行内容的判据都会被格式变体绕过，故改为按位置定性。
+fn is_table_body_row(line: &str) -> bool {
     let Some(rest) = line.strip_prefix('|') else {
         return false;
     };
-    // 表格分隔行（|---|---|）不算。
     let Some(first_cell) = rest.split('|').next() else {
         return false;
     };
     let cell = first_cell.trim();
-    !cell.starts_with('-') && cell.contains("rustmigrate")
+    // 分隔行 `|---|---|`；列标题行 `| 子命令 | 说明 |`。
+    !cell.starts_with('-') && !cell.starts_with(':') && cell != "子命令"
 }
 
 /// 06 表登记的命令集合 + 两段表头声明的计数。
@@ -108,13 +111,38 @@ struct DesignTable {
     deferred: (usize, usize),
     /// 看着像命令行、但解析器没认出来的行（格式与解析器脱节的信号）。
     unparsed_rows: Vec<String>,
+    /// 是否找到并进入过「### CLI 命令概览」章节。
+    in_overview: bool,
 }
 
 fn parse_design_table() -> DesignTable {
     let path = design_06_path();
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("读 {} 失败: {e}", path.display()));
+    let table = scan_table(&text);
 
+    assert!(
+        table.in_overview || table.implemented.0 > 0,
+        "未在 06 中找到「### CLI 命令概览」章节，表结构已变"
+    );
+    // 扫描完整性后置条件：两段表头声明都必须命中。
+    //
+    // 扫描在概览章节后的下一个 `### ` 处 break——若有人在概览章节内新增 `###` 子标题，
+    // 后半段表会被静默截断，只剩「计数 vs 行数」偶然相符的假绿。没有这条断言，
+    // 截断表现为「命令未登记」，归因同样误导（审查实证指出）。
+    assert!(
+        table.implemented.0 > 0 && table.deferred.0 > 0,
+        "只扫到 {} 段表头声明（已实现={} / 原 M2 推迟={}）——概览章节内很可能新增了 `###` 子标题\
+         导致扫描提前终止、后半段表被静默截断。请改用 `####` 或调整本测试的章节边界判定。",
+        u8::from(table.implemented.0 > 0) + u8::from(table.deferred.0 > 0),
+        table.implemented.0,
+        table.deferred.0
+    );
+    table
+}
+
+/// 纯扫描：不做断言，供合成字符串单元测试直接调用。
+fn scan_table(text: &str) -> DesignTable {
     let mut commands = BTreeSet::new();
     let mut implemented = (0usize, 0usize);
     let mut deferred = (0usize, 0usize);
@@ -154,20 +182,17 @@ fn parse_design_table() -> DesignTable {
                 2 => deferred.1 += 1,
                 _ => panic!("命令行出现在任何表头声明之前，06 表结构已变: {line}"),
             }
-        } else if looks_like_command_row(line) {
+        } else if is_table_body_row(line) {
             unparsed_rows.push(line.to_string());
         }
     }
 
-    assert!(
-        in_overview || implemented.0 > 0,
-        "未在 06 中找到「### CLI 命令概览」章节，表结构已变"
-    );
     DesignTable {
         commands,
         implemented,
         deferred,
         unparsed_rows,
+        in_overview,
     }
 }
 
@@ -242,4 +267,160 @@ fn design_table_parser_extracts_nonempty_set() {
             "解析结果缺锚点命令 `{anchor}`，解析器可能只吃到部分表行"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// 解析器单元测试：喂合成字符串，不改 06 文档
+//
+// 早先验证这些边界靠「临时改 06 → 跑测试 → git checkout 还原」，在多审查视角
+// 并发跑的工作区里会互相冲掉改动（本 PR 审查期间真实发生）。改为合成字符串后，
+// 边界可回归、无人需要抢文件；新发现的格式变体只需往下面加一条用例。
+// ---------------------------------------------------------------------------
+
+/// 正常表行能解析出子命令路径，且参数占位符被剥掉。
+#[test]
+fn parse_row_extracts_subcommand_path_without_placeholders() {
+    let cases = [
+        ("| `rustmigrate init` | 说明 |", "init"),
+        ("| `rustmigrate graph build` | 说明 |", "graph build"),
+        // `<module>` 位置参数剥掉。
+        ("| `rustmigrate state deps <module>` | 说明 |", "state deps"),
+        // `[--flag]` / `--flag` 剥掉。
+        (
+            "| `rustmigrate state reset --module <M> [--force]` | 说明 |",
+            "state reset",
+        ),
+        (
+            "| `rustmigrate state batch-transition-done --module <M>...` | 说明 |",
+            "state batch-transition-done",
+        ),
+    ];
+    for (line, expected) in cases {
+        assert_eq!(
+            parse_command_from_row(line).as_deref(),
+            Some(expected),
+            "行 {line:?} 应解析为 {expected:?}"
+        );
+    }
+}
+
+/// 表格结构行（分隔行 / 列标题行）不得被当作命令行或未解析行。
+#[test]
+fn table_structure_rows_are_not_command_rows() {
+    for line in ["|--------|------|", "| :--- | ---: |", "| 子命令 | 说明 |"] {
+        assert!(
+            !is_table_body_row(line),
+            "{line:?} 是表格结构行，不应计入表体数据行"
+        );
+        assert!(
+            parse_command_from_row(line).is_none(),
+            "{line:?} 不应解析出命令"
+        );
+    }
+    // 非表格行同样不算。
+    for line in ["普通段落", "> 引用", "**已实现命令 — 30 个**：", ""] {
+        assert!(!is_table_body_row(line), "{line:?} 不是表格行");
+    }
+}
+
+/// 格式变体：解析不出命令时，必须被认定为「表体行」进而计入 unparsed_rows。
+///
+/// 这是归因正确性的核心——每一条都曾（或可能）被静默跳过、最终误报成
+/// 「CLI 命令未登记」，让维护者去表里找并不缺失的行。
+#[test]
+fn malformed_command_rows_are_flagged_not_silently_skipped() {
+    let variants = [
+        // 双反引号（本 PR 自查发现）。
+        "| ``rustmigrate init`` | 说明 |",
+        // 丢 `rustmigrate ` 前缀（审查实证发现——旧的内容启发式在此被击穿）。
+        "| `state deps <module>` | 说明 |",
+        // 完全没有反引号。
+        "| rustmigrate init | 说明 |",
+        // 加粗包裹。
+        "| **`rustmigrate init`** | 说明 |",
+        // 前导反引号被替换成加粗标记（审查实证期间真实出现的形态：`**rustmigrate init` ）。
+        "| **rustmigrate init` | 说明 |",
+        // 只有命令名前缀、无子命令。
+        "| `rustmigrate` | 说明 |",
+        // 首列只有占位符。
+        "| `rustmigrate <cmd>` | 说明 |",
+    ];
+    for line in variants {
+        assert!(
+            parse_command_from_row(line).is_none(),
+            "用例前提失效：{line:?} 竟能被解析出命令，请改用例或更新解析器"
+        );
+        assert!(
+            is_table_body_row(line),
+            "{line:?} 解析不出命令却未被判为表体行——会被静默跳过并误报成「命令未登记」"
+        );
+    }
+}
+
+/// 合成一份最小 06 骨架：两段表头 + 各一条命令行。
+fn synthetic_doc(overview_extra: &str) -> String {
+    format!(
+        "### CLI 命令概览\n\
+         \n\
+         **已实现命令 — 1 个**（…）：\n\
+         \n\
+         | 子命令 | 说明 |\n\
+         |--------|------|\n\
+         | `rustmigrate init` | 说明 |\n\
+         {overview_extra}\
+         **原 M2 推迟命令 — 1 个（均已实现）**：\n\
+         \n\
+         | 子命令 | 说明 | 理由 |\n\
+         |--------|------|------|\n\
+         | `rustmigrate graph export` | 说明 | 理由 |\n\
+         \n\
+         ### 下一章节\n\
+         \n\
+         | `rustmigrate ghost-outside-overview` | 不该被扫到 |\n"
+    )
+}
+
+/// 正常骨架：两段都扫到，且概览章节外的表行不被计入。
+#[test]
+fn scan_covers_both_sections_and_stops_at_next_heading() {
+    let table = scan_table(&synthetic_doc(""));
+    assert!(table.in_overview);
+    assert_eq!(table.implemented, (1, 1), "已实现段：声明数与行数");
+    assert_eq!(table.deferred, (1, 1), "原 M2 推迟段：声明数与行数");
+    assert!(table.unparsed_rows.is_empty(), "{:?}", table.unparsed_rows);
+    assert_eq!(
+        table
+            .commands
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["graph export", "init"],
+        "概览章节后的 `### 下一章节` 内表行不得被计入"
+    );
+}
+
+/// 概览章节内新增 `###` 子标题 → 扫描提前终止、后半段静默截断。
+///
+/// 这是审查指出的隐患：截断后「计数 vs 行数」在前半段仍自洽，只有完整性后置条件
+/// 能把它抓出来。这里先证明截断确实发生（`deferred` 全 0），再证明 `parse_design_table`
+/// 的后置断言会因此报错。
+#[test]
+fn scan_truncates_when_overview_gains_a_h3_subheading() {
+    let truncated = scan_table(&synthetic_doc("\n### 插入的子标题\n\n"));
+    assert_eq!(
+        truncated.implemented,
+        (1, 1),
+        "前半段仍自洽——所以单看计数无法发现截断"
+    );
+    assert_eq!(
+        truncated.deferred,
+        (0, 0),
+        "后半段被静默截断（这正是完整性后置条件要抓的情形）"
+    );
+
+    // 后置断言的实际文案与触发条件（parse_design_table 走文件，这里直接复核条件）。
+    assert!(
+        !(truncated.implemented.0 > 0 && truncated.deferred.0 > 0),
+        "完整性后置条件应判定为不满足，从而报「后半段表被静默截断」而非「命令未登记」"
+    );
 }
