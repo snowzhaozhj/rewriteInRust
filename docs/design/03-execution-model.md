@@ -233,6 +233,34 @@ Work Unit（一个 Claude Code 会话）:
 - **灰色情况处理权限**：Phase B 期间 verifier 发现摘要与代码不符，视为「意图漂移」（区别于「摘要表述不清」），触发更新 `{module}-intent.md` 并由 verifier 记入 MDR；该修改**不计为违反 Step 2.5 人工确认**——因其源自后续代码生成的新发现，而非原始摘要问题（更新频率上限见 § 4.3 Step 6）。
 - **验收标准映射**（取代独立质量配置项）：意图摘要质量以「§ 4.3.1 用户应拒绝的 5 个特征 ↔ § 4.3 Step 2 的 7 字段完整性 ↔ [09 附录 E](./09-appendix-schemas.md#附录-e意图摘要module-intentmd内容规范) JSON Schema」三者映射判定，不引入 `intent_summary_min_quality` 配置项。
 
+### 4.3.3 译后签批门交互规范（M4 MDR-019）
+
+对标 § 4.3.1 的译**前**意图门，本节规范译**后**签批门。门坐落在 `reviewing → done` 这条边**本身**：翻译成功只意味着「可以送审」，不意味着「通过」。
+
+**门的封闭性（CLI 层强制，不依赖提示词自律）**：裸 `state transition --to done` 一律被拒（`--force` 不是凭据，`state update --cas-version` 委派同一转换逻辑同样被拒）。唯一入口：`state approve`（人签批）/ `state approve --by-policy <id> --attest …`（策略放行）/ `state batch-transition-done --by-policy …`（并行路径批量，同样须凭据）。
+
+**证据包内容**（由 `state review-gate` 一次输出索引，编排器负责展示与语义解读）：
+
+| 部分 | 内容 |
+|------|------|
+| 判定结论 | `decision` 三态（`mandatory_manual` / `manual_required` / `policy_eligible`）+ `mandatory_reasons[{code,detail}]` |
+| state 层事实 | `state_facts`（danger / provenance / known_differences / 通过率 / 覆盖率 / tier / composite_kind / member_files / 结构门结论）+ 回显生效的 `coverage_threshold`、`enabled_policies` |
+| 证据文件索引 | `evidence[{kind,path}]`——扫描 `intermediate/`（含 `attempts/`）下**实际存在**的本模块产物（意图摘要 / 审查报告 / 选优 / 降级报告 / 契约 / 进度 / Phase A·B 尝试）。**不构造预期路径**：命名约定属 plugin 层，CLI 猜路径只会产出一片假的「缺失」 |
+| 须补跑的命令 | `evidence_commands`（`stats compare` / `stats quality` / `git diff`）——产出不落固定文件，故给命令而非路径 |
+| 编排器自查清单 | `orchestrator_must_check`——CLI 判不了（要读产物 / 跑命令 / 读 MDR）的强制项，值域见 [09 附录 A](./09-appendix-schemas.md#附录-amigration-statejson-schema) |
+
+人审查的是「**为何可以相信它等价**」，不是从零读代码——这化解「可审 vs 磨叽」的张力：审证据比读代码快，故无须靠「跳过部分模块」来防审查疲劳。
+
+**强制人工触发清单（绝对红线，任何策略不可豁免）**：`danger` 非空 / `danger_provenance ≠ classified`（空 `danger` 不代表安全）/ `known_differences > 0` / `substatus` 不在 `{agent_done, awaiting_final_review}` 白名单内 / Phase A 结构门未过 / 覆盖率低于 `[testing].coverage_threshold`（`composite_kind=batch` 机械组豁免——无行为可测）。命中即 `decision=mandatory_manual`，**红线优先于任何策略资格**。
+
+**自动放行窄策略 + attestation**：仅当用户在 `[review_gate].auto_approve_policies` **预签**（默认空 = 全停门）、未命中红线、该策略 state 层条件全过，且编排器把 `required_attestations`（策略特有项 ∪ `orchestrator_must_check` 全项）**逐项声明**齐全时才放行，缺一即拒。CLI **不校验声明的真实性**（判不了），它校验「声明齐全」并把 `attest=[…]` 写入审计——这正是 § 7.4「Approval Token」的精神：不接受「我判过了」的整体断言，只接受逐项、可追溯、事后可追责的声明。
+
+**审计口径**：`approved:human overrides=[<被覆盖的红线码>] reason=<…>` / `auto_approved_by_policy:<id> attest=[…]`。**不伪装「无需审查」**——自动放行留下的痕迹要能看出「是谁按哪条策略、声明了什么才放的」。人签批覆盖红线时 `--reason` 必填。
+
+**打回返工（对标 § 4.3.1 修订流程）**：人指出问题 → `state transition --to translating --reason "签批打回: <反馈>"` 带反馈定点返工，最多 **2 轮**，第 3 轮仍不通过则 `→paused --substatus requires_manual_review`。该转换**作废上一轮签批证据**（清停门标记 + 通过率 + 覆盖率 + `known_differences` + 结构门结论）——否则重译一轮后模块带着上一轮的证据直接够到策略放行条件。并行路径的整组验证失败走另一条边 `reviewing → compile_fixing`（`max_retry_rounds` 计数）。
+
+**停门标记的边界（如实声明）**：人签批要求模块已停 `reviewing + awaiting_final_review`，使「证据包展示过」在状态上有痕迹；但编排器可自行标该值后立即 `approve`。CLI 能做的是留痕（标记被覆盖时写 `stop-gate-marker-cleared` 审计；`validate state` 对「`done` 但无签批审计」告警）。这道门防的是「自动流程无声升 done」，防不了「故意伪造人签批」——后者靠审计事后追责。
+
 ### 4.3.2 复杂度自适应分档（TIER-01，M2）
 
 > M2 引入。M1 对所有模块跑完整 11 步内循环；M2 按模块复杂度分档，让简单模块走短路径，减少无效 token 消耗（决策见 [PLAN-M2 §2 D4](../PLAN-M2.md)）。分档结果记入 `ModuleState.tier`（`Trivial`/`Standard`/`Full`），由 `rustmigrate detect` 在 per-module AST 语义特征上自动评估（M2-TIER-01a），analyzer 输出语义信号供复核。
@@ -624,7 +652,7 @@ Step 4: 模块迁移完成后，生成 Rust 测试（确定性 + AI 混合）
 |------|------|---------|
 | **Approval Token** | 批量执行前需要人类预览并授权令牌 | `/migrate run` 在执行 Sprint 批量翻译前，先展示待翻译模块列表和预估成本，用户确认后生成一次性令牌 |
 | **Preview-before-spend** | AI 调用前预估 token 成本 | 编排器在调度翻译任务前，根据源码大小和上下文预算预估 token 消耗，超出阈值需用户确认 |
-| **不自动宣布成功** | 翻译成功后停在 `needs_review` 而非自动标 `done` | 模块状态流转增加 `reviewing` 状态（已有），verifier 通过后仍需人类最终确认 |
+| **不自动宣布成功** | 翻译成功后停在 `needs_review` 而非自动标 `done` | 模块状态流转增加 `reviewing` 状态（已有），verifier 通过后仍需人类最终确认。**落地形态见 § 4.3.3 译后签批门交互规范**（M4 [MDR-019](../decisions/019-post-translation-review-gate.md)）：门坐落在 `reviewing → done` 这条边**本身**——CLI 拒绝裸 `state transition --to done`，唯一入口 `state approve`（人签批 / 用户预签窄策略 + 编排器逐项 attest） |
 
 ## 7.5 质量评估分层评分卡
 

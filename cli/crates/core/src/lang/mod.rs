@@ -60,14 +60,24 @@ pub struct FileClassification {
     pub file_kind: FileKind,
     /// 命中的危险信号类别（排序去重）。
     pub danger: Vec<DangerCategory>,
+    /// 危险信号扫描是否**真正跑成**（MDR-019）。
+    ///
+    /// `false` 表示走了 [`conservative`](Self::conservative) 降级路径——**语法解析失败**
+    /// （`root.has_error()`，含「语法合法但超出 pinned grammar 版本」）或该语言未实现分类。
+    /// 此时 `danger` 恒为空，但那是「**没扫**」而非「扫过没发现」：调用方
+    /// （`state populate-modules`）据此把所在模块落 `DangerProvenance::PartiallyClassified`，
+    /// 使译后签批门不把空 danger 当「安全」自动放行（专项审查实测的 fail-open）。
+    pub classified: bool,
 }
 
 impl FileClassification {
-    /// 保守默认：`Normal` + 无危险（未实现分类的语言用此，绝不会被判机械）。
+    /// 保守默认：`Normal` + 无危险 + **标记未分类**（解析失败 / 未实现分类的语言用此，
+    /// 绝不会被判机械，且空 danger 不可信）。
     pub fn conservative() -> Self {
         Self {
             file_kind: FileKind::Normal,
             danger: Vec::new(),
+            classified: false,
         }
     }
 

@@ -96,6 +96,22 @@ pub fn validate_state(state_file: &MigrationStateFile) -> Result<Vec<String>> {
         warnings.push("处于 sprint_loop 阶段但 sprint 未设置".to_owned());
     }
 
+    // MDR-019 防御性可观测：正常的 reviewing → done 只能由 approve_module 写入签批审计。
+    // `update_module`、手工改 JSON 或旧版 CLI 仍可能造出无凭据的 done；校验不把旧状态硬判损坏，
+    // 但必须告警，避免这种旁路静默存在。
+    for (name, module) in &state_file.modules {
+        if module.status == ModuleStatus::Done
+            && !module.attempts.iter().any(|attempt| {
+                attempt.result.starts_with("approved:human")
+                    || attempt.result.starts_with("auto_approved_by_policy:")
+            })
+        {
+            warnings.push(format!(
+                "模块 `{name}` 已为 done，但 attempts 中缺少译后签批审计（approved:human 或 auto_approved_by_policy:<id>）"
+            ));
+        }
+    }
+
     Ok(warnings)
 }
 
@@ -399,7 +415,9 @@ fn dfs_detect_cycle<'a>(
 mod tests {
     use super::*;
     use crate::types::common::{SourceLang, Timestamp};
-    use crate::types::state::{MigrationMetadata, ProjectInfo, StateHistoryEntry};
+    use crate::types::state::{
+        DangerProvenance, MigrationMetadata, ProjectInfo, StateHistoryEntry,
+    };
     use std::collections::HashMap;
 
     /// 辅助：构建从 Init 到目标状态的合法历史链（除末条外均带 exited_at）。
@@ -790,6 +808,40 @@ mod tests {
             decomposition_snapshot: None,
             decomposition_frozen: false,
             danger: Vec::new(),
+            danger_provenance: DangerProvenance::Unclassified,
+        }
+    }
+
+    #[test]
+    fn test_validate_warns_done_module_without_approval_audit() {
+        // MDR-019：done 但无签批审计 → 告警（手工改 JSON / update_module 旁路可观测）。
+        let mut state = minimal_init_state();
+        state
+            .modules
+            .insert("naked".to_owned(), module_with_status(ModuleStatus::Done));
+        let warnings = validate_state(&state).unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("naked") && w.contains("译后签批审计")),
+            "{warnings:?}"
+        );
+
+        // 有 approved:human 审计 → 不告警；auto_approved_by_policy 同理。
+        for audit in ["approved:human reason=审毕", "auto_approved_by_policy:x"] {
+            let mut signed = module_with_status(ModuleStatus::Done);
+            signed.attempts.push(crate::types::state::AttemptRecord {
+                timestamp: Timestamp::new("2026-07-27T00:00:00Z"),
+                result: audit.to_owned(),
+                retry_count: 0,
+                checkpoint: None,
+            });
+            state.modules.insert("naked".to_owned(), signed);
+            let warnings = validate_state(&state).unwrap();
+            assert!(
+                !warnings.iter().any(|w| w.contains("译后签批审计")),
+                "{audit} 应视为已签批: {warnings:?}"
+            );
         }
     }
 

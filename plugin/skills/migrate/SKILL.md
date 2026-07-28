@@ -28,7 +28,7 @@ argument-hint: "[analyze|run|workflow|review] [module]"
 - 通过 Bash 调用 `rustmigrate <子命令>`，工作目录为源项目根。所有 CLI 输出是统一 JSON：`{status, data, warnings}`。
 - **定位 CLI**：裸调 `rustmigrate` 假设其在 `$PATH`。若不确定是否安装，先运行 `BIN=$(hooks/scripts/ensure-cli.sh)` 取二进制绝对路径（解析优先级 PATH > `$RUSTMIGRATE_BIN` > 本地构建产物），后续用 `"$BIN" <子命令>` 调用；脚本未找到二进制时退出非 0 并打印安装指引，应如实转达用户。
 - **只解析 `data` 字段**取结构化结果；`status` 为 `error` 时按 `data` 中的错误码处理，不要从自然语言里猜成败。`warnings` 非空时如实转达用户，不要静默吞掉。
-- 常用命令（非穷举，完整清单以 `rustmigrate --help` / 各子命令 `--help` 为准）：`init`、`profile --root [--adapter-tools]`、`graph build --root [--full]`、`graph topo-sort`、`graph parallel-groups`（按 sprint 聚合并行层，ORCH-01）、`graph deps <m>`、`graph interfaces <m> [--deps-of <t>]`、`graph stats`、`validate state`、`state get <m>`、`state transition [--module] --to [--substatus] [--reason] [--force]`、`state populate-modules`、`state deps <m>`（组感知依赖门禁，破环 M2-SCALE-SCC）、`state reset`/`recover`/`resume`（断点续跑，ROB-01a/b/c）、`stats loc`、`stats compare`、`scaffold workspace [--target] [--name]`。
+- 常用命令（非穷举，完整清单以 `rustmigrate --help` / 各子命令 `--help` 为准）：`init`、`profile --root [--adapter-tools]`、`graph build --root [--full]`、`graph topo-sort`、`graph parallel-groups`（按 sprint 聚合并行层，ORCH-01）、`graph deps <m>`、`graph interfaces <m> [--deps-of <t>]`、`graph stats`、`validate state`、`state get <m>`、`state transition [--module] --to [--substatus] [--reason] [--force]`、`state populate-modules`、`state deps <m>`（组感知依赖门禁，破环 M2-SCALE-SCC）、`state record-metrics --module [--test-pass-rate] [--coverage] [--known-differences] [--phase-a-audit-passed]`、`state review-gate --module <m>`（译后签批门判定 + 证据包索引，MDR-019）、`state approve --module <m> [--reason] [--by-policy <id> --attest <项>...]`（`reviewing → done` 的唯一入口）、`state batch-transition-done --module <m>... [--by-policy --attest]`、`state reset`/`recover`/`resume`（断点续跑，ROB-01a/b/c）、`stats loc`、`stats compare`、`scaffold workspace [--target] [--name]`。
 - **`profile --adapter-tools` 路径自动解析**：analyze 流程步骤 3 按优先级定位 `analysis-tools.json`——①`.rustmigrate.toml` 的 `adapter_path` ② `$CLAUDE_PLUGIN_ROOT/skills/migrate/adapters/<lang>/` ③ `plugin/skills/migrate/adapters/<lang>/`（同仓相对路径）④ 全部未命中则省略参数（降级 warning）。详见 [analyze.md](./analyze.md) 步骤 3。
 
 ### 全局锁（跑 `/migrate` 命令的进程开始时取，结束或异常退出时释放）
@@ -81,8 +81,18 @@ token 预算 / API 额度可能在长循环中途逼近上限。检测归编排�
 - **`data.interrupted`**（运行态被中断的模块）：**逐个执行其 `recover_command`**（`state recover --module <M> --policy retry`）幂等重入——回退干净重译入口后 `run <M> --retry`。这是「进行中模块中间状态」的确定性恢复入口。
 - **`data.next`**（pending 候选）：对每个用 `state deps <M>`（位置参数）判依赖就绪后推进。
 - **`data.awaiting_decision`**（paused 决策点）：**续跑不复活**——待人类/降级抉择（headless 由既有 stall/编排 prose 处置），resume 不给 retry 命令。
+- **`data.awaiting_approval`**（`reviewing` + substatus `awaiting_final_review`）：**已停在译后签批门等人签批**——续跑既不重跑 verifier、也不 `recover retry`（那会清掉刚落的通过率/覆盖率证据），只把模块列出来等签批（见下「译后签批门」）。
 - **已完成/降级模块不重跑**：done/degrade_* 仅计入 `data.progress`，不出现在 interrupted/next。
-- **`data.progress`**：done/degraded/in_progress/pending/blocked/awaiting_decision/total 计数，用于台账进度回填与续跑校验。
+- **`data.progress`**：done/degraded/in_progress/pending/blocked/awaiting_decision/awaiting_approval/total 计数，用于台账进度回填与续跑校验。
+
+### 译后签批门（MDR-019，`reviewing → done` 的唯一入口）
+翻译成功只意味着「可以送审」。`reviewing → done` 这条边由 CLI 硬门守着：裸 `state transition --to done` 一律被拒（`--force` 不是凭据，`state update --cas-version` 也绕不过），唯一入口是 `state approve`。三种模块处境要分清：
+
+- **待签批**：`reviewing` + substatus `awaiting_final_review` = 已停门等人类。不自动升 done、不重跑验证、批量放行命令一律跳过它。
+- **人签批**：先停门（标 `awaiting_final_review`）→ 展示证据包 → `state approve --module <M> --reason "<审阅结论>"`。命中强制人工红线时 `--reason` 必填，审计记 `approved:human overrides=[<红线码>] reason=<...>`。
+- **预签策略放行**：仅当 `state review-gate` 判 `policy_eligible`、且你已逐项核对 `data.orchestrator_must_check`（CLI 判不了的项）→ `state approve --by-policy <id> --attest <逐项>`。策略须在 `.rustmigrate.toml` 的 `[review_gate].auto_approve_policies` 预签（默认空 = 全停门），审计记 `auto_approved_by_policy:<id> attest=[...]`——**不伪装「无需审查」**。
+
+强制人工红线（`review-gate` 的 `mandatory_reasons`，任何策略不可豁免）：危险信号非空 / 危险信号分类来源不可信（`danger_provenance` 非 `classified`，空 `danger` 不代表安全）/ 已知差异 >0 / substatus 不干净 / Phase A 结构门未过 / 覆盖率低于 `[testing].coverage_threshold`。判定与证据包展示见 [run.md](./run.md) 第 11 步；并行路径的批量处置见 [workflow.md](./workflow.md) 步骤 2d。
 
 ### 产出物根目录
 所有产出物在源项目下的 `.rust-migration/` 目录（`init` 创建）。关键文件：`migration-state.json`、`source-graph.db`、`porting/`（迁移规则）、`PARITY.md`、`AGENTS.md`、`test-fixtures/golden/`。写 `migration-state.json` 统一走 CLI（原子写：tmp→fsync→rename）。

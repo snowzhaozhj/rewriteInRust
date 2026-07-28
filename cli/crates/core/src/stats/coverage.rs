@@ -68,7 +68,7 @@ pub fn compute_stats(state: &MigrationStateFile) -> MigrationStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::state::{ModuleState, ProjectState};
+    use crate::types::state::{DangerProvenance, ModuleState, ProjectState};
     use std::collections::HashMap;
 
     /// 创建默认 ModuleState（指定 status）。
@@ -91,6 +91,7 @@ mod tests {
             decomposition_snapshot: None,
             decomposition_frozen: false,
             danger: Vec::new(),
+            danger_provenance: DangerProvenance::Unclassified,
         }
     }
 

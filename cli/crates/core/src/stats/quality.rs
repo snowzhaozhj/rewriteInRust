@@ -325,7 +325,7 @@ fn compute_final_score(det: &DeterministicIndicators, ai: Option<&AiIndicators>)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::state::{ModuleState, ProjectState};
+    use crate::types::state::{DangerProvenance, ModuleState, ProjectState};
     use std::collections::HashMap;
 
     fn module(status: ModuleStatus) -> ModuleState {
@@ -347,6 +347,7 @@ mod tests {
             decomposition_snapshot: None,
             decomposition_frozen: false,
             danger: Vec::new(),
+            danger_provenance: DangerProvenance::Unclassified,
         }
     }
 

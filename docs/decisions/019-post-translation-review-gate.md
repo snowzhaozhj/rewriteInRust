@@ -1,7 +1,7 @@
 # MDR-019: 译后签批门重建——证据包默认 + 窄预签自动放行策略
 
-- **状态**: 已决策
-- **日期**: 2026-07-05（2026-07-14 随 [MDR-018](018-keep-parallel-migration.md) 保留并行重新表述）
+- **状态**: 已落地（2026-07-27，PR #84）
+- **日期**: 2026-07-05（2026-07-14 随 [MDR-018](018-keep-parallel-migration.md) 保留并行重新表述；2026-07-27 落地并补「落地细化」）
 - **范围**: 修复实现对设计的偏离——`reviewing`「最终签批门」被弱化为编排器自动 `--to done`。按经**异构对抗审查（codex）收敛**的设计重建。关联 [MDR-013](013-danger-signal-to-state.md)（danger 落 state）、[MDR-018](018-keep-parallel-migration.md)（保留并行翻译 + 串行人工审批；**本门是二者共存的机制**）。本文件记决策 + 文件级落地清单；实际改 `cli/` + `plugin/` + `docs/design/` 到实现 PR。
 
 ## 背景
@@ -66,6 +66,17 @@
 - `03-execution-model.md`：补「**译后签批门交互规范**」节（对标 §4.3.1 意图门规范：证据包内容 / 强制人工触发清单 / 自动放行窄策略 / 审计口径）；`627` 处补落实说明。
 - `09-appendix-schemas.md`：补 `awaiting_final_review` substatus + 自动放行策略 config schema + 分类 provenance 字段。
 - `02-architecture.md`：`reviewing` 状态说明补三态。
+
+## 落地细化（2026-07-27，PR #84）
+
+实现时在原决策上做了 6 项细化。前 5 项是决策的具体化，第 6 项**超出**原决策 3 条自动放行条件、由用户显式授权。
+
+1. **硬门收紧到 CLI 层（不依赖提示词纪律）**：`reviewing → done` 上裸 `state transition --to done` 一律被拒（`--force` 不是凭据，`state update --cas-version` 也绕不过——它委派同一条 `transition_inner`），错误文案给出两条可执行路径。唯一入口是 `state approve` / `state approve --by-policy` / `state batch-transition-done --by-policy`。代价：`run.md`/`workflow.md`/测试约 20 处调用点改写——接受，因为「门只写在提示词里」等于没有门（LLM 编排器的纪律不可强制）。
+2. **attestation 机制（`--attest`）**：CLI 判不了 `TODO(port)=0` / 导出符号一致 / content-hash / `bug_replica` 已确认 / 与源覆盖率比较这类产物级事实，故策略放行要求编排器**逐项声明**（`orchestrator_must_check` 全项 + 策略特有项），缺一即拒，声明写入审计 `attest=[…]`。这是 03 § 7.4「Approval Token」的落地形态：不接受「我判过了」的整体断言，只接受逐项、可追溯、事后可追责的声明。**CLI 不校验声明真实性**（判不了），这一点在设计文档与代码注释里如实写明，不假装是机器验证。
+3. **两条返工边统一定义**：`Reviewing => Done | Blocked | Translating | CompileFixing`。`→Translating` 是签批打回定点返工（≤2 轮，第 3 轮 `→paused`），`→CompileFixing` 是并行整组验证失败（走 `max_retry_rounds`），闭 ORCH-01 PR-3 遗留 TODO ②。两条边都**作废上一轮签批证据**（清 substatus / `test_pass_rate` / `coverage` / `known_differences` / `phase_a_audit_passed`）——否则重译一轮后模块带着上一轮的通过率直接够到策略放行条件。
+4. **provenance 三态**：`DangerProvenance::{Unclassified, Classified, PartiallyClassified}`，默认（含旧 state 反序列化）`Unclassified`。`≠ Classified` 即强制人工红线。`PartiallyClassified` 覆盖「组内有成员读失败**或分类降级**」——语法错误文件的 tree-sitter 分类走保守路径，落地时给 `FileClassification` 加了 `classified: bool` 才关住这个洞（此前解析失败的文件被当作「已分类且无危险」，可被自动放行）。
+5. **停门标记的可伪造性有边界**：`awaiting_final_review` 是人签批的前提（保证「证据包展示过」在状态上有痕迹），但编排器可以自己标它然后立即 `approve`。CLI 能做的是**留痕**：被覆盖时写 `stop-gate-marker-cleared` 审计，`validate state` 对「`done` 但无签批审计」告警。这道门防的是「自动流程无声升 done」，防不了「编排器故意伪造人签批」——后者只能靠审计事后追责，落地时不假装能防。
+6. **`headless_default` 策略（超出原决策 3，用户显式授权）**：原决策的自动放行只覆盖 `composite_kind=batch` 全机械组。落地时用户明确选择「未命中强制人工清单的模块用窄策略放行 + 命中的停门」，故新增 `headless_default`（通过率 100% + Phase A 结构门过 + 覆盖率达阈值）。这**不是**首版被异构审查打穿的「按风险分级自动放行」复辟，区别有三：①放行须用户在 `[review_gate].auto_approve_policies` **预签**（默认空 = 全停门），不是 CLI 自作主张；②强制人工红线**永不豁免**——命中即任何策略都不放行（`judge` 里红线优先于策略资格）；③CLI 判不了的项**全部要逐项 attest**，没有「信号看起来还行就放过」的推断环节。被打穿的是「用不可靠信号推断安全」，这里是「用户预签 + 红线兜底 + 逐项声明」。
 
 ## 影响
 

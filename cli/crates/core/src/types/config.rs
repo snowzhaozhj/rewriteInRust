@@ -104,6 +104,9 @@ pub struct MigrateConfig {
     /// 规则配置（M2 预留）。
     #[serde(default)]
     pub rules: RulesConfig,
+    /// 译后签批门配置（MDR-019）。默认全停门等人签批。
+    #[serde(default)]
+    pub review_gate: ReviewGateConfig,
 }
 
 /// 项目基础配置。
@@ -395,6 +398,27 @@ impl Default for RulesConfig {
             enforce_rule_version_consistency: true,
         }
     }
+}
+
+/// 译后签批门配置（MDR-019，`06 § 11.1` `[review_gate]` 段）。
+///
+/// 译后签批门的**默认行为是全停门**：每个模块测试通过后停在 `reviewing +
+/// awaiting_final_review`，展示证据包等人签批。本段唯一作用是**用户预签**若干窄策略，
+/// 允许命中策略的模块经 `state approve --by-policy <id>` 自动放行（审计留痕
+/// `auto_approved_by_policy:<id>`，不伪装「无需审查」）。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReviewGateConfig {
+    /// 已启用的自动放行策略 id（**默认空 = 全停门等人签批**）。
+    ///
+    /// 可选值见 `state::review_gate` 的内置策略常量：
+    /// - `batch_mechanical`——全机械合批组（`composite_kind=batch`）的窄合取放行；
+    /// - `headless_default`——无人值守模式下「未命中强制人工清单 + 测试全通过 + 结构门过 +
+    ///   覆盖率达阈值」的放行。
+    ///
+    /// 未列入本清单的 id 传给 `--by-policy` 一律拒绝（`policy_not_enabled`）；
+    /// 清单里的未知 id 在判定时以 `unknown_policy` 报出（防拼写错误静默失效）。
+    pub auto_approve_policies: Vec<String>,
 }
 
 #[cfg(test)]
