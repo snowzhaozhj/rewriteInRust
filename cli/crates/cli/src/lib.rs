@@ -519,7 +519,7 @@ pub enum StatsCommands {
         #[arg(long)]
         rust: Option<PathBuf>,
     },
-    /// 社区结构偏离度诊断（Leiden vs 目录分区 NMI/ARI）。
+    /// 社区结构偏离度诊断（Louvain 社区检测 vs 目录分区 NMI/ARI）。
     Community,
 }
 

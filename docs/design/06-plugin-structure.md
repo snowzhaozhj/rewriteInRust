@@ -102,7 +102,7 @@ Plugin 中的确定性计算由独立的 Rust CLI 工具 `rustmigrate` 承担，
 
 > 各命令 `data` 字段的完整 Schema 随 M1 CLI 实现落地，纳入 insta 快照回归测试（见 [08 § CLI 测试](./08-roadmap-and-reference.md)）。
 
-**MVP（M1）— 14 个命令**：
+**已实现命令 — 30 个**（含 M1 MVP 起陆续落地的 M2/M3/M4 命令；本表是 CLI 命令列表的唯一权威，新增命令须同步本表与 `plugin/skills/migrate/SKILL.md` 的命令清单）：
 
 | 子命令 | 说明 |
 |--------|------|
@@ -114,7 +114,7 @@ Plugin 中的确定性计算由独立的 Rust CLI 工具 `rustmigrate` 承担，
 | `rustmigrate graph deps <module>` | 查询模块的正向依赖树 |
 | `rustmigrate graph interfaces <module>` | 输出模块的导出接口签名文本（查询 source-graph.db 中 `is_exported=true` 节点，按 `line_range` 从 source-ref/ 提取）；`--deps-of <target>` 批量输出 target 的直接依赖模块（imports 边的 1-hop 邻居）的导出接口签名（区别于 `graph deps` 的 BFS 传递闭包）；含每条签名的 token 估算（bytes/4） |
 | `rustmigrate graph stats` | 图统计信息（节点/边计数、度分布） |
-| `rustmigrate graph decompose` | 拆解 dry-run（M3-DEC-01）：在 SCC 缩点 DAG 上做凸性拓扑 first-fit 装箱，把机械小文件按 footprint 预算（`--budget`，token≈bytes/4）合批，输出拆解计划 + §8 验收四维度报告（目标缩减 / 正确性不变量 / 内聚 MQ vs 随机基线 / 机械·危险分类分布）。**只读：不写 state、不产 active 合批组、不派翻译**，供 DEC-GATE 判定（方案权威 [decomposition-redesign.md](../decomposition-redesign.md)） |
+| `rustmigrate graph decompose` | 拆解 dry-run：在 SCC 缩点 DAG 上做**目录优先两阶段凝聚合并**（沿耦合重边 + 同目录双轴凝聚，保 quotient 无环），按 footprint 预算（`--budget`，token≈bytes/4）约束单元规模，输出拆解计划 + §8 验收四维度报告（目标缩减 / 正确性不变量 / 内聚 MQ vs 随机基线 / 机械·危险分类分布）。**只读：不写 state、不产 active 合批组、不派翻译**，供 DEC-GATE 判定。算法权威 [MDR-011](../decisions/011-coupling-agglomerative-decomposition.md)——它**推翻**了 [decomposition-redesign.md](../decomposition-redesign.md) §5/§6/§7/§9/§12 原设计的「机械小文件按字节预算凸性 first-fit 装箱」 |
 | `rustmigrate validate state` | 校验 `migration-state.json` 的合法性（JSON Schema + 状态机约束） |
 | `rustmigrate validate rules` | 校验各适配器 `porting-template.md` 的 `rule_version` 与权威规则清单（`references/rule-registry.json`）一致性（陈旧检测，M4-GOV-01）：`--registry` 指清单、`--adapters-dir` 扫 `<lang>/porting-template.md`；缺失/版本不符/未知规则逐条落 `data.checks[].issues`。严重度由 `[rules].enforce_rule_version_consistency`（默认 true）控制——为真时不一致返回错误（退出码 1、非静默），为假时降级 warning。详见 [MDR-014](../decisions/014-rule-version-registry.md) |
 | `rustmigrate state get` | 查询指定模块的当前迁移状态 |
@@ -127,21 +127,25 @@ Plugin 中的确定性计算由独立的 Rust CLI 工具 `rustmigrate` 承担，
 | `rustmigrate state review-gate` | 译后签批门**判定 + 证据包索引**（M4 MDR-019）——纯查询、无副作用、不加载 graph。输出 `module`（归一后的组代表 key）+ `decision`（`mandatory_manual` 命中强制人工清单，任何策略不得放行 / `policy_eligible` 有已预签策略条件全过 / `manual_required` 须人签批）+ `mandatory_reasons[{code,detail}]`（红线码域：`danger_non_empty` / `danger_provenance_untrusted` / `known_differences_present` / `substatus_not_clean`（substatus 不在 `agent_done`/`awaiting_final_review` 白名单内）/ `phase_a_audit_failed` / `coverage_below_threshold`（含覆盖率缺失；`composite_kind=batch` 机械组豁免））+ `policies[{id,enabled,eligible,rejections,required_attestations}]` + `state_facts`（判定依据原样回显）+ `coverage_threshold` 与 `enabled_policies`（回显生效配置，供编排器核对配置键是否写对）+ `evidence[{kind,path}]`（扫描 `intermediate/`（含 `attempts/`）下**实际存在**的本模块产物，按文件名归类；**不构造预期路径**——产物命名约定属 plugin 层，CLI 猜路径只会假报缺失）+ `evidence_commands`（`stats compare`/`stats quality`/`git diff`）+ `orchestrator_must_check`（CLI 判不了、编排器必须自查的强制项，任一命中则不得自动放行）。`[review_gate].auto_approve_policies` 含未知 id（拼写错误 → 策略永不生效）时告警 |
 | `rustmigrate state approve` | 译后签批（MDR-019）——`reviewing → done` 的**唯一单模块入口**（裸 `state transition --to done` 在该边被拒并引导至此）。两条路径：**人签批**（省略 `--by-policy`）要求模块已停在 `reviewing + awaiting_final_review`（该标记由编排器展示证据包时落下，故人签批蕴含「证据确实展示过」），未停门则报错引导先跑 `review-gate`；**策略放行**（`--by-policy <id> --attest <k>…`）要求策略已预签、未命中强制人工清单、该策略 state 条件全过、attestation 覆盖 `required_attestations` 全项（CLI 逐项复核，不信调用方自称「已判过」——落地 03 § 7.4 Approval Token 精神）。审计写 `approved:human overrides=[<被覆盖的红线码>] [reason=…]` / `auto_approved_by_policy:<id> attest=[…]`（不伪装「无需审查」）。**人签批命中红线时 `--reason` 必填**（拒绝无理由的红线覆盖）。输出 `{module, status, approval, previous_substatus, audit, overridden_mandatory_reasons}`——`audit` 回显实际写入的审计文本，`overridden_mandatory_reasons` 非空 = 明知红线仍放行（策略路径恒空）。给了 `--attest` 却漏 `--by-policy` 硬拒（`attest_without_policy`，不静默降级为权限更大的人签批路径）。内置策略：`batch_mechanical`（`composite_kind=batch` 全机械组；策略特有 attest `exports_match`/`content_hash_unchanged`）、`headless_default`（通过率 100% + Phase A 结构门过；策略特有 attest `tests_passed`；覆盖率由全局红线 `coverage_below_threshold` 兜）。**每个策略实际要求的 attest 全集 = 策略特有项 ∪ `orchestrator_must_check` 全项**（CLI 判不了的强制项也须逐项声明），以 `review-gate` 输出的 `policies[].required_attestations` 为准，缺一项即拒（`missing_attestations`） |
 | `rustmigrate state populate-modules` | 用源码图迁移序列填充 `migration-state.json` 的 `modules`/`sprint`（PLAN 操作）：读 `source-graph.db` → `migration_sequence()` 缩点为 SCC 模块组 → 每组写 `{status:pending, sprint:<缩点 DAG 层级>, member_files:<仅多文件组>}`（module key 用组代表 NodeId 原值；**M1 另写恒为 `Low` 的死字段 `risk`，M2-TIER-01a 删除 `risk`、改填复杂度分档 `tier`**，见 [03 § 4.3.2](./03-execution-model.md#432-复杂度自适应分档tier-01m2)）+ `sprint.current=1`。**破环（MDR-004）：循环依赖不再拒绝，整组折叠为 composite 模块组（编译门禁单元；翻译粒度=单文件，见 [MDR-006](../decisions/006-scc-per-file-stub-first.md)）**。是 `/migrate analyze`→`/migrate run` 衔接的 PLAN 落盘环节（见 PLAN.md §9.5） |
+| `rustmigrate state deps <module>` | 组感知的依赖就绪门禁查询（破环 M2-SCALE-SCC）：替代 run 阶段「`graph deps` + 逐个查 `modules[dep]`」的纯图查询——composite 组成员的依赖映射回组代表 key、剔除组内自依赖、按终态判就绪。输出 `{module, dependencies:[{module,status,ready}], all_ready, blocking, unresolved}`——**`unresolved`（依赖未登记为模块）单列且不计入 `blocking`**，否则会被 run 填进 `blocked_by` 造成永久 blocked 死锁。`state resume` 的 `next` 桶模块推进前，由编排器调本命令判就绪（resume 自身不调用它，只在 `advice` 里给出指引） |
+| `rustmigrate state advance-sprint` | 推进 sprint：当前 sprint 全模块为终态（done/degrade_*）时 `current=N+1` + `history` 回填。**无可推进 sprint 或尚有非终态模块时返回 `status:ok` + `advanced:false`**（不是错误——编排器据此判断本层是否还有活要干）。`/migrate workflow` 跑完一层后的推进入口 |
+| `rustmigrate state record-subagent-call` | 向顶层 `subagent_calls` 追加一条 SubAgent 调用记录（append-only，用于诊断卡死与统计重试）：`--step-index`（必填）子命令步骤号、`--subagent-name`（必填，analyzer/translator/verifier/scaffolder）、`--status`（必填）、`--started-at`/`--ended-at`（ISO8601；`--started-at` 省略时 CLI 取当前 UTC，因 schema 中 `started_at` 必填而编排器在调用开始时就要记录）、`--error-message`。**`--status` 是自由字符串、CLI 不做枚举校验**——附录 A 示例值为 `success`，SKILL.md 的调用前后台账约定用 `started`/`ok`/`error`，二者并存（口径待统一，见下方注）。编排器须在每次 Agent 调用前后各记一条，否则 `subagent_calls` 恒空、卡死与重试无从追溯 |
 | `rustmigrate stats loc` | 统计源码和 Rust 代码行数（嵌入 tokei） |
 | `rustmigrate stats compare` | 源码与 Rust 结构复杂度对比（函数数量比、代码行数比、控制流嵌套层级）——复用 tokei + tree-sitter 函数计数，作为 Phase A 结构校验门禁（见 03 § 4.3 Step 4.5） |
 | `rustmigrate stats quality` | 迁移质量度量（per-module `final_score` / `behavior_coverage` + project-wide `degrade_rate` / `project_loc_ratio`），对齐 03 § 7.5 评分卡（M4-QUAL-01）。`--source` / `--rust`（省略则取配置）经 tokei `count_loc_excluding_tests` 计算项目级 `rust/source` LOC 比（按命名约定排除源侧测试文件，见 issue #78），仅作为报告级近似值输出（warning 明示粒度），不下沉模块评分；不走 `stats compare`，避免 Go/C 尚未实现控制流嵌套分析时连 LOC 比也丢失（M4-QUAL-05） |
 | `rustmigrate stats community` | 社区结构偏离度诊断：Louvain 社区检测 vs 目录分区 NMI/ARI → `deviation_score`（M4-QUAL-04） |
-| `rustmigrate scaffold workspace` | 生成 Cargo workspace 基础骨架（委托 `cargo init`）；dev-dependencies 与 `deny.toml` 由 scaffolder SubAgent 按项目测试需求注入 |
+| `rustmigrate scaffold workspace` | 生成 Cargo workspace 基础骨架（委托 `cargo init`）；dev-dependencies 与 `deny.toml` 由 scaffolder SubAgent 按项目测试需求注入。同时写 `.gitignore`（`/target`，后置条件式幂等——缺有效规则则追加、保留用户既有内容）；`cargo init --vcs none` 不产 VCS 文件，缺它会让 worktree 自检产物被 `git add -A` 吞入提交污染合并（ORCH-01 PR-5 实测） |
+| `rustmigrate graduate` | 项目级毕业评估：全部模块为终态（done/degrade_*）时把 `ProjectState` 推进到 `graduate`，并写 `.rust-migration/reports/graduation-report.json`（报告写入失败仅降级 warning、命令仍成功）。三道前置检查全部返回 `Config` 错误：① 当前项目态非 `sprint_loop`（已在 `graduate` 态再次调用即命中此条，构成**重复调用守护**——是拒绝重入报错，不是幂等）；② `modules` 为空（须先 `populate-modules`）；③ 存在非终态模块（错误信息列出前 5 个 `模块=状态`，超 5 追加 ` ...`）。是 `/migrate graduate` skill 的 CLI 承载 |
 
-**M2 扩展 — 5 个命令**：
+**原 M2 推迟命令 — 5 个（均已实现）**：下表保留当初的推迟理由作为设计沿革，命令本身已全部落地、与上表同等可用。
 
-| 子命令 | 说明 | 推迟理由 |
+| 子命令 | 说明 | 当初推迟理由（已不适用） |
 |--------|------|---------|
-| `rustmigrate graph rdeps <module>` | 反向依赖查询 | MVP 阶段 deps 正向查询够用 |
-| `rustmigrate graph cycles` | 循环依赖检测 | MVP 目标是 <5K 行单项目，环少见 |
-| `rustmigrate graph export` | 导出为 JSON/DOT/Mermaid | MVP 阶段 stats 输出够用 |
+| `rustmigrate graph rdeps <module>` | 反向依赖查询（imports 入边的传递闭包），用于评估改动影响面 | MVP 阶段 deps 正向查询够用 |
+| `rustmigrate graph cycles` | 循环依赖检测：完整 SCC 环路径输出 | MVP 目标是 <5K 行单项目，环少见 |
+| `rustmigrate graph export` | 导出为 JSON/DOT/Mermaid（`--format`，默认 json） | MVP 阶段 stats 输出够用 |
 | `rustmigrate validate config` | 校验 `.rustmigrate.toml` | MVP 阶段 TOML 解析时隐式校验即可 |
-| `rustmigrate state update` | 乐观锁状态更新（`--cas-version` 比较并写入，版本不匹配返回冲突） | MVP 单写者串行无需 CAS |
+| `rustmigrate state update` | 乐观锁状态更新（`--cas-version` 比较并写入，版本不匹配返回冲突）。**注**：本命令委派与 `state transition` 同一转换实现，故同样受译后签批门约束——`reviewing → done` 不能借 CAS 路径绕过 `state approve`（MDR-019，有测试钉住） | MVP 单写者串行无需 CAS |
 
 > **注（MVP 的轻量环检测）**：完整 `rustmigrate graph cycles`（SCC）推迟到 M2，但 MVP 阶段 SKILL.md `/migrate run` 的 Step 0.5（blocked 模块自动恢复）内置了一次轻量 DFS 环检测，专门防止 blocked 模块互相等待造成的死锁——检测到环即报错中止并提示用户打破循环，详见 [09-appendix-schemas.md 附录 B Step 0.5](./09-appendix-schemas.md#附录-bmvp-skill-的-skillmd-骨架)。二者范围不同：`graph cycles` 检测源码全图依赖环，Step 0.5 仅检测 blocked 子图的恢复死锁。
 
