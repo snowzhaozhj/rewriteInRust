@@ -11,7 +11,8 @@
 //!
 //! 三类用例：
 //! - `happy_path`：多模块并行、写盘不冲突（模拟契约门已冻结共享写面）→ 整组 check 绿 → 全升 done。
-//! - `merge_conflict`：两模块同改共享文件 → 第二个 merge 冲突 → abort + 标记重译（MDR-003 约束7）。
+//! - `merge_conflict`：两模块同改共享文件**同一处** → 第二个 merge 冲突 → abort + 标记重译
+//!   （MDR-003 约束7；对应 workflow.md 2c 的语义冲突分支，非 append 型 union 分支）。
 //! - `whole_group_check_gate`：一模块产物编译不过 → 整组 check 失败 → 真门拦下，无一升 done。
 
 use std::path::{Path, PathBuf};
@@ -410,7 +411,9 @@ fn orch_happy_path_two_modules_reach_done() {
 }
 
 // =========================================================================
-// 用例 2：merge 冲突 —— 两模块同改共享文件，第二个 merge 冲突 → abort + 标记重译
+// 用例 2：merge 冲突 —— 两模块同改共享文件同一处 → abort + 标记重译
+// 覆盖 workflow.md 2c 的**语义冲突**分支（两侧改同一实体）。另一分支（聚合文件
+// 双方 append 不同名 `pub mod` → 程序化 union、不 abort）不在本用例范围。
 // =========================================================================
 
 #[test]
