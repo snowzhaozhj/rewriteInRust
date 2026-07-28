@@ -78,6 +78,24 @@ fn parse_command_from_row(line: &str) -> Option<String> {
     }
 }
 
+/// 这一行「看起来是命令行」吗——用于把「表行格式没被解析器认出」与「此行本就不是命令行」
+/// 区分开。只看是否为表格行且首列提到 `rustmigrate`，不依赖反引号写法。
+///
+/// 没有它，格式变动（如把 `` `cmd` `` 写成 ``` ``cmd`` ```）会让该行被静默当作非命令行跳过，
+/// 报错信息则显示为「CLI 命令未登记」——失败方向是安全的（宁可误报不漏报），但归因误导，
+/// 维护者会去翻表找那条「缺失」的行，而真正的问题在解析器与格式脱节。
+fn looks_like_command_row(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix('|') else {
+        return false;
+    };
+    // 表格分隔行（|---|---|）不算。
+    let Some(first_cell) = rest.split('|').next() else {
+        return false;
+    };
+    let cell = first_cell.trim();
+    !cell.starts_with('-') && cell.contains("rustmigrate")
+}
+
 /// 06 表登记的命令集合 + 两段表头声明的计数。
 ///
 /// 只扫「### CLI 命令概览」到下一个 `### ` 之间的区间——避免把 § 10 命令清单、
@@ -88,6 +106,8 @@ struct DesignTable {
     implemented: (usize, usize),
     /// 「原 M2 推迟命令 — N 个（均已实现）」段：(声明数, 实际行数)
     deferred: (usize, usize),
+    /// 看着像命令行、但解析器没认出来的行（格式与解析器脱节的信号）。
+    unparsed_rows: Vec<String>,
 }
 
 fn parse_design_table() -> DesignTable {
@@ -98,6 +118,7 @@ fn parse_design_table() -> DesignTable {
     let mut commands = BTreeSet::new();
     let mut implemented = (0usize, 0usize);
     let mut deferred = (0usize, 0usize);
+    let mut unparsed_rows = Vec::new();
     // 当前所处的表头段：0=未进入 1=已实现 2=原 M2 推迟
     let mut section = 0u8;
     let mut in_overview = false;
@@ -133,6 +154,8 @@ fn parse_design_table() -> DesignTable {
                 2 => deferred.1 += 1,
                 _ => panic!("命令行出现在任何表头声明之前，06 表结构已变: {line}"),
             }
+        } else if looks_like_command_row(line) {
+            unparsed_rows.push(line.to_string());
         }
     }
 
@@ -144,6 +167,7 @@ fn parse_design_table() -> DesignTable {
         commands,
         implemented,
         deferred,
+        unparsed_rows,
     }
 }
 
@@ -158,6 +182,15 @@ fn parse_declared_count(line: &str, marker: &str) -> Option<usize> {
 fn design_06_table_matches_cli_leaf_commands() {
     let cli = cli_leaf_commands();
     let table = parse_design_table();
+
+    // 先报归因：解析不了的表行会连带表现为「命令未登记」，若不先点明，维护者会
+    // 去表里找那条并不缺失的行。
+    assert!(
+        table.unparsed_rows.is_empty(),
+        "以下 06 表行看着是命令行但解析器没认出来（表格式与本测试的解析器脱节，\
+         先修格式或解析器，否则下面的「未登记」判定不可信）: {:?}",
+        table.unparsed_rows
+    );
 
     let missing: Vec<_> = cli.difference(&table.commands).collect();
     let ghost: Vec<_> = table.commands.difference(&cli).collect();
