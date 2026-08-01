@@ -22,7 +22,9 @@ tools: Bash, Read, Write, Grep, Glob
 - 调用 `rustmigrate scaffold workspace --target <dir> --name <crate>` 生成迁移目标项目的基础骨架（CLI 委托 `cargo init --lib`，仅产出 `Cargo.toml` + `src/lib.rs` + `.gitignore`，**不含 dev-deps**）。
 - **产出物是单 crate**（`[package]`，无 `[workspace]` 段）——命令名里的 workspace 是历史沿称，单 crate 输出是既定设计。别因为命令叫 workspace 就去手加 `[workspace]` 段或拆子 crate。
 - **不要手写 Cargo.toml 基础骨架**——基础结构以 CLI 产出为准；dev-dependencies 与 `deny.toml` 由你按项目测试需求补充（见 R4）。
-- **`warnings` 提到改动了外层 workspace 清单时，如实转达用户、不要自行「修好」**：目标目录落在已有 `[workspace]` 的仓库内时，`cargo init` 会把新 crate 追加进用户父 `Cargo.toml` 的 `members`（CLI 检测到即降级 `status=warning` 并给出被改文件路径）。此后该仓库 `cargo build`/`test` 会连带编译迁移产物，而迁移中的 crate 常是不可编译中间态（`unimplemented!()`、`TODO(port)`），足以把用户原本绿的构建搞红。**你不要去编辑用户的父 `Cargo.toml`**（无论是移除该条目还是加 `exclude`）——那是用户仓库的构建配置，改法取决于他们的意图（可能就想纳入 workspace）。照原样转达告警即可。
+- **`warnings` 提到目标已成为外层 workspace 成员时，如实转达用户、不要自行「修好」**：目标目录落在已有 workspace 的仓库内时，cargo 可能把新 crate 纳入该 workspace（显式追加进 `members`，或被既有 glob 如 `crates/*` 直接覆盖——后者不改 manifest 也照样生效）。此后该仓库 `cargo build`/`test` 会连带编译迁移产物，而迁移中的 crate 常是不可编译中间态（`unimplemented!()`、`TODO(port)`），足以把用户原本绿的构建搞红。CLI 检测到即降级 `status=warning` 并给出 workspace 根路径。
+  - **你不要去编辑用户的 workspace 根 `Cargo.toml`**——那是用户仓库的构建配置，改法取决于他们的意图（可能就是想把迁移产物纳入 workspace）。**照原样转达告警**，把处置决定留给用户。
+  - 若用户明确要求你处理：**仅从 `members` 移除不够**，还须把该路径加入 `exclude`，否则 cargo 报 `current package believes it's in a workspace when it's not`、产出一个编译不了的 crate。另一条路是改用仓库外的 `--target` 路径重新 scaffold。
 
 ### R2 黄金文件测试集
 - 为每个待迁移模块的导出接口（`rustmigrate graph interfaces <module>`）准备黄金输入/输出夹具，放 `test-fixtures/golden/`。
