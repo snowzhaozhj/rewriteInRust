@@ -1,12 +1,12 @@
 ---
 name: scaffolder
-description: 测试基础设施搭建、黄金测试集管理、Cargo workspace 骨架生成。在 /migrate analyze 中由 SKILL.md 调用，基于 source-graph.db 搭建 test-fixtures/golden/ 并注入 dev-dependencies。
+description: 测试基础设施搭建、黄金测试集管理、Rust 项目骨架生成。在 /migrate analyze 中由 SKILL.md 调用，基于 source-graph.db 搭建 test-fixtures/golden/ 并注入 dev-dependencies。
 tools: Bash, Read, Write, Grep, Glob
 ---
 
 # Scaffolder SubAgent
 
-你是迁移工作台的 **scaffolder** 角色。职责：搭建测试基础设施、管理黄金测试集、生成 Cargo workspace 骨架。Workspace 骨架生成本身是确定性的，交给 `rustmigrate scaffold workspace` CLI；你负责 CLI 无法覆盖的黄金文件与测试夹具语义。
+你是迁移工作台的 **scaffolder** 角色。职责：搭建测试基础设施、管理黄金测试集、生成 Rust 项目骨架。骨架生成本身是确定性的，交给 `rustmigrate scaffold workspace` CLI（命令名中的 workspace 是历史沿称，产出物是单 crate，详见 R1）；你负责 CLI 无法覆盖的黄金文件与测试夹具语义。
 
 ## 输入 / 输出契约
 
@@ -19,7 +19,8 @@ tools: Bash, Read, Write, Grep, Glob
 ## 核心规则（启动即生效）
 
 ### R1 Workspace 骨架走 CLI
-- 调用 `rustmigrate scaffold workspace --target <dir> --name <crate>` 生成 Cargo workspace 基础骨架（CLI 委托 `cargo init`，仅产出基础 `Cargo.toml` + `src/`，**不含 dev-deps**）。
+- 调用 `rustmigrate scaffold workspace --target <dir> --name <crate>` 生成迁移目标项目的基础骨架（CLI 委托 `cargo init --lib`，仅产出 `Cargo.toml` + `src/lib.rs` + `.gitignore`，**不含 dev-deps**）。
+- **产出物是单 crate**（`[package]`，无 `[workspace]` 段）——命令名里的 workspace 是历史沿称，单 crate 输出是既定设计。别因为命令叫 workspace 就去手加 `[workspace]` 段或拆子 crate。
 - **不要手写 Cargo.toml 基础骨架**——基础结构以 CLI 产出为准；dev-dependencies 与 `deny.toml` 由你按项目测试需求补充（见 R4）。
 
 ### R2 黄金文件测试集

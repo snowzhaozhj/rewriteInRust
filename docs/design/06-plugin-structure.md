@@ -129,12 +129,12 @@ Plugin 中的确定性计算由独立的 Rust CLI 工具 `rustmigrate` 承担，
 | `rustmigrate state populate-modules` | 用源码图迁移序列填充 `migration-state.json` 的 `modules`/`sprint`（PLAN 操作）：读 `source-graph.db` → `migration_sequence()` 缩点为 SCC 模块组 → 每组写 `{status:pending, sprint:<缩点 DAG 层级>, member_files:<仅多文件组>}`（module key 用组代表 NodeId 原值；**M1 另写恒为 `Low` 的死字段 `risk`，M2-TIER-01a 删除 `risk`、改填复杂度分档 `tier`**，见 [03 § 4.3.2](./03-execution-model.md#432-复杂度自适应分档tier-01m2)）+ `sprint.current=1`。**破环（MDR-004）：循环依赖不再拒绝，整组折叠为 composite 模块组（编译门禁单元；翻译粒度=单文件，见 [MDR-006](../decisions/006-scc-per-file-stub-first.md)）**。是 `/migrate analyze`→`/migrate run` 衔接的 PLAN 落盘环节（见 PLAN.md §9.5） |
 | `rustmigrate state deps <module>` | 组感知的依赖就绪门禁查询（破环 M2-SCALE-SCC）：替代 run 阶段「`graph deps` + 逐个查 `modules[dep]`」的纯图查询——composite 组成员的依赖映射回组代表 key、剔除组内自依赖、按终态判就绪。输出 `{module, dependencies:[{module,status,ready}], all_ready, blocking, unresolved}`——**`unresolved`（依赖未登记为模块）单列且不计入 `blocking`**，否则会被 run 填进 `blocked_by` 造成永久 blocked 死锁。`state resume` 的 `next` 桶模块推进前，由编排器调本命令判就绪（resume 自身不调用它，只在 `advice` 里给出指引） |
 | `rustmigrate state advance-sprint` | 推进 sprint：当前 sprint 全模块为终态（done/degrade_*）时 `current=N+1` + `history` 回填。**无可推进 sprint 或尚有非终态模块时返回 `status:ok` + `advanced:false`**（不是错误——编排器据此判断本层是否还有活要干）。`/migrate workflow` 跑完一层后的推进入口 |
-| `rustmigrate state record-subagent-call` | 向顶层 `subagent_calls` 追加一条 SubAgent 调用记录（append-only，用于诊断卡死与统计重试）：`--step-index`（必填）子命令步骤号、`--subagent-name`（必填，analyzer/translator/verifier/scaffolder）、`--status`（必填）、`--started-at`/`--ended-at`（ISO8601；`--started-at` 省略时 CLI 取当前 UTC，因 schema 中 `started_at` 必填而编排器在调用开始时就要记录）、`--error-message`。**`--status` 是自由字符串、CLI 不做枚举校验**——附录 A 示例值为 `success`，SKILL.md 的调用前后台账约定用 `started`/`ok`/`error`，二者并存（口径待统一，见下方注）。编排器须在每次 Agent 调用前后各记一条，否则 `subagent_calls` 恒空、卡死与重试无从追溯 |
+| `rustmigrate state record-subagent-call` | 向顶层 `subagent_calls` 追加一条 SubAgent 调用记录（append-only，用于诊断卡死与统计重试）：`--step-index`（必填）子命令步骤号、`--subagent-name`（必填，analyzer/translator/verifier/scaffolder）、`--status`（必填）、`--started-at`/`--ended-at`（ISO8601；`--started-at` 省略时 CLI 取当前 UTC，因 schema 中 `started_at` 必填而编排器在调用开始时就要记录）、`--error-message`。**`--status` 值域受 clap 强校验**：`started`（调用前置台账）/ `ok`（产出物校验通过）/ `error`（校验失败或报错）/ `timeout`（超时或 watchdog 判 stall），非法值在参数解析期即拒、不落盘（M4 收口——此前是自由字符串，clap 帮助 `success/timeout/failed` × 附录 A 示例 `success` × SKILL.md `started`/`ok`/`error` 三方并存且拼错静默入库）。编排器须在每次 Agent 调用前后各记一条，否则 `subagent_calls` 恒空、卡死与重试无从追溯——**`started` 是卡死判定的锚点**（有 `started` 无终态记录即卡死信号） |
 | `rustmigrate stats loc` | 统计源码和 Rust 代码行数（嵌入 tokei） |
 | `rustmigrate stats compare` | 源码与 Rust 结构复杂度对比（函数数量比、代码行数比、控制流嵌套层级）——复用 tokei + tree-sitter 函数计数，作为 Phase A 结构校验门禁（见 03 § 4.3 Step 4.5） |
 | `rustmigrate stats quality` | 迁移质量度量（per-module `final_score` / `behavior_coverage` + project-wide `degrade_rate` / `project_loc_ratio`），对齐 03 § 7.5 评分卡（M4-QUAL-01）。`--source` / `--rust`（省略则取配置）经 tokei `count_loc_excluding_tests` 计算项目级 `rust/source` LOC 比（按命名约定排除源侧测试文件，见 issue #78），仅作为报告级近似值输出（warning 明示粒度），不下沉模块评分；不走 `stats compare`，避免 Go/C 尚未实现控制流嵌套分析时连 LOC 比也丢失（M4-QUAL-05） |
 | `rustmigrate stats community` | 社区结构偏离度诊断：Louvain 社区检测 vs 目录分区 NMI/ARI → `deviation_score`（M4-QUAL-04） |
-| `rustmigrate scaffold workspace` | 生成 Cargo workspace 基础骨架（委托 `cargo init`）；dev-dependencies 与 `deny.toml` 由 scaffolder SubAgent 按项目测试需求注入。同时写 `.gitignore`（`/target`，后置条件式幂等——缺有效规则则追加、保留用户既有内容）；`cargo init --vcs none` 不产 VCS 文件，缺它会让 worktree 自检产物被 `git add -A` 吞入提交污染合并（ORCH-01 PR-5 实测） |
+| `rustmigrate scaffold workspace` | 生成迁移目标 Rust 项目的基础骨架（委托 `cargo init --lib --vcs none`）；dev-dependencies 与 `deny.toml` 由 scaffolder SubAgent 按项目测试需求注入。同时写 `.gitignore`（`/target`，后置条件式幂等——缺有效规则则追加、保留用户既有内容）；`cargo init --vcs none` 不产 VCS 文件，缺它会让 worktree 自检产物被 `git add -A` 吞入提交污染合并（ORCH-01 PR-5 实测）。**产出物实为单 crate（`[package]` + `src/lib.rs`），不含 `[workspace]` 段**——单 crate 输出是既定设计（见下方 § M2 写隔离约束「worktree 是并行机制，与输出 crate 结构正交，M2 沿用单 crate 输出」），命令名中的 workspace 是历史沿称，保留以免破坏 `scaffolder.md` / `workflow.md` / `SKILL.md` 的既有调用；真需要多 crate 分层时另开命令而非改本命令语义 |
 | `rustmigrate graduate` | 项目级毕业评估：全部模块为终态（done/degrade_*）时把 `ProjectState` 推进到 `graduate`，并写 `.rust-migration/reports/graduation-report.json`（报告写入失败仅降级 warning、命令仍成功）。三道前置检查全部返回 `Config` 错误：① 当前项目态非 `sprint_loop`（已在 `graduate` 态再次调用即命中此条，构成**重复调用守护**——是拒绝重入报错，不是幂等）；② `modules` 为空（须先 `populate-modules`）；③ 存在非终态模块（错误信息列出前 5 个 `模块=状态`，超 5 追加 ` ...`）。是 `/migrate graduate` skill 的 CLI 承载 |
 
 **原 M2 推迟命令 — 5 个（均已实现）**：下表保留当初的推迟理由作为设计沿革，命令本身已全部落地、与上表同等可用。
@@ -162,7 +162,7 @@ cli/
 │   │   │   ├── graph.rs    # 图引擎：petgraph StableGraph + SQLite 持久化 + Query→Resolve→Set API
 │   │   │   ├── profile.rs  # 项目画像分析（tree-sitter + tokei）
 │   │   │   ├── state.rs    # 状态机管理
-│   │   │   ├── scaffold.rs # workspace 骨架生成
+│   │   │   ├── scaffold.rs # 迁移目标项目骨架生成（单 crate）
 │   │   │   └── validate.rs # 配置/状态校验（jsonschema）
 │   │   └── Cargo.toml
 │   └── cli/                # CLI 入口（clap）
@@ -195,7 +195,7 @@ SKILL.md 通过 Bash tool 调用 CLI，所有输出为统一 JSON 格式：
 | tree-sitter + 语言绑定 | 多语言 AST 解析 | `graph build`, `profile` |
 | ast-grep-core | 代码模式搜索/重写 | `profile`（惯用法检测）、`graph build`（calls 等边的模式补充解析） |
 | tokei | 代码行数统计 | `stats loc`, `stats compare` |
-| syn + quote | Rust 代码生成/分析（M2：自定义 lint crate） | M2 条件引入（MVP `scaffold workspace` 用 toml_edit 生成 TOML） |
+| syn + quote | Rust 代码生成/分析（M2：自定义 lint crate） | M2 条件引入；**均未作为直接依赖引入**——`scaffold workspace` 最终委托 `cargo init` 生成骨架，既不手写 TOML 也不用 `toml_edit`（原文「用 toml_edit 生成 TOML」失实）。三者在 `Cargo.lock` 中均**存在但仅为传递依赖**：`syn`/`quote` 来自 serde/clap/thiserror/strum 的 proc-macro 链，`toml_edit` 由本仓直接依赖的 `toml 0.8` 拉入；源码零处 `use` 它们 |
 | petgraph | 依赖图数据结构（StableGraph + newtype 索引） | `graph build/topo-sort/parallel-groups/deps/rdeps/cycles` |
 | rusqlite | SQLite 图持久化（FTS5 全文搜索 M2 才启用，见 [04 § 5.7.3](./04-toolchain.md#573-持久化存储)） | `graph build`（写入）, `graph export`（M2 查询） |
 | jsonschema | JSON Schema 校验 | `validate state`, `validate config` |
@@ -332,7 +332,7 @@ Plugin 不支持 `rules/` 目录分发，因此采用混合策略将规则按特
 | `analyzer` | 源码分析、项目画像、依赖图语义增强、惯用法检查 | tree-sitter, dependency-cruiser, Mypy, tokei |
 | `translator` | 迁移规则生成、Phase A 忠实翻译 + Phase B 惯用化优化、多候选生成 [M2+] | LLM, ast-grep |
 | `verifier` | 等价性验证、**模块级测试生成**、Phase A→B 中间的对抗性审查、不等价证据收集、性能对比 | cargo-test, proptest, criterion, Miri |
-| `scaffolder` | 测试基础设施搭建、行为录制、黄金测试集管理、Cargo workspace 骨架生成 | insta, cargo-fuzz, mitmproxy |
+| `scaffolder` | 测试基础设施搭建、行为录制、黄金测试集管理、Rust 项目骨架生成（`scaffold workspace`，产出单 crate——命令名为历史沿称，见该命令表行） | insta, cargo-fuzz, mitmproxy |
 
 ### SubAgent 输入/输出接口表
 
@@ -733,7 +733,9 @@ CLI 的成功输出为 `{status, data, warnings}`（见 § 10.0.1）。失败时
 | `ADAPTER_TOOL_MISSING` | `rustmigrate profile` 检测到适配器所需外部工具（如 dependency-cruiser、mypy）未安装或版本不满足 | 按 `error_context.install_hint` 安装缺失工具后重新执行 |
 | `RUST_TOOL_MISSING` | `rustmigrate profile` 检测到 Tier 0 Rust 外部二进制（`cargo-nextest`）未安装 | 按 `error_context.install_hint`（如 `cargo install cargo-nextest`）安装后重新执行 |
 
-> **校验工具故障 vs 产出物失效的区分（R2-D5-04）**：L2 校验本身是 CLI 子命令 `rustmigrate validate state`，其执行可能因超时 / OOM / Schema 损坏而失败。SKILL.md 检查点须按 CLI 返回的 `error_code` 区分：若为 `VALIDATION_TIMEOUT` / `VALIDATION_OOM` / `VALIDATION_SCHEMA_CORRUPTED` 三者之一，记入 `subagent_calls` 的 substatus 为 `validation_tool_error_<type>`，**不进入 `max_retries_per_step` 重试循环**（重试无意义），而是向用户输出「校验工具故障，请检查环境（增大超时 / 内存 / 重新 init）后重试一次」；其余 error_code（JSON Schema 违反、SQLite 表结构缺失等产出物真失效）才进入正常重试循环。区分逻辑骨架见 [09-appendix-schemas.md 附录 B 检查点](./09-appendix-schemas.md#附录-bmvp-skill-的-skillmd-骨架)。
+> **校验工具故障 vs 产出物失效的区分（R2-D5-04）**：L2 校验本身是 CLI 子命令 `rustmigrate validate state`，其执行可能因超时 / OOM / Schema 损坏而失败。SKILL.md 检查点须按 CLI 返回的 `error_code` 区分：若为 `VALIDATION_TIMEOUT` / `VALIDATION_OOM` / `VALIDATION_SCHEMA_CORRUPTED` 三者之一，记一条 `state record-subagent-call --status error --error-message "validation_tool_error_<type>: <详情>"`，**不进入 `max_retries_per_step` 重试循环**（重试无意义），而是向用户输出「校验工具故障，请检查环境（增大超时 / 内存 / 重新 init）后重试一次」；其余 error_code（JSON Schema 违反、SQLite 表结构缺失等产出物真失效）才进入正常重试循环。区分逻辑骨架见 [09-appendix-schemas.md 附录 B 检查点](./09-appendix-schemas.md#附录-bmvp-skill-的-skillmd-骨架)。
+>
+> **落地口径订正（M4）**：原文写「记入 `subagent_calls` 的 substatus 为 `validation_tool_error_<type>`」——`SubAgentCall` **从无 `substatus` 字段**（只有 `{step_index, subagent_name, started_at, ended_at, status, error_message}`），且 `--status` 现已收窄为 `started`/`ok`/`error`/`timeout` 四值强校验，`validation_tool_error_*` 无处安放。故 `<type>` 改由 `--error-message` 承载：状态取 `error`（工具故障不是 agent 卡死超时，不占 `timeout`），类型前缀写进消息文本，仍可按前缀 grep 聚合且不计入重试。
 
 > **Hook 失败输出一致性**：`verify.sh` 和 `full-verify.sh` 失败时，输出格式须与上述 CLI error JSON 兼容——脚本内部调用的 cargo/clippy 诊断自动转换为 `{error_code, suggested_fix}` 结构，便于 Skill 与 CI 统一解析。
 >

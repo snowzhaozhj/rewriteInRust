@@ -396,6 +396,15 @@ pub struct SubAgentCall {
     pub started_at: Timestamp,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<Timestamp>,
+    /// 调用状态。值域 `started` / `ok` / `error` / `timeout`，由 CLI 的
+    /// `SubagentCallStatusArg` 在参数解析期强校验（M4 收口，见 `09-appendix-schemas.md`
+    /// § `subagent_calls` 字段说明）。
+    ///
+    /// core 侧存 `String` 而非枚举，与 [`ModuleState::substatus`] 同惯例——本字段纯记录、
+    /// core 无分支消费，值域约束落在 CLI 层。两处敞口需知晓：`push_subagent_call` 是 `pub`，
+    /// 绕过 CLI 直调可写任意字符串；旧 state 文件可能含已废弃的 `success` / `failed`
+    /// （反序列化仍兼容不报错——旧文件必须可读；`validate state` 会扫出非法值并告警，
+    /// 但不硬判损坏，见 `validate::validate_state`）。
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,

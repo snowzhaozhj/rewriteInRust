@@ -3187,7 +3187,7 @@ mod tests {
                 subagent_name: "translator".to_string(),
                 started_at: Timestamp::new("2026-07-05T00:05:00Z".to_string()),
                 ended_at: Some(Timestamp::new("2026-07-05T00:06:00Z".to_string())),
-                status: "success".to_string(),
+                status: "ok".to_string(),
                 error_message: Some("none".to_string()),
             }],
             metadata: Some(MigrationMetadata {

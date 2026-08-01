@@ -113,7 +113,7 @@
   },
   "config_ref": ".rustmigrate.toml",
   "subagent_calls": [
-    { "step_index": 1, "subagent_name": "translator", "started_at": "2026-06-14T09:05:00Z", "ended_at": "2026-06-14T09:08:30Z", "status": "success", "error_message": null }
+    { "step_index": 1, "subagent_name": "translator", "started_at": "2026-06-14T09:05:00Z", "ended_at": "2026-06-14T09:08:30Z", "status": "ok", "error_message": null }
   ],
   "metadata": {
     "graph_build_completed": true,
@@ -154,6 +154,8 @@
 | `lock_token` | `string \| null` | MVP 恒为 `null`；M2 用于分布式锁令牌（见 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径)） |
 
 **`subagent_calls` 字段说明**：顶层 append-only 数组，每次 SubAgent 调用（含重试）追加一条 `{step_index, subagent_name, started_at, ended_at, status, error_message}`，用于诊断卡死与统计重试次数（见 [06 § 10.5](./06-plugin-structure.md#105-编排调度路径)）。
+
+> **`status` 值域（M4 收口）**：`started`（调用前置台账，已派发无结果）/ `ok`（产出物校验通过）/ `error`（校验失败或 SubAgent 报错）/ `timeout`（超时或 watchdog 判 stall，见 [MDR-016](../decisions/016-watchdog-stall-recovery-boundary.md)）。CLI `state record-subagent-call --status` 由 clap 强校验，非法值在参数解析期即拒、不落盘。**`started` 是诊断卡死的必需锚点**——有 `started` 而无对应终态记录即卡死信号。此前该参数为自由字符串、三处口径（clap 帮助 `success/timeout/failed` × 本示例 `success` × SKILL.md `started`/`ok`/`error`）并存且拼错静默入库，现统一到上述四值。
 
 ### 状态机概念名 → JSON 字段值映射
 

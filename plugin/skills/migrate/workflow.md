@@ -16,7 +16,7 @@
 - `migration-state.json` 存在，项目 state 为 `sprint_loop`。
 - `.rust-migration/porting/` 存在且含规则文件。
 - `modules` 非空，目标 sprint 的模块已被 `populate-modules` 分配。
-- Rust workspace 已搭建（`scaffold workspace` 已执行）。
+- Rust 项目骨架已搭建（`scaffold workspace` 已执行；产出单 crate，命令名中的 workspace 是历史沿称）。
 
 不满足说明 `/migrate analyze` 未完成，应提示用户先跑 analyze。
 
@@ -79,7 +79,7 @@ rustmigrate state get modules
    rustmigrate state record-subagent-call --step-index 2 --subagent-name translator --status started
    ```
 
-   **回传后记台账**：按结果记 `--status ok` 或 `--status error --error-message "<原因>"`。
+   **回传后记台账**：按结果记 `--status ok`、`--status error --error-message "<原因>"` 或 `--status timeout --error-message "<原因>"`（四值值域见 SKILL.md「SubAgent 编排」，CLI 强校验）。
 
 4. **回传**（`TranslationResult`）：SubAgent 只回传 `touched-list`（own_files + shared_touched + self_check + test）与可选质量度量（`test_pass_rate` + `known_differences`），代码留盘。机械 batch 无行为测试，两项度量均为 `None`；coupled_batch / cycle / 单文件路径只在 verifier 产出真实 L2 结果时回传度量，禁止伪造通过率。**回传一到主 worktree，集中 writer 就先写可选度量，不论 AgentDone/Failed**（失败样本同样是质量事实，不能等 2d 成功门才写）：
    ```bash

@@ -1785,7 +1785,7 @@ fn smoke_state_record_subagent_call() {
             "--subagent-name",
             "translator",
             "--status",
-            "success",
+            "ok",
             "--started-at",
             "2026-06-14T09:05:00Z",
             "--ended-at",
@@ -1803,7 +1803,7 @@ fn smoke_state_record_subagent_call() {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0]["step_index"], 1);
         assert_eq!(calls[0]["subagent_name"], "translator");
-        assert_eq!(calls[0]["status"], "success");
+        assert_eq!(calls[0]["status"], "ok");
         assert_eq!(calls[0]["started_at"], "2026-06-14T09:05:00Z");
         assert_eq!(calls[0]["ended_at"], "2026-06-14T09:08:30Z");
 
@@ -1852,7 +1852,7 @@ fn e2e_record_subagent_call_without_init_errors() {
             "--subagent-name",
             "translator",
             "--status",
-            "success",
+            "ok",
         ]);
         assert_eq!(code, 1, "无 init 应报错: {json}");
         assert_eq!(json["status"], "error");
@@ -1862,6 +1862,210 @@ fn e2e_record_subagent_call_without_init_errors() {
             "错误信息应提示状态文件不存在: {json}"
         );
     });
+}
+
+/// `--status` 四值全部被接受，且落盘字面值与命令行取值同形。
+///
+/// 值域是 SKILL.md / workflow.md 的命令行直接照抄对象——若 clap 的 kebab 化规则
+/// 与文档取值不一致（如 `Ok` 变 `ok` 之外的形态），编排器照抄就会解析失败。
+#[test]
+fn e2e_record_subagent_call_accepts_all_four_statuses() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        for (i, status) in ["started", "ok", "error", "timeout"].iter().enumerate() {
+            let (code, json) = run(&[
+                "state",
+                "record-subagent-call",
+                "--step-index",
+                "1",
+                "--subagent-name",
+                "translator",
+                "--status",
+                status,
+            ]);
+            assert_eq!(code, 0, "--status {status} 应被接受: {json}");
+            assert_eq!(json["data"]["subagent_calls_count"], i + 1);
+        }
+
+        let path = std::path::Path::new(".rust-migration").join("migration-state.json");
+        let state: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let calls = state["subagent_calls"].as_array().expect("应为数组");
+        let landed: Vec<&str> = calls
+            .iter()
+            .map(|c| c["status"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(
+            landed,
+            vec!["started", "ok", "error", "timeout"],
+            "落盘字面值须与命令行取值同形（文档照抄的前提）"
+        );
+    });
+}
+
+/// 非法 `--status` 在 clap 解析期即被拒，且不落盘。
+///
+/// 此前 `--status` 是自由字符串，`sucess` 这类拼写错误静默入库、
+/// `subagent_calls` 便无法按状态聚合统计。
+#[test]
+fn e2e_record_subagent_call_rejects_unknown_status() {
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        assert_eq!(
+            run(&["init"]).0,
+            0,
+            "init 须成功——否则下面的非法值即便被接受也会\
+                   因「状态文件不存在」而退出码非 0，命题未被真正验证"
+        );
+
+        // 先落一条合法记录作为「污染检测」基线。
+        let (code, json) = run(&[
+            "state",
+            "record-subagent-call",
+            "--step-index",
+            "1",
+            "--subagent-name",
+            "translator",
+            "--status",
+            "started",
+        ]);
+        assert_eq!(code, 0, "合法基线记录应成功: {json}");
+
+        // 旧 clap 帮助曾写 success/failed，属已废弃口径，须与拼写错误一样被拒。
+        // 大小写变体一并钉住：clap `ValueEnum` 默认 `ignore_case = false`，故 `OK`/`Ok`/`Started`
+        // 现在被拒。若日后为「对编排器宽容」给 `--status` 加 `ignore_case = true`，
+        // SKILL.md「只接受四值」即失实——没有这几个用例，那行 attribute 可以静默加上去。
+        for bad in [
+            "success", "failed", "sucess", "", "OK", "Ok", "Started", "TIMEOUT",
+        ] {
+            let (code, json) = run(&[
+                "state",
+                "record-subagent-call",
+                "--step-index",
+                "1",
+                "--subagent-name",
+                "translator",
+                "--status",
+                bad,
+            ]);
+            assert_ne!(code, 0, "非法 --status {bad:?} 应被拒: {json}");
+        }
+
+        // 一条都不应落盘——先落一条合法记录，再断言非法尝试既没追加也没污染它
+        // （只断言「数组为空」太弱：init 后本就是空，删掉整块断言测试仍会绿）。
+        let path = std::path::Path::new(".rust-migration").join("migration-state.json");
+        let state: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let calls = state["subagent_calls"].as_array().expect("应为数组");
+        assert_eq!(calls.len(), 1, "非法取值不得追加记录: {calls:?}");
+        assert_eq!(
+            calls[0]["status"], "started",
+            "既有合法记录不得被非法尝试污染: {calls:?}"
+        );
+    });
+}
+
+/// `as_str()` 的落盘字面值必须等于 clap 派生的取值名。
+///
+/// 二者是**两套独立真值源**：`as_str()` 手写字符串，clap 对变体名做 kebab 化。现有
+/// e2e 只钉住现存四值，对**新增第五个变体**无保护——`match` 穷尽性只强迫你写一个分支，
+/// 不检查返回值与 clap 取值名是否一致。写错则文档/提示词照抄的命令行会解析失败。
+///
+/// 仿 `types::common` 的 `as_str_matches_serde_serialize` 先例（专项审查建议）。
+#[test]
+fn subagent_call_status_as_str_matches_clap_value_name() {
+    use clap::ValueEnum;
+    use rustmigrate_cli::SubagentCallStatusArg;
+
+    let variants = SubagentCallStatusArg::value_variants();
+    assert_eq!(
+        variants.len(),
+        4,
+        "值域应为四值，新增变体须同步文档四处口径"
+    );
+    for v in variants {
+        let clap_name = v
+            .to_possible_value()
+            .expect("变体不应被 clap 跳过")
+            .get_name()
+            .to_owned();
+        assert_eq!(
+            v.as_str(),
+            clap_name,
+            "as_str() 与 clap 取值名不一致（文档照抄命令行会解析失败）: {v:?}"
+        );
+    }
+}
+
+/// 三处**文档**值域声明必须与 clap 真值域一致——不能只钉代码内部两套真值源。
+///
+/// 上一个测试钉的是 `as_str()` ↔ clap 派生名（都在代码里）。但本 PR 的整个论点是
+/// 「编排器照抄权威文档」：值域声明在 06 命令表、09 附录 A 值域注、SKILL.md 命令清单
+/// 三处，任一处漂回废弃口径，编排器照抄即被 CLI 拒——而这正是本 PR 要消灭的失败模式。
+///
+/// 编排器负向实证（2026-08-01，独立 worktree）：把 06 表的 `--status` 值域改回
+/// `success`/`failed`/`timeout`，**822 个测试全绿**；09 附录 A 与 SKILL.md 同样篡改
+/// 亦全绿。故补本守卫。判据只查「四个合法值出现 + 两个废弃值不出现」，不锁死周边措辞，
+/// 免得正常改文案就红。
+#[test]
+fn subagent_call_status_domain_is_consistent_across_docs() {
+    use clap::ValueEnum;
+    use rustmigrate_cli::SubagentCallStatusArg;
+
+    let legal: Vec<&str> = SubagentCallStatusArg::value_variants()
+        .iter()
+        .map(|v| v.as_str())
+        .collect();
+
+    // 每处声明的定位锚点：取该文件里谈 `--status` 值域的那一段。
+    let sources = [
+        (
+            "docs/design/06-plugin-structure.md",
+            "`--status` 值域受 clap 强校验",
+        ),
+        (
+            "docs/design/09-appendix-schemas.md",
+            "`status` 值域（M4 收口）",
+        ),
+        ("plugin/skills/migrate/SKILL.md", "`--status` 只接受"),
+    ];
+
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .expect("应能从 crate 目录上溯到仓库根")
+        .to_path_buf();
+
+    for (rel_path, anchor) in sources {
+        let path = repo_root.join(rel_path);
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("读不到 {}: {e}", path.display()));
+
+        let anchor_pos = text.find(anchor).unwrap_or_else(|| {
+            panic!(
+                "{rel_path} 里找不到值域声明锚点 `{anchor}`——该段被删或改写了措辞。\
+                 若确有重构，请连同本断言一起改并说明新锚点"
+            )
+        });
+        // 锚点后一段（值域声明连同解释通常在同一段落内）。
+        let segment: String = text[anchor_pos..].chars().take(600).collect();
+
+        for value in &legal {
+            assert!(
+                segment.contains(&format!("`{value}`")),
+                "{rel_path} 的值域声明缺合法值 `{value}`（编排器照抄会漏用该值）\n\
+                 实际段落: {segment}"
+            );
+        }
+        for deprecated in ["success", "failed"] {
+            assert!(
+                !segment.contains(&format!("`{deprecated}`（")),
+                "{rel_path} 的值域声明把已废弃的 `{deprecated}` 当作合法值列出——\
+                 编排器照抄即被 CLI 解析期拒（本 PR 要消灭的正是这个失败模式）。\n\
+                 提及废弃值的沿革说明是允许的，但不能写成 `{deprecated}`（<释义>) 这种值域条目形态。\n\
+                 实际段落: {segment}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -2219,6 +2423,20 @@ fn smoke_scaffold_workspace() {
         assert_eq!(code, 0, "scaffold workspace 应成功: {json}");
         assert_eq!(json["status"], "ok");
         assert!(target.join("Cargo.toml").exists(), "应生成 Cargo.toml");
+
+        // 产出物是**单 crate**，不是 Cargo workspace——命令名里的 workspace 是历史沿称，
+        // 单 crate 输出是既定设计（06 § M2 写隔离约束：worktree 是并行机制，与输出 crate
+        // 结构正交，M2 沿用单 crate 输出）。钉住此断言，防文档描述再次漂回「生成 workspace」。
+        let manifest = std::fs::read_to_string(target.join("Cargo.toml")).unwrap();
+        assert!(
+            manifest.contains("[package]"),
+            "应产出 [package] 单 crate: {manifest}"
+        );
+        assert!(
+            !manifest.contains("[workspace]"),
+            "不产出 [workspace] 段（命令名为历史沿称，勿据名改语义）: {manifest}"
+        );
+        assert!(target.join("src/lib.rs").exists(), "应为 --lib 骨架");
     });
 }
 
