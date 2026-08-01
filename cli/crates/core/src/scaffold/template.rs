@@ -13,8 +13,9 @@ use crate::process::{run_with_timeout, CARGO_TIMEOUT};
 /// 委托 `cargo init --lib` 生成标准结构（Cargo.toml + src/lib.rs）。
 /// 如果目标目录已有 Cargo.toml 则跳过（幂等）。
 ///
-/// 返回**警告列表**（非空时调用方须降级 `status=warning` 并如实转达）：唯一来源是
-/// [`warn_if_target_is_workspace_member`]（目标成了外层 workspace 的成员）。
+/// 返回**警告列表**（非空时调用方须降级 `status=warning` 并如实转达），全部来自
+/// [`warn_if_target_is_workspace_member`]：目标成了外层 workspace 的成员，或成员关系
+/// 无法判定。
 pub fn scaffold_project(name: &str, target_dir: &Path) -> Result<Vec<String>> {
     if name.is_empty() {
         return Err(MigrateError::Config("项目名不能为空".to_string()));
@@ -111,15 +112,35 @@ fn absolutize(path: &Path) -> PathBuf {
 /// （异构交叉 imp3：首次 `cargo init` 成功但 `write_gitignore` 失败 → 整命令以 IO 错误退出，
 /// 重跑若沉默用户永远不知道构建配置被改过）。
 ///
-/// `cargo metadata` 失败（目标不在任何 Cargo 项目内、cargo 不可用、manifest 语法坏）→ 不
-/// 告警：此时要么无 workspace，要么 cargo 自己也跑不动。
+/// `cargo metadata` 失败时**不静默**——分两种情况，靠「上溯路径里是否存在任何
+/// `Cargo.toml`」区分（不靠 stderr 文案：裸目录与坏成员**都是 exit 101**，文案又随版本
+/// 变动、可被本地化，正是本 PR 反复排除的那类脆弱判据）：
+/// - 上溯无任何 `Cargo.toml` → 目标不在任何 Cargo 项目内（裸目录 scaffold，最常见的正常
+///   情况），无 workspace 可牵连，**不告警**。
+/// - 存在 `Cargo.toml` 但 metadata 仍失败（实测：workspace 里已有语法坏的成员 → exit 101）
+///   → 用户的 `cargo build` 本来就是坏的（非迁移产物造成），但**检测确实没能进行**，故如实
+///   报「无法判定」，不让调用方以为已确认无事。
 ///
 /// 不报错只告警：成为 member 本身未破坏任何东西，用户也可能确实想要（把迁移产物纳入
 /// workspace 是合理意图）；能否接受由用户判断，CLI 的职责是不让它静默发生。
 fn warn_if_target_is_workspace_member(target_dir: &Path) -> Vec<String> {
     let absolute_target = absolutize(target_dir);
     let Some(metadata) = workspace_metadata(&absolute_target) else {
-        return Vec::new();
+        // 目标自身的 Cargo.toml 不算——它是本次产物；只看祖先目录。
+        let inside_cargo_project = absolute_target
+            .parent()
+            .into_iter()
+            .flat_map(Path::ancestors)
+            .any(|dir| dir.join("Cargo.toml").is_file());
+        if !inside_cargo_project {
+            return Vec::new();
+        }
+        return vec![format!(
+            "无法判定本目标是否落入某个外层 Rust workspace：目标位于一个 Cargo 项目内，\
+             但 `cargo metadata` 执行失败（常见原因是该 workspace 已有成员的 `Cargo.toml` \
+             语法有误）。若它确实落在已有 workspace 内，该仓库的 `cargo build`/`cargo test` \
+             可能开始连带编译迁移产物——请手工确认 workspace 根的 `members`/`exclude`"
+        )];
     };
 
     // 比对前把两侧都过 canonicalize：`cargo metadata` 返回的是符号链接解析后的真实路径
@@ -170,7 +191,11 @@ fn canonicalize_or_self(path: &Path) -> PathBuf {
 
 /// 在 `dir` 处调用 `cargo metadata`，取 workspace 根与成员目录。
 ///
-/// `--no-deps` 避免解析依赖图（快且无需网络）。任何失败都返回 `None`（调用方据此不告警）。
+/// `--no-deps` 避免解析依赖图——实测这让它不受「依赖不可解析」影响（`[dependencies]` 里写
+/// 一个不存在的 crate，metadata 仍 exit 0），也不需要网络。
+///
+/// 失败返回 `None`；**调用方须区分「无 Cargo 项目」与「真失败」**，不可一律当作无告警
+/// （见 [`warn_if_target_is_workspace_member`]）。
 fn workspace_metadata(dir: &Path) -> Option<WorkspaceMetadata> {
     let output = run_with_timeout(
         Command::new("cargo")
@@ -531,13 +556,20 @@ mod tests {
 
     #[test]
     fn test_scaffold_no_warning_when_parent_is_plain_package() {
-        // 父目录有 Cargo.toml 但是普通 [package]（非 workspace）：cargo 不改它，不该告警。
+        // 父目录有 Cargo.toml 但是普通 [package]（非 workspace）：目标不会成为任何
+        // workspace 的成员，不该告警。
+        //
+        // fixture 必须是**合法可解析**的 package——须带 src/lib.rs：实测缺源文件时 cargo
+        // 报 `no targets specified in the manifest`、`cargo metadata` 退出 101，于是走进
+        // 「无法判定」分支而误判为回归。真实项目的 package 都有源文件。
         let tmp = TempDir::new().unwrap();
         std::fs::write(
             tmp.path().join("Cargo.toml"),
             "[package]\nname = \"plain\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
         )
         .unwrap();
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::write(tmp.path().join("src/lib.rs"), "").unwrap();
         let before = std::fs::read_to_string(tmp.path().join("Cargo.toml")).unwrap();
 
         let warnings = scaffold_project("inner", &tmp.path().join("inner")).unwrap();
@@ -757,6 +789,56 @@ mod tests {
         assert!(
             warnings.is_empty(),
             "目标即自己的 workspace 根，不该告警: {warnings:?}"
+        );
+    }
+
+    /// `cargo metadata` 失败但目标确在某个 Cargo 项目内 → 报「无法判定」，不静默。
+    ///
+    /// 编排器实测：workspace 里已有语法坏的成员时 `cargo metadata` 退出码 101。此时用户的
+    /// `cargo build` 本来就坏（非迁移产物造成），但**检测没能进行**，静默返回「无告警」等于
+    /// 谎称已确认无事。
+    #[test]
+    fn test_warns_unknown_when_metadata_fails_inside_cargo_project() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("crates/broken/src")).unwrap();
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/*\"]\n",
+        )
+        .unwrap();
+        // 语法坏的成员 manifest：让 cargo metadata 失败。
+        std::fs::write(
+            tmp.path().join("crates/broken/Cargo.toml"),
+            "[package\nbad!!!",
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("crates/broken/src/lib.rs"), "").unwrap();
+
+        let warnings = scaffold_project("newmod", &tmp.path().join("crates/newmod")).unwrap();
+
+        assert_eq!(
+            warnings.len(),
+            1,
+            "metadata 失败且目标在 Cargo 项目内，须报「无法判定」而非静默: {warnings:?}"
+        );
+        assert!(
+            warnings[0].contains("无法判定"),
+            "告警须如实说明是判定失败、不是确认无事: {}",
+            warnings[0]
+        );
+    }
+
+    /// 裸目录（上溯无任何 `Cargo.toml`）：metadata 同样失败，但这是正常情况，不该告警。
+    ///
+    /// 与上一条同为 `cargo metadata` exit 101，故**不能靠 stderr 文案区分**（文案随版本变动、
+    /// 可被本地化——正是本 PR 反复排除的脆弱判据），改按「上溯是否存在 Cargo.toml」区分。
+    #[test]
+    fn test_no_unknown_warning_in_bare_dir_without_cargo_project() {
+        let tmp = TempDir::new().unwrap();
+        let warnings = scaffold_project("solo", &tmp.path().join("solo")).unwrap();
+        assert!(
+            warnings.is_empty(),
+            "裸目录 scaffold 是正常情况，不该报「无法判定」: {warnings:?}"
         );
     }
 }
