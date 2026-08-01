@@ -3700,8 +3700,10 @@ fn cmd_stats_community() -> CmdResult {
 
 /// `scaffold workspace`：生成 Rust 项目骨架（单 crate）。
 ///
-/// `warnings` 非空 → `status` 降级 `warning`：目前唯一来源是「`cargo init` 把新 crate
-/// 追加进外层 workspace 的 `members`」（详见 `scaffold::template`）。
+/// `warnings` 非空 → `status` 降级 `warning`。两类来源（详见 `scaffold::template` 的
+/// `warn_if_target_is_workspace_member`）：① 目标已成为外层 workspace 的成员——可能是
+/// `cargo init` 追加进 `members`，也可能被既有 glob（`crates/*`）直接覆盖（后者不改
+/// manifest）；② 成员关系**无法判定**（目标在某个 Cargo 项目内但 `cargo metadata` 执行失败）。
 fn cmd_scaffold_workspace(name: &str, target: &Path) -> CmdResult {
     let warnings = scaffold_project(name, target)?;
     Ok((

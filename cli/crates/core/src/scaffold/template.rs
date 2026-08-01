@@ -163,13 +163,14 @@ fn warn_if_target_is_workspace_member(target_dir: &Path) -> Vec<String> {
     }
 
     vec![format!(
-        "本目标已是外层 workspace（根 {}）的成员——该仓库的 `cargo build`/`cargo test` 会\
-         连带编译迁移产物，而迁移中的 crate 常处于不可编译的中间态（`unimplemented!()`、\
-         `TODO(port)`），足以让原本通过的构建开始失败。若不需要，请在 workspace 根的 \
-         `Cargo.toml` 里把本 crate 从 `members` 移除**并**加入 `exclude`（仅移除 members \
-         不够——被 glob 覆盖或位于 workspace 目录树内时 cargo 仍报 \
-         `current package believes it's in a workspace when it's not`），或改用仓库外的 \
-         `--target` 路径",
+        "本目标已是外层 workspace（根 {}）的成员——该仓库的 `cargo build --workspace`/\
+         `cargo test --workspace` 会连带编译迁移产物（未配 `default-members` 时，裸 \
+         `cargo build`/`cargo test` 同样会），而迁移中的 crate 常处于不可编译的中间态\
+         （`unimplemented!()`、`TODO(port)`），足以让原本通过的构建开始失败。若不需要，\
+         请在 workspace 根的 `Cargo.toml` 里把本 crate 从 `members` 移除**并**加入 \
+         `exclude`（仅移除 members 不够——被 glob 覆盖或位于 workspace 目录树内时 cargo \
+         仍报 `current package believes it's in a workspace when it's not`），\
+         或改用仓库外的 `--target` 路径",
         metadata.root.display()
     )]
 }
@@ -766,6 +767,14 @@ mod tests {
         assert!(
             warnings[0].contains("exclude"),
             "处置建议须提到 exclude（仅移除 members 会得到编译不了的 crate）: {}",
+            warnings[0]
+        );
+        // 危害范围须限定到 --workspace：设计契约审查实测，配了 `default-members` 时裸
+        // `cargo build`/`cargo test` **不**编译迁移产物，只有 `--workspace` 才会。
+        // 原文案「该仓库的 cargo build/test 会连带编译」是过度承诺。
+        assert!(
+            warnings[0].contains("--workspace"),
+            "危害描述须限定到 --workspace（default-members 下裸 build 不编译）: {}",
             warnings[0]
         );
     }
