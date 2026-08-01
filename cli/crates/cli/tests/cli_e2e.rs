@@ -1996,6 +1996,78 @@ fn subagent_call_status_as_str_matches_clap_value_name() {
     }
 }
 
+/// 三处**文档**值域声明必须与 clap 真值域一致——不能只钉代码内部两套真值源。
+///
+/// 上一个测试钉的是 `as_str()` ↔ clap 派生名（都在代码里）。但本 PR 的整个论点是
+/// 「编排器照抄权威文档」：值域声明在 06 命令表、09 附录 A 值域注、SKILL.md 命令清单
+/// 三处，任一处漂回废弃口径，编排器照抄即被 CLI 拒——而这正是本 PR 要消灭的失败模式。
+///
+/// 编排器负向实证（2026-08-01，独立 worktree）：把 06 表的 `--status` 值域改回
+/// `success`/`failed`/`timeout`，**822 个测试全绿**；09 附录 A 与 SKILL.md 同样篡改
+/// 亦全绿。故补本守卫。判据只查「四个合法值出现 + 两个废弃值不出现」，不锁死周边措辞，
+/// 免得正常改文案就红。
+#[test]
+fn subagent_call_status_domain_is_consistent_across_docs() {
+    use clap::ValueEnum;
+    use rustmigrate_cli::SubagentCallStatusArg;
+
+    let legal: Vec<&str> = SubagentCallStatusArg::value_variants()
+        .iter()
+        .map(|v| v.as_str())
+        .collect();
+
+    // 每处声明的定位锚点：取该文件里谈 `--status` 值域的那一段。
+    let sources = [
+        (
+            "docs/design/06-plugin-structure.md",
+            "`--status` 值域受 clap 强校验",
+        ),
+        (
+            "docs/design/09-appendix-schemas.md",
+            "`status` 值域（M4 收口）",
+        ),
+        ("plugin/skills/migrate/SKILL.md", "`--status` 只接受"),
+    ];
+
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .expect("应能从 crate 目录上溯到仓库根")
+        .to_path_buf();
+
+    for (rel_path, anchor) in sources {
+        let path = repo_root.join(rel_path);
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("读不到 {}: {e}", path.display()));
+
+        let anchor_pos = text.find(anchor).unwrap_or_else(|| {
+            panic!(
+                "{rel_path} 里找不到值域声明锚点 `{anchor}`——该段被删或改写了措辞。\
+                 若确有重构，请连同本断言一起改并说明新锚点"
+            )
+        });
+        // 锚点后一段（值域声明连同解释通常在同一段落内）。
+        let segment: String = text[anchor_pos..].chars().take(600).collect();
+
+        for value in &legal {
+            assert!(
+                segment.contains(&format!("`{value}`")),
+                "{rel_path} 的值域声明缺合法值 `{value}`（编排器照抄会漏用该值）\n\
+                 实际段落: {segment}"
+            );
+        }
+        for deprecated in ["success", "failed"] {
+            assert!(
+                !segment.contains(&format!("`{deprecated}`（")),
+                "{rel_path} 的值域声明把已废弃的 `{deprecated}` 当作合法值列出——\
+                 编排器照抄即被 CLI 解析期拒（本 PR 要消灭的正是这个失败模式）。\n\
+                 提及废弃值的沿革说明是允许的，但不能写成 `{deprecated}`（<释义>) 这种值域条目形态。\n\
+                 实际段落: {segment}"
+            );
+        }
+    }
+}
+
 #[test]
 fn smoke_state_transition_invalid_status() {
     let tmp = tempfile::tempdir().unwrap();
