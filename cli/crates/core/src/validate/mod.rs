@@ -905,6 +905,49 @@ mod tests {
         assert_eq!(hit.matches("\"success\"").count(), 1, "重复值应去重: {hit}");
     }
 
+    /// pub core API 绕过 CLI 值域校验后，读侧告警仍须兜住（含存盘 → 读回一轮）。
+    ///
+    /// 异构交叉审查（codex）指出的敞口：值域收窄只发生在 CLI 参数层，`push_subagent_call`
+    /// 是 `pub` 且仍收 `String`，外部 Rust 调用者可写任意值。该分层是既定惯例（同
+    /// `ModuleState::substatus`，设计契约审查判 PASS）、本 PR 不改签名，但**兜底必须有
+    /// 回归锁**——上一个测试直接构造 `SubAgentCall` 结构体，没走这条真实绕过路径，
+    /// 也没验证非法值经 `save` → `load` 往返后仍被告警。
+    #[test]
+    fn test_validate_warns_on_status_written_via_pub_api_after_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("migration-state.json");
+
+        let mut machine = crate::state::MigrationStateMachine::init_new(
+            "proof",
+            crate::types::common::SourceLang::TypeScript,
+        );
+        // 绕过 CLI 直调 pub API 写入非法值。
+        machine.push_subagent_call(
+            1,
+            "translator".to_owned(),
+            "totally-invalid".to_owned(),
+            Some(Timestamp::new("2026-08-01T00:00:00Z")),
+            None,
+            None,
+        );
+        machine.save(&path).unwrap();
+
+        let loaded = crate::state::MigrationStateMachine::load(&path).unwrap();
+        assert_eq!(
+            loaded.state_file().subagent_calls[0].status,
+            "totally-invalid",
+            "旧文件/绕过写入的值必须能读回（反序列化不得硬失败），否则 state 变砖"
+        );
+
+        let warnings = validate_state(loaded.state_file()).unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("subagent_calls") && w.contains("totally-invalid")),
+            "经 pub API 写入并往返后，读侧仍须告警该非法值: {warnings:?}"
+        );
+    }
+
     #[test]
     fn test_check_blocked_no_blocked_modules() {
         // 无 blocked 模块：返回空列表。

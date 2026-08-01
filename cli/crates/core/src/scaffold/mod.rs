@@ -1,4 +1,4 @@
-//! Cargo workspace 骨架生成 + FFI 降级桩 + 降级分析报告。
+//! 迁移目标 Rust 项目骨架生成（**单 crate**，不含 `[workspace]` 段）+ FFI 降级桩 + 降级分析报告。
 
 pub mod degrade_report;
 pub mod ffi;

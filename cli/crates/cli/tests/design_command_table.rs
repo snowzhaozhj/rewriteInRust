@@ -157,8 +157,43 @@ fn scan_table(text: &str) -> DesignTable {
     // 当前所处的表头段：0=未进入 1=已实现 2=原 M2 推迟
     let mut section = 0u8;
     let mut in_overview = false;
+    // Markdown 语义状态。异构交叉审查（codex）实证的假绿路径：整张表包进 `<!-- -->`
+    // 后读者渲染时看不到任何表格，而逐行扫描仍读得到「影子表」，9 测试全绿——守卫的
+    // 全部目的正是「读者看到的表 == CLI」，故必须按渲染语义排除不可见内容。
+    let mut in_html_comment = false;
+    let mut in_fenced_code = false;
+    // 声明出现次数：同一声明重复出现时旧写法被后值覆盖（可在注释里藏正确值、可见处写错值）。
+    let mut implemented_decls = 0usize;
+    let mut deferred_decls = 0usize;
 
     for line in text.lines() {
+        let trimmed = line.trim();
+
+        // 代码块围栏：块内整段跳过（含其中的表格样例）。
+        if trimmed.starts_with("```") {
+            in_fenced_code = !in_fenced_code;
+            continue;
+        }
+        if in_fenced_code {
+            continue;
+        }
+
+        // HTML 注释：可同行开闭，也可跨行。注释内的一切都不渲染，一律跳过。
+        if in_html_comment {
+            if trimmed.contains("-->") {
+                in_html_comment = false;
+            }
+            continue;
+        }
+        if trimmed.contains("<!--") && !trimmed.contains("-->") {
+            in_html_comment = true;
+            continue;
+        }
+        if trimmed.contains("<!--") {
+            // 同行开闭：注释掉的片段不参与解析。
+            continue;
+        }
+
         if line.starts_with("### ") {
             // 概览章节结束即停止扫描。
             if in_overview {
@@ -173,12 +208,20 @@ fn scan_table(text: &str) -> DesignTable {
 
         if let Some(n) = parse_declared_count(line, "**已实现命令 — ") {
             implemented.0 = n;
+            implemented_decls += 1;
             section = 1;
             continue;
         }
         if let Some(n) = parse_declared_count(line, "**原 M2 推迟命令 — ") {
             deferred.0 = n;
+            deferred_decls += 1;
             section = 2;
+            continue;
+        }
+
+        // 引用块 / 缩进块里的表行不是权威表的一部分——渲染成引用或代码，读者不会
+        // 当作命令表读。codex 实证：把可见表改成引用表并混入新成员，段归属守卫仍 PASS。
+        if trimmed.starts_with('>') || line.starts_with("    ") || line.starts_with('\t') {
             continue;
         }
 
@@ -196,6 +239,13 @@ fn scan_table(text: &str) -> DesignTable {
             unparsed_rows.push(line.to_string());
         }
     }
+
+    assert!(
+        implemented_decls <= 1 && deferred_decls <= 1,
+        "表头声明重复出现（已实现 {implemented_decls} 次 / 原 M2 推迟 {deferred_decls} 次）——\
+         后一个声明会覆盖前一个，可被用来「可见处写错计数、别处藏正确计数」制造假绿。\
+         每个声明在概览章节内应恰好出现一次"
+    );
 
     DesignTable {
         commands,
@@ -474,4 +524,89 @@ fn scan_truncates_when_overview_gains_a_h3_subheading() {
         !(truncated.implemented.0 > 0 && truncated.deferred.0 > 0),
         "完整性后置条件应判定为不满足，从而报「后半段表被静默截断」而非「命令未登记」"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Markdown 渲染语义边界（异构交叉审查 codex important 1）
+//
+// 守卫的命题是「**读者看到的**表 == CLI」。逐行扫描原始文本读不出渲染语义，于是
+// 「渲染后不可见」的内容也被当权威表读——codex 实证把整张表包进 `<!-- -->`（读者
+// 看不到任何表格）后 9 测试全绿；编排器独立复现确认。以下钉住四类不可见内容。
+// ---------------------------------------------------------------------------
+
+/// HTML 注释里的表行不算权威表——注释内容不渲染，读者看不到。
+#[test]
+fn html_commented_rows_are_invisible_to_the_scan() {
+    // 跨行注释：整张已实现表被注释掉 → 该段行数为 0（而非照旧读到 1）。
+    let doc = synthetic_doc("").replace(
+        "| `rustmigrate init` | 说明 |",
+        "<!--\n| `rustmigrate init` | 说明 |\n-->",
+    );
+    let table = scan_table(&doc);
+    assert_eq!(
+        table.implemented,
+        (1, 0),
+        "注释掉的表行不得计入（声明仍为 1，行数应为 0 → 计数守卫报错）"
+    );
+    assert!(
+        !table.commands.contains("init"),
+        "注释内的命令不该进入解析集合，否则读者看不到的「影子表」可冒充权威表"
+    );
+
+    // 同行开闭的注释同样不可见。
+    let inline = synthetic_doc("").replace(
+        "| `rustmigrate init` | 说明 |",
+        "<!-- | `rustmigrate init` | 说明 | -->",
+    );
+    assert_eq!(scan_table(&inline).implemented, (1, 0), "同行注释亦不可见");
+}
+
+/// 代码块围栏内的表格是示例，不是权威表。
+#[test]
+fn fenced_code_block_rows_are_not_command_rows() {
+    let doc = synthetic_doc("").replace(
+        "| `rustmigrate init` | 说明 |",
+        "```markdown\n| `rustmigrate init` | 说明 |\n```",
+    );
+    let table = scan_table(&doc);
+    assert_eq!(table.implemented, (1, 0), "代码块内表行不得计入");
+    assert!(!table.commands.contains("init"));
+}
+
+/// 引用块（`>`）与缩进块里的表行渲染成引用/代码，读者不当命令表读。
+///
+/// codex 实证：把可见表改成引用表并混入新成员，段归属守卫仍 PASS。
+#[test]
+fn blockquoted_and_indented_rows_are_not_command_rows() {
+    let quoted = synthetic_doc("").replace(
+        "| `rustmigrate graph export` | 说明 | 理由 |",
+        "> | `rustmigrate stats community` | 混入的新成员 | 理由 |",
+    );
+    let table = scan_table(&quoted);
+    assert_eq!(table.deferred, (1, 0), "引用块内表行不得计入");
+    assert!(
+        !table.deferred_commands.contains("stats community"),
+        "引用表混入的成员不得污染段归属集合（否则冻结清单可被绕过）"
+    );
+
+    let indented = synthetic_doc("").replace(
+        "| `rustmigrate init` | 说明 |",
+        "    | `rustmigrate init` | 说明 |",
+    );
+    assert_eq!(scan_table(&indented).implemented, (1, 0), "缩进块亦不计入");
+}
+
+/// 表头声明重复出现要直接失败——否则可「可见处写错计数、注释外另处藏正确计数」。
+///
+/// 旧写法下后一个声明覆盖前一个，codex 实证可借此让计数守卫读到正确值而读者看到 999。
+#[test]
+#[should_panic(expected = "表头声明重复出现")]
+fn duplicate_declared_counts_are_rejected() {
+    let doc = synthetic_doc("").replace(
+        "**原 M2 推迟命令 — 1 个（均已实现）**：",
+        "**已实现命令 — 999 个**（伪造的第二个声明）：\n\
+         \n\
+         **原 M2 推迟命令 — 1 个（均已实现）**：",
+    );
+    scan_table(&doc);
 }
