@@ -3698,15 +3698,18 @@ fn cmd_stats_community() -> CmdResult {
     Ok((serde_json::to_value(&report)?, warnings))
 }
 
-/// `scaffold workspace`：生成 Cargo lib 项目骨架。
+/// `scaffold workspace`：生成 Rust 项目骨架（单 crate）。
+///
+/// `warnings` 非空 → `status` 降级 `warning`：目前唯一来源是「`cargo init` 把新 crate
+/// 追加进外层 workspace 的 `members`」（详见 `scaffold::template`）。
 fn cmd_scaffold_workspace(name: &str, target: &Path) -> CmdResult {
-    scaffold_project(name, target)?;
+    let warnings = scaffold_project(name, target)?;
     Ok((
         json!({
             "name": name,
             "target": target.to_string_lossy(),
         }),
-        Vec::new(),
+        warnings,
     ))
 }
 

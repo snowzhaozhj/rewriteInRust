@@ -2,7 +2,7 @@
 //!
 //! 委托 `cargo init` 生成标准项目结构，避免硬编码模板。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::error::{MigrateError, Result};
@@ -12,7 +12,10 @@ use crate::process::{run_with_timeout, CARGO_TIMEOUT};
 ///
 /// 委托 `cargo init --lib` 生成标准结构（Cargo.toml + src/lib.rs）。
 /// 如果目标目录已有 Cargo.toml 则跳过（幂等）。
-pub fn scaffold_project(name: &str, target_dir: &Path) -> Result<()> {
+///
+/// 返回**警告列表**（非空时调用方须降级 `status=warning` 并如实转达）：目前唯一来源是
+/// 「`cargo init` 把新 crate 追加进外层 workspace 的 `members`」，见 [`warn_if_parent_workspace_mutated`]。
+pub fn scaffold_project(name: &str, target_dir: &Path) -> Result<Vec<String>> {
     if name.is_empty() {
         return Err(MigrateError::Config("项目名不能为空".to_string()));
     }
@@ -21,10 +24,15 @@ pub fn scaffold_project(name: &str, target_dir: &Path) -> Result<()> {
     // write_gitignore 失败（权限/磁盘/进程中断）后重跑须能补齐，否则 target/ 会漏进提交
     // （codex 审查指出的失败重试语义漏洞）。
     if target_dir.join("Cargo.toml").exists() {
-        return write_gitignore(target_dir);
+        write_gitignore(target_dir)?;
+        return Ok(Vec::new());
     }
 
     std::fs::create_dir_all(target_dir)?;
+
+    // 先记下外层 workspace manifest 的原样，供事后比对（cargo 是否把新 crate 塞进 members）。
+    let parent_manifest = find_enclosing_workspace_manifest(target_dir);
+    let parent_before = snapshot_manifest(parent_manifest.as_deref());
 
     let output = run_with_timeout(
         Command::new("cargo")
@@ -45,7 +53,67 @@ pub fn scaffold_project(name: &str, target_dir: &Path) -> Result<()> {
 
     write_gitignore(target_dir)?;
 
-    Ok(())
+    Ok(warn_if_parent_workspace_mutated(
+        parent_manifest.as_deref(),
+        parent_before.as_deref(),
+    ))
+}
+
+/// 自 `target_dir` 向上寻找第一个含 `[workspace]` 段的 `Cargo.toml`。
+///
+/// 只做**词法**判断（是否有一行去空白后以 `[workspace]` 开头）——不解析 TOML：此处目的
+/// 是「事后能否比对出被改动」，宁可多找一个候选也不该因 TOML 方言细节漏检。找不到返回
+/// `None`（裸目录 / 非 workspace 父仓，此时 cargo 不会有 members 追加行为）。
+fn find_enclosing_workspace_manifest(target_dir: &Path) -> Option<PathBuf> {
+    // 从 target_dir 的父目录起找：target_dir 自己的 Cargo.toml 是本次要生成的产物。
+    target_dir.parent()?.ancestors().find_map(|dir| {
+        let manifest = dir.join("Cargo.toml");
+        let content = std::fs::read_to_string(&manifest).ok()?;
+        content
+            .lines()
+            .any(|line| line.trim_start().starts_with("[workspace]"))
+            .then_some(manifest)
+    })
+}
+
+/// 读取 manifest 原文用于事后比对；读不到（不存在/无权限）返回 `None`。
+fn snapshot_manifest(path: Option<&Path>) -> Option<String> {
+    std::fs::read_to_string(path?).ok()
+}
+
+/// 若外层 workspace manifest 被 `cargo init` 改动，产出一条警告。
+///
+/// **为何需要**：用户的典型场景恰是「已有 Rust workspace 的仓库里迁模块进来」。cargo
+/// 在检测到外层 `[workspace]` 时会把新 crate 追加进 `members`（stderr 打
+/// `Adding ... as member of workspace`），此后父仓 `cargo build` / `cargo test` 会连带
+/// 编译迁移产物——而迁移中的 crate 常处于不可编译的中间态（`unimplemented!()`、
+/// `TODO(port)`），足以把用户原本绿的构建搞红。CLI 不该静默改用户仓库的构建配置
+/// （#86 记账 TODO ②，编排器 2026-08-01 实测：CLI 返回 `status:ok` 零 warning，
+/// 而父 `members` 已被改）。
+///
+/// **判据用「改动前后比对内容」而非匹配 cargo 的 stderr 文案**：文案随 cargo 版本变动、
+/// 且可能被本地化，比对内容对版本无假设。副作用是任何原因导致的父 manifest 变化都会
+/// 报——这个方向是安全的（宁可多提醒，不可漏报改用户文件）。
+///
+/// 不报错只告警：追加 member 本身未破坏任何东西，且用户可能确实想要这个结果；能否接受
+/// 由用户判断，CLI 的职责是不让它静默发生。
+fn warn_if_parent_workspace_mutated(path: Option<&Path>, before: Option<&str>) -> Vec<String> {
+    let (Some(path), Some(before)) = (path, before) else {
+        return Vec::new();
+    };
+    let Ok(after) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    if after == before {
+        return Vec::new();
+    }
+    vec![format!(
+        "cargo init 改动了外层 workspace 清单 {}（通常是把新 crate 追加进 `members`）——\
+         此后该仓库的 `cargo build`/`cargo test` 会连带编译迁移产物，而迁移中的 crate \
+         常处于不可编译的中间态。如不需要，请从 `members` 移除该条目（或改用仓库外的 \
+         --target 路径）",
+        path.display()
+    )]
 }
 
 /// 确保 crate 级 `.gitignore` 忽略 `/target`。
@@ -95,17 +163,23 @@ fn write_gitignore(target_dir: &Path) -> Result<()> {
 ///
 /// 委托 `cargo init` 生成（默认包含 src/main.rs）。
 /// 如果目标目录已有 Cargo.toml 则跳过（幂等）。
-pub fn scaffold_project_with_bin(name: &str, target_dir: &Path) -> Result<()> {
+///
+/// 返回警告列表，语义同 [`scaffold_project`]。
+pub fn scaffold_project_with_bin(name: &str, target_dir: &Path) -> Result<Vec<String>> {
     if name.is_empty() {
         return Err(MigrateError::Config("项目名不能为空".to_string()));
     }
 
     // 见 scaffold_project：已有 Cargo.toml 仍确保 .gitignore（失败重试补齐）。
     if target_dir.join("Cargo.toml").exists() {
-        return write_gitignore(target_dir);
+        write_gitignore(target_dir)?;
+        return Ok(Vec::new());
     }
 
     std::fs::create_dir_all(target_dir)?;
+
+    let parent_manifest = find_enclosing_workspace_manifest(target_dir);
+    let parent_before = snapshot_manifest(parent_manifest.as_deref());
 
     let output = run_with_timeout(
         Command::new("cargo")
@@ -126,7 +200,10 @@ pub fn scaffold_project_with_bin(name: &str, target_dir: &Path) -> Result<()> {
 
     write_gitignore(target_dir)?;
 
-    Ok(())
+    Ok(warn_if_parent_workspace_mutated(
+        parent_manifest.as_deref(),
+        parent_before.as_deref(),
+    ))
 }
 
 #[cfg(test)]
@@ -268,5 +345,148 @@ mod tests {
 
         assert!(target.join("Cargo.toml").exists());
         assert!(target.join("src/lib.rs").exists());
+    }
+
+    // -----------------------------------------------------------------------
+    // 外层 workspace 检测（#86 记账 TODO ②）
+    //
+    // 此前全部 scaffold 测试都在裸 tempdir 跑，而用户典型场景恰是「已有 Rust
+    // workspace 的仓库里迁模块进来」——那条路径零覆盖、零告警。
+    // -----------------------------------------------------------------------
+
+    /// 造一个含 `[workspace]` 的父仓，返回 (tmp, 父 manifest 路径)。
+    fn workspace_parent() -> (TempDir, PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        let existing = tmp.path().join("crates/existing/src");
+        std::fs::create_dir_all(&existing).unwrap();
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/existing\"]\nresolver = \"2\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("crates/existing/Cargo.toml"),
+            "[package]\nname = \"existing\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(existing.join("lib.rs"), "").unwrap();
+        let manifest = tmp.path().join("Cargo.toml");
+        (tmp, manifest)
+    }
+
+    #[test]
+    fn test_scaffold_warns_when_parent_workspace_mutated() {
+        let (tmp, manifest) = workspace_parent();
+        let before = std::fs::read_to_string(&manifest).unwrap();
+
+        let warnings = scaffold_project("probe", &tmp.path().join("crates/probe")).unwrap();
+
+        // cargo 把新 crate 塞进 members——先证明改动真的发生（不然断言告警就是空转）。
+        let after = std::fs::read_to_string(&manifest).unwrap();
+        assert_ne!(
+            after, before,
+            "前置假设不成立：cargo 未改动父 manifest（cargo 行为变了？），\
+             此时告警断言无意义——请重新核对本测试的前提"
+        );
+        assert!(
+            after.contains("crates/probe"),
+            "父 members 应含新 crate: {after}"
+        );
+
+        assert_eq!(warnings.len(), 1, "应恰好一条告警: {warnings:?}");
+        let w = &warnings[0];
+        assert!(
+            w.contains("workspace") && w.contains("members"),
+            "告警须点明改的是 workspace members: {w}"
+        );
+        assert!(
+            w.contains(&manifest.display().to_string()),
+            "告警须给出被改文件的路径（用户要据此去修）: {w}"
+        );
+    }
+
+    #[test]
+    fn test_scaffold_no_warning_in_bare_dir() {
+        // 裸目录（无外层 workspace）：cargo 不会追加 member，不该告警。
+        let tmp = TempDir::new().unwrap();
+        let warnings = scaffold_project("solo", &tmp.path().join("solo")).unwrap();
+        assert!(warnings.is_empty(), "裸目录不应告警: {warnings:?}");
+    }
+
+    #[test]
+    fn test_scaffold_no_warning_when_parent_is_plain_package() {
+        // 父目录有 Cargo.toml 但是普通 [package]（非 workspace）：cargo 不改它，不该告警。
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[package]\nname = \"plain\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        let before = std::fs::read_to_string(tmp.path().join("Cargo.toml")).unwrap();
+
+        let warnings = scaffold_project("inner", &tmp.path().join("inner")).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("Cargo.toml")).unwrap(),
+            before,
+            "普通 package 父 manifest 不该被改动"
+        );
+        assert!(
+            warnings.is_empty(),
+            "非 workspace 父目录不应告警: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn test_scaffold_with_bin_also_warns_on_parent_workspace() {
+        // 两个 scaffold 函数须行为一致——否则删掉其中一个的检测调用，测试不会红。
+        let (tmp, _manifest) = workspace_parent();
+        let warnings =
+            scaffold_project_with_bin("probe_bin", &tmp.path().join("crates/probe_bin")).unwrap();
+        assert_eq!(warnings.len(), 1, "with_bin 也应告警: {warnings:?}");
+    }
+
+    #[test]
+    fn test_scaffold_idempotent_rerun_does_not_warn() {
+        // 幂等重跑走早返回路径、不调 cargo init，故不会再改父 manifest → 不该告警
+        // （否则编排器每次重入都收到一条无动作可做的噪声告警）。
+        let (tmp, _manifest) = workspace_parent();
+        let target = tmp.path().join("crates/probe");
+
+        let first = scaffold_project("probe", &target).unwrap();
+        assert_eq!(first.len(), 1, "首次应告警");
+
+        let second = scaffold_project("probe", &target).unwrap();
+        assert!(second.is_empty(), "幂等重跑不应重复告警: {second:?}");
+    }
+
+    #[test]
+    fn test_find_enclosing_workspace_manifest_skips_target_own_manifest() {
+        // 目标目录自己的 Cargo.toml（哪怕含 [workspace]）不算「外层」——否则会把
+        // 本次要生成的产物当成父仓。
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("selfws");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+
+        assert_eq!(
+            find_enclosing_workspace_manifest(&target),
+            None,
+            "不应把目标目录自身的 manifest 当作外层 workspace"
+        );
+    }
+
+    #[test]
+    fn test_find_enclosing_workspace_manifest_finds_grandparent() {
+        // 多级嵌套：跳过中间无 workspace 的层，找到更上层的。
+        let (tmp, manifest) = workspace_parent();
+        let deep = tmp.path().join("crates/a/b");
+        std::fs::create_dir_all(&deep).unwrap();
+
+        assert_eq!(
+            find_enclosing_workspace_manifest(&deep),
+            Some(manifest),
+            "应沿 ancestors 找到祖辈 workspace manifest"
+        );
     }
 }

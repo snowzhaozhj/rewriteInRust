@@ -2440,6 +2440,76 @@ fn smoke_scaffold_workspace() {
     });
 }
 
+/// 在已有 Rust workspace 的仓库里 scaffold → 须降级 `status=warning` 并如实告警。
+///
+/// `cargo init` 检测到外层 `[workspace]` 会把新 crate 追加进 `members`，此后父仓
+/// `cargo build`/`test` 会连带编译迁移产物（迁移中的 crate 常不可编译）。而**用户典型
+/// 场景恰是这个**——已有 Rust workspace 的仓库里迁模块进来。此前 CLI 返回
+/// `status:ok` 零 warning，静默改了用户的构建配置（#86 记账 TODO ②）。
+///
+/// core 单测已覆盖检测逻辑本身；本 e2e 专证「warnings 真的接进了统一 JSON 输出并
+/// 降级 status」——两者缺一都会让用户看不到。
+#[test]
+fn smoke_scaffold_workspace_warns_when_inside_existing_workspace() {
+    let tmp = tempfile::tempdir().unwrap();
+    let parent_manifest = tmp.path().join("Cargo.toml");
+    std::fs::create_dir_all(tmp.path().join("crates/existing/src")).unwrap();
+    std::fs::write(
+        &parent_manifest,
+        "[workspace]\nmembers = [\"crates/existing\"]\nresolver = \"2\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("crates/existing/Cargo.toml"),
+        "[package]\nname = \"existing\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(tmp.path().join("crates/existing/src/lib.rs"), "").unwrap();
+
+    let target = tmp.path().join("crates/migrated");
+    with_cwd(tmp.path(), || {
+        let (code, json) = run(&[
+            "scaffold",
+            "workspace",
+            "--name",
+            "migrated_mod",
+            "--target",
+            target.to_str().unwrap(),
+        ]);
+
+        // 仍是成功（追加 member 未破坏什么，用户也可能确实想要）——只是不能静默。
+        assert_eq!(code, 0, "scaffold 仍应成功: {json}");
+        assert_eq!(
+            json["status"], "warning",
+            "改动了用户仓库构建配置必须降级 warning，不能报 ok: {json}"
+        );
+
+        let warnings = json["warnings"]
+            .as_array()
+            .unwrap_or_else(|| panic!("应有 warnings 数组: {json}"));
+        let joined = warnings
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("workspace") && joined.contains("members"),
+            "告警须点明改的是 workspace members: {joined}"
+        );
+        assert!(
+            joined.contains(&parent_manifest.display().to_string()),
+            "告警须给出被改文件路径（用户据此去修）: {joined}"
+        );
+
+        // 前置假设：cargo 确实改了父 manifest。不然上面的断言是空转。
+        let after = std::fs::read_to_string(&parent_manifest).unwrap();
+        assert!(
+            after.contains("crates/migrated"),
+            "前置假设不成立：cargo 未把新 crate 加进父 members: {after}"
+        );
+    });
+}
+
 #[test]
 fn cli_parse_error_emits_unified_json() {
     // clap 解析失败（非法参数）应走统一 JSON 错误，不输出 clap 裸文本，退出码 1。
