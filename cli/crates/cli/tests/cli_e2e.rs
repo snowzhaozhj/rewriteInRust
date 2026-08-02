@@ -2443,9 +2443,9 @@ fn smoke_scaffold_workspace() {
 /// 在已有 Rust workspace 的仓库里 scaffold → 须降级 `status=warning` 并如实告警。
 ///
 /// `cargo init` 检测到外层 `[workspace]` 会把新 crate 追加进 `members`，此后父仓
-/// `cargo build`/`test` 会连带编译迁移产物（迁移中的 crate 常不可编译）。而**用户典型
-/// 场景恰是这个**——已有 Rust workspace 的仓库里迁模块进来。此前 CLI 返回
-/// `status:ok` 零 warning，静默改了用户的构建配置（#86 记账 TODO ②）。
+/// `cargo build --workspace`/`test --workspace` 会连带编译迁移产物（迁移中的 crate 常不可
+/// 编译）。而**用户典型场景恰是这个**——已有 Rust workspace 的仓库里迁模块进来。此前 CLI
+/// 返回 `status:ok` 零 warning，静默改了用户的构建配置（#86 记账 TODO ②）。
 ///
 /// core 单测已覆盖检测逻辑本身；本 e2e 专证「warnings 真的接进了统一 JSON 输出并
 /// 降级 status」——两者缺一都会让用户看不到。
@@ -2520,7 +2520,8 @@ fn smoke_scaffold_workspace_warns_when_inside_existing_workspace() {
 /// glob workspace（`members = ["crates/*"]`）：cargo **不改** manifest，目标却成了成员。
 ///
 /// 主审实证的结构性盲区——「比对 manifest 改动前后内容」的判据在这类仓库里永远不可能
-/// 触发，而危害照旧（往新 crate 塞 `compile_error!` 后父仓 `cargo build` 立即变红）。
+/// 触发，而危害照旧（本 fixture 是虚拟 manifest 型，故往新 crate 塞 `compile_error!` 后
+/// 在 ws 根跑裸 `cargo build` 即变红；根 package 型 workspace 需 `--workspace` 才会）。
 /// glob 不是罕见写法。这是判据改用 `cargo metadata` 查成员关系的直接理由，故在 e2e 层
 /// 也钉一道。
 #[test]

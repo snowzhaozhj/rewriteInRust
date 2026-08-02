@@ -26,7 +26,7 @@ pub fn scaffold_project(name: &str, target_dir: &Path) -> Result<Vec<String>> {
     // （codex 审查指出的失败重试语义漏洞）。
     //
     // 告警同样要出：判据是「状态」，重跑时目标可能已经是 member（上次运行加进去的、
-    // 或被 glob 覆盖），用户有权知道——异构交叉 imp3 实证过「首次报 IO 错误、重跑报
+    // 或被 glob 覆盖），用户有权知道——已实证过「首次报 IO 错误、重跑报
     // status:ok 零 warning」会让改动永久隐形。
     if target_dir.join("Cargo.toml").exists() {
         write_gitignore(target_dir)?;
@@ -53,7 +53,7 @@ pub fn scaffold_project(name: &str, target_dir: &Path) -> Result<Vec<String>> {
     }
 
     // 先算告警再写 .gitignore：`write_gitignore` 用 `?` 早退时目标已经建好、可能已成为
-    // member，告警若在其后计算就随错误一起丢了（异构交叉 imp3）。重跑会走上面的早返回
+    // member，告警若在其后计算就随错误一起丢了（审查实证）。重跑会走上面的早返回
     // 路径重新判定，故不会永久丢失，但当次调用也该如实报出。
     let warnings = warn_if_target_is_workspace_member(target_dir);
 
@@ -68,8 +68,10 @@ pub fn scaffold_project(name: &str, target_dir: &Path) -> Result<Vec<String>> {
 /// `--target` 常给相对路径（默认值就是 `rust`）。此外相对路径无法与 metadata 返回的绝对
 /// 成员路径直接比较。
 ///
-/// 不用 `canonicalize`：它要求路径**已存在**（`..` 之上的中间层不保证存在），且会解析
-/// 符号链接、把告警里的路径换成用户不认识的真实路径。这里只做词法消解，够用且无 IO 依赖。
+/// 不用 `canonicalize`：它要求路径**已存在**（`..` 之上的中间层不保证存在），也不需要 IO。
+/// 这里只做词法消解，够用。（注意这**不**意味着告警里的路径是用户输入的形态——告警展示的是
+/// `cargo metadata` 返回的 workspace 根，那是符号链接已解析的真实路径，见
+/// [`canonicalize_or_self`]。）
 fn absolutize(path: &Path) -> PathBuf {
     let joined = if path.is_absolute() {
         path.to_path_buf()
@@ -109,25 +111,35 @@ fn absolutize(path: &Path) -> PathBuf {
 /// 故直接问 `cargo metadata`：它自己解析 `members`/glob/`exclude`/`default-members`，是
 /// workspace 成员关系的权威真值源。目标出现在 `workspace_members` 即命中——这一个判据同时
 /// 覆盖显式 members、glob，以及「上次运行已把它加进去、用户没看到告警」的重跑场景
-/// （异构交叉 imp3：首次 `cargo init` 成功但 `write_gitignore` 失败 → 整命令以 IO 错误退出，
+/// （首次 `cargo init` 成功但 `write_gitignore` 失败 → 整命令以 IO 错误退出，
 /// 重跑若沉默用户永远不知道构建配置被改过）。
 ///
 /// `cargo metadata` 失败时**不静默**——分两种情况，靠「上溯路径里是否存在任何
-/// `Cargo.toml`」区分（不靠 stderr 文案：裸目录与坏成员**都是 exit 101**，文案又随版本
-/// 变动、可被本地化，正是本 PR 反复排除的那类脆弱判据）：
-/// - 上溯无任何 `Cargo.toml` → 目标不在任何 Cargo 项目内（裸目录 scaffold，最常见的正常
-///   情况），无 workspace 可牵连，**不告警**。
+/// `Cargo.toml`」区分（不靠 stderr 文案：无 manifest 与坏 manifest **都是 exit 101**，文案又
+/// 随版本变动、可被本地化，正是本 PR 反复排除的那类脆弱判据）：
+/// - 上溯无任何 `Cargo.toml` → 目标不在任何 Cargo 项目内，无 workspace 可牵连，**不告警**。
 /// - 存在 `Cargo.toml` 但 metadata 仍失败（实测：workspace 里已有语法坏的成员 → exit 101）
 ///   → 用户的 `cargo build` 本来就是坏的（非迁移产物造成），但**检测确实没能进行**，故如实
 ///   报「无法判定」，不让调用方以为已确认无事。
+///
+/// 注意本函数在 `cargo init` **之后**执行，故常见的裸目录 scaffold 走不到失败分支——产出的
+/// crate 是合法可解析的，metadata 在其中 exit 0 且 `workspace_root` 指向目标自身，由下方
+/// 「目标即自己的 workspace 根」短路返回。失败分支要么是残缺 manifest（幂等重跑路径），
+/// 要么是外层 workspace 本身坏了。
 ///
 /// 不报错只告警：成为 member 本身未破坏任何东西，用户也可能确实想要（把迁移产物纳入
 /// workspace 是合理意图）；能否接受由用户判断，CLI 的职责是不让它静默发生。
 fn warn_if_target_is_workspace_member(target_dir: &Path) -> Vec<String> {
     let absolute_target = absolutize(target_dir);
     let Some(metadata) = workspace_metadata(&absolute_target) else {
+        // 上溯前先解符号链接：`absolutize` 只做词法消解，而 `--target` 路径里的符号链接段会让
+        // 词法祖先链指向一个不存在的目录树（`/tmp/link/x` 的词法祖先是 `/tmp/link`、`/tmp`，
+        // 而真实位置可能是某 workspace 内的 `/tmp/repo/crates/x`）。漏解则该场景判成「裸目录」
+        // 静默返回空告警——与成功分支（下方两侧 `canonicalize_or_self`）修的是同一个坑，
+        // 类型设计视角实测复现：直路径报 warning、经符号链接的同一目标报 ok 零 warning。
+        //
         // 目标自身的 Cargo.toml 不算——它是本次产物；只看祖先目录。
-        let inside_cargo_project = absolute_target
+        let inside_cargo_project = canonicalize_or_self(&absolute_target)
             .parent()
             .into_iter()
             .flat_map(Path::ancestors)
@@ -164,13 +176,13 @@ fn warn_if_target_is_workspace_member(target_dir: &Path) -> Vec<String> {
 
     vec![format!(
         "本目标已是外层 workspace（根 {}）的成员——该仓库的 `cargo build --workspace`/\
-         `cargo test --workspace` 会连带编译迁移产物（未配 `default-members` 时，裸 \
-         `cargo build`/`cargo test` 同样会），而迁移中的 crate 常处于不可编译的中间态\
-         （`unimplemented!()`、`TODO(port)`），足以让原本通过的构建开始失败。若不需要，\
-         请在 workspace 根的 `Cargo.toml` 里把本 crate 从 `members` 移除**并**加入 \
-         `exclude`（仅移除 members 不够——被 glob 覆盖或位于 workspace 目录树内时 cargo \
-         仍报 `current package believes it's in a workspace when it's not`），\
-         或改用仓库外的 `--target` 路径",
+         `cargo test --workspace` 会连带编译迁移产物（若该 workspace 无根 package 且未配 \
+         `default-members`，在 workspace 根执行的裸 `cargo build`/`cargo test` 同样会），\
+         而迁移中的 crate 常处于不可编译的中间态（`unimplemented!()`、`TODO(port)`），\
+         足以让原本通过的构建开始失败。若不需要，请在 workspace 根的 `Cargo.toml` 里把本 \
+         crate 从 `members` 移除**并**加入 `exclude`（仅移除 members 不够——被 glob 覆盖或\
+         位于 workspace 目录树内时 cargo 仍报 `current package believes it's in a \
+         workspace when it's not`），或改用仓库外的 `--target` 路径",
         metadata.root.display()
     )]
 }
@@ -182,10 +194,14 @@ struct WorkspaceMetadata {
     member_paths: Vec<PathBuf>,
 }
 
-/// 解析符号链接用于路径比对；失败（路径不存在等）则原样返回。
+/// 解析符号链接；失败（路径不存在等）则原样返回。
 ///
-/// 只用于**比较**，不用于展示——告警里给的是 `absolutize` 的结果，那是用户输入的形态、
-/// 更容易认。
+/// 两处用途：① 路径**比对**——`cargo metadata` 返回的成员路径已解析符号链接，词法路径与它
+/// 直接比会漏报；② 「目标是否在某 Cargo 项目内」的**祖先链上溯**，同理。
+///
+/// 注意告警文案里展示的 workspace 根取自 `metadata.root`，故也是符号链接**已解析**的形态
+/// （用户输入 `crates/probe` 时可能显示 `/private/tmp/...`）——路径仍然有效可用，只是未必是
+/// 用户输入的样子。
 fn canonicalize_or_self(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
@@ -210,7 +226,15 @@ fn workspace_metadata(dir: &Path) -> Option<WorkspaceMetadata> {
         return None;
     }
 
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    parse_workspace_metadata(&output.stdout)
+}
+
+/// 从 `cargo metadata` 的 JSON 里取 workspace 根与成员目录。
+///
+/// 与子进程调用分离，便于直接喂合成 JSON 测 schema 漂移（沿用本 PR「不改真实文件、喂合成
+/// 字符串」的测试惯例）。
+fn parse_workspace_metadata(stdout: &[u8]) -> Option<WorkspaceMetadata> {
+    let json: serde_json::Value = serde_json::from_slice(stdout).ok()?;
     let root = PathBuf::from(json.get("workspace_root")?.as_str()?);
 
     // packages[].manifest_path 给的是 `<dir>/Cargo.toml`，取其父目录即 crate 目录。
@@ -223,7 +247,7 @@ fn workspace_metadata(dir: &Path) -> Option<WorkspaceMetadata> {
         .iter()
         .filter_map(|v| v.as_str().map(str::to_owned))
         .collect();
-    let member_paths = json
+    let member_paths: Vec<PathBuf> = json
         .get("packages")?
         .as_array()?
         .iter()
@@ -237,6 +261,19 @@ fn workspace_metadata(dir: &Path) -> Option<WorkspaceMetadata> {
             Path::new(manifest).parent().map(Path::to_path_buf)
         })
         .collect();
+
+    // 不变量：`workspace_members` 非空则 `member_paths` 必非空。
+    //
+    // 上面两个 `filter`/`filter_map` 里的 `id` 与 `manifest_path` 是**内部**吞掉的（不像
+    // `workspace_root`/`packages` 那样用 `?` 上抛），任一字段改名或改格式都只会让
+    // `member_paths` 静默变空 → `is_member` 恒 false → `status:ok` 零告警，正是本检测要
+    // 消灭的失效模式。而 `id` 格式确有先例会变（cargo 1.77 换过 PackageId 格式）。
+    //
+    // 实测真 cargo 下二者恒等长（workspace 根与成员子目录下各跑均一致），故「members 非空
+    // 而 paths 空」只可能是 schema 漂移：返回 `None` 让调用方报「无法判定」，不静默放行。
+    if member_paths.is_empty() && !members.is_empty() {
+        return None;
+    }
 
     Some(WorkspaceMetadata { root, member_paths })
 }
@@ -335,10 +372,11 @@ mod tests {
 
     /// 在指定目录下执行闭包，结束后恢复原 cwd。
     ///
-    /// cwd 是**进程级**状态，而 cargo nextest 默认多线程跑同一进程内的测试——改 cwd 的
-    /// 测试之间、以及与 `cargo init` 子进程（继承 cwd）之间会竞态，故串行化。仿 cli_e2e
-    /// 的同名 helper：用 `catch_unwind` 保证断言失败时 cwd 也能恢复，否则一个失败会污染
-    /// 后续所有测试。
+    /// cwd 是**进程级**状态，而 `cargo test` 在同一进程内多线程跑测试——改 cwd 的测试之间、
+    /// 以及与 `cargo init` 子进程（继承 cwd）之间会竞态，故串行化。（`just test` 用的 nextest
+    /// 是 process-per-test，本身无此问题；但本仓也支持直接 `cargo test`，需防的是那条路径。）
+    /// 仿 cli_e2e 的同名 helper：用 `catch_unwind` 保证断言失败时 cwd 也能恢复，否则一个失败
+    /// 会污染后续所有测试。
     fn with_cwd<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
         static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -590,15 +628,25 @@ mod tests {
     fn test_scaffold_with_bin_also_warns_on_workspace_membership() {
         // 两个 scaffold 函数须行为一致——否则删掉其中一个的检测调用，测试不会红。
         let (tmp, _manifest) = workspace_parent();
-        let warnings =
-            scaffold_project_with_bin("probe_bin", &tmp.path().join("crates/probe_bin")).unwrap();
+        let target = tmp.path().join("crates/probe_bin");
+        let warnings = scaffold_project_with_bin("probe_bin", &target).unwrap();
         assert_eq!(warnings.len(), 1, "with_bin 也应告警: {warnings:?}");
+
+        // 幂等重跑（早返回路径）同样须告警。四个接线点（两函数 × 主路径/早返回）里，
+        // 这一处此前无守卫——测试覆盖视角实测：把 `with_bin` 早返回改成 `Ok(Vec::new())`，
+        // 23 个测试全绿。语义同 `test_scaffold_rerun_still_warns_when_still_a_member`。
+        let rerun = scaffold_project_with_bin("probe_bin", &target).unwrap();
+        assert_eq!(
+            rerun.len(),
+            1,
+            "with_bin 重跑走早返回，仍须按当前状态告警: {rerun:?}"
+        );
     }
 
     #[test]
     fn test_scaffold_rerun_still_warns_when_still_a_member() {
         // 重跑走早返回、不调 cargo init，故无「改动前后」可比对——但上一次运行可能已把该
-        // crate 塞进父 members 而用户没看到告警（codex imp3：首次 cargo init 成功、随后
+        // crate 塞进父 members 而用户没看到告警（首次 cargo init 成功、随后
         // write_gitignore 失败 → 整命令以 IO 错误退出，重跑再沉默就永远不知道）。故早返回
         // 路径改按**当前状态**判定：members 已含本目标即告警。
         let (tmp, _manifest) = workspace_parent();
@@ -622,7 +670,7 @@ mod tests {
 
     /// `cargo init` 成功但 `.gitignore` 写失败时，父 manifest 已被改——告警不能随错误丢失。
     ///
-    /// codex imp3 实证的原始症状：首次报 IO error（用户不知父 manifest 已被改）、
+    /// 已实证的原始症状：首次报 IO error（用户不知父 manifest 已被改）、
     /// 移除障碍后重跑报 `status:ok` 零 warning，**两次都不知道**。
     #[test]
     fn test_warning_survives_gitignore_write_failure_via_rerun() {
@@ -769,12 +817,13 @@ mod tests {
             "处置建议须提到 exclude（仅移除 members 会得到编译不了的 crate）: {}",
             warnings[0]
         );
-        // 危害范围须限定到 --workspace：设计契约审查实测，配了 `default-members` 时裸
-        // `cargo build`/`cargo test` **不**编译迁移产物，只有 `--workspace` 才会。
-        // 原文案「该仓库的 cargo build/test 会连带编译」是过度承诺。
+        // 危害范围须限定到 --workspace：实测裸 build 是否波及迁移产物取决于 workspace 形态
+        // ——配了 `default-members`、或该 workspace 有根 package（`[package]` + `[workspace]`）
+        // 时，裸 `cargo build`/`cargo test` **不**编译迁移产物；只有虚拟 manifest 且未配
+        // `default-members`、且在 ws 根执行时才会。故文案不能无条件说「裸 build 也会」。
         assert!(
             warnings[0].contains("--workspace"),
-            "危害描述须限定到 --workspace（default-members 下裸 build 不编译）: {}",
+            "危害描述须限定到 --workspace（根 package 型或配了 default-members 时裸 build 不编译）: {}",
             warnings[0]
         );
     }
@@ -837,17 +886,148 @@ mod tests {
         );
     }
 
-    /// 裸目录（上溯无任何 `Cargo.toml`）：metadata 同样失败，但这是正常情况，不该告警。
+    /// `cargo metadata` 的 JSON schema 漂移**不得**让检测静默放行。
     ///
-    /// 与上一条同为 `cargo metadata` exit 101，故**不能靠 stderr 文案区分**（文案随版本变动、
-    /// 可被本地化——正是本 PR 反复排除的脆弱判据），改按「上溯是否存在 Cargo.toml」区分。
+    /// `id` 与 `manifest_path` 是在 `filter`/`filter_map` 内部吞掉的（不像 `workspace_root`/
+    /// `packages` 那样用 `?` 上抛），任一字段改名或改格式都只会让 `member_paths` 静默变空
+    /// → `is_member` 恒 false → `status:ok` 零告警，正是本检测要消灭的失效模式。而 `id`
+    /// 格式确有先例会变（cargo 1.77 换过 PackageId 格式）。
+    ///
+    /// 喂合成 JSON 而非改真实 cargo 输出：真 cargo 下无法构造这些漂移，且合成串让每种
+    /// 漂移都可独立回归。
     #[test]
-    fn test_no_unknown_warning_in_bare_dir_without_cargo_project() {
+    fn test_metadata_schema_drift_does_not_silently_pass() {
+        let good = br#"{
+            "workspace_root": "/ws",
+            "workspace_members": ["path+file:///ws/crates/a#a@0.1.0"],
+            "packages": [{
+                "id": "path+file:///ws/crates/a#a@0.1.0",
+                "manifest_path": "/ws/crates/a/Cargo.toml"
+            }]
+        }"#;
+        let parsed = parse_workspace_metadata(good).expect("正常 JSON 须解析成功");
+        assert_eq!(parsed.root, PathBuf::from("/ws"));
+        assert_eq!(parsed.member_paths, vec![PathBuf::from("/ws/crates/a")]);
+
+        // ① id 格式变化（如 cargo 1.77 那次）→ 交叉过滤全落空。
+        let id_drift = br#"{
+            "workspace_root": "/ws",
+            "workspace_members": ["path+file:///ws/crates/a#a@0.1.0"],
+            "packages": [{
+                "id": "registry+file:///ws/crates/a#a@0.1.0",
+                "manifest_path": "/ws/crates/a/Cargo.toml"
+            }]
+        }"#;
+        assert!(
+            parse_workspace_metadata(id_drift).is_none(),
+            "id 格式漂移须返回 None（让调用方报「无法判定」），不得静默放行"
+        );
+
+        // ② manifest_path 改名 → 取不到 crate 目录。
+        let path_drift = br#"{
+            "workspace_root": "/ws",
+            "workspace_members": ["path+file:///ws/crates/a#a@0.1.0"],
+            "packages": [{
+                "id": "path+file:///ws/crates/a#a@0.1.0",
+                "manifest_path_v2": "/ws/crates/a/Cargo.toml"
+            }]
+        }"#;
+        assert!(
+            parse_workspace_metadata(path_drift).is_none(),
+            "manifest_path 改名须返回 None，不得静默放行"
+        );
+
+        // 反向：成员本就为空（单 package 非 workspace）不该被误判为漂移。
+        let genuinely_empty = br#"{
+            "workspace_root": "/solo",
+            "workspace_members": [],
+            "packages": []
+        }"#;
+        let empty = parse_workspace_metadata(genuinely_empty)
+            .expect("members 本就为空是合法状态，不该误报漂移");
+        assert!(empty.member_paths.is_empty());
+    }
+
+    /// `cargo metadata` 失败**且**上溯无任何 `Cargo.toml` → 不告警（裸目录 scaffold，正常）。
+    ///
+    /// 这条守的是 `inside_cargo_project` 分流本身。要点在**怎么逼进这个分支**：
+    /// `cargo init` 的产物是合法可解析的 crate，metadata 在其中 exit 0（实测
+    /// `workspace_root` 就是目标自身），所以普通裸目录用例走的是成功分支的
+    /// 「目标即自己的 workspace 根」短路，**根本到不了这里**——测试覆盖视角实测：把
+    /// `if !inside_cargo_project { return … }` 整块删掉（即 metadata 一失败就无条件报
+    /// 「无法判定」），23 个测试全绿。
+    ///
+    /// 故这里预置一个残缺的 `Cargo.toml`：它使调用走早返回路径（幂等分支）、且让 metadata
+    /// 必然失败，而 `TempDir` 的祖先链上没有任何 `Cargo.toml`，于是判定「不在 Cargo 项目
+    /// 内」→ 不告警。与上一条（`..._inside_cargo_project`）恰好是同一分流的两侧。
+    #[test]
+    fn test_no_unknown_warning_when_metadata_fails_outside_cargo_project() {
         let tmp = TempDir::new().unwrap();
-        let warnings = scaffold_project("solo", &tmp.path().join("solo")).unwrap();
+        let target = tmp.path().join("solo");
+        std::fs::create_dir_all(&target).unwrap();
+        // 残缺 manifest：走早返回路径且让 cargo metadata 失败。
+        std::fs::write(target.join("Cargo.toml"), "# existing").unwrap();
+
+        // 前置假设：祖先链确实无 Cargo.toml，否则本用例会退化成「无法判定」那一侧。
+        assert!(
+            !tmp.path().join("Cargo.toml").exists(),
+            "TempDir 祖先链须无 Cargo.toml"
+        );
+
+        let warnings = scaffold_project("solo", &target).unwrap();
+
         assert!(
             warnings.is_empty(),
-            "裸目录 scaffold 是正常情况，不该报「无法判定」: {warnings:?}"
+            "metadata 失败但目标不在任何 Cargo 项目内 → 裸目录 scaffold，不该报「无法判定」: {warnings:?}"
+        );
+    }
+
+    /// `--target` 路径**自身含符号链接段**时，「无法判定」分支仍须命中。
+    ///
+    /// 这是类型设计视角实证出的漏报：成功分支比对路径时两侧过了 `canonicalize_or_self`，而
+    /// metadata 失败分支的祖先链上溯一度走词法路径——`/tmp/link/x` 的词法祖先只有 `/tmp/link`
+    /// 和 `/tmp`（都无 `Cargo.toml`），真实位置 `/tmp/repo/crates/x` 却在 workspace 内，于是
+    /// 判成「裸目录」静默返回空告警。同一坏 workspace 下直路径报 warning、经符号链接报 ok。
+    ///
+    /// 与既有的 `TempDir` 用例不重复：那些用例只有**祖先层**符号链接（macOS `/var` →
+    /// `/private/var`），`--target` 参数内不含符号链接段，走不到这条路径。
+    #[test]
+    fn test_warns_unknown_when_target_path_contains_symlink_segment() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join("crates/broken/src")).unwrap();
+        std::fs::write(
+            repo.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/*\"]\n",
+        )
+        .unwrap();
+        // 同上一条：语法坏的成员让 cargo metadata 失败，逼入「无法判定」分支。
+        std::fs::write(repo.join("crates/broken/Cargo.toml"), "[package\nbad!!!").unwrap();
+        std::fs::write(repo.join("crates/broken/src/lib.rs"), "").unwrap();
+
+        // link → repo/crates，故 link/viasym 的真实位置是 repo/crates/viasym（在 workspace 内）。
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(repo.join("crates"), &link).unwrap();
+
+        // 前置假设：目标经符号链接访问，且其词法祖先链上确实没有 Cargo.toml——否则本用例
+        // 退化成「直路径」场景、不再覆盖它要防的漏报。
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert!(
+            !link.join("Cargo.toml").exists() && !tmp.path().join("Cargo.toml").exists(),
+            "词法祖先链须无 Cargo.toml，否则用例覆盖不到符号链接漏报"
+        );
+
+        let warnings = scaffold_project("viasym", &link.join("viasym")).unwrap();
+
+        assert_eq!(
+            warnings.len(),
+            1,
+            "目标真实位置在坏 workspace 内，经符号链接访问也须报「无法判定」: {warnings:?}"
+        );
+        assert!(
+            warnings[0].contains("无法判定"),
+            "须如实说明判定失败: {}",
+            warnings[0]
         );
     }
 }

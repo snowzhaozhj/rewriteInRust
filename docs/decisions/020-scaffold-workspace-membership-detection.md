@@ -42,8 +42,8 @@ CLI 此前对此**返回 `status:ok` 零 warning**——静默牵连了用户仓
 
 - **`--no-deps`**：实测它不解析依赖图——`[dependencies]` 里写一个不存在的 crate，metadata 仍 exit 0。故检测不受网络 / 私有 registry / 依赖不可解析影响。
 - **路径先绝对化再比对**：`Path::ancestors()` 对相对路径只走到 `""`（当前目录），到不了 `..` 及更上层（实测 `"crates/rel"` 的 ancestors 为 `["crates", ""]`）。而 `--target` 默认值就是相对的 `rust`，故「用户在 workspace 子目录里执行」是默认路径而非边缘情况。
-- **比对两侧过 `canonicalize`**：metadata 返回符号链接解析后的真实路径（macOS 上 `/tmp/x` → `/private/tmp/x`），而绝对化只做词法消解。最初的实现正是在此静默失效（测试用的 `TempDir` 就在 `/var` → `/private/var` 下）。展示给用户的仍是未 canonicalize 的形态——那是用户输入的样子，更容易认。
-- **metadata 失败不静默**：实测「裸目录」与「workspace 已有语法坏成员」**都是 exit 101**，故不能靠 stderr 文案区分（同 ⒜ 的理由）。改按「目标的祖先目录里是否存在任何 `Cargo.toml`」：无 → 裸目录 scaffold，正常，不告警；有 → 检测确实没能进行，如实报「无法判定」+ 提示手工确认，不让调用方以为已确认无事。
+- **比对两侧过 `canonicalize`**：metadata 返回符号链接解析后的真实路径（macOS 上 `/tmp/x` → `/private/tmp/x`），而绝对化只做词法消解。最初的实现正是在此静默失效（测试用的 `TempDir` 就在 `/var` → `/private/var` 下）。告警文案里展示的 workspace 根取自 `metadata.root`，故也是符号链接**已解析**的形态（用户输入 `crates/probe` 时可能显示 `/private/tmp/...`）——路径仍然有效可用，只是未必是用户输入的样子。
+- **metadata 失败不静默**：实测「裸目录」与「workspace 已有语法坏成员」**都是 exit 101**，故不能靠 stderr 文案区分（同 ⒜ 的理由）。改按「目标的祖先目录里是否存在任何 `Cargo.toml`」：无 → 裸目录 scaffold，正常，不告警；有 → 检测确实没能进行，如实报「无法判定」+ 提示手工确认，不让调用方以为已确认无事。**该祖先链上溯同样须先解符号链接**——类型设计视角实测出的漏报：`--target` 路径自身含符号链接段时，词法祖先链指向一个不存在的目录树（`/tmp/link/x` 的词法祖先只有 `/tmp/link`、`/tmp`），真实位置却在 workspace 内，于是判成「裸目录」静默返回空告警。同一坏 workspace 下直路径报 `warning`、经符号链接报 `ok` 零 warning。成功分支修了这个坑（上一条），失败分支一度漏修。
 
 ### 处置 = 告警不报错
 
@@ -52,7 +52,7 @@ CLI 此前对此**返回 `status:ok` 零 warning**——静默牵连了用户仓
 **告警文案两处经审查订正**：
 
 1. **必须同时提 `exclude`**——主审实测：照旧文案「从 `members` 移除该条目」操作后，cargo 报 `current package believes it's in a workspace when it's not`，用户得到一个编译不了的 crate。而 `scaffolder.md` 又禁止 agent 自行加 `exclude`，旧文案把用户领进死路。
-2. **危害范围限定到 `--workspace`**——设计契约审查实测：配了 `default-members` 时裸 `cargo build` / `cargo test` **不**编译迁移产物，只有 `--workspace` 才会。原文案「该仓库的 `cargo build`/`cargo test` 会连带编译」是过度承诺。
+2. **危害范围限定到 `--workspace`**——设计契约审查实测：配了 `default-members` 时裸 `cargo build` / `cargo test` **不**编译迁移产物，只有 `--workspace` 才会。原文案「该仓库的 `cargo build`/`cargo test` 会连带编译」是过度承诺。**注释准确性视角进一步收紧**：`default-members` 的缺省值不是「全部成员」——cargo 文档原文「When unspecified, the root package will be used. In the case of a virtual workspace, all members will be used」。实测未配 `default-members` 时两种形态相反：虚拟 manifest（只有 `[workspace]`）裸 build exit 101 编译了迁移产物；**根 package 型**（`[package]` + `[workspace]`）裸 build **exit 0、不编译**。故豁免条件不止「配了 `default-members`」，还有「有根 package」，文案改为「若该 workspace 无根 package 且未配 `default-members`，在 workspace 根执行的裸 `cargo build`/`cargo test` 同样会」（另注：即使虚拟 workspace，也只在 cwd 是 ws 根时波及全体，成员目录内跑不会）。
 
 ### 分工：CLI 检测并如实报，不代用户决定
 
@@ -77,11 +77,13 @@ pub fn scaffold_project_with_bin(name: &str, target_dir: &Path) -> Result<Vec<St
 - **不走 deprecation 期**：0.x 阶段 + 无 `cargo publish` 流程（`.github/workflows/` 仅 `ci.yml`）。同 [MDR-019](019-post-translation-review-gate.md) 与 #86 先例：MDR + STATUS 双处记「破坏性变更」即可。
 - **不保留 `Result<()>` 旧签名**：告警是本次修复的**全部价值**，留一个丢弃告警的旧入口等于留一个静默失败的口子。
 
-返回 `Vec<String>` 而非结构化告警类型，与既有惯例一致（`LanguageAdapter::configure_project` 同样返 `Vec<String>` 汇入图 warnings，见 [MDR-013](013-danger-signal-to-state.md) 时期的 Go adapter 实现）。
+返回 `Vec<String>` 而非结构化告警类型。**判据是消费方性质，不是「与惯例一致」**——本命令的 warnings 只被 LLM 读（`plugin/agents/scaffolder.md` 要求如实转达），全仓无任何机读消费方解析它（`plugin/hooks/` 下的 "warnings" 命中全是 `cargo clippy -D warnings`），两类告警的 agent 处置动作也相同（转达 + 不动用户 manifest），故字符串够用。`LanguageAdapter::configure_project` 返 `Vec<String>` 汇入图 warnings 是同构先例。
+
+反之，**有机读消费方时应走结构化**：`validate rules` 的 `data.checks[].issues` 带 `kind`（`version_mismatch` 等），动机写在 `lib.rs` 注释里——让 CI（默认 `enforce=true`）拿到逐条不一致清单。照抄「惯例」而不看消费方性质，会在需要 `jq` 分流的场景选错。
 
 ## 验证
 
-`just ci` 全绿（844 测试 + fmt + clippy `--all-targets -D warnings` + deny + shellcheck）。测试 828 → 844（+16）：`template.rs` 的测试函数 9 → 23（+14，含 `absolutize` 与 metadata 失败分支的单测）+ CLI e2e 2 + core 侧 `with_cwd` helper（改 cwd 的测试须串行化，仿 `cli_e2e` 同名先例；非测试函数，不计数）。
+`just ci` 全绿（848 测试 + fmt + clippy `--all-targets -D warnings` + deny + shellcheck）。测试 828 → 848（+20）：`template.rs` 的测试函数 9 → 26 + CLI e2e 2 + `process.rs` 3（大输出 pipe 死锁回归，见下）+ core 侧 `with_cwd` helper（改 cwd 的测试须串行化，仿 `cli_e2e` 同名先例；非测试函数，不计数）。
 
 多数用例带**前置假设断言**——先证 cargo 的实际行为符合前提（如「glob 下 manifest 确实未变」），cargo 行为若变化会让测试报红，而不是让告警断言静默失去意义。
 
@@ -92,8 +94,31 @@ pub fn scaffold_project_with_bin(name: &str, target_dir: &Path) -> Result<Vec<St
 | 检测恒返回空 | 相关测试红 | 3 个测试红 |
 | 只摘 `scaffold_project_with_bin` 一处接线 | 仅对应测试红（证两函数各有守卫、不互相掩盖） | `test_scaffold_with_bin_also_warns_on_workspace_membership` 独立红 |
 | 摘掉路径绝对化（`absolutize`） | 相对路径用例红 | 2 个测试红，且报错信息复现原始症状（告警里出现 `../Cargo.toml`） |
+| 祖先链上溯回退为词法路径（摘 `canonicalize_or_self`） | 符号链接用例红 | `test_warns_unknown_when_target_path_contains_symlink_segment` 独立红（45 passed / 1 failed，告警为空 `[]` 即漏报症状） |
+| 摘掉 schema 漂移不变量（`member_paths` 空而 `members` 非空） | 漂移用例红 | `test_metadata_schema_drift_does_not_silently_pass` 红（**首轮无此守卫时该变异 46 测试全绿**，故补测试） |
+| 摘掉 `inside_cargo_project` 分流（metadata 一失败就无条件告警） | 裸目录侧用例红 | `test_no_unknown_warning_when_metadata_fails_outside_cargo_project` 红（**首轮无此守卫时该变异 23 测试全绿**） |
+| `with_bin` 早返回路径丢告警 | 对应测试红 | 同名测试红（第 4 处接线补守卫前，该变异全绿） |
+| `process.rs` 回退为「先 wait 再读 pipe」 | 大输出用例红 | `test_run_with_timeout_survives_output_exceeding_pipe_buffer` 报 `Timeout` 而红 |
 
 > **证据留痕说明**（设计契约审查指出）：上表的变异实证在临时 worktree 中进行、worktree 已销毁，仓库内无对应 commit 或产物。可复核的部分是「存在能被这些实证钉住的测试」（表中测试名均可在 `template.rs` 找到且断言方向正确）；实证过程本身需重跑才能再次确认。
+
+### 连带修复：`run_with_timeout` 的 pipe 死锁（本决策引入 `cargo metadata` 后暴露）
+
+`core/src/process.rs` 原实现先 `wait_timeout` 再读 pipe，注释里把「输出远小于 64KB」写成前提（当时只接 `cargo check/init` 与 `<tool> --version`）。`cargo metadata --no-deps` 输出约 750B/成员，**打破了这个前提**：pipe buffer 满后子进程阻塞在 write 上永不退出，`wait_timeout` 白等到超时才 kill。
+
+实测（静默失败视角发现，编排器独立复现确认）：
+
+| workspace 规模 | metadata 输出 | 本命令行为 |
+|---|---|---|
+| 90 成员 | 68 KB | 0.4s，正确告警 |
+| 150 成员 | 114 KB | **60s 超时**，报「无法判定 + 成员语法有误」 |
+| 400 成员 | 305 KB | **60s 超时**，同上 |
+
+后果三重：① 本决策要报的那条精确告警（含 workspace 根、`exclude` 指引）在大 workspace 上**永不出现**；② 归因**错误**——文案说「成员 `Cargo.toml` 语法有误」而 workspace 完全健康，用户会去排查不存在的语法错误；③ 每次 scaffold 白挂 60 秒。`~/workspace/explore/oxc` 就是 55 成员 246 KB，正在触发区间内；pingora（96 KB）、codegraph-rust（101 KB）贴近边界。
+
+修法：spawn 两个读线程在 `wait_timeout` **之前**就开始抽 stdout/stderr。修后 305 KB 场景 1.6s 完成并给出正确告警。
+
+一个反直觉的坑（修复初版踩过）：**超时路径不能 join 读线程**。`kill` 只终止直接子进程，孙进程继承 pipe 写端后 EOF 会迟到，join 会把「2 秒超时」拖成「等满孙进程的 60 秒」——比原 bug 更糟，且断言全绿看不出来（实测 60.8s 通过）。故 `test_run_with_timeout_returns_promptly_on_slow_big_output` 断言的是**耗时**而非仅错误类型。
 
 ### 端到端回归矩阵
 
