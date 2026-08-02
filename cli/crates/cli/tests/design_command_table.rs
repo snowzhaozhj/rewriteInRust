@@ -1,4 +1,4 @@
-//! 设计文档 06 命令表 ↔ CLI 叶子命令一致性守卫。
+//! 命令清单 ↔ CLI 叶子命令一致性守卫（两处权威声明各一套）。
 //!
 //! CLAUDE.md 定 `docs/design/06-plugin-structure.md` 为 CLI 命令列表的唯一权威，
 //! 但该表的命令行与计数一直靠人工维护——PR #85 就是修这类漂移（4 条已实现命令缺表行、
@@ -11,6 +11,9 @@
 //! **比对粒度 = 叶子命令**（`state approve` 而非 `state`）：表里登记的正是叶子。
 //! 中间层 `state` / `graph` 不做实际工作——裸调只打印 help（实测退出码 0），
 //! 故不该出现在命令表里。
+//!
+//! 文件后半段是 **`plugin/skills/migrate/SKILL.md` 命令清单**的同类守卫（见该段区块注释）。
+//! 两处都是编排器会照抄的权威声明，`06:105` 表头本就要求二者同步，此前只有 06 一边有门。
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -609,4 +612,238 @@ fn duplicate_declared_counts_are_rejected() {
          **原 M2 推迟命令 — 1 个（均已实现）**：",
     );
     scan_table(&doc);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SKILL.md 命令清单 ↔ CLI 叶子命令一致性守卫
+//
+// `06` 表那一边已由上方测试钉死，但 `06:105` 表头同时要求同步 SKILL.md 清单，而
+// `SKILL.md:31` 自称「已穷举顶层子命令」——那次是一次性人工验证（PR #85），零自动化
+// 检查。新增命令时这一边仍会漂，且编排器直接读 SKILL.md，漂了就照抄不存在的命令。
+//
+// 格式与 06 的 Markdown 表格**不同**，故不能复用 `parse_design_table`：清单是锚点行
+// 之后连续的 8 个「`- **<分组>**：`cmd` 、`cmd`…`」行内反引号列表。两个坑（均实测确认，
+// 非照抄记账）：
+//
+// ⒜ **必须先精确锚定清单区块**。按行格式（`- **X**：`）全文件匹配会命中 13 行——
+//    「守护」「恢复」「幂等」「待签批」等 5 个同格式段落在文档别处，把它们拖进来会产出
+//    大批伪幽灵命令。故以「命令清单 + 已穷举」锚点行定位，按缩进量收尾。
+// ⒝ **必须限定只取命令项**。这 8 行里还散落着值域与状态名的反引号（`started`/`ok`/
+//    `error`/`timeout`/`agent_done`/`advanced:false`/`reviewing → done`/`rule_version`
+//    /`--to`/`--status` 等），无脑抽取行内所有反引号会产出十余条伪幽灵。判据取
+//    「首 token 是 CLI 顶层子命令名」——它来自 `Cli::command()` 而非写死清单。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// SKILL.md 的路径。
+fn skill_md_path() -> PathBuf {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest.ancestors().nth(3).unwrap();
+    repo_root.join("plugin/skills/migrate/SKILL.md")
+}
+
+/// CLI 顶层子命令名（`state` / `graph` / `init` …），用于判定一个反引号项是否是命令。
+fn cli_top_level_names() -> BTreeSet<String> {
+    Cli::command()
+        .get_subcommands()
+        .map(|s| s.get_name().to_owned())
+        .filter(|n| n != "help")
+        .collect()
+}
+
+/// 从命令清单里抽出的一个分组。
+#[derive(Debug, PartialEq, Eq)]
+struct SkillGroup {
+    label: String,
+    commands: Vec<String>,
+}
+
+/// 剥掉参数占位符，只留子命令路径。
+///
+/// 逐 token 在首个占位符处停止：`<m>` 位置参数、`[--flag]` 可选项、`--flag` 裸选项。
+/// 记账曾预警「`graph export [--format json|dot|mermaid]` 的 `json|dot|mermaid]` 会残留
+/// 成命令名的一部分」——实测该风险只存在于「正则替换占位符」的实现方式，逐 token break
+/// 在遇到 `[--format` 时即停止，管道段落在 break 之后、根本到不了。此处如实记录实测结论。
+fn strip_placeholders(cmd: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for tok in cmd.split_whitespace() {
+        if tok.starts_with('<') || tok.starts_with('[') || tok.starts_with("--") {
+            break;
+        }
+        parts.push(tok);
+    }
+    parts.join(" ")
+}
+
+/// 解析 SKILL.md 的命令清单区块。
+///
+/// 只接受锚点行之后**缩进两格**的 `- **<分组>**：` 行；第一个不满足的行即区块结束
+/// （文档紧随其后就有一个同格式但缩进为零的 `- **\`profile --adapter-tools\` 路径…**` 项，
+/// 只靠格式判断会把它误收进来）。
+fn parse_skill_command_list(text: &str) -> Vec<SkillGroup> {
+    let top = cli_top_level_names();
+    let mut groups = Vec::new();
+    let mut in_list = false;
+
+    for line in text.lines() {
+        if !in_list {
+            // 锚点：命令清单那一行（同时含「命令清单」与「已穷举」，避免匹配到别处提及）。
+            if line.contains("命令清单") && line.contains("已穷举") {
+                in_list = true;
+            }
+            continue;
+        }
+        // 区块内的分组项必须缩进两格；缩进为零的下一个一级列表项即结束。
+        let Some(rest) = line.strip_prefix("  - **") else {
+            break;
+        };
+        let Some((label, body)) = rest.split_once("**：") else {
+            continue;
+        };
+        let commands = body
+            .split('`')
+            // 反引号成对包裹，奇数下标才是被包裹内容。
+            .enumerate()
+            .filter(|(i, _)| i % 2 == 1)
+            .map(|(_, seg)| seg)
+            // 只保留「首 token 是 CLI 顶层子命令名」的项，滤掉值域/状态名/裸选项。
+            .filter(|seg| {
+                seg.split_whitespace()
+                    .next()
+                    .is_some_and(|first| top.contains(first))
+            })
+            .map(strip_placeholders)
+            .filter(|c| !c.is_empty())
+            .collect();
+        groups.push(SkillGroup {
+            label: label.to_owned(),
+            commands,
+        });
+    }
+    groups
+}
+
+/// SKILL.md 清单里登记的全部命令。
+fn skill_listed_commands() -> BTreeSet<String> {
+    let text = std::fs::read_to_string(skill_md_path()).expect("读 SKILL.md 失败");
+    parse_skill_command_list(&text)
+        .into_iter()
+        .flat_map(|g| g.commands)
+        .collect()
+}
+
+#[test]
+fn skill_md_command_list_matches_cli() {
+    let cli = cli_leaf_commands();
+    let listed = skill_listed_commands();
+
+    let missing: Vec<_> = cli.difference(&listed).cloned().collect();
+    assert!(
+        missing.is_empty(),
+        "SKILL.md 命令清单缺少这些已实现命令（它自称「已穷举顶层子命令」，编排器据此选命令）: {missing:?}"
+    );
+
+    let ghost: Vec<_> = listed.difference(&cli).cloned().collect();
+    assert!(
+        ghost.is_empty(),
+        "SKILL.md 列出了 CLI 中不存在的命令（编排器照抄会 cli_parse 失败）: {ghost:?}"
+    );
+}
+
+/// 分组结构冻结：防某个分组整行被删后「缺失」检查仍因其它分组齐全而假绿。
+///
+/// 与 06 侧的「表头计数」守卫同理——那里是计数漂移，这里是整行消失。
+///
+/// **它与 `skill_md_command_list_matches_cli` 不可互相替代**（变异实证）：摘掉区块收尾
+/// 判定（即坑⒜，让扫描漏进文档别处 5 个同格式段落）时，本测试报红并列出多出来的
+/// `L1 存在性` / `L2 结构校验` / `幂等`，而 `matches_cli` 却 **PASS**——那些段落恰好不含
+/// 合法命令名、被命令项判据滤空了。故只写 `matches_cli` 会让区块锚定零覆盖。
+#[test]
+fn skill_md_command_list_groups_are_frozen() {
+    let text = std::fs::read_to_string(skill_md_path()).expect("读 SKILL.md 失败");
+    let groups = parse_skill_command_list(&text);
+
+    let labels: Vec<&str> = groups.iter().map(|g| g.label.as_str()).collect();
+    assert_eq!(
+        labels,
+        vec![
+            "建图/查图",
+            "状态推进",
+            "签批门（MDR-019）",
+            "度量/台账",
+            "断点续跑（ROB-01a/b/c）",
+            "校验",
+            "统计/度量",
+            "其他",
+        ],
+        "命令清单分组结构变了——新增/删除分组须同步本断言（防整行丢失后静默）"
+    );
+
+    // 每个分组都必须真的解析出命令，否则「命令项判据」与文案格式已脱节。
+    for g in &groups {
+        assert!(
+            !g.commands.is_empty(),
+            "分组 `{}` 未解析出任何命令——判据与格式脱节，或该行命令被清空",
+            g.label
+        );
+    }
+
+    // 阈值取实际 CLI 命令数，不写死——新增命令时不必改这里。
+    let total: usize = groups.iter().map(|g| g.commands.len()).sum();
+    assert_eq!(
+        total,
+        cli_leaf_commands().len(),
+        "清单命令总数应与 CLI 叶子命令数相等"
+    );
+}
+
+/// 解析器边界：喂合成字符串，覆盖两个坑的判据。
+///
+/// 沿用本文件既有惯例（06 侧解析器亦如此测）——不改真实 SKILL.md，故多个审查视角并发时
+/// 无人需抢文件，且边界可回归。
+#[test]
+fn skill_list_parser_only_takes_command_items_inside_the_list_block() {
+    let doc = "\
+# 前言
+
+- 命令清单（**已穷举顶层子命令**；参数非穷举）：
+  - **甲组**：`graph build --root [--full]`、`graph export [--format json|dot|mermaid]`
+  - **乙组**：`state record-subagent-call --step-index`（`--status` 只接受 `started`/`ok`/`error`/`timeout`）、`state resume`
+- **`profile --adapter-tools` 路径自动解析**：`init` 这里提到的不算清单项
+
+### 别处章节
+
+  - **守护**：`done`/`blocked`/`graduate` 拒绝
+  - **幂等**：`data.was_noop=true`
+";
+    let groups = parse_skill_command_list(doc);
+
+    // 坑⒜：区块在第一个非「缩进两格」项处收尾，别处同格式段落不进来。
+    let labels: Vec<&str> = groups.iter().map(|g| g.label.as_str()).collect();
+    assert_eq!(labels, vec!["甲组", "乙组"], "区块外的同格式段落不得混入");
+
+    // 坑⒝：值域/状态名/裸选项反引号不得被当成命令；管道占位符不得残留在命令名里。
+    assert_eq!(
+        groups[0].commands,
+        vec!["graph build", "graph export"],
+        "占位符须剥净（含 `[--format json|dot|mermaid]` 这种带管道的）"
+    );
+    assert_eq!(
+        groups[1].commands,
+        vec!["state record-subagent-call", "state resume"],
+        "`--status` / `started` / `ok` / `error` / `timeout` 是值域，不是命令"
+    );
+}
+
+/// 反向：判据不因「命令名恰好是某状态名的前缀」等情况误滤合法命令。
+///
+/// `graduate` 既是命令名、也在别处作为状态词出现在反引号里——清单内它必须被收进来。
+#[test]
+fn skill_list_parser_keeps_commands_that_double_as_state_words() {
+    let doc = "\
+- 命令清单（**已穷举顶层子命令**）：
+  - **其他**：`init`、`graduate`（项目级毕业评估）
+";
+    let groups = parse_skill_command_list(doc);
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].commands, vec!["init", "graduate"]);
 }
