@@ -2440,6 +2440,135 @@ fn smoke_scaffold_workspace() {
     });
 }
 
+/// 在已有 Rust workspace 的仓库里 scaffold → 须降级 `status=warning` 并如实告警。
+///
+/// `cargo init` 检测到外层 `[workspace]` 会把新 crate 追加进 `members`，此后父仓
+/// `cargo build --workspace`/`test --workspace` 会连带编译迁移产物（迁移中的 crate 常不可
+/// 编译）。而**用户典型场景恰是这个**——已有 Rust workspace 的仓库里迁模块进来。此前 CLI
+/// 返回 `status:ok` 零 warning，静默改了用户的构建配置（#86 记账 TODO ②）。
+///
+/// core 单测已覆盖检测逻辑本身；本 e2e 专证「warnings 真的接进了统一 JSON 输出并
+/// 降级 status」——两者缺一都会让用户看不到。
+#[test]
+fn smoke_scaffold_workspace_warns_when_inside_existing_workspace() {
+    let tmp = tempfile::tempdir().unwrap();
+    let parent_manifest = tmp.path().join("Cargo.toml");
+    std::fs::create_dir_all(tmp.path().join("crates/existing/src")).unwrap();
+    std::fs::write(
+        &parent_manifest,
+        "[workspace]\nmembers = [\"crates/existing\"]\nresolver = \"2\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("crates/existing/Cargo.toml"),
+        "[package]\nname = \"existing\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(tmp.path().join("crates/existing/src/lib.rs"), "").unwrap();
+
+    let target = tmp.path().join("crates/migrated");
+    with_cwd(tmp.path(), || {
+        let (code, json) = run(&[
+            "scaffold",
+            "workspace",
+            "--name",
+            "migrated_mod",
+            "--target",
+            target.to_str().unwrap(),
+        ]);
+
+        // 仍是成功（成为 member 未破坏什么，用户也可能确实想要）——只是不能静默。
+        assert_eq!(code, 0, "scaffold 仍应成功: {json}");
+        assert_eq!(
+            json["status"], "warning",
+            "牵连了用户仓库的构建配置必须降级 warning，不能报 ok: {json}"
+        );
+
+        let warnings = json["warnings"]
+            .as_array()
+            .unwrap_or_else(|| panic!("应有 warnings 数组: {json}"));
+        let joined = warnings
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("workspace") && joined.contains("members"),
+            "告警须点明成员关系与 members: {joined}"
+        );
+        assert!(
+            joined.contains("exclude"),
+            "处置建议须提到 exclude——仅从 members 移除会让 cargo 报\
+             `believes it's in a workspace when it's not`（主审实证）: {joined}"
+        );
+        // 告警给 workspace 根目录，用户据它去找根 Cargo.toml。
+        let root = parent_manifest.parent().unwrap();
+        assert!(
+            joined.contains(&root.display().to_string()),
+            "告警须给出 workspace 根路径（用户据此去修）: {joined}"
+        );
+
+        // 前置假设：目标确实成了该 workspace 的成员。不然上面的断言是空转。
+        let after = std::fs::read_to_string(&parent_manifest).unwrap();
+        assert!(
+            after.contains("crates/migrated"),
+            "前置假设不成立：cargo 未把新 crate 加进父 members: {after}"
+        );
+    });
+}
+
+/// glob workspace（`members = ["crates/*"]`）：cargo **不改** manifest，目标却成了成员。
+///
+/// 主审实证的结构性盲区——「比对 manifest 改动前后内容」的判据在这类仓库里永远不可能
+/// 触发，而危害照旧（本 fixture 是虚拟 manifest 型，故往新 crate 塞 `compile_error!` 后
+/// 在 ws 根跑裸 `cargo build` 即变红；根 package 型 workspace 需 `--workspace` 才会）。
+/// glob 不是罕见写法。这是判据改用 `cargo metadata` 查成员关系的直接理由，故在 e2e 层
+/// 也钉一道。
+#[test]
+fn smoke_scaffold_workspace_warns_under_glob_workspace() {
+    let tmp = tempfile::tempdir().unwrap();
+    let parent_manifest = tmp.path().join("Cargo.toml");
+    std::fs::create_dir_all(tmp.path().join("crates/existing/src")).unwrap();
+    std::fs::write(
+        &parent_manifest,
+        "[workspace]\nmembers = [\"crates/*\"]\nresolver = \"2\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("crates/existing/Cargo.toml"),
+        "[package]\nname = \"existing\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(tmp.path().join("crates/existing/src/lib.rs"), "").unwrap();
+    let before = std::fs::read_to_string(&parent_manifest).unwrap();
+
+    let target = tmp.path().join("crates/globbed");
+    with_cwd(tmp.path(), || {
+        let (code, json) = run(&[
+            "scaffold",
+            "workspace",
+            "--name",
+            "globbed",
+            "--target",
+            target.to_str().unwrap(),
+        ]);
+        assert_eq!(code, 0, "scaffold 仍应成功: {json}");
+
+        // 前置假设：glob 下 cargo 确实**没改** manifest（这正是旧判据失效的原因）。
+        // 若 cargo 哪天改了行为，这条会红并提醒重新审视，而不是让断言静默失去意义。
+        assert_eq!(
+            std::fs::read_to_string(&parent_manifest).unwrap(),
+            before,
+            "前置假设不成立：glob 下 cargo 竟改了 manifest，请重新评估判据"
+        );
+
+        assert_eq!(
+            json["status"], "warning",
+            "glob 覆盖使目标成为成员，必须降级 warning（比对判据在此永不触发）: {json}"
+        );
+    });
+}
+
 #[test]
 fn cli_parse_error_emits_unified_json() {
     // clap 解析失败（非法参数）应走统一 JSON 错误，不输出 clap 裸文本，退出码 1。
