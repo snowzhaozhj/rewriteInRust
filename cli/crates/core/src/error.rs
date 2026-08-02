@@ -5,7 +5,12 @@ use std::path::PathBuf;
 use serde::Serialize;
 
 /// 错误码枚举——覆盖 ~15 条高频错误，提供编号、重试建议和用户提示。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+///
+/// `EnumIter`：供 `design_error_codes.rs` 守卫从**真值域**取全部码（而非写死清单）
+/// 断言「设计文档 06 § 10.7 错误码表声称由 CLI 返回的码必须真实存在」——M4 核实时
+/// 该表 11 个语义码里有 3 个（`VALIDATION_TIMEOUT`/`OOM`/`SCHEMA_CORRUPTED`）在 CLI
+/// 中从不存在，而 06 § 10.7 要求编排器按它们分流，照做恒为假。见 MDR-021。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, strum::EnumIter)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     /// 图构建失败。
@@ -79,7 +84,20 @@ impl ErrorCode {
             Self::LockConflict => "迁移锁冲突，请确认无其他迁移进程运行后重试",
             Self::SchemaValidation => "Schema 校验失败，请检查配置文件格式",
             Self::FileNotFound => "文件不存在，请确认路径是否正确",
-            Self::ParseFailed => "源码解析失败，请检查文件语法",
+            // E010 同时承载三类来源：源码语法错误（`Parse`）与 state/config 文件的
+            // JSON/TOML 解析失败（`Json`/`Toml`/`TomlSer`，见 `From<&MigrateError>`）。
+            // `suggestion()` 只拿到 `self`、区分不了来源，故文案须同时覆盖——原文只说
+            // 「源码解析失败，请检查文件语法」会把 state 文件损坏的用户引去查源码语法
+            // （实测：改坏 migration-state.json 即得此误导建议）。
+            //
+            // 不提「从备份恢复」：state 主文件 JSON 损坏时 `MigrationStateMachine::load`
+            // 已自动回退 `.migration-state.json.backup` 并降级 warning；能走到本建议
+            // 说明备份不存在或同样不可用，建议用户去恢复是把他引向死路。
+            Self::ParseFailed => {
+                "解析失败：若操作源码请检查文件语法；若为 .rust-migration/migration-state.json \
+                 或 .rustmigrate.toml 损坏，按 message 中的行列号修正（state 文件无可用备份可回退时才会到此），\
+                 无法修复则重新执行 init"
+            }
             Self::DatabaseError => "数据库操作失败，可重试；若持续失败请检查 .rust-migration/ 目录",
             Self::ConfigError => "配置错误，请检查配置文件",
             Self::Timeout => "子进程超时，可重试或增加超时时间",

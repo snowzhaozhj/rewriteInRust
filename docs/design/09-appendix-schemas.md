@@ -6,7 +6,7 @@
 
 ## 附录 A：migration-state.json Schema
 
-> 完整 JSON Schema 在 M1 阶段补充。以下为结构示例和状态枚举定义。
+> 以下为结构示例和状态枚举定义。**权威真值源是 Rust 类型定义**（`cli/crates/core/src/types/state.rs`）——字段类型 / required / 枚举值域由 serde 在加载期强制，本附录是给读者与 LLM 看的说明性契约，不存在也不会补独立的 JSON Schema 文件（原「完整 JSON Schema 在 M1 阶段补充」的承诺已由 [MDR-021](../decisions/021-no-json-schema-validation.md) 正式撤回）。
 > 独立 JSON 示例文件见 [`schemas/migration-state.example.json`](./schemas/migration-state.example.json)
 
 ```json
@@ -599,14 +599,14 @@ Skill 主上下文调用 `rustmigrate stats compare`（确定性脚本门禁）�
 | analyze Step 2.5→ analyzer 调用 | L1 | source-graph.db | 无 | ≤2 | pre-run | 语义增强失败可重试 |
 | analyze Step 4 translator 规则生成 | L1 | source-graph.db、migration-state.json | porting/ 内本次半成品 | ≤2 | profile | 重试仍败则回滚到 analyzer 完成态 |
 | analyze Step 6 scaffolder 测试搭建 | L1 | 前序全部 | test-fixtures/ 内本次半成品 | ≤2 | translator 完成态 | — |
-| run Step 0.5 引用一致性 | L2（延后） | 全部 | 无 | **否** | — | `BLOCKED_BY_VALIDATION_FAILED`，见 [06 § 10.7](./06-plugin-structure.md#107-错误信息与可调试性mvp) |
+| run Step 0.5 引用一致性 | L2（延后） | 全部 | 无 | **否** | — | 语义码 `BLOCKED_BY_VALIDATION_FAILED` **未落地，且该校验本身缺失**——M4 实测：`blocked_by` 引用不存在的模块名时 `validate state --check-blocked` 返 `status:warning` / `valid:true`，该模块只落入 `still_blocked` 并**永久无法解除**（无告警指出引用非法）。见 [06 § 10.7](./06-plugin-structure.md#107-错误信息与可调试性mvp) 错误码表「当前实际返回」列与 [MDR-021](../decisions/021-no-json-schema-validation.md) 记账 |
 | run Step 1 translator 意图摘要 | L2 | — | 本次 `{module}-intent.md` | ≤2 | 模块 pending | L2 = 9 required 属性非空（附录 E） |
 | run Step 2 Phase A translator 翻译 | L1 | `{module}-intent.md` + `intermediate/attempts/*` | `rust_root/{module}.rs`（部分写入） | ≤2 | translating（substatus=null，即意图已确认、Phase A 未开始） | 回滚后重入 Step 2 |
 | run Step 3 verifier 对抗审查 | L1 | Phase A `.rs` 文件 | `intermediate/{module}-review.md` | ≤2 | translating/phase_a_complete_awaiting_review | 回滚后重入 Step 3 |
 | run Step 4 Phase B translator 惯用化 | L1 | Phase A `.rs` + review.md + `intermediate/attempts/*-phase-b-*.rs` | `rust_root/{module}.rs`（Phase B 覆写） | 按 max_retry_rounds（3）然后 pause→degrade | compile_fixing（substatus=当前轮次错误描述） | 3 轮耗尽走 pause→degrade 路径 |
 | run Step 5 verifier 测试验证 | L1+L2 | Phase A/B 产物 | 测试结果 JSON | ≤2 | testing（模块保持 testing 原状态，由 Step 0.3 重新路由至 Step 5 重试） | JSON 产出物做 L2，测试代码做 L1 |
 
-> 通用规则：`intermediate/attempts/*`（含 `*.json` 与 `*-phase-*.rs`）在任何回滚下**始终保留**作诊断证据（见 [06 § 10.2.2](./06-plugin-structure.md#1022-失败恢复机制)）；`validation_tool_error_*`（超时/OOM/Schema 损坏）不计入重试（见 [06 § 10.7](./06-plugin-structure.md#107-错误信息与可调试性mvp)）。
+> 通用规则：`intermediate/attempts/*`（含 `*.json` 与 `*-phase-*.rs`）在任何回滚下**始终保留**作诊断证据（见 [06 § 10.2.2](./06-plugin-structure.md#1022-失败恢复机制)）；工具故障（非产出物失效）不计入重试——判据见 [06 § 10.7](./06-plugin-structure.md#107-错误信息与可调试性mvp)「判据订正（M4）」，按「能否解析出合法 error JSON」+ `data.retryable` 判定，**不再按已确认不存在的 `VALIDATION_TIMEOUT`/`OOM`/`SCHEMA_CORRUPTED` 三码**（[MDR-021](../decisions/021-no-json-schema-validation.md)）；台账仍记 `--error-message "validation_tool_error_<type>: …"` 前缀便于聚合。
 
 ---
 
@@ -616,7 +616,7 @@ Skill 主上下文调用 `rustmigrate stats compare`（确定性脚本门禁）�
 
 ## 附录 D：关键中间产物 Schema（简化版）
 
-> 以下为 `.rust-migration/intermediate/` 目录下关键中间产物的简化 JSON 结构示例。完整 JSON Schema 在 M1 阶段补充。
+> 以下为 `.rust-migration/intermediate/` 目录下关键中间产物的简化 JSON 结构示例。**不会补独立 JSON Schema 文件**（[MDR-021](../decisions/021-no-json-schema-validation.md) 撤回了原「完整 JSON Schema 在 M1 阶段补充」的承诺）——由 Rust 类型 + serde 承担强制。
 > 独立 JSON 示例文件见 [`schemas/`](./schemas/) 目录。
 
 ### source-graph 导出格式（JSON）
@@ -787,7 +787,7 @@ Skill 主上下文调用 `rustmigrate stats compare`（确定性脚本门禁）�
 {列出本模块的外部可观测 I/O 动作及其相对顺序（如写文件、发网络请求、写日志）；纯函数填「无」}
 ```
 
-**工具化校验 JSON Schema（M1 用于产出物有效性检查，L2）**：
+**字段契约（M1 用于产出物有效性检查，L2）**——以下用 JSON Schema 语法**书写**契约以求精确，但**无程序化校验器消费它**（[MDR-021](../decisions/021-no-json-schema-validation.md)）：`{module}-intent.md` 是 Markdown，检查由 verifier（LLM）按 [06 § 10.2 接口表](./06-plugin-structure.md#102-subagent-接口契约) 的 L1/L2 规则逐字段核对（见 `verifier.md` 维度 9「意图一致性」），CLI 侧不解析该文件：
 
 ```json
 {

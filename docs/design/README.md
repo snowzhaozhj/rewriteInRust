@@ -52,7 +52,7 @@
 | [07-pitfalls-and-risks.md](./07-pitfalls-and-risks.md) | 常见陷阱 + 风险评估 | 第九章 + 第十二章 |
 | [08-roadmap-and-reference.md](./08-roadmap-and-reference.md) | 实施路线图 + 关键数据参考 | 第十三章 + 第十四章 |
 | [09-appendix-schemas.md](./09-appendix-schemas.md) | Schema 定义 + SKILL.md 骨架 | 附录 |
-| [schemas/](./schemas/) | JSON Schema 示例文件（migration-state、source-graph、type-map、call-graph） | 附录数据 |
+| [schemas/](./schemas/) | JSON **数据示例**文件（migration-state、source-graph、type-map、call-graph）——是填了值的样例，非 JSON Schema 定义 | 附录数据 |
 
 每个子文件顶部有 `> [返回主索引](./README.md)` 导航链接，可独立阅读。
 

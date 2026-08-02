@@ -189,7 +189,7 @@ confidence: high
 
 **适配器贡献**（新语言）：
 - 工作量预期：3-5 个工作日（来源 [06 § 11.2 新语言适配器的工作量拆解](./06-plugin-structure.md#112-语言扩展架构)）。
-- 本地检查：`adapter.json` 通过 JSON Schema 校验；`extract-types.sh` 类型提取精度 ≥ 0.95、`extract-deps.sh` 依赖覆盖率 ≥ 0.90（阈值来自 [06 § 11.2 适配器验收标准](./06-plugin-structure.md#112-语言扩展架构)，可在 `.rustmigrate.toml` `[adapter_validation]` 调整）。
+- 本地检查：适配器目录须含 `analysis-tools.json`（合法 JSON、工具项字段完整）+ `porting-template.md`（frontmatter 含 `rule_version`，须与权威清单一致——`rustmigrate validate rules` 可校验）。**注**：早期版本要求「`adapter.json` 通过 JSON Schema 校验」，该 shell 脚本模式已由 [MDR-009](../decisions/009-adapter-shell-mode-cancelled.md) 正式取消（`adapter.json` 不存在，亦无对应 JSON Schema 门禁），职责下沉到 CLI 与 LLM 流程。类型提取精度 ≥ 0.95 / 依赖覆盖率 ≥ 0.90 两个阈值**仍有效但受话对象已变**——校验的是 CLI tree-sitter 在该语言上的提取质量，而非已取消的 `extract-types.sh` / `extract-deps.sh`（阈值与 `[adapter_validation]` 可选配置段见 [06 § 11.2](./06-plugin-structure.md#112-语言扩展架构)）。
 - 验收后并入发行版本。
 
 **Patterns 贡献**（成功/失败经验）：

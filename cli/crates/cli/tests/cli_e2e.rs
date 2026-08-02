@@ -1578,6 +1578,69 @@ fn e2e_review_gate_fails_closed_on_broken_config() {
 }
 
 #[test]
+fn e2e_parse_failed_suggestion_covers_state_file_not_only_source() {
+    // E010（ParseFailed）同时承载「源码语法错误」与「state/config 文件 JSON/TOML 解析
+    // 失败」两类来源，而 `suggestion()` 只拿到 ErrorCode、区分不了来源。原文案只说
+    // 「源码解析失败，请检查文件语法」——state 文件损坏的用户会被指去查源码语法，
+    // 而真正坏的是 migration-state.json。此测试钉住文案覆盖 state 文件这一路。
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+
+        // 前置假设：init 后尚无 .backup（备份在首次 save 覆盖时才产生）。若此前提变化，
+        // 下面的损坏注入会被自动回退路径吃掉、测不到 E010，故先断言而非默认成立。
+        let backup = std::path::Path::new(".rust-migration/.migration-state.json.backup");
+        assert!(
+            !backup.exists(),
+            "前提失效：init 后已存在 .backup，损坏会被自动回退掉而非返 E010"
+        );
+
+        std::fs::write(".rust-migration/migration-state.json", "{ 坏掉的 json").unwrap();
+
+        let (code, json) = run(&["validate", "state"]);
+        assert_eq!(code, 1, "state 文件损坏且无备份可回退时应报错: {json}");
+        assert_eq!(json["data"]["error_code"], "E010", "{json}");
+
+        let suggestion = json["data"]["suggestion"].as_str().unwrap_or_default();
+        assert!(
+            suggestion.contains("migration-state.json"),
+            "建议须点明 state 文件这一路，否则用户被引去查源码语法: {suggestion}"
+        );
+        assert!(
+            !suggestion.starts_with("源码解析失败"),
+            "不得退回「只讲源码」的单一口径: {suggestion}"
+        );
+    });
+}
+
+#[test]
+fn e2e_corrupt_state_with_backup_recovers_instead_of_parse_error() {
+    // 上一个测试的对照面，也是其「无备份才到此」前提的实证：主文件损坏但 .backup 可用时
+    // CLI 自动回退并降级 warning，根本不返 E010。两者合起来证明 ParseFailed 的 state
+    // 一路只在「备份也不可用」时命中——故建议文案不应再叫用户去从备份恢复（死路）。
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        // 触发一次 save 以产生 .backup。
+        let (code, json) = run(&["state", "transition", "--to", "profile"]);
+        assert_eq!(code, 0, "前置转换应成功: {json}");
+        let backup = std::path::Path::new(".rust-migration/.migration-state.json.backup");
+        assert!(backup.exists(), "前提失效：save 后未产生 .backup");
+
+        std::fs::write(".rust-migration/migration-state.json", "{ 坏掉的 json").unwrap();
+
+        let (code, json) = run(&["validate", "state"]);
+        assert_eq!(code, 0, "有备份时应自动回退而非报错: {json}");
+        assert_eq!(json["status"], "warning", "{json}");
+        let warnings = json["warnings"].to_string();
+        assert!(
+            warnings.contains("已从 .backup 恢复"),
+            "须显式告知发生了回退（进度可能丢失）: {warnings}"
+        );
+    });
+}
+
+#[test]
 fn smoke_state_reset() {
     // M4-ROB-01a：state reset 幂等回退失败/中途模块 + 输出 cleanup 作用域。
     let tmp = tempfile::tempdir().unwrap();

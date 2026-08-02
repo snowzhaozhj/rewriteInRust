@@ -115,7 +115,7 @@ Plugin 中的确定性计算由独立的 Rust CLI 工具 `rustmigrate` 承担，
 | `rustmigrate graph interfaces <module>` | 输出模块的导出接口签名文本（查询 source-graph.db 中 `is_exported=true` 节点，按 `line_range` 从 source-ref/ 提取）；`--deps-of <target>` 批量输出 target 的直接依赖模块（imports 边的 1-hop 邻居）的导出接口签名（区别于 `graph deps` 的 BFS 传递闭包）；含每条签名的 token 估算（bytes/4） |
 | `rustmigrate graph stats` | 图统计信息（节点/边计数、度分布） |
 | `rustmigrate graph decompose` | 拆解 dry-run：在 SCC 缩点 DAG 上做**目录优先两阶段凝聚合并**（沿耦合重边 + 同目录双轴凝聚，保 quotient 无环），按 footprint 预算（`--budget`，token≈bytes/4）约束单元规模，输出拆解计划 + §8 验收四维度报告（目标缩减 / 正确性不变量 / 内聚 MQ vs 随机基线 / 机械·危险分类分布）。**只读：不写 state、不产 active 合批组、不派翻译**，供 DEC-GATE 判定。算法权威 [MDR-011](../decisions/011-coupling-agglomerative-decomposition.md)——它**推翻**了 [decomposition-redesign.md](../decomposition-redesign.md) §5/§6/§7/§9/§12 原设计的「机械小文件按字节预算凸性 first-fit 装箱」 |
-| `rustmigrate validate state` | 校验 `migration-state.json` 的合法性（JSON Schema + 状态机约束） |
+| `rustmigrate validate state` | 校验 `migration-state.json` 的合法性：**手写判据**，无 JSON Schema（见 [MDR-021](../decisions/021-no-json-schema-validation.md)）——schema 版本兼容 + `state_history` 链完整性（首条为 `init`、末条与当前状态一致、`exited_at` 时间链、相邻转换合法）+ 各状态前置条件 + 非法枚举值告警。字段类型 / required / 枚举值域由 serde 类型化反序列化在**加载期**拒绝（返 `E010`），到不了本命令 |
 | `rustmigrate validate rules` | 校验各适配器 `porting-template.md` 的 `rule_version` 与权威规则清单（`references/rule-registry.json`）一致性（陈旧检测，M4-GOV-01）：`--registry` 指清单、`--adapters-dir` 扫 `<lang>/porting-template.md`；缺失/版本不符/未知规则逐条落 `data.checks[].issues`。严重度由 `[rules].enforce_rule_version_consistency`（默认 true）控制——为真时不一致返回错误（退出码 1、非静默），为假时降级 warning。详见 [MDR-014](../decisions/014-rule-version-registry.md) |
 | `rustmigrate state get` | 查询指定模块的当前迁移状态 |
 | `rustmigrate state transition` | 执行状态转换（带状态机合法性前置条件检查：校验当前状态→目标状态为合法转换路径）。`--module` 为模块级 ModuleStatus 转换；省略则为项目级 ProjectState 转换（`/migrate analyze` 把 state 从 `init` 推进到 `sprint_loop` 的接入点） |
@@ -163,7 +163,7 @@ cli/
 │   │   │   ├── profile.rs  # 项目画像分析（tree-sitter + tokei）
 │   │   │   ├── state.rs    # 状态机管理
 │   │   │   ├── scaffold.rs # 迁移目标项目骨架生成（单 crate）
-│   │   │   └── validate.rs # 配置/状态校验（jsonschema）
+│   │   │   └── validate.rs # 配置/状态校验（手写判据，非 JSON Schema）
 │   │   └── Cargo.toml
 │   └── cli/                # CLI 入口（clap）
 │       ├── src/main.rs     # clap 命令路由
@@ -198,7 +198,7 @@ SKILL.md 通过 Bash tool 调用 CLI，所有输出为统一 JSON 格式：
 | syn + quote | Rust 代码生成/分析（M2：自定义 lint crate） | M2 条件引入；**均未作为直接依赖引入**——`scaffold workspace` 最终委托 `cargo init` 生成骨架，既不手写 TOML 也不用 `toml_edit`（原文「用 toml_edit 生成 TOML」失实）。三者在 `Cargo.lock` 中均**存在但仅为传递依赖**：`syn`/`quote` 来自 serde/clap/thiserror/strum 的 proc-macro 链，`toml_edit` 由本仓直接依赖的 `toml 0.8` 拉入；源码零处 `use` 它们 |
 | petgraph | 依赖图数据结构（StableGraph + newtype 索引） | `graph build/topo-sort/parallel-groups/deps/rdeps/cycles` |
 | rusqlite | SQLite 图持久化（FTS5 全文搜索 M2 才启用，见 [04 § 5.7.3](./04-toolchain.md#573-持久化存储)） | `graph build`（写入）, `graph export`（M2 查询） |
-| jsonschema | JSON Schema 校验 | `validate state`, `validate config` |
+| ~~jsonschema~~ | ~~JSON Schema 校验~~ | **已摘除（M4，[MDR-021](../decisions/021-no-json-schema-validation.md)）**——曾在 `cli/Cargo.toml` + `core/Cargo.toml` 两处在册却**源码零引用**，`validate state`/`validate config` 实为手写判据。摘除连带移出 80 个传递 crate（含 `tokio`/`hyper`/`reqwest` 整套异步 HTTP 栈，因该 crate 默认启用远程 `$ref` 解析），对一个纯离线 CLI 是无谓的构建开销与供应链面 |
 
 ### 分发方式
 
@@ -301,7 +301,7 @@ MVP 核心命令 3 个，后续迭代 +1 个。所有命令共享 `/migrate` 命
 >
 > `analyze` 内部通过 SKILL.md 分步指令实现原 init→plan→test 的串行流程，用户无需记住 3 个命令的执行顺序。
 
-> **SKILL.md 行数预算与外部引用模式**：500 行是软约束（实践中 SKILL.md 可超出，如社区先例 UA 的 SKILL.md 达约 45KB）。为控制主 SKILL.md 体量，可复用的检查点校验模式（JSON Schema 校验、文件存在性、非空校验、重试逻辑模板）抽到 `skills/migrate/lib/checkpoint-patterns.md`，SKILL.md 按模式名引用而非全文展开。**Plan B 拆分阈值**：若某命令的 SKILL.md 在补全错误处理后内容超过 800 行，对其复杂步骤（3+ 步）触发 Plan B3（混合外部脚本）。MVP 检查点采用文件存在性确定性判断（L1），M2+ 视复杂度升级为内容校验检查点（L2/L3，见 § 10.5 产出物有效性分级）。
+> **SKILL.md 行数预算与外部引用模式**：500 行是软约束（实践中 SKILL.md 可超出，如社区先例 UA 的 SKILL.md 达约 45KB）。为控制主 SKILL.md 体量，可复用的检查点校验模式（`validate state` 结构校验、文件存在性、非空校验、重试逻辑模板）抽到 `skills/migrate/lib/checkpoint-patterns.md`，SKILL.md 按模式名引用而非全文展开。**Plan B 拆分阈值**：若某命令的 SKILL.md 在补全错误处理后内容超过 800 行，对其复杂步骤（3+ 步）触发 Plan B3（混合外部脚本）。MVP 检查点采用文件存在性确定性判断（L1），M2+ 视复杂度升级为内容校验检查点（L2/L3，见 § 10.5 产出物有效性分级）。
 
 ---
 
@@ -374,8 +374,8 @@ MVP 中 SubAgent 的实现基于 Claude Code 的标准 agent 定义机制：
 - SubAgent 的输出文本返回给 Skill（即主对话上下文中的 Claude）
 - Skill **不解析 SubAgent 输出文本来判断成功**，仅检查关键产出物文件是否存在（L1）且通过 Schema 校验（L2，见上方接口表「Schema 校验规则」列与 § 10.5 产出物有效性分级）
 - **L1/L2/L3 适用对象界定（R2-D3-03，权威定义）**：本节与 § 10.2 接口表「Schema 校验规则」列共同构成产出物分级的权威定义（§ 10.5「产出物有效性分级」给出 L1/L2/L3 三级语义，不重复逐产出物清单）。
-  - **L1（存在性）**：Markdown 产出物（`{module}-intent.md`、`porting/` 规则、`{module}-review.md`）与代码/配置产出物无 JSON Schema，只做存在、非空、关键标题存在。
-  - **L2（结构校验）**：JSON 产出物（`migration-state.json`、测试结果 JSON）做格式合法、关键字段非空校验；SQLite（`source-graph.db`）做表结构校验（必要表存在、版本号合法）。`{module}-intent.md` 在 M1 例外升 L2（9 required 属性 JSON Schema 见 [09 附录 E](./09-appendix-schemas.md#附录-e意图摘要-moduleintentmd-内容规范)）。
+  - **L1（存在性）**：Markdown 产出物（`{module}-intent.md`、`porting/` 规则、`{module}-review.md`）与代码/配置产出物只做存在、非空、关键标题存在。
+  - **L2（结构校验）**：JSON 产出物（`migration-state.json`、测试结果 JSON）做格式合法、关键字段非空校验；SQLite（`source-graph.db`）做表结构校验（必要表存在、版本号合法）。**实现手段是 serde 类型化反序列化 + 手写判据，不是 JSON Schema**（[MDR-021](../decisions/021-no-json-schema-validation.md)）：字段类型 / required / 枚举值域由 serde 在加载期拒绝，状态机与链完整性约束由 `validate state` 手写检查。`{module}-intent.md` 在 M1 例外升 L2（9 required 属性的校验清单见 [09 附录 E](./09-appendix-schemas.md#附录-e意图摘要-moduleintentmd-内容规范)，该处的 JSON Schema 是**给 LLM 读的字段契约说明**，无程序化校验器消费）。
   - **引用一致性（L2 的延后子项）**：`blocked_by` 引用的模块名须存在于 `modules` 键中——此项**不在 SubAgent 完成后立即执行**，而延后到 `/migrate run` 的 Step 0.5（彼时有完整依赖上下文，见 [09 附录 B Step 0.5](./09-appendix-schemas.md#附录-bmvp-skill-的-skillmd-骨架)），失败错误码为 `BLOCKED_BY_VALIDATION_FAILED`（见 § 10.7）。
   - **MVP 边界**：上述 L2 项中，`migration-state.json` 与测试结果 JSON、`source-graph.db`、`{module}-intent.md` 即 MVP 的 L2 范围；其余 Markdown 产出物 MVP 停留 L1，M2 视复杂度再升级。语义校验 L3 见 § 10.5，MVP 为人工 sampling。`rustmigrate validate state` 以本界定为设计输入，MVP 不要求 100% 自动化。
 - 失败时 Skill 根据 SKILL.md 的分步指令决定重试或降级（见 § 10.2.2）
@@ -560,7 +560,7 @@ SubAgent B (串行)
 **文件通信协议**：
 - SubAgent 间**不直接通信**，通过 `.rust-migration/` 下的文件传递数据
 - 每个 SubAgent 的输入/输出文件路径在 Skill 脚本中硬编码
-- 顺序约束：后序 SubAgent 启动前，检查前序产出物文件的存在性和有效性（JSON Schema 校验）
+- 顺序约束：后序 SubAgent 启动前，检查前序产出物文件的存在性和有效性（L1 存在性 + L2 结构校验，见 § 10.5）
 
 **编排机制的本质（MVP 阶段）**：
 - MVP 阶段的编排**依赖 Claude 的指令跟随能力**，而非确定性程序控制。Skill 的 SKILL.md 通过强约束分步指令引导 Claude 的行为（如"第 1 步：调用 analyzer SubAgent；第 2 步：检查产出物；第 3 步：调用 translator SubAgent"）。
@@ -568,11 +568,11 @@ SubAgent B (串行)
 - **M0 验证要求**：在 M0 Spike 1 中验证 Claude 能否可靠执行 `/migrate analyze` 的 7 步序列（含 3 次 SubAgent 串行调用）。验收标准与失败判定规则见 [07-pitfalls-and-risks.md § 12.2 Plan B 体系表](./07-pitfalls-and-risks.md#122-plan-b-体系)（5 次独立测试，>20% 失败率自动触发 Plan B；20%-50% 临界区间追加 5+ 样本重评）。**M0 Spike 1 成功率 < 80%（或 7 步完成率 < 95% / 超时次数 > 2）时强制采用 Plan B3 混合编排，不可选**。
 - **检查点确定性（两级校验）**：SubAgent 间的编排检查点采用两级确定性校验，**Skill 不解析 SubAgent 输出文本来判断成功，只看产出物文件**：
   - **L1 文件存在性检查**（脚本，毫秒级）：仅检查关键产出物文件是否存在。proceed/halt 决策只依赖此项。
-  - **L2 结构校验**（CLI `rustmigrate validate state` 等，秒级）：若文件存在，对 JSON 产出物执行 JSON Schema 校验、对 SQLite 检查表结构完整性，作为二级验证。
+  - **L2 结构校验**（CLI `rustmigrate validate state` 等，秒级）：若文件存在，对 JSON 产出物执行结构与状态机约束校验（serde 类型化反序列化 + 手写判据，非 JSON Schema——见 [MDR-021](../decisions/021-no-json-schema-validation.md)）、对 SQLite 检查表结构完整性，作为二级验证。
 
 **产出物有效性分级**：
 - **执行成功**（L1）：全部 7 步完成，所有关键产出物文件存在（文件存在性检查）。
-- **结构有效**（L2）：产出物通过 JSON Schema 校验、SQLite 表结构完整（自动化校验）。
+- **结构有效**（L2）：产出物通过结构与状态机约束校验、SQLite 表结构完整（自动化校验，手写判据非 JSON Schema）。
 - **语义有效**（L3，M1+ 阶段）：产出物内容正确性由人工样本审视确认（非自动化），包括 source-graph.db 的节点/边关系准确性。
 
 > Spike 1 验收标准仅关注「执行成功」（L1）与「结构有效」（L2）；「语义有效」（L3）在 M1 阶段可接受人工 sampling 而非 100% 自动化。编排可靠性假设的定义模板见 M0 产出的 `DESIGN_ASSUMPTIONS.md`。
@@ -706,34 +706,70 @@ CLI 的成功输出为 `{status, data, warnings}`（见 § 10.0.1）。失败时
 ```json
 {
   "status": "error",
-  "error_code": "PHASE_A_TRANSLATION_FAILED",   // 稳定错误码（见下方错误码表）
-  "error_context": {
-    "module": "src/auth/session.ts",
-    "attempt_num": 2,
-    "compiler_errors": ["E0382: borrow of moved value: `cfg`"],
-    "suggested_fix": "将 cfg 改为按引用传递或 clone"      // 1-2 行修复建议模板
+  "data": {
+    "kind": "json",                               // 错误分类标识（如 graph / json / config / io / schema_validation）
+    "error_code": "E010",                         // 稳定错误码（见下方错误码表）；空时省略
+    "message": "JSON 错误: invalid type: string \"x\", expected u64 at line 1 column 219",
+    "retryable": false,                           // CI 可否重试（Timeout/IoError/DatabaseError 为 true）
+    "suggestion": "…"                             // 1-2 行修复建议模板；空时省略
   }
 }
 ```
 
-**常见迁移错误码（与 SubAgent substatus 对应）**：下表（连同上文 § 10.7 的 `VALIDATION_*` 三码）即为 **MVP（M1）错误码表**，覆盖编排层主路径高频故障。完整编码体系（30-40 条，按「编译错误 / 翻译语义错误 / 验证失败 / 状态机错误 / SubAgent 错误」五类组织，每条含稳定码名、含义、触发条件、CI 推荐重试策略）在 **M2 开发期**补充，届时落地为 09-appendix-schemas.md 专节并在此回链（工作量见 [08-roadmap-and-reference.md](./08-roadmap-and-reference.md)）；MVP 不阻塞于完整枚举（R1-BS2-01）。
+> **结构说明（M4 据实订正）**：`error_code` 等字段位于 **`data` 之内**，与成功输出的 `{status, data, warnings}` 契约同构——早期版本示例把 `error_code` / `error_context` 画在 JSON 顶层且字段名为 `error_context.{module, attempt_num, compiler_errors, suggested_fix}`，实际实现是上述 `data.{kind, error_code, message, retryable, suggestion}`，**无 `error_context` 字段**（源码零命中）。编排器取值路径须为 `data.error_code`。结构化补充上下文经 `ErrorData.details` 的 `flatten` **提升到 `data` 顶层**（如循环依赖的 `data.cycle_path`、`validate rules` 的 `data.checks`），不嵌在 `data.details` 下。
 
-| error_code | 含义 | 典型修复建议 |
-|-----------|------|------------|
-| `LIFETIME_MISMATCH` | 生命周期不匹配 | 引入显式生命周期标注或调整借用范围 |
-| `MUTEX_SEND_SYNC_VIOLATION` | 跨 `.await` 持有非 Send 类型 | 缩小锁持有范围或换用 `tokio::sync::Mutex` |
-| `TYPE_INFERENCE_FAILED` | 类型推断失败 | 补充类型标注 |
-| `PHASE_A_TRANSLATION_FAILED` | Phase A 忠实翻译编译失败 | 见 `error_context.compiler_errors` |
-| `BLOCKED_BY_VALIDATION_FAILED` | `blocked_by` 引用了不存在的模块名（引用一致性，延后到 `/migrate run` Step 0.5 校验） | 若发生在 `/migrate analyze` 后，多为 SubAgent 写入的非法引用，重跑 `/migrate analyze`；若发生在 `/migrate run` Step 0.5，检查用户手填的 `blocked_by` |
-| `VALIDATION_TIMEOUT` | L2 校验工具超时（> `[validation].timeout_secs`，默认 30s） | 工具故障，非产出物失效：检查环境/增大超时后重试一次 |
-| `VALIDATION_OOM` | L2 校验工具内存不足 | 工具故障：检查环境内存后重试一次 |
-| `VALIDATION_SCHEMA_CORRUPTED` | Schema 文件损坏 | 工具故障：重新运行 `rustmigrate init` 修复 Schema 后重试 |
-| `PLUGIN_VERSION_MISMATCH` | `plugin.json` version 与 `rustmigrate --version` 不一致 | 重新安装匹配版本的 CLI/Plugin（见 § 10.0.3 升级失败诊断） |
-| `SCHEMA_VERSION_UNSUPPORTED` | `migration-state.json` / `source-graph.db` 的 `schema_version` 超出当前支持范围 | 运行迁移工具升级 schema，或回退到兼容的 Plugin 版本 |
-| `ADAPTER_TOOL_MISSING` | `rustmigrate profile` 检测到适配器所需外部工具（如 dependency-cruiser、mypy）未安装或版本不满足 | 按 `error_context.install_hint` 安装缺失工具后重新执行 |
-| `RUST_TOOL_MISSING` | `rustmigrate profile` 检测到 Tier 0 Rust 外部二进制（`cargo-nextest`）未安装 | 按 `error_context.install_hint`（如 `cargo install cargo-nextest`）安装后重新执行 |
+**CLI 实际错误码全表（`data.error_code` 的完整值域，编排器分流以此为准）**——权威真值源是 `cli/crates/core/src/error.rs` 的 `ErrorCode`，守卫 `cli/crates/cli/tests/design_error_codes.rs` 钉住本表与之双向一致（新增码不登记即报红）：
 
-> **校验工具故障 vs 产出物失效的区分（R2-D5-04）**：L2 校验本身是 CLI 子命令 `rustmigrate validate state`，其执行可能因超时 / OOM / Schema 损坏而失败。SKILL.md 检查点须按 CLI 返回的 `error_code` 区分：若为 `VALIDATION_TIMEOUT` / `VALIDATION_OOM` / `VALIDATION_SCHEMA_CORRUPTED` 三者之一，记一条 `state record-subagent-call --status error --error-message "validation_tool_error_<type>: <详情>"`，**不进入 `max_retries_per_step` 重试循环**（重试无意义），而是向用户输出「校验工具故障，请检查环境（增大超时 / 内存 / 重新 init）后重试一次」；其余 error_code（JSON Schema 违反、SQLite 表结构缺失等产出物真失效）才进入正常重试循环。区分逻辑骨架见 [09-appendix-schemas.md 附录 B 检查点](./09-appendix-schemas.md#附录-bmvp-skill-的-skillmd-骨架)。
+| `data.error_code` | 枚举变体 | 含义 | `data.retryable` |
+|-----|------|------|------|
+| `E001` | `GraphBuildFailed` | 图构建失败 | false |
+| `E002` | `CyclicDependency` | 循环依赖。**例外：`graph topo-sort` 的环路径不走本码**——该处用 `ErrorData::new` 构造，输出 `kind:"cyclic_dependency"` + `data.cycle_path` 但**无 `error_code` 字段**（`skip_serializing_if` 省略），且退出码为 **2**（非 1）。编排器判环须看 `data.cycle_path` 或 `kind`，不能等 `E002` | false |
+| `E003` | `ModuleNotFound` | 模块未找到 | false |
+| `E004` | `InvalidTransition` | 非法状态转换（不满足转换矩阵） | false |
+| `E005` | `PreconditionFailed` | 前置条件不满足（如未完成 graph build 即进 sprint_loop） | false |
+| `E006` | `ModuleBlocked` | 模块被上游依赖阻塞 | false |
+| `E007` | `LockConflict` | 迁移锁冲突（另有迁移进程运行） | false |
+| `E008` | `SchemaValidation` | 结构/状态机约束校验失败（含 schema 主版本不兼容） | false |
+| `E009` | `FileNotFound` | 文件不存在 | false |
+| `E010` | `ParseFailed` | 解析失败：源码语法错误 **或** state/config 的 JSON/TOML 损坏（两类共用此码，建议文案已同时覆盖） | false |
+| `E011` | `DatabaseError` | SQLite 操作失败 | **true** |
+| `E012` | `ConfigError` | 配置错误（含「未检测到支持的源语言」等） | false |
+| `E013` | `Timeout` | 子进程超时 | **true** |
+| `E014` | `IoError` | IO 操作失败（如 state 文件权限不足） | **true** |
+| `E015` | `NotImplemented` | 命令/语言路径尚未实现 | false |
+
+**设计意图语义码表（M2 错误码细分的目标形态）**：下表即 **MVP（M1）错误码表**的原始设计，覆盖编排层主路径高频故障。完整编码体系（30-40 条，按「编译错误 / 翻译语义错误 / 验证失败 / 状态机错误 / SubAgent 错误」五类组织，每条含稳定码名、含义、触发条件、CI 推荐重试策略）在 **M2 开发期**补充，届时落地为 09-appendix-schemas.md 专节并在此回链（工作量见 [08-roadmap-and-reference.md](./08-roadmap-and-reference.md)）；MVP 不阻塞于完整枚举（R1-BS2-01）。
+
+> ⚠️ **本表是设计意图的语义码，多数不是 CLI 当前实际返回值（M4 核实，见 [MDR-021](../decisions/021-no-json-schema-validation.md) § 连带修正）**。编排器**不得**按本表的码名做分支判断——照做会全部落空，请用上方「CLI 实际错误码全表」。实况：
+> - 本表 11 个码名中，`ADAPTER_TOOL_MISSING` / `RUST_TOOL_MISSING` 确实出现在输出里，但形态是 **`warnings[]` 的文本前缀**而非 `error_code` 字段值；`SCHEMA_VERSION_UNSUPPORTED` 仅存于源码 `TODO(M2-ERR-01)` 注释，该场景**实测返 `E008`**；三个 `VALIDATION_*` 码**从不存在**；其余码名在 CLI 源码零命中（属 Plugin 提示词层的语义标签或未落地设计）。
+> - M2 错误码细分时若要落地语义码，须同步两张表并保持守卫通过。
+
+| error_code（设计意图语义码） | 当前实际返回 | 含义 | 典型修复建议 |
+|-----------|------|------|------------|
+| `LIFETIME_MISMATCH` | 未落地（Plugin 提示词层语义标签） | 生命周期不匹配 | 引入显式生命周期标注或调整借用范围 |
+| `MUTEX_SEND_SYNC_VIOLATION` | 未落地（同上） | 跨 `.await` 持有非 Send 类型 | 缩小锁持有范围或换用 `tokio::sync::Mutex` |
+| `TYPE_INFERENCE_FAILED` | 未落地（同上） | 类型推断失败 | 补充类型标注 |
+| `PHASE_A_TRANSLATION_FAILED` | 未落地（同上） | Phase A 忠实翻译编译失败 | 见编译器诊断文本（无 `error_context` 字段，见上方结构说明） |
+| `BLOCKED_BY_VALIDATION_FAILED` | **未落地，且校验本身缺失**（M4 实测：幽灵引用返 `status:warning`/`valid:true`，模块永久 `still_blocked` 无告警） | `blocked_by` 引用了不存在的模块名（引用一致性，延后到 `/migrate run` Step 0.5 校验） | 若发生在 `/migrate analyze` 后，多为 SubAgent 写入的非法引用，重跑 `/migrate analyze`；若发生在 `/migrate run` Step 0.5，检查用户手填的 `blocked_by`。**当前须人工核对**——CLI 尚不检出 |
+| ~~`VALIDATION_TIMEOUT`~~ | **不存在**（无 L2 校验超时机制，`[validation].timeout_secs` 配置项亦未落地——`ValidationConfig` 是空结构） | ~~L2 校验工具超时~~ | 见下方「校验工具故障」注的 M4 订正 |
+| ~~`VALIDATION_OOM`~~ | **不存在**（CLI 不检测自身 OOM，进程被 OOM killer 杀死时无输出可言） | ~~L2 校验工具内存不足~~ | 同上 |
+| ~~`VALIDATION_SCHEMA_CORRUPTED`~~ | **不存在**（无 schema 文件可损坏，见 [MDR-021](../decisions/021-no-json-schema-validation.md)） | ~~Schema 文件损坏~~ | 同上 |
+| `PLUGIN_VERSION_MISMATCH` | 未落地 | `plugin.json` version 与 `rustmigrate --version` 不一致 | 重新安装匹配版本的 CLI/Plugin（见 § 10.0.3 升级失败诊断） |
+| `SCHEMA_VERSION_UNSUPPORTED` | **`E008`**（`SchemaValidation`；专属码留 `TODO(M2-ERR-01)`） | `migration-state.json` / `source-graph.db` 的 `schema_version` 超出当前支持范围 | 运行迁移工具升级 schema，或回退到兼容的 Plugin 版本 |
+| `ADAPTER_TOOL_MISSING` | **`warnings[]` 文本前缀**（非 `error_code` 字段值），`status` 降级 `warning` 而非 `error` | `rustmigrate profile` 检测到适配器所需外部工具（如 dependency-cruiser、mypy）未安装或版本不满足 | 按 `data.tool_checks[].install_hint` 安装缺失工具后重新执行（告警文本亦内联该提示） |
+| `RUST_TOOL_MISSING` | **`warnings[]` 文本前缀**（同上） | `rustmigrate profile` 检测到 Tier 0 Rust 外部二进制（`cargo-nextest`）未安装 | 按 `data.tool_checks[].install_hint`（如 `cargo install cargo-nextest --locked`）安装后重新执行 |
+
+> **校验工具故障 vs 产出物失效的区分（R2-D5-04，判据已由 M4 重写——见下）**：L2 校验本身是 CLI 子命令 `rustmigrate validate state`，其执行原则上可能因工具侧原因而非产出物失效而失败。此时应记一条 `state record-subagent-call --status error --error-message "validation_tool_error_<type>: <详情>"`，**不进入 `max_retries_per_step` 重试循环**（重试无意义），而是向用户输出「校验工具故障，请检查环境后重试一次」；产出物真失效（结构非法、状态机约束违反、SQLite 表结构缺失）才进入正常重试循环。
+>
+> **判据订正（M4，[MDR-021](../decisions/021-no-json-schema-validation.md) § 连带修正）**：原文要求「按 `error_code` 是否为 `VALIDATION_TIMEOUT` / `VALIDATION_OOM` / `VALIDATION_SCHEMA_CORRUPTED` 三者之一」区分——**这三个码在 CLI 中从不存在**（`ValidationConfig` 是空结构、无超时机制、无 schema 文件可损坏），编排器照此判断则**恒为假**，一切工具故障都会被误判成产出物失效而进入无意义重试。可执行的判据改为**两级，均不写死码名**（故不随 M2 错误码细分而失效）：
+> 1. **能否解析出合法 error JSON**。不能 → 工具故障（进程被信号杀死，OOM killer 即属此类；或超时无输出、stdout 非 JSON）：不进重试循环，提示用户检查环境。实测确认被 `kill -9` 时 CLI **无任何输出**，故「解析失败」是这类故障唯一可观测信号。
+> 2. 能解析 → 读 **`data.retryable`**（CLI 已提供的权威字段，`Timeout`/`IoError`/`DatabaseError` 为 `true`）：
+>    - `retryable: false` → **产出物真失效**（如 `E008` 状态机约束违反 / 链完整性破损、`E010` JSON 解析失败）：进正常重试循环，重试仍失败则按产出物损坏处置。
+>    - `retryable: true` → **环境侧瞬态故障**（如 `E014` state 文件权限/IO 错误、`E011` 数据库锁）：可重试，但**计入 `max_retries_per_step`**（与上面第 1 类不同——瞬态 IO 重试有意义），连续失败后提示检查环境而非报产出物损坏。
+>
+> 区分逻辑骨架见 [09-appendix-schemas.md 附录 B 检查点](./09-appendix-schemas.md#附录-bmvp-skill-的-skillmd-骨架)。
+>
+> **落地口径订正（M4）**：原文写「记入 `subagent_calls` 的 substatus 为 `validation_tool_error_<type>`」——`SubAgentCall` **从无 `substatus` 字段**（只有 `{step_index, subagent_name, started_at, ended_at, status, error_message}`），且 `--status` 现已收窄为 `started`/`ok`/`error`/`timeout` 四值强校验，`validation_tool_error_*` 无处安放。故 `<type>` 改由 `--error-message` 承载：状态取 `error`（工具故障不是 agent 卡死超时，不占 `timeout`），类型前缀写进消息文本，仍可按前缀 grep 聚合且不计入重试。
 >
 > **落地口径订正（M4）**：原文写「记入 `subagent_calls` 的 substatus 为 `validation_tool_error_<type>`」——`SubAgentCall` **从无 `substatus` 字段**（只有 `{step_index, subagent_name, started_at, ended_at, status, error_message}`），且 `--status` 现已收窄为 `started`/`ok`/`error`/`timeout` 四值强校验，`validation_tool_error_*` 无处安放。故 `<type>` 改由 `--error-message` 承载：状态取 `error`（工具故障不是 agent 卡死超时，不占 `timeout`），类型前缀写进消息文本，仍可按前缀 grep 聚合且不计入重试。
 
@@ -857,7 +893,8 @@ backup_on_write = true               # 每次写 migration-state.json 前创建 
 retention_days = 30                  # 备份保留期限
 
 [validation]                         # L2 校验工具的故障边界（见 § 10.5 / § 10.7）
-timeout_secs = 30                    # validate state 校验超时；超时视为工具故障而非产出物失效
+# timeout_secs = 30                  # ⚠️ 未落地：`ValidationConfig` 是空结构，CLI 不读此项，`validate state` 无超时机制
+                                     # （M4 据实订正，见 MDR-021 § 连带修正）。工具故障判据改为「能否解析出合法 error JSON」+ `data.retryable`
 
 [rules]                              # 规则版本追踪（见 05 § 6.2 代码回溯机制）
 version_tracking = true              # 在 _porting_manifest.json 记录各模块/函数依据的规则版本
