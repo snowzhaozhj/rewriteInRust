@@ -43,7 +43,7 @@ CLI 此前对此**返回 `status:ok` 零 warning**——静默牵连了用户仓
 - **`--no-deps`**：实测它不解析依赖图——`[dependencies]` 里写一个不存在的 crate，metadata 仍 exit 0。故检测不受网络 / 私有 registry / 依赖不可解析影响。
 - **路径先绝对化再比对**：`Path::ancestors()` 对相对路径只走到 `""`（当前目录），到不了 `..` 及更上层（实测 `"crates/rel"` 的 ancestors 为 `["crates", ""]`）。而 `--target` 默认值就是相对的 `rust`，故「用户在 workspace 子目录里执行」是默认路径而非边缘情况。
 - **比对两侧过 `canonicalize`**：metadata 返回符号链接解析后的真实路径（macOS 上 `/tmp/x` → `/private/tmp/x`），而绝对化只做词法消解。最初的实现正是在此静默失效（测试用的 `TempDir` 就在 `/var` → `/private/var` 下）。告警文案里展示的 workspace 根取自 `metadata.root`，故也是符号链接**已解析**的形态（用户输入 `crates/probe` 时可能显示 `/private/tmp/...`）——路径仍然有效可用，只是未必是用户输入的样子。
-- **metadata 失败不静默**：实测「裸目录」与「workspace 已有语法坏成员」**都是 exit 101**，故不能靠 stderr 文案区分（同 ⒜ 的理由）。改按「目标的祖先目录里是否存在任何 `Cargo.toml`」：无 → 裸目录 scaffold，正常，不告警；有 → 检测确实没能进行，如实报「无法判定」+ 提示手工确认，不让调用方以为已确认无事。**该祖先链上溯同样须先解符号链接**——类型设计视角实测出的漏报：`--target` 路径自身含符号链接段时，词法祖先链指向一个不存在的目录树（`/tmp/link/x` 的词法祖先只有 `/tmp/link`、`/tmp`），真实位置却在 workspace 内，于是判成「裸目录」静默返回空告警。同一坏 workspace 下直路径报 `warning`、经符号链接报 `ok` 零 warning。成功分支修了这个坑（上一条），失败分支一度漏修。
+- **metadata 失败不静默**：实测无 manifest（`could not find Cargo.toml`）与坏 manifest（`unclosed table`）**都是 exit 101**，故不能靠 stderr 文案区分（同 ⒜ 的理由）。改按「目标的祖先目录里是否存在任何 `Cargo.toml`」：无 → 不在任何 Cargo 项目内，正常，不告警；有 → 检测确实没能进行，如实报「无法判定」+ 提示手工确认，不让调用方以为已确认无事。**注意执行时点**（测试覆盖视角订正）：本检测在 `cargo init` **之后**执行，故常见的裸目录 scaffold 走不到失败分支——产出的 crate 合法可解析，metadata 在其中 **exit 0** 且 `workspace_root` 指向自身，由「目标即自己的 workspace 根」短路返回。失败分支只在残缺 manifest（幂等重跑）或外层 workspace 本身坏了时命中。因此该分流的两侧**各需专门构造**才测得到（原先两个「裸目录」用例函数体逐字重复，且都停在成功分支的短路上，摘掉分流守卫 23 测试全绿）。**该祖先链上溯同样须先解符号链接**——类型设计视角实测出的漏报：`--target` 路径自身含符号链接段时，词法祖先链指向一个不存在的目录树（`/tmp/link/x` 的词法祖先只有 `/tmp/link`、`/tmp`），真实位置却在 workspace 内，于是判成「裸目录」静默返回空告警。同一坏 workspace 下直路径报 `warning`、经符号链接报 `ok` 零 warning。成功分支修了这个坑（上一条），失败分支一度漏修。
 
 ### 处置 = 告警不报错
 
@@ -83,7 +83,7 @@ pub fn scaffold_project_with_bin(name: &str, target_dir: &Path) -> Result<Vec<St
 
 ## 验证
 
-`just ci` 全绿（848 测试 + fmt + clippy `--all-targets -D warnings` + deny + shellcheck）。测试 828 → 848（+20）：`template.rs` 的测试函数 9 → 26 + CLI e2e 2 + `process.rs` 3（大输出 pipe 死锁回归，见下）+ core 侧 `with_cwd` helper（改 cwd 的测试须串行化，仿 `cli_e2e` 同名先例；非测试函数，不计数）。
+`just ci` 全绿（849 测试 + fmt + clippy `--all-targets -D warnings` + deny + shellcheck）。测试 828 → 849（+21）：`template.rs` 的测试函数 9 → 26 + CLI e2e 2 + `process.rs` 4（pipe 死锁与孙进程挂死回归，见下）+ core 侧 `with_cwd` helper（改 cwd 的测试须串行化，仿 `cli_e2e` 同名先例；非测试函数，不计数）。
 
 多数用例带**前置假设断言**——先证 cargo 的实际行为符合前提（如「glob 下 manifest 确实未变」），cargo 行为若变化会让测试报红，而不是让告警断言静默失去意义。
 
@@ -99,6 +99,8 @@ pub fn scaffold_project_with_bin(name: &str, target_dir: &Path) -> Result<Vec<St
 | 摘掉 `inside_cargo_project` 分流（metadata 一失败就无条件告警） | 裸目录侧用例红 | `test_no_unknown_warning_when_metadata_fails_outside_cargo_project` 红（**首轮无此守卫时该变异 23 测试全绿**） |
 | `with_bin` 早返回路径丢告警 | 对应测试红 | 同名测试红（第 4 处接线补守卫前，该变异全绿） |
 | `process.rs` 回退为「先 wait 再读 pipe」 | 大输出用例红 | `test_run_with_timeout_survives_output_exceeding_pipe_buffer` 报 `Timeout` 而红 |
+| 正常退出路径改为几乎无限等（等价于无条件 join） | 孙进程用例红 | `test_run_with_timeout_not_blocked_by_grandchild_holding_pipe` 红，**耗时 30.04s 精确复现孙进程 `sleep 30`** |
+| 读线程改回「读完才整块交付」 | 同上用例红 | 同一测试红，归因精确（`已写出的输出: ""`——丢掉了早已读到的内容） |
 
 > **证据留痕说明**（设计契约审查指出）：上表的变异实证在临时 worktree 中进行、worktree 已销毁，仓库内无对应 commit 或产物。可复核的部分是「存在能被这些实证钉住的测试」（表中测试名均可在 `template.rs` 找到且断言方向正确）；实证过程本身需重跑才能再次确认。
 
@@ -118,7 +120,14 @@ pub fn scaffold_project_with_bin(name: &str, target_dir: &Path) -> Result<Vec<St
 
 修法：spawn 两个读线程在 `wait_timeout` **之前**就开始抽 stdout/stderr。修后 305 KB 场景 1.6s 完成并给出正确告警。
 
-一个反直觉的坑（修复初版踩过）：**超时路径不能 join 读线程**。`kill` 只终止直接子进程，孙进程继承 pipe 写端后 EOF 会迟到，join 会把「2 秒超时」拖成「等满孙进程的 60 秒」——比原 bug 更糟，且断言全绿看不出来（实测 60.8s 通过）。故 `test_run_with_timeout_returns_promptly_on_slow_big_output` 断言的是**耗时**而非仅错误类型。
+一个反直觉的坑（修复初版踩过两轮，两轮都是**同一个机理只防了一半**）：`kill` 只终止直接子进程，孙进程继承 pipe 写端后 EOF 会迟到甚至永不到来。
+
+- **第一轮**：超时路径 join 读线程，把「2 秒超时」拖成「等满孙进程的 60 秒」——比原 bug 更糟，且断言全绿看不出来（实测 60.8s 通过）。改为超时路径不等读线程。
+- **第二轮**（合并前自查发现）：**正常退出路径仍无条件 join**，而那里没有任何时限。实测 `sh -c 'sleep 30 & echo done'`：子进程 4.7ms 退出、`join` 硬等 30s；孙进程若是守护进程即**永久挂死**——恰好废掉本函数「避免子进程挂死导致 CLI 永久卡住」的全部意义，比原 bug 隐蔽得多（原 bug 至少 60 秒后会返回）。
+
+最终实现：两条路径都不无条件等。读线程**边读边并入共享缓冲区**（而非读完整块交付，否则超期只能返回空、丢掉早已读到的内容），调用方按一个**两流共享的截止时刻**取结果（各给一份宽限期会让最坏耗时翻倍，实测正好 2 倍）。宽限期取 200ms 而非「宽裕」值：子进程退出时它写出的数据已在内核缓冲区里，读线程只差那个读不到的 EOF，宽限期要覆盖的仅是送达延迟而非等孙进程——5s 的版本会让「后台任务持有 pipe」这个正常场景每次白等 5 秒，并不会让输出更完整。
+
+三条回归测试分别钉住：1MB 大输出不死锁、超时及时返回、**孙进程持 pipe 时正常路径不挂**（断言耗时 + 已读输出不丢）。
 
 ### 端到端回归矩阵
 
