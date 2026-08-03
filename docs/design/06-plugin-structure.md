@@ -711,12 +711,13 @@ CLI 的成功输出为 `{status, data, warnings}`（见 § 10.0.1）。失败时
     "error_code": "E010",                         // 稳定错误码（见下方错误码表）；空时省略
     "message": "JSON 错误: invalid type: string \"x\", expected u64 at line 1 column 219",
     "retryable": false,                           // CI 可否重试（Timeout/IoError/DatabaseError 为 true）
-    "suggestion": "…"                             // 1-2 行修复建议模板；空时省略
+    "suggestion": "…",                            // 1-2 行修复建议模板；空时省略
+    "context": "…"                                // 可选补充上下文（字符串）；None 时省略
   }
 }
 ```
 
-> **结构说明（M4 据实订正）**：`error_code` 等字段位于 **`data` 之内**，与成功输出的 `{status, data, warnings}` 契约同构——早期版本示例把 `error_code` / `error_context` 画在 JSON 顶层且字段名为 `error_context.{module, attempt_num, compiler_errors, suggested_fix}`，实际实现是上述 `data.{kind, error_code, message, retryable, suggestion}`，**无 `error_context` 字段**（源码零命中）。编排器取值路径须为 `data.error_code`。结构化补充上下文经 `ErrorData.details` 的 `flatten` **提升到 `data` 顶层**（如循环依赖的 `data.cycle_path`、`validate rules` 的 `data.checks`），不嵌在 `data.details` 下。
+> **结构说明（M4 据实订正）**：`error_code` 等字段位于 **`data` 之内**，与成功输出的 `{status, data, warnings}` 契约同构——早期版本示例把 `error_code` / `error_context` 画在 JSON 顶层且字段名为 `error_context.{module, attempt_num, compiler_errors, suggested_fix}`，实际实现是上述 `data.{kind, error_code, message, retryable, suggestion, context}`，**无 `error_context` 字段**（源码零命中）。编排器取值路径须为 `data.error_code`。`error_code` / `suggestion` 为空串、`context` 为 `None` 时该键**整体省略**（`skip_serializing_if`），故不能假设键必然存在。结构化补充上下文经 `ErrorData.details` 的 `flatten` **提升到 `data` 顶层**（如循环依赖的 `data.cycle_path`、`validate rules` 的 `data.checks`），不嵌在 `data.details` 下。
 
 **CLI 实际错误码全表**——权威真值源是 `cli/crates/core/src/error.rs` 的 `ErrorCode`，守卫 `cli/crates/cli/tests/design_error_codes.rs` 钉住本表与之双向一致（新增码不登记、可达性标注与实现不符均报红）：
 

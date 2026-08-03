@@ -137,6 +137,15 @@ STATUS 把修法记为二选一、**需先定方向**：⒜ 如实化 + 摘依�
 
 **新增 e2e 测试 3 个**（守卫 5 个另计，共 +8）：文案守卫 + 两条对照面——`e2e_corrupt_state_with_backup_recovers_instead_of_parse_error`（实证「无备份才到 E010」这一前提）与 `e2e_broken_config_returns_config_error_not_parse_failed`（实证「配置损坏走 E012 不走 E010」，即文案不提 `.rustmigrate.toml` 的依据）。前两者带**前置假设断言**（先证 `.backup` 存在/不存在符合前提，机制变化时会红而非让断言静默失去意义）。
 
+## 变更性质登记
+
+按 MDR-019/020 先例逐项判定，**本 MDR 无破坏性变更**：
+
+- **摘除 `jsonschema` 依赖**：该 crate 源码零引用，无 `pub` API 依赖它、无类型出现在任何签名里，故对下游 Rust 调用者与 CLI 的 JSON 契约均零影响。`Cargo.lock` 变动不构成 API 变更（0.x 阶段 + 无 `cargo publish` 流程）。
+- **`ParseFailed` 的 `suggestion` 文案变化**：`suggestion` 是**用户可见文本，非机读契约**——`plugin/` 下对该键零命中（无提示词或脚本按其内容分支），CLI 侧亦无消费方。文案纠错不改结构、不改字段名、不改 `error_code` 值域。故不按 `--status` 值域那类（#86，值被 clap 解析期强校验、编排器照抄）登记为破坏性变更。
+- **`ErrorCode` 加 `strum::EnumIter`**：纯派生宏新增，不改 serde 表示（`rename_all = "snake_case"` 未动）、不改变体集合与码号，对外部零影响。
+- **设计文档措辞如实化**：不改任何契约值，只让描述与实现一致。表格新增「可达性」列属信息补充，未删任何既有行。
+
 ## 未采纳
 
 - **补真 schema 实现（方向 ⒝）**：见「决策」段实证——serde 已覆盖 schema 能管的层，增量仅「未知字段」「minLength」两处，而代价是 80 个传递 crate。
