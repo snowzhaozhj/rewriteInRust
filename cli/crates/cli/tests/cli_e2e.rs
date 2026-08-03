@@ -1634,6 +1634,141 @@ fn e2e_parse_failed_suggestion_covers_state_file_not_only_source() {
 }
 
 #[test]
+fn e2e_codes_marked_reachable_actually_appear_in_output() {
+    // 06 § 10.7「CLI 实际错误码全表」的「可达性」列是编排器分流的前提：标「可达」的码
+    // 若实际不可能出现，按它写的分支恒不命中（与已废弃的 VALIDATION_* 幽灵码同构）。
+    //
+    // `design_error_codes.rs` 的守卫只能做到「不可达」侧的清单一致性检查——异构交叉审查
+    // （codex）实证其类型级补强**无法**发现「有映射但源变体零构造点」型死码（`E006` 正是
+    // 此类：`MigrateError::Blocked` 有 From 映射却零构造点）。故「可达」侧必须由本测试用
+    // **真实命令产出**证明，而非从源码结构推断。
+    //
+    // 未覆盖的两个码及原因（如实记录，不假装全覆盖）：
+    // - `E013` Timeout：需注入睡满 `subagent_timeout_secs`（默认 60s）的假 cargo，
+    //   codex 已实证 `scaffold workspace` 可触发，但 65 秒不适合进 CI。
+    // - `E015` NotImplemented：需配 `source_language = "c"` 后 `graph build`，codex 已实证。
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        std::fs::write("package.json", r#"{"name":"p"}"#).unwrap();
+        std::fs::create_dir_all("src").unwrap();
+        std::fs::write("src/a.ts", "export const x = 1;\n").unwrap();
+
+        let expect_code = |args: &[&str], want: &str, why: &str| {
+            let (_, json) = run(args);
+            assert_eq!(
+                json["data"]["error_code"], want,
+                "{why}（若该码已变不可达，须同步 06 表的可达性列 + UNREACHABLE_CODES）: {json}"
+            );
+        };
+
+        // E012 ConfigError：模块不存在（也是 E003/E006 场景的实际归属码）。
+        let (_, json) = run(&["init"]);
+        assert!(
+            json["status"] == "ok" || json["status"] == "warning",
+            "init 应成功: {json}"
+        );
+        expect_code(&["state", "get", "absent"], "E012", "模块不存在");
+
+        // E004 InvalidTransition：init 态直接跳 plan（不满足转换矩阵）。
+        expect_code(
+            &["state", "transition", "--to", "plan"],
+            "E004",
+            "init→plan 非法转换",
+        );
+
+        // E007 LockConflict：CAS 版本不匹配（注意 message 是「版本冲突」而非进程冲突）。
+        expect_code(
+            &[
+                "state",
+                "update",
+                "--module",
+                "absent",
+                "--status",
+                "translating",
+                "--cas-version",
+                "99",
+            ],
+            "E007",
+            "CAS 版本冲突",
+        );
+
+        // E009 FileNotFound：--registry 指向不存在的文件。
+        expect_code(
+            &[
+                "validate",
+                "rules",
+                "--registry",
+                "missing.json",
+                "--adapters-dir",
+                ".",
+            ],
+            "E009",
+            "registry 文件不存在",
+        );
+
+        // E005 PreconditionFailed：推进到 sprint_loop 后未 graph build 即校验。
+        // 注意 `transition --to sprint_loop` 本身放行（不查 graph），前置条件由
+        // `validate state` 检查——这是 codex 给的场景，我起初误接在 transition 上。
+        for to in ["profile", "plan", "scaffold", "sprint_loop"] {
+            let (_, json) = run(&["state", "transition", "--to", to]);
+            assert_eq!(json["status"], "ok", "{to} 转换应成功: {json}");
+        }
+        expect_code(
+            &["validate", "state"],
+            "E005",
+            "sprint_loop 态但未 graph build",
+        );
+
+        // E008 SchemaValidation：schema 主版本不兼容。
+        let state_path = std::path::Path::new(".rust-migration/migration-state.json");
+        let mut state: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(state_path).unwrap()).unwrap();
+        state["schema_version"] = serde_json::json!("99.0.0");
+        std::fs::write(state_path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+        expect_code(&["validate", "state"], "E008", "schema 主版本不兼容");
+        state["schema_version"] = serde_json::json!("1.0.0");
+        std::fs::write(state_path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+
+        // E011 DatabaseError：source-graph.db 非 SQLite 内容。
+        std::fs::write(".rust-migration/source-graph.db", "not sqlite").unwrap();
+        expect_code(&["graph", "stats"], "E011", "db 文件非 SQLite");
+        std::fs::remove_file(".rust-migration/source-graph.db").unwrap();
+
+        // E001 GraphBuildFailed：图操作错误（此处为查询不存在的节点，非「构建」失败）。
+        let (_, json) = run(&["graph", "build", "--root", "."]);
+        assert!(
+            json["status"] == "ok" || json["status"] == "warning",
+            "graph build 应成功: {json}"
+        );
+        expect_code(
+            &["graph", "deps", "does-not-exist"],
+            "E001",
+            "查询不存在的图节点",
+        );
+
+        // E014 IoError：state 文件不可读。
+        let mut perms = std::fs::metadata(state_path).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o000);
+            std::fs::set_permissions(state_path, perms.clone()).unwrap();
+            expect_code(&["validate", "state"], "E014", "state 文件权限不足");
+            perms.set_mode(0o644);
+            std::fs::set_permissions(state_path, perms).unwrap();
+        }
+
+        // E010 ParseFailed：state JSON 损坏且无备份（备份由前面的 transition 产生，须先删）。
+        let backup = std::path::Path::new(".rust-migration/.migration-state.json.backup");
+        if backup.exists() {
+            std::fs::remove_file(backup).unwrap();
+        }
+        std::fs::write(state_path, "{ 坏掉的 json").unwrap();
+        expect_code(&["validate", "state"], "E010", "state JSON 损坏且无备份");
+    });
+}
+
+#[test]
 fn e2e_broken_rule_registry_returns_parse_failed_with_actionable_hint() {
     // E010 的**第二条真实路径**（主审视角发现，初版文案漏了）：`validate rules --registry`
     // 指向的 rule-registry.json 损坏时经 `?` → `#[from] serde_json::Error` → E010。

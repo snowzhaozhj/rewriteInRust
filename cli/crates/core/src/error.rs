@@ -75,13 +75,25 @@ impl ErrorCode {
     /// 用户提示信息。
     pub fn suggestion(self) -> &'static str {
         match self {
-            Self::GraphBuildFailed => "请检查源码目录结构后重试 graph build",
+            // 本码覆盖图**操作**错误（构建期与查询期都有构造点，见 graph/persist.rs），
+            // 故建议不能只讲 graph build——异构交叉审查实测 `graph deps <不存在的节点>`
+            // 亦返本码，那时叫用户去"重试 graph build"指错了方向。
+            Self::GraphBuildFailed => {
+                "图操作失败：若在构建期，请检查源码目录结构后重试 graph build；\
+                 若在查询期，请确认节点/模块标识是否存在（可用 graph stats 核对图规模）"
+            }
             Self::CyclicDependency => "请打破循环依赖后重试",
             Self::ModuleNotFound => "请确认模块路径是否正确",
             Self::InvalidTransition => "当前状态不允许此操作，请检查迁移状态",
             Self::PreconditionFailed => "前置条件不满足，请先完成依赖步骤",
             Self::ModuleBlocked => "模块被上游依赖阻塞，请先完成上游模块迁移",
-            Self::LockConflict => "迁移锁冲突，请确认无其他迁移进程运行后重试",
+            // 唯一构造点是 `state/machine.rs` 的 CAS 版本检查——原文案「请确认无其他迁移
+            // 进程运行后重试」属过度归因（异构交叉审查实证：`--cas-version 99` 在无并发时
+            // 同样触发）。正确处置是重读 state 取新版本号，而非等锁释放。
+            Self::LockConflict => {
+                "CAS 版本不匹配（多为传入的 --cas-version 已陈旧）：重新读取 \
+                 migration-state.json 的 metadata.version 后重发；若确有并发迁移进程，先等其结束"
+            }
             Self::SchemaValidation => "Schema 校验失败，请检查配置文件格式",
             Self::FileNotFound => "文件不存在，请确认路径是否正确",
             // E010 的**两条真实路径**（主审视角逐条实证，见 MDR-021 § 可达性核查）：

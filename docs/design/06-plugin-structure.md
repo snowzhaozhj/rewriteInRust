@@ -719,19 +719,19 @@ CLI 的成功输出为 `{status, data, warnings}`（见 § 10.0.1）。失败时
 
 > **结构说明（M4 据实订正）**：`error_code` 等字段位于 **`data` 之内**，与成功输出的 `{status, data, warnings}` 契约同构——早期版本示例把 `error_code` / `error_context` 画在 JSON 顶层且字段名为 `error_context.{module, attempt_num, compiler_errors, suggested_fix}`，实际实现是上述 `data.{kind, error_code, message, retryable, suggestion, context}`，**无 `error_context` 字段**（源码零命中）。编排器取值路径须为 `data.error_code`。`error_code` / `suggestion` 为空串、`context` 为 `None` 时该键**整体省略**（`skip_serializing_if`），故不能假设键必然存在。结构化补充上下文经 `ErrorData.details` 的 `flatten` **提升到 `data` 顶层**（如循环依赖的 `data.cycle_path`、`validate rules` 的 `data.checks`），不嵌在 `data.details` 下。
 
-**CLI 实际错误码全表**——权威真值源是 `cli/crates/core/src/error.rs` 的 `ErrorCode`，守卫 `cli/crates/cli/tests/design_error_codes.rs` 钉住本表与之双向一致（新增码不登记、可达性标注与实现不符均报红）：
+**CLI 实际错误码全表**——权威真值源是 `cli/crates/core/src/error.rs` 的 `ErrorCode`，守卫 `cli/crates/cli/tests/design_error_codes.rs` 钉住本表与之一致（新增码不登记、`retryable` 列漂移、可达性标注与 `UNREACHABLE_CODES` 常量不符均报红）。**守卫能力边界**（异构交叉审查实证）：「可达」侧由**逐码命令级产出测试**证明；「不可达」侧靠人工维护的常量 + 一条类型级补强（`From<&MigrateError>` 无映射的码必然不可达），该补强**无法**发现「有映射但源变体零构造点」型死码（`E006` 正属此类），故新增码变不可达时仍需人工判断并更新常量。
 
 > ⚠️ **「可达性」列是编排器分流的前提**：`ErrorCode` 定义了 15 个码，但其中 3 个**当前不可能出现在任何命令的输出里**——按它们写分支与按已废弃的 `VALIDATION_*` 写分支同样恒不命中。M4 逐码实测确认（见 [MDR-021](../decisions/021-no-json-schema-validation.md) § 可达性核查）。
 
 | `data.error_code` | 枚举变体 | 可达性 | 含义 | `data.retryable` |
 |-----|------|------|------|------|
-| `E001` | `GraphBuildFailed` | 可达 | 图构建失败 | false |
+| `E001` | `GraphBuildFailed` | 可达 | **图操作错误（构建或查询）**——码名易误读为仅构建期：`MigrateError::Graph` 的构造点遍布 `graph/persist.rs`（节点/边类型反序列化）等处，实测 `graph deps <不存在的节点>` 亦返本码 | false |
 | `E002` | `CyclicDependency` | **不可达** | 循环依赖。`CyclicDependency` 的唯一构造点在 `graph/topo.rs` 的 `topological_sort`，而其唯一非测试调用点（`graph topo-sort`）就地 match 消费该错误、改用 `ErrorData::new` 重构造 → 输出 `kind:"cyclic_dependency"` + `data.cycle_path`、**无 `error_code` 字段**、退出码 **2**（非 1）。**编排器判环须看 `data.cycle_path` 或 `kind`** | false |
 | `E003` | `ModuleNotFound` | **不可达** | 模块未找到。`From<&MigrateError>` 中**无分支映射到本码**（无对应 `MigrateError` 变体）；「模块不存在」实测返 **`E012`**（`MigrateError::Config`） | false |
 | `E004` | `InvalidTransition` | 可达 | 非法状态转换（不满足转换矩阵） | false |
 | `E005` | `PreconditionFailed` | 可达 | 前置条件不满足（如未完成 graph build 即进 sprint_loop） | false |
 | `E006` | `ModuleBlocked` | **不可达** | 模块被上游依赖阻塞。源变体 `MigrateError::Blocked` **零构造点**（只存在 match arm）；被阻塞模块的查询实测返 **`E012`** | false |
-| `E007` | `LockConflict` | 可达 | 迁移锁冲突（另有迁移进程运行） | false |
+| `E007` | `LockConflict` | 可达 | **CAS 版本不匹配**（`--cas-version` 期望值与 state 当前 `metadata.version` 不符）。码名与建议文案的「另有迁移进程运行」是**过度归因**——`LockConflict` 的唯一构造点在 `state/machine.rs` 的 CAS 检查处，版本陈旧或传错参数同样触发，未必存在其他进程。编排器处置是**重读 state 取新版本号后重发**，而非等锁释放 | false |
 | `E008` | `SchemaValidation` | 可达 | 结构/状态机约束校验失败（含 schema 主版本不兼容） | false |
 | `E009` | `FileNotFound` | 可达 | 文件不存在 | false |
 | `E010` | `ParseFailed` | 可达 | **JSON 解析失败**，两条真实路径：① `migration-state.json` 损坏（且 `.backup` 也不可用）；② `validate rules --registry` 指向的 `rule-registry.json` 损坏。**注意两处易误解**：⒜ `MigrateError::Parse`（源码语法）虽映射到本码，但其全部三个调用点（`graph/build.rs`）都把它**降级为 `warnings` 并跳过该文件**，故源码语法错误**实测不产出本码**；⒝ `Toml`/`TomlSer` 亦映射到本码，但三处 `toml::from_str` 全部显式包成 `Config`——**配置文件损坏实测返 `E012`** | false |
@@ -766,11 +766,20 @@ CLI 的成功输出为 `{status, data, warnings}`（见 § 10.0.1）。失败时
 
 > **校验工具故障 vs 产出物失效的区分（R2-D5-04，判据已由 M4 重写——见下）**：L2 校验本身是 CLI 子命令 `rustmigrate validate state`，其执行原则上可能因工具侧原因而非产出物失效而失败。此时应记一条 `state record-subagent-call --status error --error-message "validation_tool_error_<type>: <详情>"`，**不进入 `max_retries_per_step` 重试循环**（重试无意义），而是向用户输出「校验工具故障，请检查环境后重试一次」；产出物真失效（结构非法、状态机约束违反、SQLite 表结构缺失）才进入正常重试循环。
 >
-> **判据订正（M4，[MDR-021](../decisions/021-no-json-schema-validation.md) § 连带修正）**：原文要求「按 `error_code` 是否为 `VALIDATION_TIMEOUT` / `VALIDATION_OOM` / `VALIDATION_SCHEMA_CORRUPTED` 三者之一」区分——**这三个码在 CLI 中从不存在**（`ValidationConfig` 是空结构、无超时机制、无 schema 文件可损坏），编排器照此判断则**恒为假**，一切工具故障都会被误判成产出物失效而进入无意义重试。可执行的判据改为**两级，均不写死码名**（故不随 M2 错误码细分而失效）：
-> 1. **能否解析出合法 error JSON**。不能 → 工具故障（进程被信号杀死，OOM killer 即属此类；或超时无输出、stdout 非 JSON）：不进重试循环，提示用户检查环境。实测确认被 `kill -9` 时 CLI **无任何输出**，故「解析失败」是这类故障唯一可观测信号。
-> 2. 能解析 → 读 **`data.retryable`**（CLI 已提供的权威字段，`Timeout`/`IoError`/`DatabaseError` 为 `true`）：
->    - `retryable: false` → **产出物真失效**（如 `E008` 状态机约束违反 / 链完整性破损、`E010` JSON 解析失败）：进正常重试循环，重试仍失败则按产出物损坏处置。
->    - `retryable: true` → **环境侧瞬态故障**（如 `E014` state 文件权限/IO 错误、`E011` 数据库锁）：可重试，但**计入 `max_retries_per_step`**（与上面第 1 类不同——瞬态 IO 重试有意义），连续失败后提示检查环境而非报产出物损坏。
+> **判据订正（M4，[MDR-021](../decisions/021-no-json-schema-validation.md) § 连带修正）**：原文要求「按 `error_code` 是否为 `VALIDATION_TIMEOUT` / `VALIDATION_OOM` / `VALIDATION_SCHEMA_CORRUPTED` 三者之一」区分——**这三个码在 CLI 中从不存在**（`ValidationConfig` 是空结构、无超时机制、无 schema 文件可损坏），编排器照此判断则**恒为假**，一切工具故障都会被误判成产出物失效而进入无意义重试。可执行的判据改为：
+>
+> **第 1 级：能否解析出合法 error JSON。** 不能 → 工具故障（进程被信号杀死，OOM killer 即属此类；或超时无输出、stdout 非 JSON）：不进重试循环，提示用户检查环境。实测确认被 `kill -9` 时 CLI **无任何输出**，故「解析失败」是这类故障唯一可观测信号。
+>
+> **第 2 级：能解析则按 `data.error_code` 归类**（下表）。**注意不能用 `data.retryable` 代替归类**——异构交叉审查双向实证推翻了该捷径：⒜ `source-graph.db` 写入非 SQLite 内容后 `graph stats` 两次均返 `E011` + `retryable:true`，但这是**产出物持久损坏**，不重建数据库则重试永远无意义；⒝ `state update --cas-version 99` 返 `E007` + `retryable:false`，而它只是**调用方用了陈旧版本号**，产出物完好。`retryable` 表达的是「是否建议原样重试」，承担不了「错误归属」判定。
+>
+> | 归属 | error_code | 处置 |
+> |---|---|---|
+> | **产出物失效** | `E008`（结构/状态机约束违反）、`E010`（JSON 损坏）、`E011`（DB 内容损坏） | 进 `max_retries_per_step` 重试；重试仍失败按产出物损坏处置（可 `state reset` 重做该步） |
+> | **环境侧瞬态** | `E013`（超时）、`E014`（IO/权限） | 可重试并计入计数；连续失败提示检查环境而非报产出物损坏 |
+> | **调用方错误** | `E007`（CAS 版本陈旧）、`E004`（非法转换）、`E005`（前置条件未满足）、`E012`（模块不存在/配置错误）、`E003`/`E006`（实际归 `E012`） | **不重试**——重试同样的调用必然同样失败。编排器须先纠正自己的调用（重读 state 取新版本号 / 补前置步骤） |
+> | **工具能力缺失** | `E015`（未实现的语言路径） | 不重试，走降级路径（`degrade_skip`） |
+>
+> 该表按**归属**而非码名逐一列举，M2 错误码细分时新增的码须归入四类之一；`E001`/`E002`/`E009` 不出现在 L2 校验路径上，故未列。
 >
 > 区分逻辑骨架见 [09-appendix-schemas.md 附录 B 检查点](./09-appendix-schemas.md#附录-bmvp-skill-的-skillmd-骨架)。
 >
