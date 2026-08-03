@@ -731,7 +731,7 @@ CLI 的成功输出为 `{status, data, warnings}`（见 § 10.0.1）。失败时
 | `E007` | `LockConflict` | 迁移锁冲突（另有迁移进程运行） | false |
 | `E008` | `SchemaValidation` | 结构/状态机约束校验失败（含 schema 主版本不兼容） | false |
 | `E009` | `FileNotFound` | 文件不存在 | false |
-| `E010` | `ParseFailed` | 解析失败：源码语法错误 **或** state/config 的 JSON/TOML 损坏（两类共用此码，建议文案已同时覆盖） | false |
+| `E010` | `ParseFailed` | 解析失败：源码语法错误 **或** `migration-state.json` 的 JSON 损坏（两类共用此码，建议文案已同时覆盖）。**注**：`From<&MigrateError>` 虽把 `Toml`/`TomlSer` 也映射到本码，但那两个变体除 `#[from]` 外零构造点、三处 `toml::from_str` 全部显式包成 `Config`——**配置文件损坏实测返 `E012`**，永不到此 | false |
 | `E011` | `DatabaseError` | SQLite 操作失败 | **true** |
 | `E012` | `ConfigError` | 配置错误（含「未检测到支持的源语言」等） | false |
 | `E013` | `Timeout` | 子进程超时 | **true** |

@@ -1610,6 +1610,32 @@ fn e2e_parse_failed_suggestion_covers_state_file_not_only_source() {
             !suggestion.starts_with("源码解析失败"),
             "不得退回「只讲源码」的单一口径: {suggestion}"
         );
+        // 不得提配置文件：`Toml`/`TomlSer` 虽在 `From<&MigrateError>` 里映射到 E010，
+        // 但实测配置损坏走 E012（见下一个测试），提它会把用户引去查没坏的文件。
+        assert!(
+            !suggestion.contains(".rustmigrate.toml"),
+            "配置损坏实际走 E012 而非本码，建议里提它是误导: {suggestion}"
+        );
+    });
+}
+
+#[test]
+fn e2e_broken_config_returns_config_error_not_parse_failed() {
+    // 上一个测试「E010 建议不提配置文件」这一断言的依据：配置文件 TOML 损坏时走的是
+    // `E012`（ConfigError）而非 `E010`——三处 `toml::from_str` 都显式包成
+    // `MigrateError::Config`，`MigrateError::Toml` 除 `#[from]` 外零构造点。
+    // 若将来有人改成经 `?` 上抛（走 From → E010），本测试会红，提示同步 E010 的建议文案。
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        std::fs::write(".rustmigrate.toml", "[project\nsource_root = ").unwrap();
+
+        let (code, json) = run(&["validate", "config"]);
+        assert_eq!(code, 1, "配置损坏应报错: {json}");
+        assert_eq!(
+            json["data"]["error_code"], "E012",
+            "配置损坏须走 ConfigError；若变成 E010 请同步该码的建议文案（现声明「永不到此」）: {json}"
+        );
     });
 }
 

@@ -84,18 +84,21 @@ impl ErrorCode {
             Self::LockConflict => "迁移锁冲突，请确认无其他迁移进程运行后重试",
             Self::SchemaValidation => "Schema 校验失败，请检查配置文件格式",
             Self::FileNotFound => "文件不存在，请确认路径是否正确",
-            // E010 同时承载三类来源：源码语法错误（`Parse`）与 state/config 文件的
-            // JSON/TOML 解析失败（`Json`/`Toml`/`TomlSer`，见 `From<&MigrateError>`）。
-            // `suggestion()` 只拿到 `self`、区分不了来源，故文案须同时覆盖——原文只说
-            // 「源码解析失败，请检查文件语法」会把 state 文件损坏的用户引去查源码语法
-            // （实测：改坏 migration-state.json 即得此误导建议）。
+            // E010 的两类真实来源：源码语法错误（`Parse`）与 **state 文件**的 JSON 解析
+            // 失败（`Json`）。`suggestion()` 只拿到 `self`、区分不了来源，故文案须同时覆盖
+            // ——原文只说「源码解析失败，请检查文件语法」会把 state 文件损坏的用户引去查
+            // 源码语法（实测：改坏 migration-state.json 即得此误导建议）。
+            //
+            // **不提 `.rustmigrate.toml`**：`From<&MigrateError>` 虽把 `Toml`/`TomlSer` 也
+            // 映射到本码，但那两个变体除 `#[from]` 外零构造点、且全部三处 `toml::from_str`
+            // 都显式包成 `MigrateError::Config`——配置损坏实测返 **E012**，永不到此。
             //
             // 不提「从备份恢复」：state 主文件 JSON 损坏时 `MigrationStateMachine::load`
             // 已自动回退 `.migration-state.json.backup` 并降级 warning；能走到本建议
             // 说明备份不存在或同样不可用，建议用户去恢复是把他引向死路。
             Self::ParseFailed => {
                 "解析失败：若操作源码请检查文件语法；若为 .rust-migration/migration-state.json \
-                 或 .rustmigrate.toml 损坏，按 message 中的行列号修正（state 文件无可用备份可回退时才会到此），\
+                 损坏，按 message 中的行列号修正（无可用备份可回退时才会到此），\
                  无法修复则重新执行 init"
             }
             Self::DatabaseError => "数据库操作失败，可重试；若持续失败请检查 .rust-migration/ 目录",

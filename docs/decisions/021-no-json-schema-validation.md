@@ -69,11 +69,14 @@ STATUS 把修法记为二选一、**需先定方向**：⒜ 如实化 + 摘依�
 
 实测：`blocked_by` 引用不存在的模块名时，`validate state --check-blocked` 返 `status:warning` / `valid:true`，该模块只落入 `still_blocked` 且**永久无法解除**（无任何告警指出引用非法）。这正是该码本该防的场景。已在 `06` 表行与 `09` 附录 B 检查点表如实标注「当前须人工核对」，并记为待办（见文末）。
 
-### ④ `E010` 对 state/config 损坏给出误导性建议（代码改动）
+### ④ `E010` 对 state 文件损坏给出误导性建议（代码改动）
 
-`ParseFailed` 同时承载 `MigrateError::Parse`（源码语法）与 `Json`/`Toml`/`TomlSer`（state/config 文件），而 `suggestion()` 只拿到 `self`、区分不了来源。原文案「源码解析失败，请检查文件语法」会把 state 文件损坏的用户**指去查源码语法**。实测复现：改坏 `migration-state.json` 即得此建议。
+`ParseFailed` 的两类真实来源是 `MigrateError::Parse`（源码语法）与 `Json`（state 文件），而 `suggestion()` 只拿到 `self`、区分不了来源。原文案「源码解析失败，请检查文件语法」会把 state 文件损坏的用户**指去查源码语法**。实测复现：改坏 `migration-state.json` 即得此建议。
 
-改为同时覆盖两类来源。**不提「从备份恢复」**——实测澄清了完整行为：主文件 JSON 损坏且 `.migration-state.json.backup` 可用时，`load` **自动回退**并降级 warning（`已从 .backup 恢复`）；能走到 `E010` 说明备份不存在或同样不可用，建议用户去恢复是把他引向死路。
+改为同时覆盖两类来源，并排除两处会把用户引向死路的表述：
+
+- **不提 `.rustmigrate.toml`**（初版文案提了，自查实测推翻）：`From<&MigrateError>` 虽把 `Toml`/`TomlSer` 也映射到 `ParseFailed`，但那两个变体除 `#[from]` 外**零构造点**，且全部三处 `toml::from_str`（`cli/src/lib.rs:1934/3513/3535`）都显式包成 `MigrateError::Config`——**配置损坏实测返 `E012`**，永不到 `E010`。已补 e2e `e2e_broken_config_returns_config_error_not_parse_failed` 钉住：若将来改成经 `?` 上抛，测试会红并提示同步文案。
+- **不提「从备份恢复」**：实测澄清了完整行为——主文件 JSON 损坏且 `.migration-state.json.backup` 可用时，`load` **自动回退**并降级 warning（`已从 .backup 恢复`）；能走到 `E010` 说明备份不存在或同样不可用，建议用户去恢复是把他引向死路。
 
 ## 守卫
 
@@ -101,7 +104,7 @@ STATUS 把修法记为二选一、**需先定方向**：⒜ 如实化 + 摘依�
 
 `E010` 建议文案同样做了负向实证：还原旧文案后 `e2e_parse_failed_suggestion_covers_state_file_not_only_source` 立即红，报错信息复现原始症状（`建议须点明 state 文件这一路…: 源码解析失败，请检查文件语法`）。
 
-**新增测试 3 个**：上述 e2e 文案守卫 + 其对照面 `e2e_corrupt_state_with_backup_recovers_instead_of_parse_error`（同时实证「无备份才到 E010」这一前提），两者均带**前置假设断言**（先证 `.backup` 存在/不存在符合前提，机制变化时会红而非让断言静默失去意义）。
+**新增 e2e 测试 3 个**（守卫 5 个另计，共 +8）：文案守卫 + 两条对照面——`e2e_corrupt_state_with_backup_recovers_instead_of_parse_error`（实证「无备份才到 E010」这一前提）与 `e2e_broken_config_returns_config_error_not_parse_failed`（实证「配置损坏走 E012 不走 E010」，即文案不提 `.rustmigrate.toml` 的依据）。前两者带**前置假设断言**（先证 `.backup` 存在/不存在符合前提，机制变化时会红而非让断言静默失去意义）。
 
 ## 未采纳
 
