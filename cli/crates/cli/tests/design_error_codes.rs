@@ -94,6 +94,24 @@ fn visible_section_10_7() -> String {
     out
 }
 
+/// 「CLI 实际错误码全表」的列数：`code | 变体 | 可达性 | 含义 | retryable`。
+const TABLE_COLUMNS: usize = 5;
+
+/// 表里被标注为**当前不可达**的码。主审视角逐条实证（见 MDR-021 § 可达性核查）：
+/// - `E002`：`CyclicDependency` 唯一构造点在 `topological_sort`，唯一非测试调用点就地
+///   match 消费后改用 `ErrorData::new` 重构造（输出无 `error_code`、退出码 2）。
+/// - `E003`：`From<&MigrateError>` 中无分支映射到 `ModuleNotFound`；实测返 `E012`。
+/// - `E006`：源变体 `MigrateError::Blocked` 零构造点（只有 match arm）；实测返 `E012`。
+///
+/// 这三个码若被当作可分流值写进编排器分支，与已废弃的 `VALIDATION_*` 幽灵码同样恒不
+/// 命中——正是本守卫要防的失败模式，只是藏在「实际码全表」内部。
+const UNREACHABLE_CODES: &[&str] = &["E002", "E003", "E006"];
+
+/// 取一行表格的各列（去掉首尾 `|` 后按 `|` 切分）。
+fn row_columns(row: &str) -> Vec<&str> {
+    row.trim().trim_matches('|').split('|').collect()
+}
+
 /// 从文本中抽取所有 `` `E0NN` `` 形态的码号（反引号包裹，避免命中散文里的裸字母数字）。
 ///
 /// **逐行配对**，不对整节做一次 `split('`')`：自查实测若节内任一行出现奇数个反引号
@@ -231,13 +249,14 @@ fn retryable_codes_match_design_06_table() {
         // 启发式，只要哪一行的「含义」列出现 true 字样（例如将来某码的说明里写
         // 「…返回 true 时…」）判定就静默反转。#86 主审实证过同一教训：任何依赖行内容
         // 的判据都会被格式变体绕过。当下各行恰无无关 true，但那是巧合而非保证。
-        let cols: Vec<&str> = row.trim().trim_matches('|').split('|').collect();
+        let cols = row_columns(row);
         assert_eq!(
             cols.len(),
-            4,
-            "{num} 行不是 4 列（`code | 变体 | 含义 | retryable`），表结构变化会让列位判定失效\n该行: {row}"
+            TABLE_COLUMNS,
+            "{num} 行不是 {TABLE_COLUMNS} 列（`code | 变体 | 可达性 | 含义 | retryable`），\
+             表结构变化会让列位判定失效\n该行: {row}"
         );
-        let retryable_cell = cols[3].trim();
+        let retryable_cell = cols[TABLE_COLUMNS - 1].trim();
         let documented_retryable = match retryable_cell.trim_matches('*').trim() {
             "true" => true,
             "false" => false,
@@ -256,12 +275,93 @@ fn retryable_codes_match_design_06_table() {
 }
 
 #[test]
+fn unreachable_codes_are_marked_as_such_in_design_06() {
+    // 断言 6（主审视角提出）：表的「可达性」列必须与实际可达性一致。
+    //
+    // 本 PR 初版新增「CLI 实际错误码全表」时，表头写着「`data.error_code` 的完整值域，
+    // 编排器分流以此为准」，却把 E002/E003/E006 三个**当前不可能出现在任何输出里**的码
+    // 列成普通可分流值——等于在这张「据实纠错」的新表内部重演了它要消灭的幽灵码模式。
+    //
+    // **判据的真值源是 `From<&MigrateError>` 的映射覆盖**，不是两份写死清单互相比对：
+    // 一个 `ErrorCode` 若在 `From` 中无任何 `MigrateError` 变体映射到它，就绝无可能出现在
+    // 输出里（`ErrorData::with_error_code` 的调用方全部经由 `From` 取码）。E003 正属此类。
+    // E002/E006 的不可达另有成因（构造点被就地消费 / 源变体零构造点），这两条无法从类型
+    // 系统推出，故列入 `UNREACHABLE_CODES` 常量并在其 doc 中记明实证依据。
+    let section = visible_section_10_7();
+
+    for code in ErrorCode::iter() {
+        let num = code.code();
+        let row = section
+            .lines()
+            .find(|l| l.trim_start().starts_with(&format!("| `{num}` |")))
+            .unwrap_or_else(|| panic!("06 § 10.7 的实际码全表缺少 {num} 行"));
+
+        let cols = row_columns(row);
+        assert_eq!(cols.len(), TABLE_COLUMNS, "{num} 行列数异常\n该行: {row}");
+
+        let marked_unreachable = cols[2].contains("不可达");
+        let is_unreachable = UNREACHABLE_CODES.contains(&num);
+
+        assert_eq!(
+            marked_unreachable,
+            is_unreachable,
+            "{num} 的可达性标注与实证不符：实际{}可达，表里{}标「不可达」。\n\
+             若某码的可达性因实现变化而改变，请同步 UNREACHABLE_CODES 常量与本表\n该行: {row}",
+            if is_unreachable { "不" } else { "" },
+            if marked_unreachable { "" } else { "未" },
+        );
+    }
+}
+
+#[test]
+fn codes_without_error_mapping_are_all_marked_unreachable() {
+    // 断言 6 的类型级补强：`From<&MigrateError>` 未覆盖的码**必然**不可达，故必须在
+    // `UNREACHABLE_CODES` 里。这条不依赖人工维护的清单——它从 error.rs 的源码结构取真值，
+    // 使「新增一个 ErrorCode 变体但忘了接线 From」这类漏配被立刻发现（该码会成为死码，
+    // 若同时被表登记为可达就是新的幽灵码）。
+    let error_rs = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .unwrap()
+            .join("crates/core/src/error.rs"),
+    )
+    .expect("读取 error.rs");
+
+    // 截取 `impl From<&MigrateError> for ErrorCode` 块。
+    let from_block = error_rs
+        .split_once("impl From<&MigrateError> for ErrorCode")
+        .expect("未找到 From<&MigrateError> impl——error.rs 结构变化，本守卫需同步")
+        .1;
+    let from_block = from_block
+        .split_once("\n}\n")
+        .map(|(b, _)| b)
+        .unwrap_or(from_block);
+
+    for code in ErrorCode::iter() {
+        let variant = format!("{code:?}"); // Debug 即变体名
+        let mapped = from_block.contains(&format!("Self::{variant}"));
+        if !mapped {
+            assert!(
+                UNREACHABLE_CODES.contains(&code.code()),
+                "{} ({variant}) 在 `From<&MigrateError>` 中无映射分支——它绝无可能出现在输出里，\n\
+                 必须列入 UNREACHABLE_CODES 并在 06 § 10.7 标「不可达」，否则编排器会按它写恒不命中的分支",
+                code.code()
+            );
+        }
+    }
+}
+
+#[test]
 fn error_code_domain_has_expected_size() {
     // 冻结码数：新增/删除变体时强制回看上面两个断言的登记要求，避免「加了码但
     // 断言 2 恰好因散文里出现过该数字而通过」这类假绿。
     let count = ErrorCode::iter().count();
     assert_eq!(
         count, 15,
-        "ErrorCode 变体数变化（{count} ≠ 15）：请同步 06 § 10.7 的「当前实际返回」列后更新本断言"
+        "ErrorCode 变体数变化（{count} ≠ 15）。需同步的不只是本断言的数字：\n\
+         ① 06 § 10.7「CLI 实际错误码全表」加一整行（`has_table_row_for` 要求表行形态，散文提及不算）；\n\
+         ② 该行的「可达性」列须与 `UNREACHABLE_CODES` 一致；\n\
+         ③ 若新码在 `From<&MigrateError>` 中无映射分支，它是死码，须列入 `UNREACHABLE_CODES`"
     );
 }

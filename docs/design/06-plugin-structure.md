@@ -718,25 +718,29 @@ CLI 的成功输出为 `{status, data, warnings}`（见 § 10.0.1）。失败时
 
 > **结构说明（M4 据实订正）**：`error_code` 等字段位于 **`data` 之内**，与成功输出的 `{status, data, warnings}` 契约同构——早期版本示例把 `error_code` / `error_context` 画在 JSON 顶层且字段名为 `error_context.{module, attempt_num, compiler_errors, suggested_fix}`，实际实现是上述 `data.{kind, error_code, message, retryable, suggestion}`，**无 `error_context` 字段**（源码零命中）。编排器取值路径须为 `data.error_code`。结构化补充上下文经 `ErrorData.details` 的 `flatten` **提升到 `data` 顶层**（如循环依赖的 `data.cycle_path`、`validate rules` 的 `data.checks`），不嵌在 `data.details` 下。
 
-**CLI 实际错误码全表（`data.error_code` 的完整值域，编排器分流以此为准）**——权威真值源是 `cli/crates/core/src/error.rs` 的 `ErrorCode`，守卫 `cli/crates/cli/tests/design_error_codes.rs` 钉住本表与之双向一致（新增码不登记即报红）：
+**CLI 实际错误码全表**——权威真值源是 `cli/crates/core/src/error.rs` 的 `ErrorCode`，守卫 `cli/crates/cli/tests/design_error_codes.rs` 钉住本表与之双向一致（新增码不登记、可达性标注与实现不符均报红）：
 
-| `data.error_code` | 枚举变体 | 含义 | `data.retryable` |
-|-----|------|------|------|
-| `E001` | `GraphBuildFailed` | 图构建失败 | false |
-| `E002` | `CyclicDependency` | 循环依赖。**例外：`graph topo-sort` 的环路径不走本码**——该处用 `ErrorData::new` 构造，输出 `kind:"cyclic_dependency"` + `data.cycle_path` 但**无 `error_code` 字段**（`skip_serializing_if` 省略），且退出码为 **2**（非 1）。编排器判环须看 `data.cycle_path` 或 `kind`，不能等 `E002` | false |
-| `E003` | `ModuleNotFound` | 模块未找到 | false |
-| `E004` | `InvalidTransition` | 非法状态转换（不满足转换矩阵） | false |
-| `E005` | `PreconditionFailed` | 前置条件不满足（如未完成 graph build 即进 sprint_loop） | false |
-| `E006` | `ModuleBlocked` | 模块被上游依赖阻塞 | false |
-| `E007` | `LockConflict` | 迁移锁冲突（另有迁移进程运行） | false |
-| `E008` | `SchemaValidation` | 结构/状态机约束校验失败（含 schema 主版本不兼容） | false |
-| `E009` | `FileNotFound` | 文件不存在 | false |
-| `E010` | `ParseFailed` | 解析失败：源码语法错误 **或** `migration-state.json` 的 JSON 损坏（两类共用此码，建议文案已同时覆盖）。**注**：`From<&MigrateError>` 虽把 `Toml`/`TomlSer` 也映射到本码，但那两个变体除 `#[from]` 外零构造点、三处 `toml::from_str` 全部显式包成 `Config`——**配置文件损坏实测返 `E012`**，永不到此 | false |
-| `E011` | `DatabaseError` | SQLite 操作失败 | **true** |
-| `E012` | `ConfigError` | 配置错误（含「未检测到支持的源语言」等） | false |
-| `E013` | `Timeout` | 子进程超时 | **true** |
-| `E014` | `IoError` | IO 操作失败（如 state 文件权限不足） | **true** |
-| `E015` | `NotImplemented` | 命令/语言路径尚未实现 | false |
+> ⚠️ **「可达性」列是编排器分流的前提**：`ErrorCode` 定义了 15 个码，但其中 3 个**当前不可能出现在任何命令的输出里**——按它们写分支与按已废弃的 `VALIDATION_*` 写分支同样恒不命中。M4 逐码实测确认（见 [MDR-021](../decisions/021-no-json-schema-validation.md) § 可达性核查）。
+
+| `data.error_code` | 枚举变体 | 可达性 | 含义 | `data.retryable` |
+|-----|------|------|------|------|
+| `E001` | `GraphBuildFailed` | 可达 | 图构建失败 | false |
+| `E002` | `CyclicDependency` | **不可达** | 循环依赖。`CyclicDependency` 的唯一构造点在 `graph/topo.rs` 的 `topological_sort`，而其唯一非测试调用点（`graph topo-sort`）就地 match 消费该错误、改用 `ErrorData::new` 重构造 → 输出 `kind:"cyclic_dependency"` + `data.cycle_path`、**无 `error_code` 字段**、退出码 **2**（非 1）。**编排器判环须看 `data.cycle_path` 或 `kind`** | false |
+| `E003` | `ModuleNotFound` | **不可达** | 模块未找到。`From<&MigrateError>` 中**无分支映射到本码**（无对应 `MigrateError` 变体）；「模块不存在」实测返 **`E012`**（`MigrateError::Config`） | false |
+| `E004` | `InvalidTransition` | 可达 | 非法状态转换（不满足转换矩阵） | false |
+| `E005` | `PreconditionFailed` | 可达 | 前置条件不满足（如未完成 graph build 即进 sprint_loop） | false |
+| `E006` | `ModuleBlocked` | **不可达** | 模块被上游依赖阻塞。源变体 `MigrateError::Blocked` **零构造点**（只存在 match arm）；被阻塞模块的查询实测返 **`E012`** | false |
+| `E007` | `LockConflict` | 可达 | 迁移锁冲突（另有迁移进程运行） | false |
+| `E008` | `SchemaValidation` | 可达 | 结构/状态机约束校验失败（含 schema 主版本不兼容） | false |
+| `E009` | `FileNotFound` | 可达 | 文件不存在 | false |
+| `E010` | `ParseFailed` | 可达 | **JSON 解析失败**，两条真实路径：① `migration-state.json` 损坏（且 `.backup` 也不可用）；② `validate rules --registry` 指向的 `rule-registry.json` 损坏。**注意两处易误解**：⒜ `MigrateError::Parse`（源码语法）虽映射到本码，但其全部三个调用点（`graph/build.rs`）都把它**降级为 `warnings` 并跳过该文件**，故源码语法错误**实测不产出本码**；⒝ `Toml`/`TomlSer` 亦映射到本码，但三处 `toml::from_str` 全部显式包成 `Config`——**配置文件损坏实测返 `E012`** | false |
+| `E011` | `DatabaseError` | 可达 | SQLite 操作失败（经 `#[from] rusqlite::Error`，如 `source-graph.db` 非法） | **true** |
+| `E012` | `ConfigError` | 可达 | 配置错误。**实际是最宽的一类**——除配置文件本身问题（解析失败、「未检测到支持的源语言」）外，「模块不存在」「模块不在 state 中」等也归此码（见 `E003`/`E006` 行） | false |
+| `E013` | `Timeout` | 可达 | 子进程超时（`run_with_timeout`） | **true** |
+| `E014` | `IoError` | 可达 | IO 操作失败（如 state 文件权限不足） | **true** |
+| `E015` | `NotImplemented` | 可达 | 命令/语言路径尚未实现 | false |
+
+> **另有两类「`status:error` 但无 `error_code` 字段」的输出**（`skip_serializing_if` 省略该字段），编排器不能假设 error 必带码：① 上表 `E002` 行所述的环检测输出（退出码 2）；② clap 解析失败 —— `kind:"cli_parse"`、无 `error_code`、退出码 1。
 
 **设计意图语义码表（M2 错误码细分的目标形态）**：下表即 **MVP（M1）错误码表**的原始设计，覆盖编排层主路径高频故障。完整编码体系（30-40 条，按「编译错误 / 翻译语义错误 / 验证失败 / 状态机错误 / SubAgent 错误」五类组织，每条含稳定码名、含义、触发条件、CI 推荐重试策略）在 **M2 开发期**补充，届时落地为 09-appendix-schemas.md 专节并在此回链（工作量见 [08-roadmap-and-reference.md](./08-roadmap-and-reference.md)）；MVP 不阻塞于完整枚举（R1-BS2-01）。
 

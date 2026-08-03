@@ -84,22 +84,27 @@ impl ErrorCode {
             Self::LockConflict => "迁移锁冲突，请确认无其他迁移进程运行后重试",
             Self::SchemaValidation => "Schema 校验失败，请检查配置文件格式",
             Self::FileNotFound => "文件不存在，请确认路径是否正确",
-            // E010 的两类真实来源：源码语法错误（`Parse`）与 **state 文件**的 JSON 解析
-            // 失败（`Json`）。`suggestion()` 只拿到 `self`、区分不了来源，故文案须同时覆盖
-            // ——原文只说「源码解析失败，请检查文件语法」会把 state 文件损坏的用户引去查
-            // 源码语法（实测：改坏 migration-state.json 即得此误导建议）。
+            // E010 的**两条真实路径**（主审视角逐条实证，见 MDR-021 § 可达性核查）：
+            // ① `migration-state.json` 损坏且 `.backup` 也不可用；② `validate rules
+            // --registry` 指向的 `rule-registry.json` 损坏。
             //
-            // **不提 `.rustmigrate.toml`**：`From<&MigrateError>` 虽把 `Toml`/`TomlSer` 也
-            // 映射到本码，但那两个变体除 `#[from]` 外零构造点、且全部三处 `toml::from_str`
-            // 都显式包成 `MigrateError::Config`——配置损坏实测返 **E012**，永不到此。
+            // 三处**看似是来源、实则不是**的映射，故文案不提它们：
+            // ⒜ `MigrateError::Parse`（源码语法）虽映射到本码，但其全部三个调用点
+            //    （`graph/build.rs` 的 analyze_file 处）都把它降级成 `warnings` 并跳过该
+            //    文件，绝不上抛——源码语法错误实测不产出本码，写进建议会让用户拿到的第一
+            //    条指引永远指错方向。
+            // ⒝ `Toml`/`TomlSer` 亦映射到本码，但三处 `toml::from_str` 全部显式包成
+            //    `MigrateError::Config`——配置文件损坏实测返 E012。
+            // ⒞ 不提「从备份恢复」：state 主文件 JSON 损坏时 `MigrationStateMachine::load`
+            //    已自动回退 `.migration-state.json.backup` 并降级 warning；能走到本建议说明
+            //    备份不存在或同样不可用，叫用户去恢复是把他引向死路。
             //
-            // 不提「从备份恢复」：state 主文件 JSON 损坏时 `MigrationStateMachine::load`
-            // 已自动回退 `.migration-state.json.backup` 并降级 warning；能走到本建议
-            // 说明备份不存在或同样不可用，建议用户去恢复是把他引向死路。
+            // `init` 兜底只对 state 文件成立（它不生成 `rule-registry.json`，那个文件在
+            // `plugin/skills/migrate/references/` 下），故该建议收在 state 分句内部。
             Self::ParseFailed => {
-                "解析失败：若操作源码请检查文件语法；若为 .rust-migration/migration-state.json \
-                 损坏，按 message 中的行列号修正（无可用备份可回退时才会到此），\
-                 无法修复则重新执行 init"
+                "JSON 解析失败：若为 .rust-migration/migration-state.json 损坏，按 message 中的\
+                 行列号修正（主文件与 .backup 双双不可用时才会到此），无法修复则重新执行 init；\
+                 若为 validate rules 的 --registry 指向的 rule-registry.json 损坏，按行列号修正该文件"
             }
             Self::DatabaseError => "数据库操作失败，可重试；若持续失败请检查 .rust-migration/ 目录",
             Self::ConfigError => "配置错误，请检查配置文件",

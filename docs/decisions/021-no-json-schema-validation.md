@@ -97,6 +97,30 @@ STATUS 把修法记为二选一、**需先定方向**：⒜ 如实化 + 摘依�
 
 **节定位失效不静默**：`visible_section_10_7()` 对空正文硬断言。变异实证把 `## 10.7` 降级为 `### 10.7` → 报「未能在 06 中定位 § 10.7 节可见正文——标题格式可能已变，守卫失去作用」，而非静默放行。
 
+## 可达性核查（主审视角发现，本 MDR 最重要的一轮修正）
+
+**初版的「CLI 实际错误码全表」自身重演了它要消灭的失实模式。** 表头写着「`data.error_code` 的完整值域，编排器分流以此为准」，却把 3 个**当前不可能出现在任何输出里**的码列成普通可分流值——按它们写分支与按已废弃的 `VALIDATION_*` 写分支同样恒不命中，只是藏在一张「据实纠错」的新表内部。逐条实证：
+
+| 码 | 不可达成因 | 实际替代 |
+|---|---|---|
+| `E002` `CyclicDependency` | 唯一构造点在 `graph/topo.rs` 的 `topological_sort`；其唯一非测试调用点（`graph topo-sort`）就地 match 消费该错误、改用 `ErrorData::new` 重构造 | 输出 `kind:"cyclic_dependency"` + `data.cycle_path`，**无 `error_code`**、退出码 **2** |
+| `E003` `ModuleNotFound` | **`From<&MigrateError>` 中无分支映射到它**（无对应 `MigrateError` 变体） | 「模块不存在」实测返 **`E012`** |
+| `E006` `ModuleBlocked` | 源变体 `MigrateError::Blocked` **零构造点**（只有 match arm） | 实测返 **`E012`** |
+
+初版把 `E002` 写成「例外：`graph topo-sort` 不走本码」——这个框架本身误导，它暗示存在非例外路径，实际那是唯一路径。已改为「本码当前不可达」。
+
+**`E010` 的来源清单初版一半失实、一半漏项**（同一视角发现）：
+
+- **失实**：写了「源码语法错误」，而 `MigrateError::Parse` 的全部三个调用点（`graph/build.rs` 的 `analyze_file` 处）都把它**降级成 `warnings` 并跳过该文件**，绝不上抛——源码语法错误实测不产出本码。这句是用户拿到的**第一条建议**，恒指错方向。
+- **漏项**：`validate rules --registry` 指向的 `rule-registry.json` 损坏同样经 `?` → `#[from] serde_json::Error` → E010（实证：`{"error_code":"E010","kind":"json"}`）。而初版建议的「无法修复则重新执行 `init`」对这条路径是**无效动作**——`init` 不生成该文件（它在 `plugin/skills/migrate/references/` 下）。已把 `init` 兜底收进 state 分句内部，并加断言钉住两句不得混。
+
+**守卫扩到 7 条**，新增两条把可达性纳入 CI：
+
+6. `unreachable_codes_are_marked_as_such_in_design_06`——表的「可达性」列须与 `UNREACHABLE_CODES` 常量一致（双向：标了但实际可达、可达但标了不可达，都报红）。
+7. `codes_without_error_mapping_are_all_marked_unreachable`——**不依赖人工清单**的类型级补强：解析 `error.rs` 的 `impl From<&MigrateError> for ErrorCode` 块，任何未被映射的码必然不可达、必须在常量里。这条能抓「新增 ErrorCode 变体却忘接线 `From`」——该码会成死码，若同时被表登记为可达即是新幽灵码。
+
+**负向实证 3 轮**：① 把 `E003` 标注改「可达」→ 断言 6 红；② 从常量摘掉 `E002` 但表仍标不可达 → 断言 6 红；③ **把表与常量同时改成自洽的错误状态**（`E003` 两处都改成可达）→ 前 6 条全绿、**仅断言 7 报红**，证明类型级判据提供了独立于人工维护的防线。
+
 ## 验证
 
 **负向实证 5 轮**（逐条确认断言有区分力，非推断）：

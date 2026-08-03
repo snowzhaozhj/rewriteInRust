@@ -1579,10 +1579,11 @@ fn e2e_review_gate_fails_closed_on_broken_config() {
 
 #[test]
 fn e2e_parse_failed_suggestion_covers_state_file_not_only_source() {
-    // E010（ParseFailed）同时承载「源码语法错误」与「state/config 文件 JSON/TOML 解析
-    // 失败」两类来源，而 `suggestion()` 只拿到 ErrorCode、区分不了来源。原文案只说
-    // 「源码解析失败，请检查文件语法」——state 文件损坏的用户会被指去查源码语法，
-    // 而真正坏的是 migration-state.json。此测试钉住文案覆盖 state 文件这一路。
+    // E010（ParseFailed）原文案只说「源码解析失败，请检查文件语法」——state 文件损坏的
+    // 用户会被指去查源码语法，而真正坏的是 migration-state.json。更糟的是主审视角实证：
+    // 源码语法错误**根本不产出本码**（`MigrateError::Parse` 的三个调用点都在
+    // `graph/build.rs` 里降级成 warnings 并跳过该文件），故那句指引恒指错方向。
+    // 此测试钉住文案覆盖 state 文件这一路、且不再提三类不成立的来源。
     let tmp = tempfile::tempdir().unwrap();
     with_cwd(tmp.path(), || {
         let _ = run(&["init"]);
@@ -1610,11 +1611,70 @@ fn e2e_parse_failed_suggestion_covers_state_file_not_only_source() {
             !suggestion.starts_with("源码解析失败"),
             "不得退回「只讲源码」的单一口径: {suggestion}"
         );
+        // 不得提源码语法：主审实证 `MigrateError::Parse` 的三个调用点都在 graph/build.rs
+        // 降级成 warnings 并跳过，源码语法错误实测不产出 E010——提它等于给用户一条恒错的
+        // 首选指引（负向实证：还原旧文案时本断言与上一条同时红）。
+        assert!(
+            !suggestion.contains("源码"),
+            "源码语法错误实测不产出 E010（Parse 在 build.rs 被降级为 warning），提它是误导: {suggestion}"
+        );
         // 不得提配置文件：`Toml`/`TomlSer` 虽在 `From<&MigrateError>` 里映射到 E010，
-        // 但实测配置损坏走 E012（见下一个测试），提它会把用户引去查没坏的文件。
+        // 但实测配置损坏走 E012（见 e2e_broken_config_returns_config_error_not_parse_failed）。
         assert!(
             !suggestion.contains(".rustmigrate.toml"),
             "配置损坏实际走 E012 而非本码，建议里提它是误导: {suggestion}"
+        );
+        // 须覆盖第二条真实路径：validate rules 的 --registry JSON 损坏同样返 E010
+        // （见 e2e_broken_rule_registry_returns_parse_failed_with_actionable_hint）。
+        assert!(
+            suggestion.contains("rule-registry.json"),
+            "E010 的第二条真实来源（--registry JSON 损坏）须在建议里覆盖: {suggestion}"
+        );
+    });
+}
+
+#[test]
+fn e2e_broken_rule_registry_returns_parse_failed_with_actionable_hint() {
+    // E010 的**第二条真实路径**（主审视角发现，初版文案漏了）：`validate rules --registry`
+    // 指向的 rule-registry.json 损坏时经 `?` → `#[from] serde_json::Error` → E010。
+    //
+    // 该路径与 state 文件、与 `.backup` 机制均无关，且 `init` **不生成** rule-registry.json
+    // （它在 plugin/skills/migrate/references/ 下），故初版建议的「无法修复则重新执行 init」
+    // 对这条路径是无效动作——与本 PR 要消灭的「给用户恒不成立的指引」同类。
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        std::fs::create_dir_all("adapters/typescript").unwrap();
+        std::fs::write("registry.json", "not json at all {{{").unwrap();
+
+        let (code, json) = run(&[
+            "validate",
+            "rules",
+            "--registry",
+            "./registry.json",
+            "--adapters-dir",
+            "./adapters",
+        ]);
+        assert_eq!(code, 1, "registry JSON 损坏应报错: {json}");
+        assert_eq!(
+            json["data"]["error_code"], "E010",
+            "registry 损坏经 #[from] serde_json::Error 走 ParseFailed: {json}"
+        );
+
+        let suggestion = json["data"]["suggestion"].as_str().unwrap_or_default();
+        assert!(
+            suggestion.contains("rule-registry.json"),
+            "建议须覆盖这条路径，否则用户只看到 state 文件的指引: {suggestion}"
+        );
+        // `init` 兜底须收在 state 分句内部——对本路径 init 无效。判据：init 建议与
+        // rule-registry 提示不得出现在同一句里（用分号切句后各自检查）。
+        let registry_clause = suggestion
+            .split('；')
+            .find(|c| c.contains("rule-registry.json"))
+            .unwrap_or_default();
+        assert!(
+            !registry_clause.contains("init"),
+            "init 不生成 rule-registry.json，把它写进该路径的建议是无效动作: {registry_clause}"
         );
     });
 }
