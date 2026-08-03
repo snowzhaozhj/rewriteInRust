@@ -95,14 +95,25 @@ fn visible_section_10_7() -> String {
 }
 
 /// 从文本中抽取所有 `` `E0NN` `` 形态的码号（反引号包裹，避免命中散文里的裸字母数字）。
+///
+/// **逐行配对**，不对整节做一次 `split('`')`：自查实测若节内任一行出现奇数个反引号
+/// （中文引号误用、未闭合的行内代码等），整节此后的配对全部错位——`design_06_declared_
+/// error_codes_all_exist_in_cli` 会报出无法理解的假红，把正常改文档的人拦在门外。
+/// 逐行配对把错位限制在该行内，其余行仍正确解析。
 fn extract_e_codes(text: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
-    for segment in text.split('`').skip(1).step_by(2) {
-        let s = segment.trim();
-        // 形如 E001..E999：首字母 E + 全数字尾部。
-        if let Some(digits) = s.strip_prefix('E') {
-            if digits.len() >= 3 && digits.chars().all(|c| c.is_ascii_digit()) {
-                out.insert(s.to_owned());
+    for line in text.lines() {
+        // 奇数个反引号的行本身无法可靠配对，跳过（宁可漏检一行，不让错位传播全节）。
+        if line.matches('`').count() % 2 != 0 {
+            continue;
+        }
+        for segment in line.split('`').skip(1).step_by(2) {
+            let s = segment.trim();
+            // 形如 E001..E999：首字母 E + 全数字尾部。
+            if let Some(digits) = s.strip_prefix('E') {
+                if digits.len() >= 3 && digits.chars().all(|c| c.is_ascii_digit()) {
+                    out.insert(s.to_owned());
+                }
             }
         }
     }
@@ -137,18 +148,31 @@ fn design_06_declared_error_codes_all_exist_in_cli() {
 
 #[test]
 fn all_cli_error_codes_are_documented_in_design_06() {
-    // 断言 2：反向——每个真实码都须在 § 10.7 被提及。新增 ErrorCode 变体却不登记，
-    // 编排器就无从得知该如何处置它（本表是其唯一权威）。
+    // 断言 2：反向——每个真实码都须在「CLI 实际错误码全表」里**以表行形态**登记。
+    // 新增 ErrorCode 变体却不登记，编排器就无从得知该如何处置它（本表是其唯一权威）。
+    //
+    // **判据是表行而非全文 contains**：自查实测 § 10.7 节内 `E008` 出现 4 次（表行 1 次 +
+    // 散文 3 次，如 `SCHEMA_VERSION_UNSUPPORTED` 行的「实测返 E008」与判据段的举例），
+    // `E010`/`E011`/`E012`/`E014`/`E002` 同样各有散文提及。若按全文匹配，删掉某码的表行
+    // 后断言仍会因散文提及而通过——正是本守卫要消灭的那类假绿。
     let section = visible_section_10_7();
     let missing: Vec<String> = ErrorCode::iter()
         .map(|c| c.code().to_owned())
-        .filter(|code| !section.contains(code.as_str()))
+        .filter(|code| !has_table_row_for(&section, code))
         .collect();
 
     assert!(
         missing.is_empty(),
-        "以下 CLI 错误码未在 06 § 10.7 登记（新增码须同步该节的「当前实际返回」列）: {missing:?}"
+        "以下 CLI 错误码未在 06 § 10.7 的「CLI 实际错误码全表」中以表行形态登记: {missing:?}\n\
+         （散文里提到该码号不算登记——编排器查的是表）"
     );
+}
+
+/// 该码是否在「CLI 实际错误码全表」中有自己的表行（首列为 `` `E0NN` ``）。
+fn has_table_row_for(section: &str, code: &str) -> bool {
+    section
+        .lines()
+        .any(|l| l.trim_start().starts_with(&format!("| `{code}` |")))
 }
 
 #[test]
