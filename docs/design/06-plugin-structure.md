@@ -770,8 +770,6 @@ CLI 的成功输出为 `{status, data, warnings}`（见 § 10.0.1）。失败时
 > 区分逻辑骨架见 [09-appendix-schemas.md 附录 B 检查点](./09-appendix-schemas.md#附录-bmvp-skill-的-skillmd-骨架)。
 >
 > **落地口径订正（M4）**：原文写「记入 `subagent_calls` 的 substatus 为 `validation_tool_error_<type>`」——`SubAgentCall` **从无 `substatus` 字段**（只有 `{step_index, subagent_name, started_at, ended_at, status, error_message}`），且 `--status` 现已收窄为 `started`/`ok`/`error`/`timeout` 四值强校验，`validation_tool_error_*` 无处安放。故 `<type>` 改由 `--error-message` 承载：状态取 `error`（工具故障不是 agent 卡死超时，不占 `timeout`），类型前缀写进消息文本，仍可按前缀 grep 聚合且不计入重试。
->
-> **落地口径订正（M4）**：原文写「记入 `subagent_calls` 的 substatus 为 `validation_tool_error_<type>`」——`SubAgentCall` **从无 `substatus` 字段**（只有 `{step_index, subagent_name, started_at, ended_at, status, error_message}`），且 `--status` 现已收窄为 `started`/`ok`/`error`/`timeout` 四值强校验，`validation_tool_error_*` 无处安放。故 `<type>` 改由 `--error-message` 承载：状态取 `error`（工具故障不是 agent 卡死超时，不占 `timeout`），类型前缀写进消息文本，仍可按前缀 grep 聚合且不计入重试。
 
 > **Hook 失败输出一致性**：`verify.sh` 和 `full-verify.sh` 失败时，输出格式须与上述 CLI error JSON 兼容——脚本内部调用的 cargo/clippy 诊断自动转换为 `{error_code, suggested_fix}` 结构，便于 Skill 与 CI 统一解析。
 >

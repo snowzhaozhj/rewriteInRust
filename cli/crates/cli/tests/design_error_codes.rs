@@ -203,9 +203,24 @@ fn retryable_codes_match_design_06_table() {
                 panic!("06 § 10.7 的实际码全表缺少 {num} 行（表格式变化会让本守卫失效）")
             });
 
-        // 表里 retryable 为真的行写 `**true**`（加粗以便读者扫视），假的写 `false`。
-        // 只判是否含 "true"——列里除该值外不含其他 true 字样。
-        let documented_retryable = row.contains("true");
+        // 取 retryable 列的值。**按列位取，不按整行 contains("true")**——后者是内容
+        // 启发式，只要哪一行的「含义」列出现 true 字样（例如将来某码的说明里写
+        // 「…返回 true 时…」）判定就静默反转。#86 主审实证过同一教训：任何依赖行内容
+        // 的判据都会被格式变体绕过。当下各行恰无无关 true，但那是巧合而非保证。
+        let cols: Vec<&str> = row.trim().trim_matches('|').split('|').collect();
+        assert_eq!(
+            cols.len(),
+            4,
+            "{num} 行不是 4 列（`code | 变体 | 含义 | retryable`），表结构变化会让列位判定失效\n该行: {row}"
+        );
+        let retryable_cell = cols[3].trim();
+        let documented_retryable = match retryable_cell.trim_matches('*').trim() {
+            "true" => true,
+            "false" => false,
+            other => panic!(
+                "{num} 的 retryable 列值非法（须为 true/false，可加 ** 强调）: {other:?}\n该行: {row}"
+            ),
+        };
         assert_eq!(
             documented_retryable,
             code.is_retryable(),
