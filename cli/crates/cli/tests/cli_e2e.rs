@@ -3518,13 +3518,10 @@ fn smoke_validate_detects_ghost_blocked_by_reference() {
         let warns = json["warnings"].as_array().unwrap();
         let ghost_warn = warns
             .iter()
-            .find(|w| w.as_str().unwrap().contains("幽灵引用"))
+            .find(|w| w.as_str().unwrap().contains("file:GHOST.ts"))
             .unwrap_or_else(|| panic!("应就幽灵引用告警: {json}"));
         let ghost_warn = ghost_warn.as_str().unwrap();
-        assert!(
-            ghost_warn.contains("file:GHOST.ts") && ghost_warn.contains(&key),
-            "告警须点名引用方与被引 key: {ghost_warn}"
-        );
+        assert!(ghost_warn.contains(&key), "告警须点名引用方: {ghost_warn}");
 
         // --check-blocked：幽灵引用单列进 ghost_refs，同时仍留在 still_blocked
         // （它确实阻塞），但编排器据 ghost_refs 可区分出「等不到」而非「还没到」。
@@ -3533,9 +3530,11 @@ fn smoke_validate_detects_ghost_blocked_by_reference() {
         let ghost_refs = json["data"]["ghost_refs"].as_array().unwrap();
         assert_eq!(ghost_refs.len(), 1, "应有一条幽灵引用记录: {json}");
         assert_eq!(ghost_refs[0]["module"], serde_json::json!(key));
+        assert_eq!(ghost_refs[0]["missing"], serde_json::json!("file:GHOST.ts"));
         assert_eq!(
-            ghost_refs[0]["missing"],
-            serde_json::json!(["file:GHOST.ts"])
+            ghost_refs[0]["module_blocked"],
+            serde_json::json!(true),
+            "该模块确为 blocked，应标记为现已阻塞: {json}"
         );
         assert!(
             json["data"]["still_blocked"]
@@ -3558,6 +3557,33 @@ fn smoke_validate_detects_ghost_blocked_by_reference() {
         assert_eq!(
             sf["modules"][&key]["status"], "blocked",
             "落盘状态须保持 blocked"
+        );
+
+        // 非 blocked 模块上的残留幽灵引用同样须进 ghost_refs（异构交叉 imp3 回归）：
+        // 此前告警扫全部模块、ghost_refs 只取 blocked 模块，只读机读字段的编排器会
+        // 看到「warnings 有、ghost_refs 空数组」而漏掉。
+        let mut sf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+        sf["modules"][&key]["status"] = serde_json::json!("pending");
+        sf["modules"][&key]["pre_blocked_status"] = serde_json::Value::Null;
+        std::fs::write(&sp, serde_json::to_string_pretty(&sf).unwrap()).unwrap();
+
+        let (code, json) = run(&["validate", "state", "--check-blocked"]);
+        assert_eq!(code, 0, "{json}");
+        assert_eq!(
+            json["data"]["blocked_count"], 0,
+            "该模块已非 blocked: {json}"
+        );
+        let ghost_refs = json["data"]["ghost_refs"].as_array().unwrap();
+        assert_eq!(
+            ghost_refs.len(),
+            1,
+            "非 blocked 模块的残留引用也须进 ghost_refs: {json}"
+        );
+        assert_eq!(
+            ghost_refs[0]["module_blocked"],
+            serde_json::json!(false),
+            "pending 模块不得标记为已阻塞: {json}"
         );
     });
 }

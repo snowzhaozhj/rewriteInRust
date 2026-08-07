@@ -135,42 +135,52 @@ pub fn validate_state(state_file: &MigrationStateFile) -> Result<Vec<String>> {
         ));
     }
 
-    // M4 防御性可观测：`blocked_by` 引用了 `modules` 里不存在的 key（幽灵引用）。
-    // 后果是模块**永久**阻塞——`check_blocked_modules` 判定依赖「未终态」，而这个依赖
-    // 根本不存在、永远不会进终态，`--auto-unblock` 也就永远不会解除它。此前无任何告警，
-    // 编排器只看到它落在 `still_blocked` 里，与「依赖还在翻译中」完全无法区分。
+    // M4 防御性可观测：`blocked_by` 引用了既非登记模块、也不属于任何 composite 组的
+    // key（幽灵引用）。对 blocked 模块，后果是**永久**阻塞——依赖根本不存在、永远不会
+    // 进终态，`--auto-unblock` 也就永远不会解除它。此前无任何告警，编排器只看到它落在
+    // `still_blocked` 里，与「依赖还在翻译中」完全无法区分。
     //
     // 同一语义在 `state deps` 侧早已做对（幽灵依赖单列 `unresolved` + warning，且
     // run.md 明令不得填进 `blocked_by`），读侧却漏了——本扫描补上这处不对称。
     //
-    // 判据与 `check_blocked_modules` 共用 `canonicalize_blocked_ref`：composite 组的
-    // 非代表成员 key 不在 `modules` 表里但**不是**幽灵，必须先归一到组代表再判，
-    // 否则会把合法引用误报、并给出「重跑 graph build」这条对该场景无效的建议。
-    //
-    // 扫描覆盖**全部模块**而非仅 blocked：正常路径下离开 blocked 会清空 `blocked_by`
-    // （machine.rs `transition_module`），但手工编辑或旧文件可能在非 blocked 模块上留下
-    // 残值，一旦该模块再次被标 blocked 就会立刻踩中同一个坑。
-    // 不硬判损坏（旧文件仍须可读），但必须告警。
-    let mut ghost_refs: Vec<String> = Vec::new();
-    for (name, module) in &state_file.modules {
-        let Some(blocked_by) = module.blocked_by.as_ref() else {
-            continue;
-        };
-        for dep in blocked_by {
-            if canonicalize_blocked_ref(state_file, dep).is_none() {
-                ghost_refs.push(format!("`{name}` → `{dep}`"));
+    // 扫描与 `--check-blocked` 的机读明细共用 [`scan_ghost_references`]，避免两处覆盖
+    // 口径不一致（曾经告警扫全部模块、`ghost_refs` 只取 blocked 模块，导致「warnings
+    // 报了但机读字段是空数组」）。
+    let ghosts = scan_ghost_references(state_file);
+    if !ghosts.is_empty() {
+        // 按是否 blocked 分述：对 blocked 模块是「现在就永久阻塞」，对其余模块只是
+        // 残留引用（当前不阻塞，但该模块再被标 blocked 时会立刻永久阻塞）。
+        // 混为一谈会对 pending 模块作出「引用方将永久阻塞」这种当下失实的断言。
+        let mut blocking: Vec<String> = Vec::new();
+        let mut residual: Vec<String> = Vec::new();
+        for g in &ghosts {
+            let line = format!("{} → {}", quote_key(&g.module), quote_key(&g.missing));
+            if g.module_blocked {
+                blocking.push(line);
+            } else {
+                residual.push(line);
             }
         }
-    }
-    if !ghost_refs.is_empty() {
-        // modules 是 HashMap，迭代序不确定——排序保证告警文本可复现。
-        ghost_refs.sort_unstable();
-        ghost_refs.dedup();
+        let mut parts: Vec<String> = Vec::new();
+        if !blocking.is_empty() {
+            parts.push(format!(
+                "以下 blocked 模块的 blocked_by 指向未登记的 key，被引模块永远不会进终态、\
+                 该模块将永久阻塞: {}",
+                blocking.join("、")
+            ));
+        }
+        if !residual.is_empty() {
+            parts.push(format!(
+                "以下模块残留指向未登记 key 的 blocked_by（当前未阻塞，但该模块一旦被标 \
+                 blocked 即永久阻塞）: {}",
+                residual.join("、")
+            ));
+        }
         warnings.push(format!(
-            "blocked_by 引用了未登记为模块的 key（幽灵引用，被引模块永远不会进终态，\
-             引用方将永久阻塞）: {}——state 与 source-graph 不同步，应重新执行 \
-             `graph build` + `state populate-modules`，而非等待依赖就绪",
-            ghost_refs.join("、")
+            "{}——state 与 source-graph 不同步。处置：重新执行 `graph build` + \
+             `state populate-modules` 同步；若模块已有迁移进度导致 populate 拒绝重填，\
+             须先 `state reset --module <M>`（会丢弃该模块进度）再同步，不要靠等待依赖就绪",
+            parts.join("；")
         ));
     }
 
@@ -307,6 +317,65 @@ pub struct BlockedCheckResult {
     pub missing: Vec<String>,
     /// 是否就绪可解除（`unresolved` 为空）。
     pub ready: bool,
+}
+
+/// 一条幽灵引用：`module` 的 `blocked_by` 指向了 `missing`，而后者无处归属。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GhostReference {
+    /// 持有该 `blocked_by` 的模块 key。
+    pub module: String,
+    /// 无法归一到任何模块的被引 key。
+    pub missing: String,
+    /// 持有方当前是否处于 `blocked`。
+    ///
+    /// 决定后果的严重度，两者处置紧迫性不同：`true` 表示**现在就**永久阻塞；
+    /// `false` 只是残留引用（当前不阻塞，但该模块一旦被标 blocked 即永久阻塞）。
+    /// 不区分就会对 pending 模块作出「引用方将永久阻塞」这种当下失实的断言。
+    pub module_blocked: bool,
+}
+
+/// 扫描全部模块的 `blocked_by`，返回无法归一到任何模块的引用。
+///
+/// 覆盖**全部模块**而非仅 blocked：正常路径下离开 blocked 会清空 `blocked_by`
+/// （`machine.rs` 的 `transition_module`），但手工编辑或旧文件可能在非 blocked 模块上
+/// 留下残值，一旦该模块再次被标 blocked 就会立刻踩中同一个坑。
+///
+/// 判据经 [`canonicalize_blocked_ref`] 归一，故 composite 组的非代表成员 key 不算幽灵。
+///
+/// 结果按 (module, missing) 字典序排序：`modules` 是 `HashMap`，不排序则告警文本与
+/// JSON 明细的条目顺序在每次运行间漂移。
+pub fn scan_ghost_references(state_file: &MigrationStateFile) -> Vec<GhostReference> {
+    let mut out: Vec<GhostReference> = Vec::new();
+    for (name, module) in &state_file.modules {
+        let Some(blocked_by) = module.blocked_by.as_ref() else {
+            continue;
+        };
+        for dep in blocked_by {
+            if canonicalize_blocked_ref(state_file, dep).is_none() {
+                out.push(GhostReference {
+                    module: name.clone(),
+                    missing: dep.clone(),
+                    module_blocked: module.status == ModuleStatus::Blocked,
+                });
+            }
+        }
+    }
+    out.sort_by(|a, b| {
+        a.module
+            .cmp(&b.module)
+            .then_with(|| a.missing.cmp(&b.missing))
+    });
+    out.dedup();
+    out
+}
+
+/// 把模块 key 渲染进人读告警文本。
+///
+/// 用 JSON 字符串字面量而非裸反引号包裹：key 来自 state 文件（可被手工编辑），
+/// 若其中含反引号、`→`、`、` 或换行，裸包裹会让告警里的条目边界可被内容伪造，
+/// 读者无从分辨哪部分是 key、哪部分是分隔符。JSON 转义同时处理引号与控制字符。
+fn quote_key(key: &str) -> String {
+    serde_json::to_string(key).unwrap_or_else(|_| format!("{key:?}"))
 }
 
 /// 把一个 `blocked_by` 引用归一到它所属的模块 key。
@@ -1197,9 +1266,16 @@ mod tests {
         state.modules.insert("file:shared.ts".to_owned(), blocked);
 
         let warnings = validate_state(&state).expect("合法 state");
+        // 按被引 key 判定而非「幽灵引用」措辞：这是**否定**断言，若改文案后措辞不再
+        // 出现，按措辞匹配会恒真、静默失去区分力。
         assert!(
-            !warnings.iter().any(|w| w.contains("幽灵引用")),
+            !warnings.iter().any(|w| w.contains("file:handler.ts")),
             "组成员 key 不得被误报为幽灵引用: {warnings:?}"
+        );
+        // 同时直接查扫描结果，不依赖告警文案。
+        assert!(
+            scan_ghost_references(&state).is_empty(),
+            "组成员 key 不得进入幽灵扫描结果"
         );
 
         let results = check_blocked_modules(&state);
@@ -1251,11 +1327,19 @@ mod tests {
         state.modules.insert("file:a.ts".to_owned(), blocked);
 
         let warnings = validate_state(&state).expect("幽灵引用只告警，不得硬判损坏");
-        let hit = warnings.iter().find(|w| w.contains("幽灵引用"));
-        let hit = hit.expect("应就幽灵引用告警");
+        // 按「点名了被引 key」定位告警，而非匹配「幽灵引用」这类措辞——文案会改，
+        // 而「告警里必须能看到是哪个 key」是这条守卫真正要保的性质。
+        let hit = warnings
+            .iter()
+            .find(|w| w.contains("file:ghost.ts"))
+            .expect("应就幽灵引用告警");
         // 告警须同时点明引用方与被引 key——只说「存在幽灵引用」定位不到现场。
         assert!(hit.contains("file:a.ts"), "告警缺引用方: {hit}");
-        assert!(hit.contains("file:ghost.ts"), "告警缺被引 key: {hit}");
+        // 处置须可执行：点明重新同步，且不把「等待依赖就绪」当作出路。
+        assert!(
+            hit.contains("populate-modules"),
+            "告警须给出重新同步的处置: {hit}"
+        );
     }
 
     #[test]
@@ -1288,17 +1372,85 @@ mod tests {
         state.modules.insert("target".to_owned(), blocked);
 
         let warnings = validate_state(&state).expect("合法 state");
+        // 直接查扫描结果，不按告警措辞判定：否定断言若依赖措辞，文案一改就恒真；
+        // 而按模块名做子串匹配同样不可靠——本例中 `dep` 恰好是签批告警文本的子串。
         assert!(
-            !warnings.iter().any(|w| w.contains("幽灵引用")),
+            scan_ghost_references(&state).is_empty(),
+            "合法 blocked_by 不应产生幽灵引用"
+        );
+        assert!(
+            !warnings.iter().any(|w| w.contains("blocked_by 指向")),
             "合法 blocked_by 不应触发幽灵告警: {warnings:?}"
         );
     }
 
     #[test]
+    fn test_ghost_scan_marks_blocked_vs_residual() {
+        // 回归（异构交叉 imp3）：告警扫全部模块、`ghost_refs` 却只取 blocked 模块时，
+        // 非 blocked 模块的幽灵引用会「warnings 报了但机读字段是空数组」，只消费
+        // `data.ghost_refs` 的编排器直接漏掉。两侧现共用本函数。
+        //
+        // 同时钉住 `module_blocked` 的区分：对 pending 模块断言「引用方将永久阻塞」
+        // 是当下失实的——它此刻并没有被阻塞。
+        let mut state = minimal_init_state();
+        let mut blocked = module_with_status(ModuleStatus::Blocked);
+        blocked.blocked_by = Some(vec!["file:GHOST_A.ts".to_owned()]);
+        state.modules.insert("file:a.ts".to_owned(), blocked);
+        let mut pending = module_with_status(ModuleStatus::Pending);
+        pending.blocked_by = Some(vec!["file:GHOST_B.ts".to_owned()]);
+        state.modules.insert("file:b.ts".to_owned(), pending);
+
+        let ghosts = scan_ghost_references(&state);
+        assert_eq!(ghosts.len(), 2, "两类模块都须被扫出: {ghosts:?}");
+        // 结果按 (module, missing) 排序，故 a 在前。
+        assert_eq!(ghosts[0].module, "file:a.ts");
+        assert!(ghosts[0].module_blocked, "blocked 模块须标记为现已阻塞");
+        assert_eq!(ghosts[1].module, "file:b.ts");
+        assert!(
+            !ghosts[1].module_blocked,
+            "pending 模块只是残留引用，不得断言其已阻塞"
+        );
+
+        // 告警文本须分述两类，不能把 pending 说成永久阻塞。
+        let warnings = validate_state(&state).expect("不得硬判损坏");
+        let w = warnings
+            .iter()
+            .find(|w| w.contains("file:GHOST_A.ts"))
+            .expect("应告警");
+        assert!(w.contains("file:GHOST_B.ts"), "两条都应在同一告警内: {w}");
+        assert!(w.contains("当前未阻塞"), "须分述残留类: {w}");
+    }
+
+    #[test]
+    fn test_ghost_warning_quotes_keys_unambiguously() {
+        // 回归（异构交叉 nit）：key 来自可被手工编辑的 state，含反引号/换行时，
+        // 裸反引号包裹会让告警里的条目边界可被内容伪造。改用 JSON 字面量转义。
+        let mut state = minimal_init_state();
+        let mut blocked = module_with_status(ModuleStatus::Blocked);
+        blocked.blocked_by = Some(vec!["file:spoof`、`other\nnext".to_owned()]);
+        state.modules.insert("file:a.ts".to_owned(), blocked);
+
+        let warnings = validate_state(&state).expect("不得硬判损坏");
+        let w = warnings
+            .iter()
+            .find(|w| w.contains("spoof"))
+            .expect("应告警");
+        // 换行被转义成字面 \n，不会在告警里断行伪装成新条目。
+        assert!(!w.contains('\n'), "告警不得含裸换行: {w:?}");
+        assert!(w.contains("\\n"), "换行应转义可见: {w:?}");
+    }
+
+    #[test]
     fn test_auto_unblock_refuses_module_with_ghost_reference() {
-        // 幽灵引用绝不能让模块「就绪可解除」——否则 --auto-unblock 会在损坏数据上
+        // 幽灵引用不得让模块判为「就绪可解除」，否则 `--auto-unblock` 会在损坏数据上
         // 真的改状态（把等不到的依赖当成已满足）。此性质当前由 missing ⊆ unresolved
         // 保证，这里钉死它，防将来「优化」ready 判定时被破坏。
+        //
+        // **承诺范围仅限本条路径**：`state transition` / `state update --cas-version`
+        // 走 `transition_inner`，那里离开 blocked 只校验 `target == pre_blocked_status`、
+        // 不校验依赖是否终态，故**能**在不带 --force 的情况下解除幽灵阻塞（异构交叉
+        // 审查实证）。那是 pre-existing 行为（对所有 blocked 模块一视同仁，不限幽灵），
+        // 收窄它会改变既有转换语义，已记账另议。本测试不为那条路径背书。
         let mut machine = MigrationStateMachine::init_new("test", SourceLang::TypeScript);
         let mut blocked = module_with_status(ModuleStatus::Blocked);
         blocked.blocked_by = Some(vec!["ghost".to_owned()]);

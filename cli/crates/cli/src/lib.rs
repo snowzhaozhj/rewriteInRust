@@ -44,7 +44,8 @@ use rustmigrate_core::types::state::{
 };
 use rustmigrate_core::validate::rules::{check_adapters_dir, load_rule_registry};
 use rustmigrate_core::validate::{
-    auto_unblock_modules, check_blocked_modules, detect_blocked_cycles, validate_state,
+    auto_unblock_modules, check_blocked_modules, detect_blocked_cycles, scan_ghost_references,
+    validate_state,
 };
 
 /// `.rust-migration/` 工作目录名（见 `docs/design/04-toolchain.md § 5.7.3`）。
@@ -1879,15 +1880,13 @@ fn cmd_validate_state(check_blocked: bool, auto_unblock: bool) -> CmdResult {
         .collect();
     let cycle_paths: Vec<Vec<String>> = cycles;
 
-    // 幽灵引用（`blocked_by` 指向未登记的 key）单列：它们也在 `still_blocked` 里，但
-    // 处置动作与「依赖还没译完」相反——等待永远不会结束，必须重新同步 state。
-    // 告警本身由 `validate_state` 统一发出（覆盖全部模块，不限 blocked），此处只把
-    // 逐模块的明细接进 data 供编排器机读。
-    let ghost_refs: Vec<serde_json::Value> = checks
-        .iter()
-        .filter(|r| !r.missing.is_empty())
-        .map(|r| json!({ "module": r.module, "missing": r.missing }))
-        .collect();
+    // 幽灵引用（`blocked_by` 指向无处归属的 key）单列，供编排器机读。
+    //
+    // 取 `scan_ghost_references` 而非从 `checks` 提取：后者只遍历 blocked 模块，会与
+    // `validate_state` 的全模块告警口径不一致——非 blocked 模块上的残留引用会出现
+    // 「warnings 报了、`ghost_refs` 却是空数组」，只消费机读字段的编排器就漏掉了。
+    // `module_blocked` 区分「现在就永久阻塞」与「残留、将来才阻塞」。
+    let ghost_refs = scan_ghost_references(machine.state_file());
 
     let mut data = json!({
         "valid": true,

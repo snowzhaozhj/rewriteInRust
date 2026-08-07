@@ -167,12 +167,13 @@ STATUS 把修法记为二选一、**需先定方向**：⒜ 如实化 + 摘依�
 
 ## 变更性质登记
 
-按 MDR-019/020 先例逐项判定，**本 MDR 无破坏性变更**：
+按 MDR-019/020 先例逐项判定。**MDR 主体（摘依赖 + 如实化）无破坏性变更**；后续收口待办 1 时引入**一项源码破坏性变更**（见本段末）：
 
 - **摘除 `jsonschema` 依赖**：该 crate 源码零引用，无 `pub` API 依赖它、无类型出现在任何签名里，故对下游 Rust 调用者与 CLI 的 JSON 契约均零影响。`Cargo.lock` 变动不构成 API 变更（0.x 阶段 + 无 `cargo publish` 流程）。
 - **`ParseFailed` 的 `suggestion` 文案变化**：`suggestion` 是**用户可见文本，非机读契约**——`plugin/` 下对该键零命中（无提示词或脚本按其内容分支），CLI 侧亦无消费方。文案纠错不改结构、不改字段名、不改 `error_code` 值域。故不按 `--status` 值域那类（#86，值被 clap 解析期强校验、编排器照抄）登记为破坏性变更。
 - **`ErrorCode` 加 `strum::EnumIter`**：纯派生宏新增，不改 serde 表示（`rename_all = "snake_case"` 未动）、不改变体集合与码号，对外部零影响。
 - **设计文档措辞如实化**：不改任何契约值，只让描述与实现一致。表格新增「可达性」列属信息补充，未删任何既有行。
+- **【破坏性变更，收口待办 1 时引入】`BlockedCheckResult` 新增 pub 字段 `missing`**：该 struct 是 `pub` 且无 `#[non_exhaustive]`，外部若用 struct-literal 构造会编译失败——同 MDR-020 登记的 `pub` 签名变更同类，故按先例在此登记（MDR + STATUS 双处），0.x 阶段不走 deprecation 期。**影响面**：`rustmigrate-core` 无 `cargo publish` 流程；全仓构造点仅 `validate/mod.rs` 内一处，CLI 侧只读字段、不建字面量。同批新增的 `GhostReference` / `scan_ghost_references` 是纯新增，不构成破坏性变更。CLI JSON 输出侧 `data.ghost_refs` 亦为纯新增键。
 
 ## 未采纳
 
