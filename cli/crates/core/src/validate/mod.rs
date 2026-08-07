@@ -337,24 +337,14 @@ pub struct BlockedCheckResult {
     pub blocked_by: Vec<String>,
     /// `blocked_by` 中已进入终态（done/degrade_*）的模块。
     pub resolved: Vec<String>,
-    /// `blocked_by` 中尚未终态的模块（**含** `missing`——见该字段说明）。
+    /// `blocked_by` 中尚未终态的模块。
+    ///
+    /// **含无处归属的引用**（幽灵引用）与宿主歧义的引用：两者都不该让模块变成
+    /// 「就绪可解除」，否则 `--auto-unblock` 会在损坏数据上真的改状态。要区分出
+    /// 「哪些是幽灵」请用 [`scan_ghost_references`]——本结构不再单列，避免同一概念
+    /// 存在两份可能相互漂移的表示（`--check-blocked` 的 `ghost_refs` 曾因两处各算
+    /// 一遍而与告警口径不一致）。
     pub unresolved: Vec<String>,
-    /// `blocked_by` 中**既非登记模块、也不属于任何 composite 组**的引用（幽灵引用）。
-    ///
-    /// 与 `unresolved` 的其余项性质不同：后者是「等得到的依赖」（依赖真实存在、
-    /// 迟早进终态），前者是**数据不一致**——被引用的 key 在 `modules` 里根本没有，
-    /// 等待永远不会结束。两者处置动作相反（等 vs 重跑 `graph build` +
-    /// `populate-modules` 同步状态），故必须分列。
-    ///
-    /// 判定经 [`canonicalize_blocked_ref`] 归一：composite 组的非代表成员 key 同样
-    /// 不在 `modules` 表里，但它**不是**幽灵——实体真实存在、登记在组代表名下，
-    /// 且「重跑 graph build」对它是无效动作（成员不进 `modules` 是 decompose 的
-    /// 既定设计）。误报会把用户导向一个做了也没用的操作。
-    ///
-    /// 仍保留在 `unresolved` 内是**有意的**：幽灵引用绝不能让模块变成「就绪可解除」，
-    /// 否则 `--auto-unblock` 会在损坏数据上真的改状态。`missing` 是 `unresolved` 的
-    /// 子集，供调用方在「阻塞」之外额外识别出「数据坏了」。
-    pub missing: Vec<String>,
     /// 是否就绪可解除（`unresolved` 为空）。
     pub ready: bool,
 }
@@ -495,7 +485,6 @@ pub fn check_blocked_modules(state_file: &MigrationStateFile) -> Vec<BlockedChec
 
         let mut resolved = Vec::new();
         let mut unresolved = Vec::new();
-        let mut missing = Vec::new();
 
         for dep in &blocked_by {
             // 四分：无归属（真幽灵）/ 多宿主（坏划分）/ 归一后终态 / 归一后未终态。
@@ -507,10 +496,9 @@ pub fn check_blocked_modules(state_file: &MigrationStateFile) -> Vec<BlockedChec
             // key：这些列表要能与用户 state 里的 `blocked_by` 逐条对上，换成组代表会
             // 让人对不上自己写的是什么。归一只用于判定，不改回显。
             match resolve_blocked_ref(state_file, dep) {
-                RefResolution::Missing => {
-                    missing.push(dep.clone());
-                    unresolved.push(dep.clone());
-                }
+                // 幽灵引用同样按未终态处理（等待永远不会结束，但绝不能因此判就绪）。
+                // 「哪些是幽灵」由 `scan_ghost_references` 单独提供，此处不重复表示。
+                RefResolution::Missing => unresolved.push(dep.clone()),
                 // 坏划分：宿主组状态各异，挑错就判错就绪 → 一律按非终态处理，
                 // 绝不让它把模块推成 ready（`--auto-unblock` 会据此真的改状态）。
                 // 不进 `missing`——它不是幽灵，处置动作是修组划分而非重新同步。
@@ -530,7 +518,6 @@ pub fn check_blocked_modules(state_file: &MigrationStateFile) -> Vec<BlockedChec
             blocked_by,
             resolved,
             unresolved,
-            missing,
             ready,
         });
     }
@@ -1279,8 +1266,10 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert!(!results[0].ready);
         assert_eq!(results[0].unresolved, vec!["nonexistent".to_owned()]);
-        // missing 是 unresolved 的子集：幽灵引用既要阻塞，又要能被识别为数据不一致。
-        assert_eq!(results[0].missing, vec!["nonexistent".to_owned()]);
+        // 幽灵引用要能被单独识别出来——由 scan_ghost_references 提供。
+        let ghosts = scan_ghost_references(&state);
+        assert_eq!(ghosts.len(), 1);
+        assert_eq!(ghosts[0].missing, "nonexistent");
     }
 
     #[test]
@@ -1303,8 +1292,11 @@ mod tests {
             results[0].unresolved,
             vec!["real_dep".to_owned(), "ghost".to_owned()]
         );
-        assert_eq!(results[0].missing, vec!["ghost".to_owned()]);
         assert!(results[0].resolved.is_empty());
+        // 两类只有幽灵那条进扫描结果——处置动作不同，必须能分开。
+        let ghosts = scan_ghost_references(&state);
+        assert_eq!(ghosts.len(), 1);
+        assert_eq!(ghosts[0].missing, "ghost");
     }
 
     #[test]
@@ -1321,7 +1313,7 @@ mod tests {
         state.modules.insert("target".to_owned(), blocked);
 
         let results = check_blocked_modules(&state);
-        assert!(results[0].missing.is_empty());
+        assert!(scan_ghost_references(&state).is_empty());
         assert!(results[0].ready);
     }
 
@@ -1361,7 +1353,10 @@ mod tests {
             .iter()
             .find(|r| r.module == "file:shared.ts")
             .unwrap();
-        assert!(target.missing.is_empty(), "组成员 key 不得进 missing");
+        assert!(
+            scan_ghost_references(&state).is_empty(),
+            "组成员 key 不得被当成幽灵引用"
+        );
         // 归一后按**组代表**的状态判定：emitter 组是 translating（非终态）→ 仍阻塞。
         assert_eq!(target.unresolved, vec!["file:handler.ts".to_owned()]);
         assert!(!target.ready);
@@ -1529,7 +1524,10 @@ mod tests {
         );
         assert_eq!(target.unresolved, vec!["file:X.ts".to_owned()]);
         // 不是幽灵——处置动作是修组划分，不是重新同步 state。
-        assert!(target.missing.is_empty(), "坏划分不应被当成幽灵引用");
+        assert!(
+            scan_ghost_references(&state).is_empty(),
+            "坏划分不应被当成幽灵引用"
+        );
 
         // 校验命令必须报出这个不变量被破坏（machine.rs 对同一不变量是 release 硬错，
         // 这里不能硬错但绝不能沉默）。

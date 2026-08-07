@@ -480,6 +480,8 @@ CLI 构建基础图（contains/imports 边），存储到 `.rust-migration/sourc
 > MVP 不做自动拓扑排序：A→B→C 多层 blocked 时，本步骤只解除「blocked_by 全部完成」的一层，连续运行会逐层推进（见 [附录 A § 合法状态转换「多模块同时 blocked」注](#合法状态转换)）。但**环形**阻塞（A→B→C→A 或自依赖）无法靠逐层推进解除，故 Step 0.5 在恢复前先做一次 DFS 环检测并报错中止，避免静默死锁。`metadata.last_error` 字段见 [附录 A「metadata 字段说明」](#附录-amigration-statejson-schema)。
 
 > **MVP 实现归属与确定性边界**：上述伪码在 MVP 期由 SKILL.md 通过指令跟随执行（非独立确定性脚本），与 L1/L2 校验的确定性存在割裂——这是 MVP 的已知约束，**不在 M2 之前补 CLI 化**。完整自动化（含 DFS 环检测 + 拓扑排序的程序化实现）推迟到 M2，抽取为 `rustmigrate validate state --check-blocked --auto-unblock`，详见 [08 § M2 状态机程序化实现](./08-roadmap-and-reference.md#m2-质量提升8-12-周)。因此 MVP 验收时，Verifier **必须在测试中实证环检测确实触发并中止**（构造 A↔B 互锁与 A→A 自依赖用例），不得依赖 Skill 的指令跟随行为推定其生效。
+>
+> **M4 现状更新**：上述 CLI 化**已落地**——`validate state --check-blocked` 一条命令完成依赖就绪判定 + blocked 子图 DFS 环检测 + 幽灵引用检出（纯查询不写盘），`--auto-unblock` 追加自动恢复。`run.md` 步骤 2 已改为先调该命令再按 `data` 分流，不再靠指令跟随复刻这套逻辑。环检测与就绪判定均在 `check_blocked_modules`/`detect_blocked_cycles` 有单元测试覆盖（含 A↔B 互锁、自依赖、经 composite 成员 key 表达的互锁）。
 
 ### Step 0.6: 目标模块依赖就绪检查（前置门禁）
 查询目标模块的依赖是否全部完成（通过 `rustmigrate graph deps <module>` 或 migration-state.json）。

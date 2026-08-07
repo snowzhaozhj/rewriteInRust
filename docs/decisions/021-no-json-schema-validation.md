@@ -173,7 +173,8 @@ STATUS 把修法记为二选一、**需先定方向**：⒜ 如实化 + 摘依�
 - **`ParseFailed` 的 `suggestion` 文案变化**：`suggestion` 是**用户可见文本，非机读契约**——`plugin/` 下对该键零命中（无提示词或脚本按其内容分支），CLI 侧亦无消费方。文案纠错不改结构、不改字段名、不改 `error_code` 值域。故不按 `--status` 值域那类（#86，值被 clap 解析期强校验、编排器照抄）登记为破坏性变更。
 - **`ErrorCode` 加 `strum::EnumIter`**：纯派生宏新增，不改 serde 表示（`rename_all = "snake_case"` 未动）、不改变体集合与码号，对外部零影响。
 - **设计文档措辞如实化**：不改任何契约值，只让描述与实现一致。表格新增「可达性」列属信息补充，未删任何既有行。
-- **【破坏性变更，收口待办 1 时引入】`BlockedCheckResult` 新增 pub 字段 `missing`**：该 struct 是 `pub` 且无 `#[non_exhaustive]`，外部若用 struct-literal 构造会编译失败——同 MDR-020 登记的 `pub` 签名变更同类，故按先例在此登记（MDR + STATUS 双处），0.x 阶段不走 deprecation 期。**影响面**：`rustmigrate-core` 无 `cargo publish` 流程；全仓构造点仅 `validate/mod.rs` 内一处，CLI 侧只读字段、不建字面量。同批新增的 `GhostReference` / `scan_ghost_references` 是纯新增，不构成破坏性变更。CLI JSON 输出侧 `data.ghost_refs` 亦为纯新增键。
+- **收口待办 1 的新增项均为纯新增，无破坏性变更**：`GhostReference` 类型、`scan_ghost_references` 函数、CLI 输出的 `data.ghost_refs` 键都是新增，不改既有签名与 JSON 键。
+  - 过程记录：中途曾给 `pub struct BlockedCheckResult` 加过 `missing` 字段（无 `#[non_exhaustive]`，对外部 struct-literal 构造是源码破坏性变更，一度按 MDR-020 先例登记于此）。后经专项审查指出该字段在 CLI 改用 `scan_ghost_references` 后**已无生产消费方**，遂**移除**——它与 `GhostReference` 是同一概念的两份表示，正是「`ghost_refs` 两处各算一遍导致口径不一致」那个 important 的同类风险来源。移除后破坏性变更归零，概念只剩一处表示。
 
 ## 未采纳
 
@@ -185,7 +186,7 @@ STATUS 把修法记为二选一、**需先定方向**：⒜ 如实化 + 摘依�
 
 1. ~~**`blocked_by` 幽灵引用无检出**~~ **✅ 已收口**（后续 PR）——落地方式与原修法方向一致（`validate_state` 加扫描 + 告警，不硬判损坏）。三点落地细化，均非原记账所能预见：
    - **扫描覆盖全部模块而非仅 blocked**。正常路径下 `transition_module` 离开 blocked 会清空 `blocked_by`（`machine.rs:637`），但手工编辑或旧文件可能在非 blocked 模块上留残值，该模块再被标 blocked 时会立刻踩中同一个坑。`check_blocked_modules` 只看 blocked 模块，这条只能由 `validate_state` 兜住。
-   - **`BlockedCheckResult` 加 `missing` 字段**（`unresolved` 的子集）。原实现用 `.unwrap_or(false)` 把「依赖不存在」与「依赖未终态」抹平进同一个 `unresolved`，而两者处置动作**相反**：一个要重新同步 state，一个只需等待。分列后编排器才能区分。`missing` 仍计入 `unresolved` 是有意的——否则幽灵引用会让模块判为「就绪可解除」，`--auto-unblock` 就会在损坏数据上真的改状态；已有专门测试钉死这条性质。
+   - **幽灵引用由 `scan_ghost_references` 单独提供**（`BlockedCheckResult` 不再单列）。原实现用 `.unwrap_or(false)` 把「依赖不存在」与「依赖未终态」抹平进同一个 `unresolved`，而两者处置动作**相反**：一个要重新同步 state，一个只需等待。幽灵引用**仍计入** `unresolved` 是有意的——否则它会让模块判为「就绪可解除」，`--auto-unblock` 就会在损坏数据上真的改状态；已有专门测试钉死这条性质。
    - **命名冲突需留意**：`state deps` 的 `unresolved` 指的正是幽灵引用，而 `BlockedCheckResult.unresolved` 指「未进终态的依赖」（含幽灵）。同词异义，故 `--check-blocked` 侧的输出键取名 `ghost_refs` 而非复用 `unresolved`，避免两个命令的同名字段语义相反。
    - **负向实证八轮**（独立 worktree，非推断，全部报红且归因准确）：① `missing` 恒空（退回二分）→ 2 core + 1 e2e 报红；② 摘掉告警扫描 → 2 core 报红；③ `missing` 不计入 `unresolved`（幽灵变可就绪）→ 3 core 报红，归因精确到「带幽灵引用的模块不得判为就绪」；④ 判据反转（合法引用当幽灵）→ 3 core 报红，其中「反向不误报」由独立测试钉住；⑤ 摘掉 `member_files` 归一 → 2 个 composite 测试报红；⑥ 环检测退回不归一 → 互锁测试报红；⑦ 歧义退回静默择一（按首个宿主判定）→ 坏划分测试报红；⑧ 摘掉排序与去重 → 3 个测试报红。
    - **归一修复自身又引入两处问题，均由主审实证抓出后修**（记此以备后来者：给判据加归一时，**所有共用该判据的路径必须同步**，否则会制造比原问题更隐蔽的盲区）：

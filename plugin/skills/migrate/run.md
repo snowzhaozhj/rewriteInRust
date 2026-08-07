@@ -54,9 +54,19 @@
 | `pending` / `translating`(substatus=null) | 正常从第 2 步开始（非 batch 组的默认路由） |
 
 ### 2. 解除 blocked + 循环依赖检测
-遍历所有 `status=blocked` 模块，若其 `blocked_by` 引用的模块都已 `done`/`degrade_*`，则 `state transition --module <M> --to <pre_blocked_status> --reason 'blocked_by resolved'` 自动恢复并记日志。对 blocked 子图做 DFS 环检测：发现环即报错中止、输出环路径、记入 `metadata.last_error`（防 blocked 模块互相等待死锁）。
 
-> **幽灵引用不能靠等**：`blocked_by` 可能引用**无处归属**的 key（state 与 source-graph 不同步、SubAgent 写入非法引用、用户手填）。这类依赖永远不会进终态，等待是无效动作。`validate state` 会就此降级 warning 并点名「引用方 → 被引 key」，`validate state --check-blocked` 在 `data.ghost_refs` 给逐条明细（`[{module, missing, module_blocked}]`，`missing` 是**单个** key 字符串、每条一项；`module_blocked=true` 表示该模块此刻就被永久阻塞，`false` 表示只是残留引用、当前不阻塞但它一旦被标 blocked 即永久阻塞）。
+**先执行 `rustmigrate validate state --check-blocked`**（一条命令同时完成依赖就绪判定、blocked 子图 DFS 环检测、幽灵引用检出，不写盘），按 `data` 分流：
+
+| `data` 字段 | 含义 | 处置 |
+|---|---|---|
+| `ready_to_unblock[]` | 依赖已全部终态，可恢复 | 逐个 `state transition --module <M> --to <pre_blocked_status> --reason 'blocked_by resolved'` 并记日志（或整体改用 `--check-blocked --auto-unblock` 让 CLI 代劳） |
+| `cycles[]` 非空 | blocked 模块互相等待，死锁 | 报错中止、输出环路径、记入 `metadata.last_error` |
+| `ghost_refs[]` 非空 | `blocked_by` 指向无处归属的 key | 见下方「幽灵引用不能靠等」——**等待无效**，须按其处置动作修 |
+| `still_blocked[]` 中其余模块 | 依赖确实还没译完 | 正常等待，跳过本轮 |
+
+`warnings` 非空时如实转达用户（跨组划分破坏等问题只经 warning 报出）。
+
+> **幽灵引用不能靠等**：`blocked_by` 可能引用**无处归属**的 key（state 与 source-graph 不同步、SubAgent 写入非法引用、用户手填）。这类依赖永远不会进终态，等待是无效动作。`validate state` 会就此降级 warning 并点名「引用方 → 被引 key」，`--check-blocked` 在 `data.ghost_refs` 给逐条明细（`[{module, missing, module_blocked}]`，`missing` 是**单个** key 字符串、每条一项；`module_blocked=true` 表示该模块此刻就被永久阻塞，`false` 表示只是残留引用、当前不阻塞但它一旦被标 blocked 即永久阻塞）。
 >
 > **处置：对每个模块执行 `state transition --module <M> --to <pre_blocked_status>`**——离开 blocked 即清空 `blocked_by`，不丢迁移进度；随后 `graph build` 重建图确认真实依赖。**不要用 `state populate-modules`**：它对非 pending 模块一律拒绝重填（断点续传保护），而幽灵引用按定义就发生在 blocked 等非 pending 状态上，照做必然失败；`state reset` 同样不解决（它把模块置为 `translating`，仍非 pending）。注意 `module_blocked=true` 的模块仍计入阻塞，`--auto-unblock` 不会放行它们——不是命令失灵，是不在损坏数据上改状态。
 >
