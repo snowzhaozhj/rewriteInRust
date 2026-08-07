@@ -184,6 +184,44 @@ pub fn validate_state(state_file: &MigrationStateFile) -> Result<Vec<String>> {
         ));
     }
 
+    // M4 防御性可观测：`member_files` 跨组互斥不变量被破坏（同一文件被多个组列为成员）。
+    // `machine.rs` 的 `canonical_module_key` 对此是 release 硬错（MDR-015:55），但校验
+    // 命令不能硬错——旧文件须可读。这里报出来，并在 `check_blocked_modules` 侧按最保守
+    // 的非终态处理：宿主组状态各异，静默择一会让 `--auto-unblock` 据错误宿主判 ready、
+    // 真的把模块解除（实证：X 同属 done 组与 translating 组时，取到 done 那组即解除落盘）。
+    let mut ambiguous: Vec<String> = Vec::new();
+    for (name, module) in &state_file.modules {
+        let Some(blocked_by) = module.blocked_by.as_ref() else {
+            continue;
+        };
+        for dep in blocked_by {
+            if let RefResolution::Ambiguous(hosts) = resolve_blocked_ref(state_file, dep) {
+                let hosts = hosts
+                    .iter()
+                    .map(|h| quote_key(h))
+                    .collect::<Vec<_>>()
+                    .join("、");
+                ambiguous.push(format!(
+                    "{} → {}（同属 {}）",
+                    quote_key(name),
+                    quote_key(dep),
+                    hosts
+                ));
+            }
+        }
+    }
+    if !ambiguous.is_empty() {
+        ambiguous.sort_unstable();
+        ambiguous.dedup();
+        warnings.push(format!(
+            "member_files 跨组互斥不变量被破坏，以下 blocked_by 引用的文件同属多个 \
+             composite 组: {}——无法判定应按哪个组的状态判就绪，已一律按未就绪处理（\
+             不会被 `--auto-unblock` 解除）。处置：修正 modules 的 member_files 划分，\
+             使每个文件只属一个组",
+            ambiguous.join("；")
+        ));
+    }
+
     Ok(warnings)
 }
 
@@ -351,7 +389,7 @@ pub fn scan_ghost_references(state_file: &MigrationStateFile) -> Vec<GhostRefere
             continue;
         };
         for dep in blocked_by {
-            if canonicalize_blocked_ref(state_file, dep).is_none() {
+            if resolve_blocked_ref(state_file, dep) == RefResolution::Missing {
                 out.push(GhostReference {
                     module: name.clone(),
                     missing: dep.clone(),
@@ -378,28 +416,38 @@ fn quote_key(key: &str) -> String {
     serde_json::to_string(key).unwrap_or_else(|_| format!("{key:?}"))
 }
 
+/// `blocked_by` 引用的归一结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RefResolution<'a> {
+    /// 唯一宿主：直接命中登记模块，或唯一一个 composite 组把它列为成员。
+    Resolved(&'a String),
+    /// 同一 key 被多个组列为成员——`member_files` 跨组互斥不变量被破坏。
+    ///
+    /// 不选任何一个：宿主组的状态各不相同，挑错就会判错就绪。`machine.rs` 的
+    /// `canonical_module_key` 对同一不变量是 **release 硬错**（MDR-015:55 记载理由：
+    /// 静默取迭代序首个会让破坏性的 reset 清空**错误模块**的进度）。校验命令不能硬错
+    /// （旧文件须可读），故降级为「按最保守的非终态处理 + 告警」——绝不因坏划分判 ready。
+    Ambiguous(Vec<&'a String>),
+    /// 无处归属：既非登记模块，也不是任何组的成员（真幽灵引用）。
+    Missing,
+}
+
 /// 把一个 `blocked_by` 引用归一到它所属的模块 key。
 ///
 /// composite 组折叠后 `modules` 只登记**组代表** key，组内非代表成员（`member_files`
 /// 里的其余文件）不是独立模块。故「不在 `modules` 里」并不等于「不存在」——它可能是
 /// 某个组的合法成员，实体真实存在、只是登记在组代表名下。
 ///
-/// 返回 `Some(归一后的 key)`；只有归一后仍无归属的才是真幽灵引用（返回 `None`）。
-///
 /// 与 `state deps` 的 `cmd_state_deps` 归一逻辑同源（那里是正向依赖闭包的
 /// 「文件→组代表」映射），此处是 `blocked_by` 方向。两侧都不做归一就会各自误判：
 /// 那边会漏掉组外依赖，这边会把合法成员 key 误报成幽灵。
-fn canonicalize_blocked_ref<'a>(
-    state_file: &'a MigrationStateFile,
-    dep: &'a str,
-) -> Option<&'a String> {
+fn resolve_blocked_ref<'a>(state_file: &'a MigrationStateFile, dep: &str) -> RefResolution<'a> {
     // 已是登记模块（含组代表自身）：直接命中。
     if let Some((key, _)) = state_file.modules.get_key_value(dep) {
-        return Some(key);
+        return RefResolution::Resolved(key);
     }
-    // 否则反查 member_files：确定性取字典序最小的宿主组，避免 HashMap 迭代序
-    // 让同一份 state 产出不同结论（成员理论上只属一个组，但 state 可被手工编辑）。
-    state_file
+    // 否则反查 member_files。排序保证多宿主时的告警文本可复现（modules 是 HashMap）。
+    let mut hosts: Vec<&String> = state_file
         .modules
         .iter()
         .filter(|(_, m)| {
@@ -408,7 +456,13 @@ fn canonicalize_blocked_ref<'a>(
                 .is_some_and(|mf| mf.iter().any(|f| f == dep))
         })
         .map(|(key, _)| key)
-        .min()
+        .collect();
+    hosts.sort();
+    match hosts.len() {
+        0 => RefResolution::Missing,
+        1 => RefResolution::Resolved(hosts[0]),
+        _ => RefResolution::Ambiguous(hosts),
+    }
 }
 
 /// 检查所有 blocked 模块的依赖就绪状态。
@@ -442,22 +496,29 @@ pub fn check_blocked_modules(state_file: &MigrationStateFile) -> Vec<BlockedChec
         let mut missing = Vec::new();
 
         for dep in &blocked_by {
-            // 三分：无归属（真幽灵）/ 归一后终态 / 归一后未终态。此前「不存在」与
-            // 「未终态」都经 `unwrap_or(false)` 落进 `unresolved`，两种相反的处置
-            // 动作被抹平；而不做归一则会把 composite 组的合法成员 key 误判成不存在。
+            // 四分：无归属（真幽灵）/ 多宿主（坏划分）/ 归一后终态 / 归一后未终态。
+            // 此前「不存在」与「未终态」都经 `unwrap_or(false)` 落进 `unresolved`，两种
+            // 相反的处置动作被抹平；而不做归一则会把 composite 组的合法成员 key 误判
+            // 成不存在。
             //
             // 注意 `resolved`/`unresolved` 里保留的是**原始** dep 字符串而非归一后的
             // key：这些列表要能与用户 state 里的 `blocked_by` 逐条对上，换成组代表会
             // 让人对不上自己写的是什么。归一只用于判定，不改回显。
-            match canonicalize_blocked_ref(state_file, dep) {
-                None => {
+            match resolve_blocked_ref(state_file, dep) {
+                RefResolution::Missing => {
                     missing.push(dep.clone());
                     unresolved.push(dep.clone());
                 }
-                Some(canonical) if state_file.modules[canonical].status.is_terminal() => {
+                // 坏划分：宿主组状态各异，挑错就判错就绪 → 一律按非终态处理，
+                // 绝不让它把模块推成 ready（`--auto-unblock` 会据此真的改状态）。
+                // 不进 `missing`——它不是幽灵，处置动作是修组划分而非重新同步。
+                RefResolution::Ambiguous(_) => unresolved.push(dep.clone()),
+                RefResolution::Resolved(canonical)
+                    if state_file.modules[canonical].status.is_terminal() =>
+                {
                     resolved.push(dep.clone())
                 }
-                Some(_) => unresolved.push(dep.clone()),
+                RefResolution::Resolved(_) => unresolved.push(dep.clone()),
             }
         }
 
@@ -526,6 +587,11 @@ pub fn auto_unblock_modules(
 /// 用三色 DFS 检测环：白色（未访问）→ 灰色（栈上）→ 黑色（已完成）。
 /// 遇到灰色节点即发现环，回溯栈提取环路径。
 ///
+/// 建边前先经 [`canonicalize_blocked_ref`] 归一（composite 组成员 key → 组代表），
+/// **必须与 `check_blocked_modules` 用同一判据**：若这里按原始字符串建边而那边归一，
+/// 「经成员 key 表达的互锁」会成为静默死锁——两侧都判成合法未终态依赖（无幽灵告警），
+/// 而成员 key 不在 `blocked_set` 里、边被丢弃（无环告警），模块永久阻塞且零诊断。
+///
 /// 返回所有检测到的环路径（每条环路径为 Vec<String>）。空 Vec 表示无环。
 pub fn detect_blocked_cycles(state_file: &MigrationStateFile) -> Vec<Vec<String>> {
     // 收集所有 blocked 模块的 key 集合。
@@ -540,13 +606,23 @@ pub fn detect_blocked_cycles(state_file: &MigrationStateFile) -> Vec<Vec<String>
         return Vec::new();
     }
 
-    // 构建 blocked 子图的邻接表：M → [N...]（M blocked_by N，N 也是 blocked）。
+    // 构建 blocked 子图的邻接表：M → [N...]（M blocked_by N，N 归一后也是 blocked）。
     let mut adj: HashMap<&String, Vec<&String>> = HashMap::new();
     for key in &blocked_set {
         let deps: Vec<&String> = state_file.modules[*key]
             .blocked_by
             .as_ref()
-            .map(|bs| bs.iter().filter(|b| blocked_set.contains(b)).collect())
+            .map(|bs| {
+                bs.iter()
+                    .filter_map(|b| match resolve_blocked_ref(state_file, b) {
+                        RefResolution::Resolved(key) => Some(key),
+                        // 坏划分的边不建：宿主歧义时连哪条都是猜。该情形另有专门告警
+                        // （`validate_state` 的跨组不变量扫描），不在此处静默择一。
+                        RefResolution::Ambiguous(_) | RefResolution::Missing => None,
+                    })
+                    .filter(|b| blocked_set.contains(b))
+                    .collect()
+            })
             .unwrap_or_default();
         adj.insert(key, deps);
     }
@@ -1382,6 +1458,140 @@ mod tests {
             !warnings.iter().any(|w| w.contains("blocked_by 指向")),
             "合法 blocked_by 不应触发幽灵告警: {warnings:?}"
         );
+    }
+
+    #[test]
+    fn test_cycle_detection_follows_member_key_normalization() {
+        // 回归（主审 imp2，归一引入的新盲区）：`check_blocked_modules` 归一了而
+        // `detect_blocked_cycles` 按原始字符串建边时，「经成员 key 表达的互锁」会
+        // **完全静默**——两侧都判成合法未终态依赖（无幽灵告警），而成员 key 不在
+        // blocked_set 里、边被丢弃（无环告警），模块永久阻塞且零诊断。
+        // 归一前这至少还会报幽灵告警，故属归一引入的回归。
+        let mut state = minimal_init_state();
+        let mut group = module_with_status(ModuleStatus::Blocked);
+        group.member_files = Some(vec![
+            "file:emitter.ts".to_owned(),
+            "file:handler.ts".to_owned(),
+        ]);
+        // 组 blocked_by 普通模块 shared。
+        group.blocked_by = Some(vec!["file:shared.ts".to_owned()]);
+        state.modules.insert("file:emitter.ts".to_owned(), group);
+
+        // shared blocked_by 组的**成员** key（而非组代表）→ 构成互锁。
+        let mut shared = module_with_status(ModuleStatus::Blocked);
+        shared.blocked_by = Some(vec!["file:handler.ts".to_owned()]);
+        state.modules.insert("file:shared.ts".to_owned(), shared);
+
+        let cycles = detect_blocked_cycles(&state);
+        assert!(
+            !cycles.is_empty(),
+            "经成员 key 表达的互锁必须被环检测看见，否则是零诊断的永久死锁"
+        );
+        // 环里出现的是归一后的组代表。
+        let flat: Vec<&String> = cycles.iter().flatten().collect();
+        assert!(
+            flat.iter().any(|m| *m == "file:emitter.ts")
+                && flat.iter().any(|m| *m == "file:shared.ts"),
+            "环路径应含两个互锁模块: {cycles:?}"
+        );
+    }
+
+    #[test]
+    fn test_member_in_multiple_groups_never_judged_ready() {
+        // 回归（主审 imp3，归一引入）：同一文件被多个组列为成员时，静默取字典序最小
+        // 的宿主会按**错误**的组判就绪。实证：X 同属 done 组与 translating 组时，
+        // min() 取到 done 那组 → ready → `--auto-unblock` 真的把模块解除并落盘。
+        // 这与「不在损坏数据上改状态」直接相反，只是入口换成坏划分而非幽灵 key。
+        let mut state = minimal_init_state();
+        let mut done_group = module_with_status(ModuleStatus::Done);
+        done_group.member_files = Some(vec!["file:a.ts".to_owned(), "file:X.ts".to_owned()]);
+        state.modules.insert("file:a.ts".to_owned(), done_group);
+
+        let mut active_group = module_with_status(ModuleStatus::Translating);
+        active_group.member_files = Some(vec!["file:z.ts".to_owned(), "file:X.ts".to_owned()]);
+        state.modules.insert("file:z.ts".to_owned(), active_group);
+
+        let mut victim = module_with_status(ModuleStatus::Blocked);
+        victim.blocked_by = Some(vec!["file:X.ts".to_owned()]);
+        victim.pre_blocked_status = Some(ModuleStatus::Pending);
+        state.modules.insert("file:victim.ts".to_owned(), victim);
+
+        let results = check_blocked_modules(&state);
+        let target = results
+            .iter()
+            .find(|r| r.module == "file:victim.ts")
+            .unwrap();
+        assert!(
+            !target.ready,
+            "宿主歧义时不得判就绪（宿主组状态各异，挑错即判错）"
+        );
+        assert_eq!(target.unresolved, vec!["file:X.ts".to_owned()]);
+        // 不是幽灵——处置动作是修组划分，不是重新同步 state。
+        assert!(target.missing.is_empty(), "坏划分不应被当成幽灵引用");
+
+        // 校验命令必须报出这个不变量被破坏（machine.rs 对同一不变量是 release 硬错，
+        // 这里不能硬错但绝不能沉默）。
+        let warnings = validate_state(&state).expect("旧文件须可读，不硬判损坏");
+        let hit = warnings
+            .iter()
+            .find(|w| w.contains("跨组互斥"))
+            .expect("坏划分须告警");
+        assert!(hit.contains("file:X.ts"), "告警须点名冲突文件: {hit}");
+        assert!(
+            hit.contains("file:a.ts") && hit.contains("file:z.ts"),
+            "告警须列出全部宿主组: {hit}"
+        );
+    }
+
+    #[test]
+    fn test_ghost_scan_output_is_deterministically_ordered() {
+        // 回归（主审 nit）：`scan_ghost_references` 的排序是告警文本可复现的唯一手段，
+        // 但此前无测试构造 ≥2 条去验证输出序——摘掉排序时全部测试仍绿，而症状是
+        // 低频 flaky（modules 是 HashMap，迭代序不定），属最难查的一类。
+        let mut state = minimal_init_state();
+        for (m, dep) in [
+            ("file:c.ts", "file:GHOST_2.ts"),
+            ("file:a.ts", "file:GHOST_9.ts"),
+            ("file:b.ts", "file:GHOST_1.ts"),
+        ] {
+            let mut blocked = module_with_status(ModuleStatus::Blocked);
+            blocked.blocked_by = Some(vec![dep.to_owned()]);
+            state.modules.insert(m.to_owned(), blocked);
+        }
+        // 同一模块内多条引用也须有序。
+        let mut multi = module_with_status(ModuleStatus::Blocked);
+        multi.blocked_by = Some(vec![
+            "file:GHOST_z.ts".to_owned(),
+            "file:GHOST_y.ts".to_owned(),
+        ]);
+        state.modules.insert("file:d.ts".to_owned(), multi);
+
+        // 多跑几轮：单轮偶然有序无法排除 HashMap 迭代序碰巧的情况。
+        let expected: Vec<(String, String)> = vec![
+            ("file:a.ts".into(), "file:GHOST_9.ts".into()),
+            ("file:b.ts".into(), "file:GHOST_1.ts".into()),
+            ("file:c.ts".into(), "file:GHOST_2.ts".into()),
+            ("file:d.ts".into(), "file:GHOST_y.ts".into()),
+            ("file:d.ts".into(), "file:GHOST_z.ts".into()),
+        ];
+        for _ in 0..8 {
+            let got: Vec<(String, String)> = scan_ghost_references(&state)
+                .into_iter()
+                .map(|g| (g.module, g.missing))
+                .collect();
+            assert_eq!(got, expected, "输出须按 (module, missing) 字典序稳定");
+        }
+    }
+
+    #[test]
+    fn test_ghost_scan_dedups_repeated_reference() {
+        // 同一 blocked_by 里重复列同一个 key：去重后只报一条，否则告警里同一条现两次。
+        let mut state = minimal_init_state();
+        let mut blocked = module_with_status(ModuleStatus::Blocked);
+        blocked.blocked_by = Some(vec!["file:GHOST.ts".to_owned(), "file:GHOST.ts".to_owned()]);
+        state.modules.insert("file:a.ts".to_owned(), blocked);
+
+        assert_eq!(scan_ghost_references(&state).len(), 1, "重复引用须去重");
     }
 
     #[test]

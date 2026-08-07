@@ -189,5 +189,7 @@ STATUS 把修法记为二选一、**需先定方向**：⒜ 如实化 + 摘依�
    - **命名冲突需留意**：`state deps` 的 `unresolved` 指的正是幽灵引用，而 `BlockedCheckResult.unresolved` 指「未进终态的依赖」（含幽灵）。同词异义，故 `--check-blocked` 侧的输出键取名 `ghost_refs` 而非复用 `unresolved`，避免两个命令的同名字段语义相反。
    - **负向实证四轮**（独立 worktree）：① `missing` 恒空（退回二分）→ 2 core + 1 e2e 报红；② 摘掉告警扫描 → 2 core 报红；③ `missing` 不计入 `unresolved`（幽灵变可就绪）→ 3 core 报红，归因精确到「带幽灵引用的模块不得判为就绪」；④ 判据反转（合法引用当幽灵）→ 3 core 报红，其中「反向不误报」由独立测试钉住。
 2. **`E002` 定义了但从不出现在输出里**（连带修正 ② 末）——`graph topo-sort` 走 `ErrorData::new`。要么改用 `with_error_code(CyclicDependency, …)` 使码域自洽，要么把 `CyclicDependency` 从枚举摘掉；两者都会动 CLI 输出契约（前者新增字段、后者改码域），需独立 PR。
-3. **`project.name` 等字符串字段空值无校验**（见「未采纳」）。
-4. **`ValidationConfig` 空结构 vs `[validation]` 配置段**——06 § 11.1 的 `timeout_secs = 30` 已注释并标注未落地。若 M2 真要做校验超时，须同时落配置字段与超时机制，否则应把该段从配置样例中彻底删去。
+3. **`transition_inner` 不校验 `blocked_by` 是否终态**（收口待办 1 时由异构交叉审查实证，**pre-existing**）——`state transition --to <pre_blocked_status>` 与 `state update --cas-version` 共用该路径，离开 `blocked` 只校验 `target == pre_blocked_status`，**不带 `--force` 即可解除阻塞**并清空 `blocked_by`；`--auto-unblock` 侧的「依赖须全终态」不变量在这条路径上不成立。对幽灵引用而言，意味着「不在损坏数据上改状态」只由 `--auto-unblock` 保证，普通 transition 仍可绕过。
+   **判为不在待办 1 范围内**：该行为对所有 blocked 模块一视同仁（非幽灵专有），本 PR 之前即如此；收窄它等于给 `blocked → pre_blocked_status` 这条边加新前置条件，会改变既有转换语义并影响 `run.md` 步骤 2 的自动解除流程，须独立评估。修法方向：把不变量下沉进 `transition_inner`，使 transition / CAS / auto-unblock 三条路径共享；人工逃生改走显式 `--force` 或 repair 语义。已在 `check_blocked_modules` 的相关测试注释中如实限定承诺范围，不为该路径背书。
+4. **`project.name` 等字符串字段空值无校验**（见「未采纳」）。
+5. **`ValidationConfig` 空结构 vs `[validation]` 配置段**——06 § 11.1 的 `timeout_secs = 30` 已注释并标注未落地。若 M2 真要做校验超时，须同时落配置字段与超时机制，否则应把该段从配置样例中彻底删去。
