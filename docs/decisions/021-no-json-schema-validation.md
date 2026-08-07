@@ -67,7 +67,9 @@ STATUS 把修法记为二选一、**需先定方向**：⒜ 如实化 + 摘依�
 
 ### ③ `BLOCKED_BY_VALIDATION_FAILED` 不只未落地，该校验本身缺失（真实功能缺口）
 
-实测：`blocked_by` 引用不存在的模块名时，`validate state --check-blocked` 返 `status:warning` / `valid:true`，该模块只落入 `still_blocked` 且**永久无法解除**（无任何告警指出引用非法）。这正是该码本该防的场景。已在 `06` 表行与 `09` 附录 B 检查点表如实标注「当前须人工核对」，并记为待办（见文末）。
+实测：`blocked_by` 引用不存在的模块名时，`validate state --check-blocked` 返 `status:warning` / `valid:true`，该模块只落入 `still_blocked` 且**永久无法解除**（无任何告警指出引用非法）。这正是该码本该防的场景。当时在 `06` 表行与 `09` 附录 B 检查点表如实标注「当前须人工核对」，并记为待办。
+
+> **已收口（后续 PR）**：待办 1 已落地为告警式检出——`validate state` 检出幽灵引用即降级 warning 并点名「引用方 → 被引 key」，`--check-blocked` 另在 `data.ghost_refs` 给逐模块明细；`06`/`09` 两处「当前须人工核对」标注同步收回。详见下方「待办」段第 1 条。
 
 ### ④ `E010` 对 state 文件损坏给出误导性建议（代码改动）
 
@@ -180,7 +182,11 @@ STATUS 把修法记为二选一、**需先定方向**：⒜ 如实化 + 摘依�
 
 ## 待办（本次核实出、判超范围）
 
-1. **`blocked_by` 幽灵引用无检出**（连带修正 ③）——真实功能缺口：模块永久 `still_blocked` 而 `valid:true`。修法方向：`validate_state` 的 blocked 检查段增加「`blocked_by` 各项须存在于 `modules` 键中」扫描，不存在则告警（沿用 MDR-019「防御性可观测」惯例，不硬判损坏——旧文件须可读）。
+1. ~~**`blocked_by` 幽灵引用无检出**~~ **✅ 已收口**（后续 PR）——落地方式与原修法方向一致（`validate_state` 加扫描 + 告警，不硬判损坏）。三点落地细化，均非原记账所能预见：
+   - **扫描覆盖全部模块而非仅 blocked**。正常路径下 `transition_module` 离开 blocked 会清空 `blocked_by`（`machine.rs:637`），但手工编辑或旧文件可能在非 blocked 模块上留残值，该模块再被标 blocked 时会立刻踩中同一个坑。`check_blocked_modules` 只看 blocked 模块，这条只能由 `validate_state` 兜住。
+   - **`BlockedCheckResult` 加 `missing` 字段**（`unresolved` 的子集）。原实现用 `.unwrap_or(false)` 把「依赖不存在」与「依赖未终态」抹平进同一个 `unresolved`，而两者处置动作**相反**：一个要重新同步 state，一个只需等待。分列后编排器才能区分。`missing` 仍计入 `unresolved` 是有意的——否则幽灵引用会让模块判为「就绪可解除」，`--auto-unblock` 就会在损坏数据上真的改状态；已有专门测试钉死这条性质。
+   - **命名冲突需留意**：`state deps` 的 `unresolved` 指的正是幽灵引用，而 `BlockedCheckResult.unresolved` 指「未进终态的依赖」（含幽灵）。同词异义，故 `--check-blocked` 侧的输出键取名 `ghost_refs` 而非复用 `unresolved`，避免两个命令的同名字段语义相反。
+   - **负向实证四轮**（独立 worktree）：① `missing` 恒空（退回二分）→ 2 core + 1 e2e 报红；② 摘掉告警扫描 → 2 core 报红；③ `missing` 不计入 `unresolved`（幽灵变可就绪）→ 3 core 报红，归因精确到「带幽灵引用的模块不得判为就绪」；④ 判据反转（合法引用当幽灵）→ 3 core 报红，其中「反向不误报」由独立测试钉住。
 2. **`E002` 定义了但从不出现在输出里**（连带修正 ② 末）——`graph topo-sort` 走 `ErrorData::new`。要么改用 `with_error_code(CyclicDependency, …)` 使码域自洽，要么把 `CyclicDependency` 从枚举摘掉；两者都会动 CLI 输出契约（前者新增字段、后者改码域），需独立 PR。
 3. **`project.name` 等字符串字段空值无校验**（见「未采纳」）。
 4. **`ValidationConfig` 空结构 vs `[validation]` 配置段**——06 § 11.1 的 `timeout_secs = 30` 已注释并标注未落地。若 M2 真要做校验超时，须同时落配置字段与超时机制，否则应把该段从配置样例中彻底删去。

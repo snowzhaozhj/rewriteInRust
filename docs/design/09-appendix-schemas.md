@@ -599,7 +599,7 @@ Skill 主上下文调用 `rustmigrate stats compare`（确定性脚本门禁）�
 | analyze Step 2.5→ analyzer 调用 | L1 | source-graph.db | 无 | ≤2 | pre-run | 语义增强失败可重试 |
 | analyze Step 4 translator 规则生成 | L1 | source-graph.db、migration-state.json | porting/ 内本次半成品 | ≤2 | profile | 重试仍败则回滚到 analyzer 完成态 |
 | analyze Step 6 scaffolder 测试搭建 | L1 | 前序全部 | test-fixtures/ 内本次半成品 | ≤2 | translator 完成态 | — |
-| run Step 0.5 引用一致性 | L2（延后） | 全部 | 无 | **否** | — | 语义码 `BLOCKED_BY_VALIDATION_FAILED` **未落地，且该校验本身缺失**——M4 实测：`blocked_by` 引用不存在的模块名时 `validate state --check-blocked` 返 `status:warning` / `valid:true`，该模块只落入 `still_blocked` 并**永久无法解除**（无告警指出引用非法）。见 [06 § 10.7](./06-plugin-structure.md#107-错误信息与可调试性mvp) 错误码表「当前实际返回」列与 [MDR-021](../decisions/021-no-json-schema-validation.md) 记账 |
+| run Step 0.5 引用一致性 | L2（告警级，不中止） | 全部 | 无 | **否** | — | 语义码 `BLOCKED_BY_VALIDATION_FAILED` 未落地，但**校验已落地为告警**（M4）：`blocked_by` 引用未登记模块时 `validate state` 降级 `status:warning` 并点名「引用方 → 被引 key」，`--check-blocked` 另在 `data.ghost_refs` 给逐模块明细。**退出码仍为 0、`valid` 仍为 true**——不硬判损坏（旧文件须可读），编排器须读 `warnings`/`ghost_refs` 而非靠退出码判定。幽灵引用仍计入阻塞，故 `--auto-unblock` 对这类模块不放行。处置是重新 `graph build` + `state populate-modules`，不是等依赖就绪。见 [06 § 10.7](./06-plugin-structure.md#107-错误信息与可调试性mvp) 错误码表与 [MDR-021](../decisions/021-no-json-schema-validation.md) |
 | run Step 1 translator 意图摘要 | L2 | — | 本次 `{module}-intent.md` | ≤2 | 模块 pending | L2 = 9 required 属性非空（附录 E） |
 | run Step 2 Phase A translator 翻译 | L1 | `{module}-intent.md` + `intermediate/attempts/*` | `rust_root/{module}.rs`（部分写入） | ≤2 | translating（substatus=null，即意图已确认、Phase A 未开始） | 回滚后重入 Step 2 |
 | run Step 3 verifier 对抗审查 | L1 | Phase A `.rs` 文件 | `intermediate/{module}-review.md` | ≤2 | translating/phase_a_complete_awaiting_review | 回滚后重入 Step 3 |

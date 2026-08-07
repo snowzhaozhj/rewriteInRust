@@ -56,6 +56,8 @@
 ### 2. 解除 blocked + 循环依赖检测
 遍历所有 `status=blocked` 模块，若其 `blocked_by` 引用的模块都已 `done`/`degrade_*`，则 `state transition --module <M> --to <pre_blocked_status> --reason 'blocked_by resolved'` 自动恢复并记日志。对 blocked 子图做 DFS 环检测：发现环即报错中止、输出环路径、记入 `metadata.last_error`（防 blocked 模块互相等待死锁）。
 
+> **幽灵引用不能靠等**：`blocked_by` 可能引用**未登记为模块**的 key（state 与 source-graph 不同步、SubAgent 写入非法引用、用户手填）。这类依赖永远不会进终态，等待是无效动作。`validate state` 会就此降级 warning 并点名「引用方 → 被引 key」，`validate state --check-blocked` 在 `data.ghost_refs` 给逐模块明细（`[{module, missing}]`）。**处置：重新 `graph build` + `state populate-modules` 同步状态**，而非继续等或手改 `blocked_by`。注意这类模块仍计入阻塞，`--auto-unblock` 不会放行它们——不是命令失灵，是不在损坏数据上改状态。
+
 > 源码 SCC（循环依赖）在 populate 阶段已被折叠成**一个模块组**（`member_files` 含组内全部源文件），翻译粒度=单文件、SCC 仅作整组编译门禁（步骤 6「SCC 组 Phase A」：契约+stub→契约门→逐文件填空→整组真门，见 [translator.md](../../agents/translator.md)「SCC 模块组翻译」），不再因循环依赖被标 `blocked`。这里的环检测只针对 `blocked` 子图的等待死锁，与源码 SCC 无关。
 
 ### 3. 目标依赖就绪门禁

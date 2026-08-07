@@ -755,7 +755,7 @@ CLI 的成功输出为 `{status, data, warnings}`（见 § 10.0.1）。失败时
 | `MUTEX_SEND_SYNC_VIOLATION` | 未落地（同上） | 跨 `.await` 持有非 Send 类型 | 缩小锁持有范围或换用 `tokio::sync::Mutex` |
 | `TYPE_INFERENCE_FAILED` | 未落地（同上） | 类型推断失败 | 补充类型标注 |
 | `PHASE_A_TRANSLATION_FAILED` | 未落地（同上） | Phase A 忠实翻译编译失败 | 见编译器诊断文本（无 `error_context` 字段，见上方结构说明） |
-| `BLOCKED_BY_VALIDATION_FAILED` | **未落地，且校验本身缺失**（M4 实测：幽灵引用返 `status:warning`/`valid:true`，模块永久 `still_blocked` 无告警） | `blocked_by` 引用了不存在的模块名（引用一致性，延后到 `/migrate run` Step 0.5 校验） | 若发生在 `/migrate analyze` 后，多为 SubAgent 写入的非法引用，重跑 `/migrate analyze`；若发生在 `/migrate run` Step 0.5，检查用户手填的 `blocked_by`。**当前须人工核对**——CLI 尚不检出 |
+| `BLOCKED_BY_VALIDATION_FAILED` | **语义码未落地，但校验已落地为告警**（M4：`validate state` 检出幽灵引用并降级 `status:warning`，`--check-blocked` 另在 `data.ghost_refs` 列出逐模块明细；不返本码、不硬判损坏——旧文件须可读） | `blocked_by` 引用了不存在的模块名（引用一致性） | 按告警文本重新执行 `graph build` + `state populate-modules` 同步 state；幽灵引用不会自行解除，`--auto-unblock` 对这类模块**不放行**（等待依赖就绪是无效动作） |
 | ~~`VALIDATION_TIMEOUT`~~ | **不存在**（无 L2 校验超时机制，`[validation].timeout_secs` 配置项亦未落地——`ValidationConfig` 是空结构） | ~~L2 校验工具超时~~ | 见下方「校验工具故障」注的 M4 订正 |
 | ~~`VALIDATION_OOM`~~ | **不存在**（CLI 不检测自身 OOM，进程被 OOM killer 杀死时无输出可言） | ~~L2 校验工具内存不足~~ | 同上 |
 | ~~`VALIDATION_SCHEMA_CORRUPTED`~~ | **不存在**（无 schema 文件可损坏，见 [MDR-021](../decisions/021-no-json-schema-validation.md)） | ~~Schema 文件损坏~~ | 同上 |
