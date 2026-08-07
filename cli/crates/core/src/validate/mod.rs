@@ -143,6 +143,10 @@ pub fn validate_state(state_file: &MigrationStateFile) -> Result<Vec<String>> {
     // 同一语义在 `state deps` 侧早已做对（幽灵依赖单列 `unresolved` + warning，且
     // run.md 明令不得填进 `blocked_by`），读侧却漏了——本扫描补上这处不对称。
     //
+    // 判据与 `check_blocked_modules` 共用 `canonicalize_blocked_ref`：composite 组的
+    // 非代表成员 key 不在 `modules` 表里但**不是**幽灵，必须先归一到组代表再判，
+    // 否则会把合法引用误报、并给出「重跑 graph build」这条对该场景无效的建议。
+    //
     // 扫描覆盖**全部模块**而非仅 blocked：正常路径下离开 blocked 会清空 `blocked_by`
     // （machine.rs `transition_module`），但手工编辑或旧文件可能在非 blocked 模块上留下
     // 残值，一旦该模块再次被标 blocked 就会立刻踩中同一个坑。
@@ -153,7 +157,7 @@ pub fn validate_state(state_file: &MigrationStateFile) -> Result<Vec<String>> {
             continue;
         };
         for dep in blocked_by {
-            if !state_file.modules.contains_key(dep) {
+            if canonicalize_blocked_ref(state_file, dep).is_none() {
                 ghost_refs.push(format!("`{name}` → `{dep}`"));
             }
         }
@@ -285,12 +289,17 @@ pub struct BlockedCheckResult {
     pub resolved: Vec<String>,
     /// `blocked_by` 中尚未终态的模块（**含** `missing`——见该字段说明）。
     pub unresolved: Vec<String>,
-    /// `blocked_by` 中**未登记为模块**的引用（幽灵引用）。
+    /// `blocked_by` 中**既非登记模块、也不属于任何 composite 组**的引用（幽灵引用）。
     ///
     /// 与 `unresolved` 的其余项性质不同：后者是「等得到的依赖」（依赖真实存在、
     /// 迟早进终态），前者是**数据不一致**——被引用的 key 在 `modules` 里根本没有，
     /// 等待永远不会结束。两者处置动作相反（等 vs 重跑 `graph build` +
     /// `populate-modules` 同步状态），故必须分列。
+    ///
+    /// 判定经 [`canonicalize_blocked_ref`] 归一：composite 组的非代表成员 key 同样
+    /// 不在 `modules` 表里，但它**不是**幽灵——实体真实存在、登记在组代表名下，
+    /// 且「重跑 graph build」对它是无效动作（成员不进 `modules` 是 decompose 的
+    /// 既定设计）。误报会把用户导向一个做了也没用的操作。
     ///
     /// 仍保留在 `unresolved` 内是**有意的**：幽灵引用绝不能让模块变成「就绪可解除」，
     /// 否则 `--auto-unblock` 会在损坏数据上真的改状态。`missing` 是 `unresolved` 的
@@ -300,13 +309,49 @@ pub struct BlockedCheckResult {
     pub ready: bool,
 }
 
+/// 把一个 `blocked_by` 引用归一到它所属的模块 key。
+///
+/// composite 组折叠后 `modules` 只登记**组代表** key，组内非代表成员（`member_files`
+/// 里的其余文件）不是独立模块。故「不在 `modules` 里」并不等于「不存在」——它可能是
+/// 某个组的合法成员，实体真实存在、只是登记在组代表名下。
+///
+/// 返回 `Some(归一后的 key)`；只有归一后仍无归属的才是真幽灵引用（返回 `None`）。
+///
+/// 与 `state deps` 的 `cmd_state_deps` 归一逻辑同源（那里是正向依赖闭包的
+/// 「文件→组代表」映射），此处是 `blocked_by` 方向。两侧都不做归一就会各自误判：
+/// 那边会漏掉组外依赖，这边会把合法成员 key 误报成幽灵。
+fn canonicalize_blocked_ref<'a>(
+    state_file: &'a MigrationStateFile,
+    dep: &'a str,
+) -> Option<&'a String> {
+    // 已是登记模块（含组代表自身）：直接命中。
+    if let Some((key, _)) = state_file.modules.get_key_value(dep) {
+        return Some(key);
+    }
+    // 否则反查 member_files：确定性取字典序最小的宿主组，避免 HashMap 迭代序
+    // 让同一份 state 产出不同结论（成员理论上只属一个组，但 state 可被手工编辑）。
+    state_file
+        .modules
+        .iter()
+        .filter(|(_, m)| {
+            m.member_files
+                .as_ref()
+                .is_some_and(|mf| mf.iter().any(|f| f == dep))
+        })
+        .map(|(key, _)| key)
+        .min()
+}
+
 /// 检查所有 blocked 模块的依赖就绪状态。
 ///
 /// 遍历 `modules` 中 `status == Blocked` 的模块，逐个检查其 `blocked_by`
 /// 引用的模块是否已进入终态（done/degrade_ffi/degrade_manual/degrade_skip）。
 ///
-/// 返回每个 blocked 模块的检查结果（含已解决/未解决依赖列表）。**未登记为模块的
-/// 引用**另行汇入 `missing`（同时计入 `unresolved`），理由见 [`BlockedCheckResult::missing`]。
+/// 引用先经 [`canonicalize_blocked_ref`] 归一（composite 组成员 key → 组代表），
+/// 就绪与否按**归一后**的模块判定。归一后仍无归属的引用汇入 `missing`（同时计入
+/// `unresolved`），理由见 [`BlockedCheckResult::missing`]。
+///
+/// 返回每个 blocked 模块的检查结果（含已解决/未解决依赖列表）。
 pub fn check_blocked_modules(state_file: &MigrationStateFile) -> Vec<BlockedCheckResult> {
     let mut results = Vec::new();
 
@@ -328,14 +373,21 @@ pub fn check_blocked_modules(state_file: &MigrationStateFile) -> Vec<BlockedChec
         let mut missing = Vec::new();
 
         for dep in &blocked_by {
-            // 三分：不存在 / 存在且终态 / 存在但未终态。此前「不存在」与「未终态」
-            // 都经 `unwrap_or(false)` 落进 `unresolved`，两种相反的处置动作被抹平。
-            match state_file.modules.get(dep) {
+            // 三分：无归属（真幽灵）/ 归一后终态 / 归一后未终态。此前「不存在」与
+            // 「未终态」都经 `unwrap_or(false)` 落进 `unresolved`，两种相反的处置
+            // 动作被抹平；而不做归一则会把 composite 组的合法成员 key 误判成不存在。
+            //
+            // 注意 `resolved`/`unresolved` 里保留的是**原始** dep 字符串而非归一后的
+            // key：这些列表要能与用户 state 里的 `blocked_by` 逐条对上，换成组代表会
+            // 让人对不上自己写的是什么。归一只用于判定，不改回显。
+            match canonicalize_blocked_ref(state_file, dep) {
                 None => {
                     missing.push(dep.clone());
                     unresolved.push(dep.clone());
                 }
-                Some(m) if m.status.is_terminal() => resolved.push(dep.clone()),
+                Some(canonical) if state_file.modules[canonical].status.is_terminal() => {
+                    resolved.push(dep.clone())
+                }
                 Some(_) => unresolved.push(dep.clone()),
             }
         }
@@ -1124,6 +1176,69 @@ mod tests {
         let results = check_blocked_modules(&state);
         assert!(results[0].missing.is_empty());
         assert!(results[0].ready);
+    }
+
+    #[test]
+    fn test_composite_member_key_is_not_a_ghost_reference() {
+        // 回归：composite 组的**非代表成员** key 不在 `modules` 表里（decompose 折叠后
+        // 只登记组代表），但它不是幽灵——实体真实存在、登记在组代表名下。
+        // 不做归一就会误报，且给出的「重跑 graph build + populate-modules」对该场景是
+        // 无效动作（成员本就不会进 modules 表）。
+        let mut state = minimal_init_state();
+        let mut group = module_with_status(ModuleStatus::Translating);
+        group.member_files = Some(vec![
+            "file:emitter.ts".to_owned(),
+            "file:handler.ts".to_owned(),
+        ]);
+        state.modules.insert("file:emitter.ts".to_owned(), group);
+
+        let mut blocked = module_with_status(ModuleStatus::Blocked);
+        blocked.blocked_by = Some(vec!["file:handler.ts".to_owned()]);
+        state.modules.insert("file:shared.ts".to_owned(), blocked);
+
+        let warnings = validate_state(&state).expect("合法 state");
+        assert!(
+            !warnings.iter().any(|w| w.contains("幽灵引用")),
+            "组成员 key 不得被误报为幽灵引用: {warnings:?}"
+        );
+
+        let results = check_blocked_modules(&state);
+        let target = results
+            .iter()
+            .find(|r| r.module == "file:shared.ts")
+            .unwrap();
+        assert!(target.missing.is_empty(), "组成员 key 不得进 missing");
+        // 归一后按**组代表**的状态判定：emitter 组是 translating（非终态）→ 仍阻塞。
+        assert_eq!(target.unresolved, vec!["file:handler.ts".to_owned()]);
+        assert!(!target.ready);
+    }
+
+    #[test]
+    fn test_composite_member_ref_resolves_when_group_is_terminal() {
+        // 承上：归一的意义不止「不误报」，还要按**组代表**的真实状态判就绪。
+        // 组进终态后，引用其成员 key 的模块应能解除——不做归一则永远解除不了。
+        let mut state = minimal_init_state();
+        let mut group = module_with_status(ModuleStatus::Done);
+        group.member_files = Some(vec![
+            "file:emitter.ts".to_owned(),
+            "file:handler.ts".to_owned(),
+        ]);
+        state.modules.insert("file:emitter.ts".to_owned(), group);
+
+        let mut blocked = module_with_status(ModuleStatus::Blocked);
+        blocked.blocked_by = Some(vec!["file:handler.ts".to_owned()]);
+        blocked.pre_blocked_status = Some(ModuleStatus::Pending);
+        state.modules.insert("file:shared.ts".to_owned(), blocked);
+
+        let results = check_blocked_modules(&state);
+        let target = results
+            .iter()
+            .find(|r| r.module == "file:shared.ts")
+            .unwrap();
+        // 回显保留原始 dep 字符串（用户在 state 里写的就是它），不换成组代表。
+        assert_eq!(target.resolved, vec!["file:handler.ts".to_owned()]);
+        assert!(target.unresolved.is_empty());
+        assert!(target.ready, "组已终态，引用其成员的模块应可解除");
     }
 
     #[test]
