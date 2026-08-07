@@ -1838,7 +1838,9 @@ fn cmd_graph_export(format: &str) -> CmdResult {
 /// 基础模式（无 flag）：执行 schema 版本、历史链、前置条件等完整性检查。
 ///
 /// `--check-blocked`：额外检查所有 blocked 模块的 `blocked_by` 依赖是否已进入终态，
-/// 并执行 DFS 环检测（blocked_by 关系图中的环路会导致死锁）。
+/// 并执行 DFS 环检测（blocked_by 关系图中的环路会导致死锁）。输出的 `ghost_refs`
+/// 列出「引用了未登记模块」的条目——它们同时在 `still_blocked` 里，但成因是 state 与
+/// source-graph 不同步（等待永不结束），处置须重新同步而非等依赖就绪。
 ///
 /// `--auto-unblock`（需配合 `--check-blocked`）：对就绪的 blocked 模块自动恢复到
 /// `pre_blocked_status`（无则默认 `pending`），通过 `transition_module` 落盘。
@@ -1877,11 +1879,22 @@ fn cmd_validate_state(check_blocked: bool, auto_unblock: bool) -> CmdResult {
         .collect();
     let cycle_paths: Vec<Vec<String>> = cycles;
 
+    // 幽灵引用（`blocked_by` 指向未登记的 key）单列：它们也在 `still_blocked` 里，但
+    // 处置动作与「依赖还没译完」相反——等待永远不会结束，必须重新同步 state。
+    // 告警本身由 `validate_state` 统一发出（覆盖全部模块，不限 blocked），此处只把
+    // 逐模块的明细接进 data 供编排器机读。
+    let ghost_refs: Vec<serde_json::Value> = checks
+        .iter()
+        .filter(|r| !r.missing.is_empty())
+        .map(|r| json!({ "module": r.module, "missing": r.missing }))
+        .collect();
+
     let mut data = json!({
         "valid": true,
         "blocked_count": blocked_count,
         "ready_to_unblock": ready_modules,
         "still_blocked": still_blocked,
+        "ghost_refs": ghost_refs,
         "cycles": cycle_paths,
     });
 

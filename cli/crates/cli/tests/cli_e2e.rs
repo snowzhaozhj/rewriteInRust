@@ -3472,6 +3472,93 @@ fn smoke_state_deps_unresolved_not_blocking() {
 }
 
 #[test]
+fn smoke_validate_detects_ghost_blocked_by_reference() {
+    // MDR-021 待办 1：`blocked_by` 引用未登记模块时，此前 `validate state` 返
+    // `valid:true` 零告警、`--check-blocked` 只把它列进 `still_blocked`——与「依赖还在
+    // 翻译中」完全无法区分，而这个依赖永远不会进终态，模块永久阻塞。
+    //
+    // 复现路径与 `smoke_state_deps_unresolved_not_blocking` 同源（state 与 graph 不同步），
+    // 但走的是读侧：那条测试证明 deps 侧不把幽灵 key 填进 blocked_by，这条证明**已经**
+    // 落进 blocked_by 的幽灵 key 能被检出。
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("circular-deps"), tmp.path());
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        let (code, _) = run(&["graph", "build", "--root", "src"]);
+        assert_eq!(code, 0);
+        let (code, _) = run(&["state", "populate-modules"]);
+        assert_eq!(code, 0);
+
+        // 手工把一个模块标 blocked 并填入不存在的 blocked_by（模拟 SubAgent 写入非法
+        // 引用 / 用户手填 / state 与 graph 不同步后残留）。
+        let sp = tmp.path().join(".rust-migration/migration-state.json");
+        let mut sf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+        let key = sf["modules"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        sf["modules"][&key]["status"] = serde_json::json!("blocked");
+        sf["modules"][&key]["blocked_by"] = serde_json::json!(["file:GHOST.ts"]);
+        sf["modules"][&key]["pre_blocked_status"] = serde_json::json!("pending");
+        std::fs::write(&sp, serde_json::to_string_pretty(&sf).unwrap()).unwrap();
+
+        // 基础 validate：必须降级 warning 并点名幽灵引用，且不硬判损坏（旧文件须可读）。
+        let (code, json) = run(&["validate", "state"]);
+        assert_eq!(code, 0, "幽灵引用只告警，不应命令失败: {json}");
+        assert_eq!(json["status"], "warning", "有告警须降级 status: {json}");
+        assert_eq!(json["data"]["valid"], true);
+        let warns = json["warnings"].as_array().unwrap();
+        let ghost_warn = warns
+            .iter()
+            .find(|w| w.as_str().unwrap().contains("幽灵引用"))
+            .unwrap_or_else(|| panic!("应就幽灵引用告警: {json}"));
+        let ghost_warn = ghost_warn.as_str().unwrap();
+        assert!(
+            ghost_warn.contains("file:GHOST.ts") && ghost_warn.contains(&key),
+            "告警须点名引用方与被引 key: {ghost_warn}"
+        );
+
+        // --check-blocked：幽灵引用单列进 ghost_refs，同时仍留在 still_blocked
+        // （它确实阻塞），但编排器据 ghost_refs 可区分出「等不到」而非「还没到」。
+        let (code, json) = run(&["validate", "state", "--check-blocked"]);
+        assert_eq!(code, 0, "{json}");
+        let ghost_refs = json["data"]["ghost_refs"].as_array().unwrap();
+        assert_eq!(ghost_refs.len(), 1, "应有一条幽灵引用记录: {json}");
+        assert_eq!(ghost_refs[0]["module"], serde_json::json!(key));
+        assert_eq!(
+            ghost_refs[0]["missing"],
+            serde_json::json!(["file:GHOST.ts"])
+        );
+        assert!(
+            json["data"]["still_blocked"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m.as_str().unwrap() == key),
+            "幽灵引用仍须阻塞: {json}"
+        );
+
+        // --auto-unblock：绝不能在损坏数据上改状态。
+        let (code, json) = run(&["validate", "state", "--check-blocked", "--auto-unblock"]);
+        assert_eq!(code, 0, "{json}");
+        assert!(
+            json["data"]["unblocked"].as_array().unwrap().is_empty(),
+            "不得自动解除带幽灵引用的模块: {json}"
+        );
+        let sf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+        assert_eq!(
+            sf["modules"][&key]["status"], "blocked",
+            "落盘状态须保持 blocked"
+        );
+    });
+}
+
+#[test]
 fn smoke_populate_rejects_active_progress() {
     let project = temp_linear_project();
     with_cwd(project.path(), || {
