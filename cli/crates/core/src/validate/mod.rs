@@ -177,9 +177,11 @@ pub fn validate_state(state_file: &MigrationStateFile) -> Result<Vec<String>> {
             ));
         }
         warnings.push(format!(
-            "{}——state 与 source-graph 不同步。处置：重新执行 `graph build` + \
-             `state populate-modules` 同步；若模块已有迁移进度导致 populate 拒绝重填，\
-             须先 `state reset --module <M>`（会丢弃该模块进度）再同步，不要靠等待依赖就绪",
+            "{}——state 与 source-graph 不同步。处置：对每个模块执行 \
+             `state transition --module <M> --to <pre_blocked_status>`（离开 blocked 即\
+             清空 blocked_by，不丢迁移进度），再 `graph build` 重建图确认依赖关系；\
+             不要靠等待依赖就绪。注意 `state populate-modules` 对非 pending 模块会拒绝\
+             重填，故不是本场景的处置手段",
             parts.join("；")
         ));
     }

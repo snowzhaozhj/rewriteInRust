@@ -56,9 +56,11 @@
 ### 2. 解除 blocked + 循环依赖检测
 遍历所有 `status=blocked` 模块，若其 `blocked_by` 引用的模块都已 `done`/`degrade_*`，则 `state transition --module <M> --to <pre_blocked_status> --reason 'blocked_by resolved'` 自动恢复并记日志。对 blocked 子图做 DFS 环检测：发现环即报错中止、输出环路径、记入 `metadata.last_error`（防 blocked 模块互相等待死锁）。
 
-> **幽灵引用不能靠等**：`blocked_by` 可能引用**无处归属**的 key（state 与 source-graph 不同步、SubAgent 写入非法引用、用户手填）。这类依赖永远不会进终态，等待是无效动作。`validate state` 会就此降级 warning 并点名「引用方 → 被引 key」，`validate state --check-blocked` 在 `data.ghost_refs` 给逐条明细（`[{module, missing, module_blocked}]`，`missing` 是**单个** key 字符串、每条一项；`module_blocked=true` 表示该模块此刻就被永久阻塞，`false` 表示只是残留引用、当前不阻塞但它一旦被标 blocked 即永久阻塞）。**处置：重新 `graph build` + `state populate-modules` 同步状态**；若该模块已有迁移进度导致 populate 拒绝重填，须先 `state reset --module <M>`（会丢弃该模块进度）再同步。注意 `module_blocked=true` 的模块仍计入阻塞，`--auto-unblock` 不会放行它们——不是命令失灵，是不在损坏数据上改状态。
+> **幽灵引用不能靠等**：`blocked_by` 可能引用**无处归属**的 key（state 与 source-graph 不同步、SubAgent 写入非法引用、用户手填）。这类依赖永远不会进终态，等待是无效动作。`validate state` 会就此降级 warning 并点名「引用方 → 被引 key」，`validate state --check-blocked` 在 `data.ghost_refs` 给逐条明细（`[{module, missing, module_blocked}]`，`missing` 是**单个** key 字符串、每条一项；`module_blocked=true` 表示该模块此刻就被永久阻塞，`false` 表示只是残留引用、当前不阻塞但它一旦被标 blocked 即永久阻塞）。
 >
-> composite 组的**非代表成员** key 不算幽灵（它登记在组代表名下，CLI 已自动归一到组代表判定），不会出现在 `ghost_refs` 里。
+> **处置：对每个模块执行 `state transition --module <M> --to <pre_blocked_status>`**——离开 blocked 即清空 `blocked_by`，不丢迁移进度；随后 `graph build` 重建图确认真实依赖。**不要用 `state populate-modules`**：它对非 pending 模块一律拒绝重填（断点续传保护），而幽灵引用按定义就发生在 blocked 等非 pending 状态上，照做必然失败；`state reset` 同样不解决（它把模块置为 `translating`，仍非 pending）。注意 `module_blocked=true` 的模块仍计入阻塞，`--auto-unblock` 不会放行它们——不是命令失灵，是不在损坏数据上改状态。
+>
+> composite 组的**非代表成员** key 不算幽灵（它登记在组代表名下，CLI 已自动归一到组代表判定），不会出现在 `ghost_refs` 里。但若同一文件被**多个组**列为 `member_files`（跨组互斥不变量被破坏），CLI 无法判定按哪个组判就绪，会单独告警并一律按未就绪处理——处置是修正 `member_files` 划分，不是重新同步。
 
 > 源码 SCC（循环依赖）在 populate 阶段已被折叠成**一个模块组**（`member_files` 含组内全部源文件），翻译粒度=单文件、SCC 仅作整组编译门禁（步骤 6「SCC 组 Phase A」：契约+stub→契约门→逐文件填空→整组真门，见 [translator.md](../../agents/translator.md)「SCC 模块组翻译」），不再因循环依赖被标 `blocked`。这里的环检测只针对 `blocked` 子图的等待死锁，与源码 SCC 无关。
 

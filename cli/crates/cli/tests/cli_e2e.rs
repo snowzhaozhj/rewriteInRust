@@ -3514,6 +3514,10 @@ fn smoke_validate_detects_ghost_blocked_by_reference() {
         let (code, json) = run(&["validate", "state"]);
         assert_eq!(code, 0, "幽灵引用只告警，不应命令失败: {json}");
         assert_eq!(json["status"], "warning", "有告警须降级 status: {json}");
+        // 注：`valid` 在 cmd_validate_state 里是硬编码字面量，任何输入下都是 true，
+        // 该断言不区分实现分支——它锁的是 09:602 对编排器的**文档承诺**（「退出码
+        // 仍为 0、valid 仍为 true」）。「不硬判损坏」的真实可观测面是上面两条
+        // （code==0 + status 降级），不是这一条。
         assert_eq!(json["data"]["valid"], true);
         let warns = json["warnings"].as_array().unwrap();
         let ghost_warn = warns
@@ -3584,6 +3588,91 @@ fn smoke_validate_detects_ghost_blocked_by_reference() {
             ghost_refs[0]["module_blocked"],
             serde_json::json!(false),
             "pending 模块不得标记为已阻塞: {json}"
+        );
+    });
+}
+
+#[test]
+fn smoke_ghost_reference_advice_actually_works() {
+    // 主审 imp：告警给的处置动作必须**照做能成功**。此前只验告警文本含哪些 key，
+    // 没验建议可执行——而当时的建议（`graph build` + `populate-modules`）在主路径上
+    // 确定性失败：幽灵引用按定义发生在 blocked/translating 等非 pending 状态，而
+    // populate 对非 pending 模块一律拒绝重填（断点续传保护）；补的 `state reset`
+    // 前置也不行——reset 置为 translating，仍非 pending。
+    //
+    // 这是 MDR-020 finding 5 修过的同一失败模式：用户可见文案把人领进死路。
+    // 本测试钉住「建议照做真能解决」，而不只是「告警文本长这样」。
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("circular-deps"), tmp.path());
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        assert_eq!(run(&["graph", "build", "--root", "src"]).0, 0);
+        assert_eq!(run(&["state", "populate-modules"]).0, 0);
+
+        let sp = tmp.path().join(".rust-migration/migration-state.json");
+        let mut sf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+        let key = sf["modules"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .min()
+            .unwrap()
+            .clone();
+        sf["modules"][&key]["status"] = serde_json::json!("blocked");
+        sf["modules"][&key]["blocked_by"] = serde_json::json!(["file:GHOST.ts"]);
+        sf["modules"][&key]["pre_blocked_status"] = serde_json::json!("pending");
+        std::fs::write(&sp, serde_json::to_string_pretty(&sf).unwrap()).unwrap();
+
+        // 取告警里给出的处置命令。
+        let (_, json) = run(&["validate", "state"]);
+        let advice = json["warnings"][0].as_str().unwrap().to_string();
+        assert!(
+            advice.contains("state transition"),
+            "告警须给出 transition 处置: {advice}"
+        );
+        assert!(
+            !advice.contains("populate-modules 同步"),
+            "不得再建议用 populate 同步——该路径对非 pending 模块必然被拒: {advice}"
+        );
+
+        // 反证：在**幽灵态尚未处置时**，旧文案建议的 populate 路径确实走不通。
+        // 必须在 transition 之前测——处置后模块已回 pending，populate 反而会成功，
+        // 那时的成功证明不了任何事。
+        let (code, out) = run(&["state", "populate-modules"]);
+        assert_ne!(
+            code, 0,
+            "幽灵态（blocked）下 populate 应拒绝——这正是旧文案走不通的原因: {out}"
+        );
+        assert!(
+            out["data"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("非 pending"),
+            "拒绝理由应为非 pending 状态保护: {out}"
+        );
+
+        // 照建议执行：transition 回 pre_blocked_status。
+        let (code, out) = run(&[
+            "state",
+            "transition",
+            "--module",
+            &key,
+            "--to",
+            "pending",
+            "--reason",
+            "清除幽灵 blocked_by",
+        ]);
+        assert_eq!(code, 0, "告警建议的命令必须能成功执行: {out}");
+
+        // 照做之后问题真的消失（这才是「建议有效」的定义）。
+        let (code, json) = run(&["validate", "state"]);
+        assert_eq!(code, 0, "{json}");
+        assert_eq!(json["status"], "ok", "照建议处置后不应再有任何告警: {json}");
+        let (_, json) = run(&["validate", "state", "--check-blocked"]);
+        assert!(
+            json["data"]["ghost_refs"].as_array().unwrap().is_empty(),
+            "幽灵引用应已清除: {json}"
         );
     });
 }
