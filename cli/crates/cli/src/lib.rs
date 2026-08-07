@@ -2948,8 +2948,10 @@ fn cmd_state_deps(module: &str) -> CmdResult {
     }
 
     // 按终态（done/degrade_*）判就绪。未登记为模块的依赖（state 与 graph 不同步）单列
-    // `unresolved` + 告警，**不计入 blocking**——否则会被 run 填进 blocked_by，而
-    // check-blocked 对缺失 key 永判非终态（validate/mod.rs `unwrap_or(false)`），导致模块永久 blocked 死锁。
+    // `unresolved` + 告警，**不计入 blocking**——否则会被 run 填进 blocked_by，而缺失 key
+    // 永远不会进终态，模块将永久 blocked。读侧现已能检出这种幽灵引用（`validate state`
+    // 告警 + `--check-blocked` 的 `data.ghost_refs`），但那是**事后可观测**；此处不写进
+    // blocking 才是从源头不制造它。
     let mut dependencies = Vec::with_capacity(dep_keys.len());
     let mut blocking = Vec::new();
     let mut unresolved = Vec::new();

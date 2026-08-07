@@ -3491,6 +3491,10 @@ fn smoke_validate_detects_ghost_blocked_by_reference() {
 
         // 手工把一个模块标 blocked 并填入不存在的 blocked_by（模拟 SubAgent 写入非法
         // 引用 / 用户手填 / state 与 graph 不同步后残留）。
+        //
+        // 取字典序最小的 key 而非 `.keys().next()`：后者的稳定性依赖「serde_json 未启用
+        // preserve_order 故 Map 实为 BTreeMap」这一不显眼的前提，前提一变测试就 flaky
+        // 且症状难懂。显式排序把选取变成确定的。
         let sp = tmp.path().join(".rust-migration/migration-state.json");
         let mut sf: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
@@ -3498,8 +3502,8 @@ fn smoke_validate_detects_ghost_blocked_by_reference() {
             .as_object()
             .unwrap()
             .keys()
-            .next()
-            .unwrap()
+            .min()
+            .expect("populate 后应至少有一个模块")
             .clone();
         sf["modules"][&key]["status"] = serde_json::json!("blocked");
         sf["modules"][&key]["blocked_by"] = serde_json::json!(["file:GHOST.ts"]);
