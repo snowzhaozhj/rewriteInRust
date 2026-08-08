@@ -4,7 +4,8 @@
 
 ## 当前位置
 
-- **`blocked_by` 幽灵引用检出已交付（分支 `fix/m4-jsonschema-truthfulness`，堆叠在 #88 之上，待用户拍板）**——收口 [MDR-021](decisions/021-no-json-schema-validation.md) 待办 1，是该批待办里唯一的**真实功能缺口**（其余为文档/守卫类）。`just ci` 全绿 877 测试（861 → 877）。
+- **`blocked_by` 幽灵引用检出已交付并推送（PR [#88](https://github.com/snowzhaozhj/rewriteInRust/pull/88) 第二部分，2026-08-08 推送 `47a8b3c`，待用户拍板）**——收口 [MDR-021](decisions/021-no-json-schema-validation.md) 待办 1，是该批待办里唯一的**真实功能缺口**（其余为文档/守卫类）。`just ci` 全绿 877 测试（861 → 877）。
+  - **⚠️ 教训：交付曾滞留本地 12 个提交未推送，远端 PR 上的绿 CI 是旧提交跑的**。本条此前写「已交付待拍板」而未记推送状态，下一会话据此会误判为「可以合并」，而当时合并的是**不含本功能**的旧提交。**此后凡记「待拍板」，必须同时记明：已推送的 commit sha + 远端 CI 是否针对该 sha 复跑通过**——「本地 `just ci` 全绿」不等于「PR 上的东西是绿的」。已在推送后校验 5 项远端检查针对 `47a8b3c` 复跑。
   - **缺口实证**：`blocked_by` 引用无处归属的 key 时，`validate state` 返 `valid:true` **零告警**、`--check-blocked` 只把它列进 `still_blocked`——与「依赖还在翻译中」完全无法区分，而该依赖永远不会进终态，模块**永久阻塞**。根因是 `check_blocked_modules` 用 `.unwrap_or(false)` 把「依赖不存在」与「依赖未终态」抹平进同一个 `unresolved`，而两者处置动作**相反**（重新同步 state vs 等待）。同一语义在 `state deps` 侧早已做对（幽灵依赖单列 + warning，`run.md:64` 明令不得填进 `blocked_by`），读侧漏了——本次补上这处不对称。
   - **交付**：新增 `scan_ghost_references`（幽灵引用的唯一表示，`validate_state` 告警与 CLI `data.ghost_refs` 共用它）；`check_blocked_modules` 把幽灵引用与宿主歧义都按未终态处理（不判 ready，故 `--auto-unblock` 不会在损坏数据上改状态）；告警扫描覆盖**全部模块**而非仅 blocked（正常路径离开 blocked 会清空 `blocked_by`，但手工编辑/旧文件可能残留，该模块再被标 blocked 即踩坑）；`run.md` 步骤 2 改为先调 `validate state --check-blocked` 再按 `data` 分流。**无破坏性变更**（中途曾加 `BlockedCheckResult.missing`，经专项审查确认无生产消费方后移除——它与 `GhostReference` 是同一概念的两份表示，正是「两处各算一遍致口径不一致」的同类风险源）。
   - **自查抓到的真实缺陷（本 PR 引入，已修）**：初版判据「不在 `modules` 即幽灵」会把 **composite 组的非代表成员 key 误报**——decompose 折叠后只登记组代表，成员不进 `modules` 是既定设计，而告警给的「重跑 `graph build` + `populate-modules`」对该场景是**无效动作**。危害不止误报：归一后语义完全不同（成员属哪个组、该组是否终态决定它是否就绪），不归一则组进 `done` 后引用方**永远解除不了**。修法是新增归一函数（先查 `modules`，再反查 `member_files`；后续因坏划分问题重构为三态 `resolve_blocked_ref`），与 `state deps` 的归一同源、两处共用同一判据。设计契约视角独立复现了同一缺陷。
