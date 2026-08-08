@@ -463,8 +463,9 @@ fn resolve_blocked_ref<'a>(state_file: &'a MigrationStateFile, dep: &str) -> Ref
 /// 引用的模块是否已进入终态（done/degrade_ffi/degrade_manual/degrade_skip）。
 ///
 /// 引用先经 [`canonicalize_blocked_ref`] 归一（composite 组成员 key → 组代表），
-/// 就绪与否按**归一后**的模块判定。归一后仍无归属的引用汇入 `missing`（同时计入
-/// `unresolved`），理由见 [`BlockedCheckResult::missing`]。
+/// 就绪与否按**归一后**的模块判定。归一后仍无归属的引用（幽灵引用）与宿主歧义的引用
+/// 一律计入 `unresolved`、不判就绪，理由见 [`BlockedCheckResult::unresolved`]；
+/// 要单独取出哪些是幽灵引用请用 [`scan_ghost_references`]。
 ///
 /// 返回每个 blocked 模块的检查结果（含已解决/未解决依赖列表）。
 pub fn check_blocked_modules(state_file: &MigrationStateFile) -> Vec<BlockedCheckResult> {
@@ -501,7 +502,8 @@ pub fn check_blocked_modules(state_file: &MigrationStateFile) -> Vec<BlockedChec
                 RefResolution::Missing => unresolved.push(dep.clone()),
                 // 坏划分：宿主组状态各异，挑错就判错就绪 → 一律按非终态处理，
                 // 绝不让它把模块推成 ready（`--auto-unblock` 会据此真的改状态）。
-                // 不进 `missing`——它不是幽灵，处置动作是修组划分而非重新同步。
+                // 但它不算幽灵（故不进 `scan_ghost_references` 结果），处置动作是修组
+                // 划分而非重新同步 state。
                 RefResolution::Ambiguous(_) => unresolved.push(dep.clone()),
                 RefResolution::Resolved(canonical)
                     if state_file.modules[canonical].status.is_terminal() =>
@@ -1256,7 +1258,7 @@ mod tests {
 
     #[test]
     fn test_check_blocked_missing_dep_not_terminal() {
-        // blocked_by 引用不存在的模块 → 视为非终态（安全侧）+ 单列进 missing。
+        // blocked_by 引用不存在的模块 → 视为非终态（安全侧），且能被扫成幽灵引用。
         let mut state = minimal_init_state();
         let mut blocked = module_with_status(ModuleStatus::Blocked);
         blocked.blocked_by = Some(vec!["nonexistent".to_owned()]);
@@ -1275,7 +1277,7 @@ mod tests {
     #[test]
     fn test_check_blocked_separates_missing_from_pending_dep() {
         // 同一模块同时有「真实但未终态」与「幽灵」两类依赖：都进 unresolved，
-        // 但只有后者进 missing。两者处置动作相反（等 vs 重新同步 state），
+        // 但只有后者进幽灵扫描结果。两者处置动作相反（等 vs 重新同步 state），
         // 若不分列，编排器无从区分。
         let mut state = minimal_init_state();
         state.modules.insert(
@@ -1301,8 +1303,8 @@ mod tests {
 
     #[test]
     fn test_check_blocked_terminal_dep_not_reported_missing() {
-        // 反向：依赖真实存在且终态时 missing 必须为空（防判据写成「不在 resolved 里
-        // 就算 missing」这类等价变异）。
+        // 反向：依赖真实存在且终态时幽灵扫描结果必须为空（防判据写成「不在 resolved 里
+        // 就算幽灵」这类等价变异）。
         let mut state = minimal_init_state();
         state
             .modules
