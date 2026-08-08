@@ -679,12 +679,46 @@ fn strip_placeholders(cmd: &str) -> String {
 /// 只接受锚点行之后**缩进两格**的 `- **<分组>**：` 行；第一个不满足的行即区块结束
 /// （文档紧随其后就有一个同格式但缩进为零的 `- **\`profile --adapter-tools\` 路径…**` 项，
 /// 只靠格式判断会把它误收进来）。
+///
+/// **按 Markdown 渲染语义排除不可见内容**（与 06 侧 `scan_table` 同一套处理，理由见那里）：
+/// 守卫的命题是「**读者看到的**清单 == CLI」，逐行扫描原始文本则读得到读者看不到的内容。
+/// 自查实证：把整个清单包进 `<!-- -->`（渲染后读者看不到任何清单）时 4 个测试**全绿**——
+/// 与 codex 当初击穿 06 侧守卫是同一手法（06 侧已修，写本侧时漏了沿用）。
+/// 同理排除代码块围栏内的样例清单（否则文档里的示例会被当成权威声明）。
 fn parse_skill_command_list(text: &str) -> Vec<SkillGroup> {
     let top = cli_top_level_names();
     let mut groups = Vec::new();
     let mut in_list = false;
+    let mut in_html_comment = false;
+    let mut in_fenced_code = false;
 
     for line in text.lines() {
+        let trimmed = line.trim();
+
+        // 代码块围栏：块内整段跳过（含其中的清单样例）。
+        if trimmed.starts_with("```") {
+            in_fenced_code = !in_fenced_code;
+            continue;
+        }
+        if in_fenced_code {
+            continue;
+        }
+
+        // HTML 注释：可同行开闭，也可跨行。注释内的一切都不渲染，一律跳过。
+        if in_html_comment {
+            if trimmed.contains("-->") {
+                in_html_comment = false;
+            }
+            continue;
+        }
+        if trimmed.contains("<!--") && !trimmed.contains("-->") {
+            in_html_comment = true;
+            continue;
+        }
+        if trimmed.contains("<!--") {
+            continue;
+        }
+
         if !in_list {
             // 锚点：命令清单那一行（同时含「命令清单」与「已穷举」，避免匹配到别处提及）。
             if line.contains("命令清单") && line.contains("已穷举") {
@@ -846,4 +880,56 @@ fn skill_list_parser_keeps_commands_that_double_as_state_words() {
     let groups = parse_skill_command_list(doc);
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0].commands, vec!["init", "graduate"]);
+}
+
+/// 不可见内容不得被当作权威声明（自查击穿后补）。
+///
+/// 守卫的命题是「**读者看到的**清单 == CLI」。若逐行扫描原始文本，把清单包进 `<!-- -->`
+/// 即可让读者看不到任何清单而守卫照常全绿——自查实证过这条路径（与 codex 当初击穿 06 侧
+/// 守卫同一手法）。代码块围栏同理：文档里的示例清单不是权威声明。
+#[test]
+fn skill_list_parser_ignores_invisible_content() {
+    // ① 真清单被注释掉、注释外另放一份可见的假清单：解析结果必须只反映**可见**那份。
+    let commented = "\
+- 命令清单（**已穷举顶层子命令**）：
+<!--
+  - **甲组**：`graph build`、`graph stats`
+-->
+  - **可见组**：`init`
+";
+    let groups = parse_skill_command_list(commented);
+    assert_eq!(
+        groups.iter().map(|g| g.label.as_str()).collect::<Vec<_>>(),
+        vec!["可见组"],
+        "HTML 注释内的清单不得被解析（读者渲染时看不到它）"
+    );
+    assert_eq!(groups[0].commands, vec!["init"]);
+
+    // ② 同行开闭的注释同样跳过。
+    let inline = "\
+- 命令清单（**已穷举顶层子命令**）：
+  - **甲组**：`init`
+  <!-- - **藏组**：`graph build` -->
+";
+    assert_eq!(
+        parse_skill_command_list(inline).len(),
+        1,
+        "同行注释亦不计入"
+    );
+
+    // ③ 代码块围栏内的样例清单不是权威声明。
+    let fenced = "\
+- 命令清单（**已穷举顶层子命令**）：
+  - **甲组**：`init`
+
+```markdown
+  - **样例组**：`graph build`、`graph stats`
+```
+";
+    let groups = parse_skill_command_list(fenced);
+    assert_eq!(
+        groups.iter().map(|g| g.label.as_str()).collect::<Vec<_>>(),
+        vec!["甲组"],
+        "代码块内的样例不得被当作权威清单"
+    );
 }
