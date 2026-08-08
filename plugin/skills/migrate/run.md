@@ -55,20 +55,26 @@
 
 ### 2. 解除 blocked + 循环依赖检测
 
-**先执行 `rustmigrate validate state --check-blocked`**（一条命令同时完成依赖就绪判定、blocked 子图 DFS 环检测、幽灵引用检出，不写盘），按 `data` 分流：
+**先执行 `rustmigrate validate state --check-blocked`**（一条命令同时完成依赖就绪判定、blocked 子图 DFS 环检测、幽灵引用检出，不写盘）。
 
-| `data` 字段 | 含义 | 处置 |
-|---|---|---|
-| `ready_to_unblock[]` | 依赖已全部终态，可恢复 | 逐个 `state transition --module <M> --to <pre_blocked_status> --reason 'blocked_by resolved'` 并记日志（或整体改用 `--check-blocked --auto-unblock` 让 CLI 代劳） |
-| `cycles[]` 非空 | blocked 模块互相等待，死锁 | 报错中止、输出环路径、记入 `metadata.last_error` |
-| `ghost_refs[]` 非空 | `blocked_by` 指向无处归属的 key | 见下方「幽灵引用不能靠等」——**等待无效**，须按其处置动作修 |
-| `still_blocked[]` 中其余模块 | 依赖确实还没译完 | 正常等待，跳过本轮 |
+**这四类不是互斥分区，须按下表顺序判定**——同一次输出里 `ready_to_unblock` 与 `cycles` 可以同时非空，而 `--auto-unblock` 在 `cycles` 非空时会**整体拒绝**（返 `E012` + 退出码 1，一个模块都不解除）。故先看 `cycles`：
 
-`warnings` 非空时如实转达用户（跨组划分破坏等问题只经 warning 报出）。
+| 顺序 | `data` 字段 | 含义 | 处置 |
+|---|---|---|---|
+| ① | `cycles[]` 非空 | blocked 模块互相等待，死锁 | 报错中止、输出环路径、记入 `metadata.last_error`。**此时不要再调 `--auto-unblock`**（会 `E012` 硬错且零解除），也不要按 ② 逐个 transition——先打破环 |
+| ② | `ready_to_unblock[]` | 依赖已全部终态，可恢复 | 逐个 `state transition --module <M> --to <pre_blocked_status> --reason 'blocked_by resolved'` 并记日志。仅当 `cycles[]` **为空**时，才可整体改用 `--check-blocked --auto-unblock` 让 CLI 代劳 |
+| ③ | `ghost_refs[]` 非空 | `blocked_by` 指向无处归属的 key | 见下方「幽灵引用不能靠等」——**等待无效**，且两类处置动作不同 |
+| ④ | `warnings` 非空 | 含跨组 `member_files` 划分破坏等**数据完整性**问题（无机读字段，只经 warning 报出） | 如实转达用户并按 warning 指示处置。**不可当作正常等待跳过**——这类模块会落在 `still_blocked` 里但成因是数据坏了 |
+| ⑤ | `still_blocked[]` 中其余模块 | 排除上述四类后，依赖确实还没译完 | 正常等待，跳过本轮 |
 
 > **幽灵引用不能靠等**：`blocked_by` 可能引用**无处归属**的 key（state 与 source-graph 不同步、SubAgent 写入非法引用、用户手填）。这类依赖永远不会进终态，等待是无效动作。`validate state` 会就此降级 warning 并点名「引用方 → 被引 key」，`--check-blocked` 在 `data.ghost_refs` 给逐条明细（`[{module, missing, module_blocked}]`，`missing` 是**单个** key 字符串、每条一项；`module_blocked=true` 表示该模块此刻就被永久阻塞，`false` 表示只是残留引用、当前不阻塞但它一旦被标 blocked 即永久阻塞）。
 >
-> **处置：对每个模块执行 `state transition --module <M> --to <pre_blocked_status>`**——离开 blocked 即清空 `blocked_by`，不丢迁移进度；随后 `graph build` 重建图确认真实依赖。**不要用 `state populate-modules`**：它对非 pending 模块一律拒绝重填（断点续传保护），而幽灵引用按定义就发生在 blocked 等非 pending 状态上，照做必然失败；`state reset` 同样不解决（它把模块置为 `translating`，仍非 pending）。注意 `module_blocked=true` 的模块仍计入阻塞，`--auto-unblock` 不会放行它们——不是命令失灵，是不在损坏数据上改状态。
+> **处置按 `module_blocked` 分两类，动作不同**（给错会拿到 `E004 非法状态转换`）：
+>
+> - **`module_blocked=true`（该模块正 blocked）**：`state transition --module <M> --to <pre_blocked_status>`——离开 blocked 即清空 `blocked_by`，**不丢迁移进度**。
+> - **`module_blocked=false`（残留引用，模块不在 blocked 态）**：用 `state reset --module <M>`。这类模块的 `pre_blocked_status` 恒为 `null`（该字段只在进入 blocked 时写入），照上一条做**必然失败**——实测 `translating` 模块 `--to pending` 与 `--to translating` 都报 `E004 非法状态转换`。代价须知：reset 会把 `reviewing` 等状态**回退到 `translating` 并清进度字段**，`done`/`degrade_*` 还需 `--force`；`pending`/`translating` 则原状态不变。
+>
+> 两类处置后都应 `graph build` 重建图确认真实依赖。**不要用 `state populate-modules`**：它对非 pending 模块一律拒绝重填（断点续传保护）。注意 `module_blocked=true` 的模块仍计入阻塞，`--auto-unblock` 不会放行它们——不是命令失灵，是不在损坏数据上改状态。
 >
 > composite 组的**非代表成员** key 不算幽灵（它登记在组代表名下，CLI 已自动归一到组代表判定），不会出现在 `ghost_refs` 里。但若同一文件被**多个组**列为 `member_files`（跨组互斥不变量被破坏），CLI 无法判定按哪个组判就绪，会单独告警并一律按未就绪处理——处置是修正 `member_files` 划分，不是重新同步。
 

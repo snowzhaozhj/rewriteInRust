@@ -161,27 +161,36 @@ pub fn validate_state(state_file: &MigrationStateFile) -> Result<Vec<String>> {
                 residual.push(line);
             }
         }
+        // 处置动作**必须按两类分开给**：blocked 模块有 `pre_blocked_status` 锚点，
+        // `transition` 回该状态即清空 `blocked_by` 且不丢进度；而非 blocked 模块的
+        // `pre_blocked_status` 恒为 None（该字段只在进入 blocked 时写入），同一条建议
+        // 对它是**确定性失败**——实测 `translating` 模块照做，`--to pending` 与
+        // `--to translating` 均报 `E004 非法状态转换`，幽灵引用原样留着。
+        // 这正是本轮修过的「告警建议照做会失败」那条 imp 的另一半入口，不能只修一半。
         let mut parts: Vec<String> = Vec::new();
         if !blocking.is_empty() {
             parts.push(format!(
                 "以下 blocked 模块的 blocked_by 指向未登记的 key，被引模块永远不会进终态、\
-                 该模块将永久阻塞: {}",
+                 该模块将永久阻塞: {}——处置：`state transition --module <M> --to \
+                 <pre_blocked_status>`（离开 blocked 即清空 blocked_by，不丢迁移进度）",
                 blocking.join("、")
             ));
         }
         if !residual.is_empty() {
             parts.push(format!(
                 "以下模块残留指向未登记 key 的 blocked_by（当前未阻塞，但该模块一旦被标 \
-                 blocked 即永久阻塞）: {}",
+                 blocked 即永久阻塞）: {}——处置：`state reset --module <M>`（无条件清空 \
+                 blocked_by；这类模块不在 blocked 态、无 `pre_blocked_status` 可回，故\
+                 transition 一律报非法转换）。注意 reset 会把 `reviewing` 等状态回退到 \
+                 `translating` 并清进度字段，`done`/`degrade_*` 还需 `--force`；\
+                 `pending`/`translating` 则原状态不变",
                 residual.join("、")
             ));
         }
         warnings.push(format!(
-            "{}——state 与 source-graph 不同步。处置：对每个模块执行 \
-             `state transition --module <M> --to <pre_blocked_status>`（离开 blocked 即\
-             清空 blocked_by，不丢迁移进度），再 `graph build` 重建图确认依赖关系；\
-             不要靠等待依赖就绪。注意 `state populate-modules` 对非 pending 模块会拒绝\
-             重填，故不是本场景的处置手段",
+            "{}。成因是 state 与 source-graph 不同步，处置后请 `graph build` 重建图确认\
+             依赖关系；不要靠等待依赖就绪。`state populate-modules` 对非 pending 模块会\
+             拒绝重填，故不是本场景的通用手段",
             parts.join("；")
         ));
     }
@@ -370,7 +379,7 @@ pub struct GhostReference {
 /// （`machine.rs` 的 `transition_module`），但手工编辑或旧文件可能在非 blocked 模块上
 /// 留下残值，一旦该模块再次被标 blocked 就会立刻踩中同一个坑。
 ///
-/// 判据经 [`canonicalize_blocked_ref`] 归一，故 composite 组的非代表成员 key 不算幽灵。
+/// 判据经 [`resolve_blocked_ref`] 归一，故 composite 组的非代表成员 key 不算幽灵。
 ///
 /// 结果按 (module, missing) 字典序排序：`modules` 是 `HashMap`，不排序则告警文本与
 /// JSON 明细的条目顺序在每次运行间漂移。
@@ -462,7 +471,7 @@ fn resolve_blocked_ref<'a>(state_file: &'a MigrationStateFile, dep: &str) -> Ref
 /// 遍历 `modules` 中 `status == Blocked` 的模块，逐个检查其 `blocked_by`
 /// 引用的模块是否已进入终态（done/degrade_ffi/degrade_manual/degrade_skip）。
 ///
-/// 引用先经 [`canonicalize_blocked_ref`] 归一（composite 组成员 key → 组代表），
+/// 引用先经 [`resolve_blocked_ref`] 归一（composite 组成员 key → 组代表），
 /// 就绪与否按**归一后**的模块判定。归一后仍无归属的引用（幽灵引用）与宿主歧义的引用
 /// 一律计入 `unresolved`、不判就绪，理由见 [`BlockedCheckResult::unresolved`]；
 /// 要单独取出哪些是幽灵引用请用 [`scan_ghost_references`]。
@@ -578,7 +587,7 @@ pub fn auto_unblock_modules(
 /// 用三色 DFS 检测环：白色（未访问）→ 灰色（栈上）→ 黑色（已完成）。
 /// 遇到灰色节点即发现环，回溯栈提取环路径。
 ///
-/// 建边前先经 [`canonicalize_blocked_ref`] 归一（composite 组成员 key → 组代表），
+/// 建边前先经 [`resolve_blocked_ref`] 归一（composite 组成员 key → 组代表），
 /// **必须与 `check_blocked_modules` 用同一判据**：若这里按原始字符串建边而那边归一，
 /// 「经成员 key 表达的互锁」会成为静默死锁——两侧都判成合法未终态依赖（无幽灵告警），
 /// 而成员 key 不在 `blocked_set` 里、边被丢弃（无环告警），模块永久阻塞且零诊断。
@@ -1655,8 +1664,8 @@ mod tests {
     #[test]
     fn test_auto_unblock_refuses_module_with_ghost_reference() {
         // 幽灵引用不得让模块判为「就绪可解除」，否则 `--auto-unblock` 会在损坏数据上
-        // 真的改状态（把等不到的依赖当成已满足）。此性质当前由 missing ⊆ unresolved
-        // 保证，这里钉死它，防将来「优化」ready 判定时被破坏。
+        // 真的改状态（把等不到的依赖当成已满足）。此性质当前由「`RefResolution::Missing`
+        // 一律计入 `unresolved`」保证，这里钉死它，防将来「优化」ready 判定时被破坏。
         //
         // **承诺范围仅限本条路径**：`state transition` / `state update --cas-version`
         // 走 `transition_inner`，那里离开 blocked 只校验 `target == pre_blocked_status`、

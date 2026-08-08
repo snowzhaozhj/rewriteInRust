@@ -1840,8 +1840,11 @@ fn cmd_graph_export(format: &str) -> CmdResult {
 ///
 /// `--check-blocked`：额外检查所有 blocked 模块的 `blocked_by` 依赖是否已进入终态，
 /// 并执行 DFS 环检测（blocked_by 关系图中的环路会导致死锁）。输出的 `ghost_refs`
-/// 列出「引用了未登记模块」的条目——它们同时在 `still_blocked` 里，但成因是 state 与
-/// source-graph 不同步（等待永不结束），处置须重新同步而非等依赖就绪。
+/// 列出「引用了未登记模块」的条目，成因是 state 与 source-graph 不同步（等待永不结束）。
+/// 注意它**不是** `still_blocked` 的子集：扫描覆盖全部模块，故非 blocked 模块上的残留
+/// 引用会出现在 `ghost_refs`（`module_blocked=false`）而不在 `still_blocked` 里。
+/// 两类处置动作不同，见 `validate_state` 告警文本（blocked 用 `state transition`
+/// 回 `pre_blocked_status`；残留用 `state reset`——后者无 `pre_blocked_status` 可回）。
 ///
 /// `--auto-unblock`（需配合 `--check-blocked`）：对就绪的 blocked 模块自动恢复到
 /// `pre_blocked_status`（无则默认 `pending`），通过 `transition_module` 落盘。

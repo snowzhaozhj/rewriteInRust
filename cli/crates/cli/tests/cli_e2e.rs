@@ -3592,6 +3592,24 @@ fn smoke_validate_detects_ghost_blocked_by_reference() {
     });
 }
 
+/// 从告警文本里抽出以 `prefix` 开头的那条反引号包裹的命令。
+///
+/// 用于「照告警说的做」类测试：判据必须是**文案里实际写的命令**，而不是测试自己硬编码
+/// 的一条。审查实证过硬编码的后果——告警可以被改成一条确定性失败的命令（例如把
+/// `--to <pre_blocked_status>` 换成 `--to done`），而硬编码 `--to pending` 的测试照样绿，
+/// 于是「建议照做能成功」这个命题失去守卫。
+fn parse_advice_command(advice: &str, prefix: &str) -> Option<String> {
+    advice
+        .split('`')
+        // 反引号成对包裹，奇数下标才是被包裹的内容（偶数下标是包裹外的散文）。
+        // 按内容启发式（如 contains("state")）会被散文里提到的同名词误触发。
+        .enumerate()
+        .filter(|(i, _)| i % 2 == 1)
+        .map(|(_, seg)| seg)
+        .find(|seg| seg.starts_with(prefix))
+        .map(str::to_owned)
+}
+
 #[test]
 fn smoke_ghost_reference_advice_actually_works() {
     // 主审 imp：告警给的处置动作必须**照做能成功**。此前只验告警文本含哪些 key，
@@ -3627,13 +3645,18 @@ fn smoke_ghost_reference_advice_actually_works() {
         // 取告警里给出的处置命令。
         let (_, json) = run(&["validate", "state"]);
         let advice = json["warnings"][0].as_str().unwrap().to_string();
+
+        // 从 advice 里**解析**出建议的命令再执行，而不是硬编码。此前这里是
+        // `advice.contains("state transition")` + `!advice.contains("populate-modules 同步")`
+        // 两条文本形状断言，而后面照做的代码用的是硬编码 `--to pending`——文案与实际
+        // 执行之间没有任何绑定。审查变异实证：把死路建议换个措辞塞回来（保留
+        // "state transition" 字样）、甚至改成确定性失败的 `--to done`，该测试照样 PASS。
+        // 现在改为「文案说什么就跑什么」，给错建议即在下方 assert_eq!(code, 0) 处报红。
+        let cmd = parse_advice_command(&advice, "state transition")
+            .unwrap_or_else(|| panic!("告警须给出可解析的 transition 处置命令: {advice}"));
         assert!(
-            advice.contains("state transition"),
-            "告警须给出 transition 处置: {advice}"
-        );
-        assert!(
-            !advice.contains("populate-modules 同步"),
-            "不得再建议用 populate 同步——该路径对非 pending 模块必然被拒: {advice}"
+            cmd.contains("--to <pre_blocked_status>"),
+            "blocked 类处置须回 pre_blocked_status（该模块有此锚点、不丢进度）: {cmd}"
         );
 
         // 反证：在**幽灵态尚未处置时**，旧文案建议的 populate 路径确实走不通。
@@ -3652,14 +3675,15 @@ fn smoke_ghost_reference_advice_actually_works() {
             "拒绝理由应为非 pending 状态保护: {out}"
         );
 
-        // 照建议执行：transition 回 pre_blocked_status。
+        // 照建议执行：把解析出的 `<pre_blocked_status>` 占位符替换为该模块的实际锚点值。
+        let target = sf["modules"][&key]["pre_blocked_status"].as_str().unwrap();
         let (code, out) = run(&[
             "state",
             "transition",
             "--module",
             &key,
             "--to",
-            "pending",
+            target,
             "--reason",
             "清除幽灵 blocked_by",
         ]);
@@ -3669,6 +3693,163 @@ fn smoke_ghost_reference_advice_actually_works() {
         let (code, json) = run(&["validate", "state"]);
         assert_eq!(code, 0, "{json}");
         assert_eq!(json["status"], "ok", "照建议处置后不应再有任何告警: {json}");
+        let (_, json) = run(&["validate", "state", "--check-blocked"]);
+        assert!(
+            json["data"]["ghost_refs"].as_array().unwrap().is_empty(),
+            "幽灵引用应已清除: {json}"
+        );
+    });
+}
+
+#[test]
+fn smoke_auto_unblock_refuses_entirely_when_cycles_present() {
+    // run.md 步骤 2 的分流表把 `ready_to_unblock` 与 `cycles` 列成两行，读起来像可以各自
+    // 处理；但 `--auto-unblock` 在环存在时**整体拒绝**（E012 + 退出码 1），连本可解除的
+    // 模块也一个不动。编排器若按 ready 行选了 `--auto-unblock` 而恰好同时有环，会拿到
+    // 硬错且零进展——本 PR 通篇在消灭「文档给的动作实现里做不到」，这属同类。
+    //
+    // 表已改为带优先级（先判 cycles），此测试钉住那个前提行为，防表与实现反向漂移。
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("circular-deps"), tmp.path());
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        assert_eq!(run(&["graph", "build", "--root", "src"]).0, 0);
+        assert_eq!(run(&["state", "populate-modules"]).0, 0);
+
+        let sp = tmp.path().join(".rust-migration/migration-state.json");
+        let mut sf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+        // 以既有模块为模板造四个：一个终态依赖、一个可解除、两个互锁。
+        let template = sf["modules"]
+            .as_object()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()
+            .clone();
+        let mk = |status: &str, blocked_by: serde_json::Value, pre: serde_json::Value| {
+            let mut m = template.clone();
+            m["status"] = serde_json::json!(status);
+            m["blocked_by"] = blocked_by;
+            m["pre_blocked_status"] = pre;
+            m["composite_kind"] = serde_json::Value::Null;
+            m.as_object_mut().unwrap().remove("member_files");
+            m
+        };
+        sf["modules"] = serde_json::json!({
+            "DONE": mk("done", serde_json::Value::Null, serde_json::Value::Null),
+            "READY": mk("blocked", serde_json::json!(["DONE"]), serde_json::json!("pending")),
+            "C1": mk("blocked", serde_json::json!(["C2"]), serde_json::json!("pending")),
+            "C2": mk("blocked", serde_json::json!(["C1"]), serde_json::json!("pending")),
+        });
+        std::fs::write(&sp, serde_json::to_string_pretty(&sf).unwrap()).unwrap();
+
+        // 前置假设：两者确实同时非空（否则本测试测不到它要测的东西）。
+        let (_, json) = run(&["validate", "state", "--check-blocked"]);
+        assert_eq!(
+            json["data"]["ready_to_unblock"],
+            serde_json::json!(["READY"]),
+            "前提：READY 须被判为可解除: {json}"
+        );
+        assert!(
+            !json["data"]["cycles"].as_array().unwrap().is_empty(),
+            "前提：C1↔C2 须被检出为环: {json}"
+        );
+
+        // 有环时 --auto-unblock 整体拒绝。
+        let (code, out) = run(&["validate", "state", "--check-blocked", "--auto-unblock"]);
+        assert_ne!(code, 0, "有环时 --auto-unblock 应硬错: {out}");
+        assert_eq!(out["data"]["error_code"], "E012", "{out}");
+
+        // 且**一个都没解除**——这是「不能按 ready 行直接调 auto-unblock」的实质理由。
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+        assert_eq!(
+            after["modules"]["READY"]["status"], "blocked",
+            "拒绝须是整体的，可解除模块也不得被改状态: {after}"
+        );
+    });
+}
+
+#[test]
+fn smoke_residual_ghost_reference_advice_actually_works() {
+    // 补上一轮漏掉的另一半定义域。`scan_ghost_references` 有意扫**全部**模块，故告警
+    // 覆盖两类：`module_blocked=true`（正 blocked）与 `false`（残留引用）。但上一轮
+    // 为「建议照做能成功」加的 e2e 只覆盖了前者（测试里显式写 pre_blocked_status），
+    // 而处置文本当时是两类共用一段——于是后者拿到一条**确定性失败**的建议：
+    // 这类模块不在 blocked 态、`pre_blocked_status` 恒为 null，transition 无目标可回。
+    //
+    // 三个审查视角各自独立复现了同一缺陷；实测 `translating` 模块照做，`--to pending`
+    // 与 `--to translating` 均报 `E004 非法状态转换`，幽灵引用原样留着。更刺眼的是当时
+    // 文案明确否掉的 `state reset` 才是这一类唯一可行的处置。
+    //
+    // 教训：**测试的场景定义域必须覆盖被测行为的定义域**。告警分述两类而测试只测一类，
+    // 另一类的同型缺陷就原样留下。
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("circular-deps"), tmp.path());
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        assert_eq!(run(&["graph", "build", "--root", "src"]).0, 0);
+        assert_eq!(run(&["state", "populate-modules"]).0, 0);
+
+        let sp = tmp.path().join(".rust-migration/migration-state.json");
+        let mut sf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+        let key = sf["modules"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .min()
+            .unwrap()
+            .clone();
+        // 残留态：模块**不在** blocked，blocked_by 却留着幽灵引用，无 pre_blocked_status。
+        sf["modules"][&key]["status"] = serde_json::json!("translating");
+        sf["modules"][&key]["blocked_by"] = serde_json::json!(["file:GHOST.ts"]);
+        sf["modules"][&key]["pre_blocked_status"] = serde_json::Value::Null;
+        std::fs::write(&sp, serde_json::to_string_pretty(&sf).unwrap()).unwrap();
+
+        // 前置假设断言：确认这确实是残留类（module_blocked=false 且不在 still_blocked）。
+        // 若将来 scan 退回只扫 blocked 模块，此处会红而不是让下面的断言静默失去意义。
+        let (_, json) = run(&["validate", "state", "--check-blocked"]);
+        let ghosts = json["data"]["ghost_refs"].as_array().unwrap();
+        assert_eq!(ghosts.len(), 1, "残留引用须被扫出: {json}");
+        assert_eq!(
+            ghosts[0]["module_blocked"],
+            serde_json::json!(false),
+            "本场景须是残留类（模块不在 blocked）: {json}"
+        );
+        assert!(
+            json["data"]["still_blocked"].as_array().unwrap().is_empty(),
+            "残留类不进 still_blocked——ghost_refs 不是它的子集: {json}"
+        );
+
+        // 反证：blocked 类的处置动作对本类**确实**行不通（这正是本测试存在的理由）。
+        // 必须在处置之前做——处置后 blocked_by 已清，transition 的失败原因就变了。
+        for target in ["pending", "translating"] {
+            let (code, out) = run(&["state", "transition", "--module", &key, "--to", target]);
+            assert_ne!(
+                code, 0,
+                "残留类模块无 pre_blocked_status 可回，transition --to {target} 应被拒: {out}"
+            );
+        }
+
+        // 照告警说的做：解析出 reset 命令而非硬编码。
+        let (_, json) = run(&["validate", "state"]);
+        let advice = json["warnings"][0].as_str().unwrap().to_string();
+        let cmd = parse_advice_command(&advice, "state reset")
+            .unwrap_or_else(|| panic!("残留类告警须给出 reset 处置命令: {advice}"));
+        assert!(
+            cmd.contains("--module"),
+            "reset 处置须按模块给出: {cmd}（advice: {advice}）"
+        );
+
+        let (code, out) = run(&["state", "reset", "--module", &key]);
+        assert_eq!(code, 0, "残留类告警建议的命令必须能成功执行: {out}");
+
+        // 照做之后问题真的消失。
+        let (code, json) = run(&["validate", "state"]);
+        assert_eq!(code, 0, "{json}");
+        assert_eq!(json["status"], "ok", "照建议处置后不应再有告警: {json}");
         let (_, json) = run(&["validate", "state", "--check-blocked"]);
         assert!(
             json["data"]["ghost_refs"].as_array().unwrap().is_empty(),
