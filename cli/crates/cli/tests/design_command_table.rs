@@ -625,13 +625,18 @@ fn duplicate_declared_counts_are_rejected() {
 // 之后连续的 8 个「`- **<分组>**：`cmd` 、`cmd`…`」行内反引号列表。两个坑（均实测确认，
 // 非照抄记账）：
 //
-// ⒜ **必须先精确锚定清单区块**。按行格式（`- **X**：`）全文件匹配会命中 13 行——
-//    「守护」「恢复」「幂等」「待签批」等 5 个同格式段落在文档别处，把它们拖进来会产出
-//    大批伪幽灵命令。故以「命令清单 + 已穷举」锚点行定位，按缩进量收尾。
+// ⒜ **必须先精确锚定清单区块**。文档别处也有同格式的 `- **X**：` 段落（`守护`/`恢复`/
+//    `幂等`/`待签批`），全文件按行格式匹配会把它们一并收进来。**其中缩进两格、真能落进
+//    区块的是 3 个**（`L1 存在性`/`L2 结构校验`/`幂等`）——设计契约审查订正过这里：初版
+//    注释写「命中 13 行、5 个别处段落、会产出大批伪幽灵」，前两个数字取自更窄的正则口径
+//    （未写明）、易被读成字面正则的结果（那是 32 行），而「大批伪幽灵」实为坑⒝的后果
+//    （单独摘掉⒜不产生任何伪幽灵，只污染分组标签集合）。故以「命令清单 + 已穷举」锚点行
+//    定位，按缩进量收尾。
 // ⒝ **必须限定只取命令项**。这 8 行里还散落着值域与状态名的反引号（`started`/`ok`/
 //    `error`/`timeout`/`agent_done`/`advanced:false`/`reviewing → done`/`rule_version`
-//    /`--to`/`--status` 等），无脑抽取行内所有反引号会产出十余条伪幽灵。判据取
-//    「首 token 是 CLI 顶层子命令名」——它来自 `Cli::command()` 而非写死清单。
+//    /`--to`/`--status` 等 13 个），无脑抽取行内所有反引号会产出 8 条伪幽灵（实测）。
+//    命令判据取「首 token 是 CLI 顶层子命令名」——它来自 `Cli::command()` 而非写死清单；
+//    非命令项则须能被 `is_known_non_command` 分类，分不了的报出而非静默丢弃（见该函数）。
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// SKILL.md 的路径。
@@ -651,27 +656,90 @@ fn cli_top_level_names() -> BTreeSet<String> {
 }
 
 /// 从命令清单里抽出的一个分组。
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 struct SkillGroup {
     label: String,
     commands: Vec<String>,
 }
 
+/// 命令清单的解析结果。
+struct SkillCommandList {
+    groups: Vec<SkillGroup>,
+    /// 清单里既不像 CLI 命令、也不像值域/状态名的反引号项。
+    ///
+    /// **必须断言为空，不能静默丢弃**。此前的判据是「首 token 是 CLI 顶层子命令名就收，
+    /// 否则丢」，它让「不认识」和「不存在」变成同一件事——主审与设计契约两个视角各自
+    /// 实证：往清单里加一条顶层名不存在的命令（`audit unsafe --deny-new` / `doctor`），
+    /// 两条守卫**全绿**，而同类变异在 06 侧会报 ghost。编排器复现确认。
+    ///
+    /// 危害不是假设：命令**下线**时维护者会按 06 侧的 CI 报错去改 06 表，SKILL.md 这边
+    /// 若漏改就留下一条真幽灵（主审实测下线 `graduate` 后 5 个守卫全绿，而编排器照抄得到
+    /// `unrecognized subcommand 'graduate'`）。
+    ///
+    /// 根因是**一个判据扛了两个正交职责**（滤值域 + 判定是不是命令）——本仓 MEMORY 里
+    /// 记过同型教训。06 侧早已用 `unparsed_rows` 把「不认识」改成显式报归因，本侧沿用。
+    unclassified_items: Vec<String>,
+}
+
 /// 剥掉参数占位符，只留子命令路径。
 ///
-/// 逐 token 在首个占位符处停止：`<m>` 位置参数、`[--flag]` 可选项、`--flag` 裸选项。
+/// 逐 token 在首个占位符处停止：`<m>` 位置参数、`[--flag]` 可选项、`-f`/`--flag` 裸选项。
 /// 记账曾预警「`graph export [--format json|dot|mermaid]` 的 `json|dot|mermaid]` 会残留
 /// 成命令名的一部分」——实测该风险只存在于「正则替换占位符」的实现方式，逐 token break
 /// 在遇到 `[--format` 时即停止，管道段落在 break 之后、根本到不了。此处如实记录实测结论。
+///
+/// 单破折号也当占位符（与 06 侧 `parse_command_from_row` 统一）：当前 CLI 无短选项，
+/// 但若将来清单写成 `graph build -r`，只判 `--` 会把 `-r` 当命令路径的一部分，
+/// 报出的将是「`graph build` 缺失」这种误导归因（主审实测）。
 fn strip_placeholders(cmd: &str) -> String {
     let mut parts: Vec<&str> = Vec::new();
     for tok in cmd.split_whitespace() {
-        if tok.starts_with('<') || tok.starts_with('[') || tok.starts_with("--") {
+        if tok.starts_with('<') || tok.starts_with('[') || tok.starts_with('-') {
             break;
         }
         parts.push(tok);
     }
     parts.join(" ")
+}
+
+/// 清单里出现过的非命令单标识符（值域、状态名、字段名）。
+///
+/// 新增值域时同步此处；报错信息会指引到这里。
+/// **它与 CLI 顶层命令名必须不相交**——见 `value_tokens_do_not_collide_with_cli_commands`。
+const KNOWN_VALUE_TOKENS: [&str; 6] = [
+    "started",      // --status 值域
+    "ok",           // --status 值域
+    "error",        // --status 值域
+    "timeout",      // --status 值域
+    "agent_done",   // substatus
+    "rule_version", // porting-template frontmatter 字段
+];
+
+/// 这个反引号项是否是**已登记的非命令项**（值域、状态名、裸选项、状态转换箭头、字段路径）。
+///
+/// **单标识符必须走显式清单，不能按形态判**。初版判据是「无空格的单 token 一律当值域」，
+/// 编排器实测漏掉 `` `doctor` `` 这种单 token 幽灵命令——它与 `` `started` `` 形态完全相同，
+/// 形态判据在原理上区分不了两者，正是「一个判据扛两个正交维度」的翻版（本仓 MEMORY 记过）。
+///
+/// 代价是文档新增值域时须同步本清单，但那正是想要的效果：**新出现的单标识符默认按
+/// 「疑似幽灵命令」报出**，由人确认它是值域而非漏实现的命令。宁可多问一次，
+/// 不可把幽灵命令静默放行。
+fn is_known_non_command(seg: &str) -> bool {
+    let seg = seg.trim();
+    // 裸选项：`--to` / `--status` / `-f`。
+    if seg.starts_with('-') {
+        return true;
+    }
+    // 状态转换箭头：`reviewing → done`。
+    if seg.contains('→') {
+        return true;
+    }
+    // 键值 / 字段路径：`advanced:false` / `data.was_noop=true`。
+    // 命令路径不含这些符号，故按形态判是安全的。
+    if seg.contains(':') || seg.contains('=') || seg.contains('.') {
+        return true;
+    }
+    KNOWN_VALUE_TOKENS.contains(&seg)
 }
 
 /// 解析 SKILL.md 的命令清单区块。
@@ -685,9 +753,10 @@ fn strip_placeholders(cmd: &str) -> String {
 /// 自查实证：把整个清单包进 `<!-- -->`（渲染后读者看不到任何清单）时 4 个测试**全绿**——
 /// 与 codex 当初击穿 06 侧守卫是同一手法（06 侧已修，写本侧时漏了沿用）。
 /// 同理排除代码块围栏内的样例清单（否则文档里的示例会被当成权威声明）。
-fn parse_skill_command_list(text: &str) -> Vec<SkillGroup> {
+fn parse_skill_command_list(text: &str) -> SkillCommandList {
     let top = cli_top_level_names();
     let mut groups = Vec::new();
+    let mut unclassified = Vec::new();
     let mut in_list = false;
     let mut in_html_comment = false;
     let mut in_fenced_code = false;
@@ -733,33 +802,78 @@ fn parse_skill_command_list(text: &str) -> Vec<SkillGroup> {
         let Some((label, body)) = rest.split_once("**：") else {
             continue;
         };
-        let commands = body
+        // 反引号成对包裹，奇数下标才是被包裹内容。
+        let items: Vec<&str> = body
             .split('`')
-            // 反引号成对包裹，奇数下标才是被包裹内容。
             .enumerate()
             .filter(|(i, _)| i % 2 == 1)
             .map(|(_, seg)| seg)
-            // 只保留「首 token 是 CLI 顶层子命令名」的项，滤掉值域/状态名/裸选项。
-            .filter(|seg| {
-                seg.split_whitespace()
-                    .next()
-                    .is_some_and(|first| top.contains(first))
-            })
-            .map(strip_placeholders)
-            .filter(|c| !c.is_empty())
             .collect();
+
+        let mut commands = Vec::new();
+        for seg in items {
+            let Some(first) = seg.split_whitespace().next() else {
+                continue;
+            };
+            if top.contains(first) {
+                let cmd = strip_placeholders(seg);
+                // 空值检查是**防御性**的：专项审查实证它当前不可达（能过 `top.contains`
+                // 的项其首 token 必是顶层命令名，而顶层名没有一个以 `<`/`[`/`-` 开头，
+                // 故 `strip_placeholders` 至少留一个 token），删掉它 7 个测试仍全绿。
+                // 保留是因为判据若将来放宽（例如允许带 `rustmigrate ` 前缀），空串会静默
+                // 混进命令集合。同 `collect_leaf_commands` 里 `help` 过滤的标注方式。
+                if !cmd.is_empty() {
+                    commands.push(cmd);
+                }
+            } else if !is_known_non_command(seg) {
+                // 既不是已知 CLI 顶层命令、又不像值域/状态名/裸选项——**必须报出来**，
+                // 不能静默丢弃。理由见 `unclassified_items` 字段说明。
+                unclassified.push(format!("[{label}] {seg}"));
+            }
+        }
         groups.push(SkillGroup {
             label: label.to_owned(),
             commands,
         });
     }
-    groups
+    SkillCommandList {
+        groups,
+        unclassified_items: unclassified,
+    }
+}
+
+/// 解析真实 SKILL.md，并就地断言「无法分类的项」为空。
+///
+/// 这条断言必须在每个消费方之前跑——它守的正是「不认识 ≠ 不存在」，
+/// 若只在某一个测试里查，另一个测试仍会在被污染的解析结果上给出假绿。
+fn parse_real_skill_command_list() -> SkillCommandList {
+    let text = std::fs::read_to_string(skill_md_path()).expect("读 SKILL.md 失败");
+    let parsed = parse_skill_command_list(&text);
+    // 区块定位失败要报真因。此前的表现是「35 条命令全部未登记」——失败是响亮的（非假绿），
+    // 但维护者很难从那个信息想到真因是缩进或锚点措辞（专项审查指出）。两种现实触发：
+    // 锚点行文案被润色掉「已穷举」；Markdown 格式化器（prettier/markdownlint 默认行为）
+    // 把嵌套列表的两格缩进重排成四格。
+    assert!(
+        !parsed.groups.is_empty(),
+        "未定位到 SKILL.md 的命令清单区块——检查两处格式前提：\
+         ① 锚点行须同时含「命令清单」与「已穷举」（见 `SKILL.md:31`）；\
+         ② 8 个分组行须**缩进两格**（Markdown 格式化器可能重排成四格）。\
+         区块定位失败时全部命令都会被报成「未登记」，那是症状而非真因。"
+    );
+    assert!(
+        parsed.unclassified_items.is_empty(),
+        "命令清单里有既不是 CLI 命令、也不像值域/状态名的项——它可能是一条 CLI 中不存在的\
+         幽灵命令（顶层名就不对，故不会出现在「幽灵」比对里），也可能是文档新增了本判据\
+         不认识的写法。逐条核对：{:?}",
+        parsed.unclassified_items
+    );
+    parsed
 }
 
 /// SKILL.md 清单里登记的全部命令。
 fn skill_listed_commands() -> BTreeSet<String> {
-    let text = std::fs::read_to_string(skill_md_path()).expect("读 SKILL.md 失败");
-    parse_skill_command_list(&text)
+    parse_real_skill_command_list()
+        .groups
         .into_iter()
         .flat_map(|g| g.commands)
         .collect()
@@ -799,8 +913,7 @@ fn skill_md_command_list_matches_cli() {
 /// 下会实际误导。故改为逐组冻结成员集合，测试名与实际能力对齐。
 #[test]
 fn skill_md_command_list_groups_are_frozen() {
-    let text = std::fs::read_to_string(skill_md_path()).expect("读 SKILL.md 失败");
-    let groups = parse_skill_command_list(&text);
+    let groups = parse_real_skill_command_list().groups;
 
     // 逐组期望成员：命令**归属**也是给编排器看的语义，不能只冻结标签。
     // 新增命令时须把它加进对应组（这是有意的结构变更审查门，同 06 侧「原 M2 推迟段成员冻结」）。
@@ -878,7 +991,11 @@ fn skill_md_command_list_groups_are_frozen() {
     assert_eq!(
         actual, expected,
         "命令清单的分组结构或命令归属变了——新增/删除/移动命令须同步本断言\
-         （分组是编排器按用途选命令的依据，归属错了会误导它）"
+         （分组是编排器按用途选命令的依据，归属错了会误导它）。\
+         **同步前先确认 SKILL.md 真的登记了该命令**：若 `left` 里多出的项其实是清单说明\
+         文字里的值域反引号（因 CLI 新增了同名顶层命令而被当成命令项），照本提示把它加进\
+         期望表会关掉守卫——那种情形应由 `value_tokens_do_not_collide_with_cli_commands` \
+         报出真因，按那里的处置改。"
     );
 
     // 每个分组都必须真的解析出命令，否则「命令项判据」与文案格式已脱节。
@@ -918,7 +1035,7 @@ fn skill_list_parser_only_takes_command_items_inside_the_list_block() {
   - **守护**：`done`/`blocked`/`graduate` 拒绝
   - **幂等**：`data.was_noop=true`
 ";
-    let groups = parse_skill_command_list(doc);
+    let groups = parse_skill_command_list(doc).groups;
 
     // 坑⒜：区块在第一个非「缩进两格」项处收尾，别处同格式段落不进来。
     let labels: Vec<&str> = groups.iter().map(|g| g.label.as_str()).collect();
@@ -946,7 +1063,7 @@ fn skill_list_parser_keeps_commands_that_double_as_state_words() {
 - 命令清单（**已穷举顶层子命令**）：
   - **其他**：`init`、`graduate`（项目级毕业评估）
 ";
-    let groups = parse_skill_command_list(doc);
+    let groups = parse_skill_command_list(doc).groups;
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0].commands, vec!["init", "graduate"]);
 }
@@ -966,7 +1083,7 @@ fn skill_list_parser_ignores_invisible_content() {
 -->
   - **可见组**：`init`
 ";
-    let groups = parse_skill_command_list(commented);
+    let groups = parse_skill_command_list(commented).groups;
     assert_eq!(
         groups.iter().map(|g| g.label.as_str()).collect::<Vec<_>>(),
         vec!["可见组"],
@@ -981,7 +1098,7 @@ fn skill_list_parser_ignores_invisible_content() {
   <!-- - **藏组**：`graph build` -->
 ";
     assert_eq!(
-        parse_skill_command_list(inline).len(),
+        parse_skill_command_list(inline).groups.len(),
         1,
         "同行注释亦不计入"
     );
@@ -995,10 +1112,87 @@ fn skill_list_parser_ignores_invisible_content() {
   - **样例组**：`graph build`、`graph stats`
 ```
 ";
-    let groups = parse_skill_command_list(fenced);
+    let groups = parse_skill_command_list(fenced).groups;
     assert_eq!(
         groups.iter().map(|g| g.label.as_str()).collect::<Vec<_>>(),
         vec!["甲组"],
         "代码块内的样例不得被当作权威清单"
+    );
+}
+
+/// 未分类项必须被报出，而不是静默丢弃（主审 + 设计契约共同抓出的结构性盲区）。
+///
+/// 此前判据是「首 token 是 CLI 顶层名就收，否则丢」，让「不认识」与「不存在」变成同一件事。
+/// 两个视角各自实证：往清单里加一条顶层名不存在的命令，两条守卫**全绿**；主审更用真实的
+/// 命令下线序列复现——CLI 下线 `graduate`、06 表按 CI 报错改好、SKILL.md 漏改，5 个守卫
+/// 全绿放行，而编排器照抄得到 `unrecognized subcommand 'graduate'`。
+#[test]
+fn skill_list_parser_reports_unclassifiable_items() {
+    // 形态一：多 token 的虚构命令（顶层名不存在）。
+    let multi = "\
+- 命令清单（**已穷举顶层子命令**）：
+  - **校验**：`audit unsafe --deny-new`、`validate state`
+";
+    let parsed = parse_skill_command_list(multi);
+    assert_eq!(
+        parsed.unclassified_items,
+        vec!["[校验] audit unsafe --deny-new"],
+        "顶层名不存在的命令项必须报出，不能因判据不认识就丢掉"
+    );
+    // 合法项照常收进来，不受影响。
+    assert_eq!(parsed.groups[0].commands, vec!["validate state"]);
+
+    // 形态二：**单 token** 的虚构命令。它与值域项（`started` 等）形态完全相同，
+    // 故初版「无空格即当值域」的形态判据在原理上区分不了——必须靠显式值域清单。
+    let single = "\
+- 命令清单（**已穷举顶层子命令**）：
+  - **其他**：`doctor`、`init`
+";
+    let parsed = parse_skill_command_list(single);
+    assert_eq!(
+        parsed.unclassified_items,
+        vec!["[其他] doctor"],
+        "单 token 的未知项同样须报出（这条是形态判据挡不住、必须用显式清单的理由）"
+    );
+
+    // 反向：真实清单里的 13 个值域/状态名/裸选项项一个都不该被误报。
+    // 若有人新增值域忘了同步 KNOWN_VALUE_TOKENS，parse_real_skill_command_list 会报红——
+    // 那是有意的（宁可多问一次，不可把幽灵命令静默放行）。
+    assert!(
+        parse_real_skill_command_list()
+            .unclassified_items
+            .is_empty(),
+        "真实清单不得有未分类项"
+    );
+}
+
+/// 值域清单与 CLI 顶层命令名**必须不相交**——否则守卫会被自己遮蔽。
+///
+/// 专项审查抓出的判据自遮蔽（编排器独立复现）：`KNOWN_VALUE_TOKENS` 与
+/// `cli_top_level_names()` 是两个独立集合，一旦相交，清单说明文字里那个值域反引号就
+/// **「转正」成命令项**，替真正缺登记的新命令把坑填了。
+///
+/// 实测：CLI 新增顶层命令 `timeout`（与 `--status` 值域同名）、SKILL.md 一字不改 →
+/// `skill_md_command_list_matches_cli` **PASS**（`listed` 里的 `timeout` 来自值域反引号，
+/// `missing`/`ghost` 双双为空）。分组冻结守卫虽报红，但归因指向「命令归属变了」，
+/// **照它的提示把 `timeout` 加进期望表就会把守卫彻底关掉**——报错信息亲手指挥维护者
+/// 关闭自己，这比不报更危险。
+///
+/// 故把不相交升为显式不变量：撞名时直接报在真因上，并给出两条可行处置。
+#[test]
+fn value_tokens_do_not_collide_with_cli_commands() {
+    let top = cli_top_level_names();
+    let collisions: Vec<&str> = KNOWN_VALUE_TOKENS
+        .iter()
+        .copied()
+        .filter(|tok| top.contains(*tok))
+        .collect();
+    assert!(
+        collisions.is_empty(),
+        "值域清单与 CLI 顶层命令名撞名 {collisions:?}——撞名会让 SKILL.md 说明文字里的\
+         该值域反引号被当成命令项，替真正缺登记的新命令填坑，使「新增命令未登记必报红」失效。\
+         处置二选一：⒜ 给新命令改名；⒝ 把清单里那处值域反引号改成非反引号写法（如加引号或\
+         写成 `--status=timeout`），再从 KNOWN_VALUE_TOKENS 移除该项。\
+         **不要**把它加进分组期望表——那等于关掉本守卫。"
     );
 }
