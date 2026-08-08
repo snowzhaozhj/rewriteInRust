@@ -783,7 +783,8 @@ fn skill_md_command_list_matches_cli() {
     );
 }
 
-/// 分组结构冻结：防某个分组整行被删后「缺失」检查仍因其它分组齐全而假绿。
+/// 分组结构冻结：防某个分组整行被删后「缺失」检查仍因其它分组齐全而假绿，
+/// 并冻结**命令的分组归属**。
 ///
 /// 与 06 侧的「表头计数」守卫同理——那里是计数漂移，这里是整行消失。
 ///
@@ -791,25 +792,93 @@ fn skill_md_command_list_matches_cli() {
 /// 判定（即坑⒜，让扫描漏进文档别处 5 个同格式段落）时，本测试报红并列出多出来的
 /// `L1 存在性` / `L2 结构校验` / `幂等`，而 `matches_cli` 却 **PASS**——那些段落恰好不含
 /// 合法命令名、被命令项判据滤空了。故只写 `matches_cli` 会让区块锚定零覆盖。
+///
+/// **归属也必须冻结**（codex 审查抓出，编排器已复现）：初版只冻结标签与总数，实测把
+/// `state resume` 从「断点续跑」搬进「建图/查图」后标签、总数、命令集合全不变，两守卫
+/// 双双 PASS——而分组的用途正是让编排器按类别选命令，`state resume` 出现在「建图/查图」
+/// 下会实际误导。故改为逐组冻结成员集合，测试名与实际能力对齐。
 #[test]
 fn skill_md_command_list_groups_are_frozen() {
     let text = std::fs::read_to_string(skill_md_path()).expect("读 SKILL.md 失败");
     let groups = parse_skill_command_list(&text);
 
-    let labels: Vec<&str> = groups.iter().map(|g| g.label.as_str()).collect();
-    assert_eq!(
-        labels,
-        vec![
+    // 逐组期望成员：命令**归属**也是给编排器看的语义，不能只冻结标签。
+    // 新增命令时须把它加进对应组（这是有意的结构变更审查门，同 06 侧「原 M2 推迟段成员冻结」）。
+    let expected: Vec<(&str, Vec<&str>)> = vec![
+        (
             "建图/查图",
+            vec![
+                "graph build",
+                "graph topo-sort",
+                "graph parallel-groups",
+                "graph deps",
+                "graph rdeps",
+                "graph interfaces",
+                "graph cycles",
+                "graph stats",
+                "graph export",
+                "graph decompose",
+            ],
+        ),
+        (
             "状态推进",
+            vec![
+                "state get",
+                "state transition",
+                "state update",
+                "state populate-modules",
+                "state deps",
+                "state advance-sprint",
+            ],
+        ),
+        (
             "签批门（MDR-019）",
+            vec![
+                "state review-gate",
+                "state approve",
+                "state batch-transition-done",
+            ],
+        ),
+        (
             "度量/台账",
+            vec!["state record-metrics", "state record-subagent-call"],
+        ),
+        (
             "断点续跑（ROB-01a/b/c）",
+            vec!["state reset", "state recover", "state resume"],
+        ),
+        (
             "校验",
+            vec!["validate state", "validate config", "validate rules"],
+        ),
+        (
             "统计/度量",
+            vec![
+                "stats loc",
+                "stats compare",
+                "stats quality",
+                "stats community",
+            ],
+        ),
+        (
             "其他",
-        ],
-        "命令清单分组结构变了——新增/删除分组须同步本断言（防整行丢失后静默）"
+            vec!["init", "profile", "scaffold workspace", "graduate"],
+        ),
+    ];
+
+    let actual: Vec<(&str, Vec<&str>)> = groups
+        .iter()
+        .map(|g| {
+            (
+                g.label.as_str(),
+                g.commands.iter().map(String::as_str).collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        actual, expected,
+        "命令清单的分组结构或命令归属变了——新增/删除/移动命令须同步本断言\
+         （分组是编排器按用途选命令的依据，归属错了会误导它）"
     );
 
     // 每个分组都必须真的解析出命令，否则「命令项判据」与文案格式已脱节。
@@ -821,7 +890,7 @@ fn skill_md_command_list_groups_are_frozen() {
         );
     }
 
-    // 阈值取实际 CLI 命令数，不写死——新增命令时不必改这里。
+    // 阈值取实际 CLI 命令数，不写死——防上面的期望表与 CLI 同时漂到自洽的错误状态。
     let total: usize = groups.iter().map(|g| g.commands.len()).sum();
     assert_eq!(
         total,

@@ -28,7 +28,7 @@ argument-hint: "[analyze|run|workflow|review] [module]"
 - 通过 Bash 调用 `rustmigrate <子命令>`，工作目录为源项目根。所有 CLI 输出是统一 JSON：`{status, data, warnings}`。
 - **定位 CLI**：裸调 `rustmigrate` 假设其在 `$PATH`。若不确定是否安装，先运行 `BIN=$(hooks/scripts/ensure-cli.sh)` 取二进制绝对路径（解析优先级 PATH > `$RUSTMIGRATE_BIN` > 本地构建产物），后续用 `"$BIN" <子命令>` 调用；脚本未找到二进制时退出非 0 并打印安装指引，应如实转达用户。
 - **只解析 `data` 字段**取结构化结果；`status` 为 `error` 时按 `data` 中的错误码处理，不要从自然语言里猜成败。`warnings` 非空时如实转达用户，不要静默吞掉。
-- 命令清单（**已穷举顶层子命令**，由 CI 守卫双向钉住：新增命令未登记、或列出不存在的命令都会让测试报红；参数非穷举，细节以各子命令 `--help` 为准）：
+- 命令清单（**已穷举顶层子命令**——CI 守卫双向钉住**子命令路径**这一层：新增命令未登记、或列出 CLI 里不存在的命令都会让测试报红。**参数不在守卫范围内**、亦非穷举，照抄本清单里的参数不保证能解析，细节以各子命令 `--help` 为准）：
   - **建图/查图**：`graph build --root [--full]`、`graph topo-sort`、`graph parallel-groups`（按 sprint 聚合并行层，ORCH-01）、`graph deps <m>`、`graph rdeps <m>`（反向依赖，改动影响面）、`graph interfaces <m> [--deps-of <t>]`、`graph cycles`（完整 SCC 环路径）、`graph stats`、`graph export [--format json|dot|mermaid]`、`graph decompose [--root] [--budget]`（拆解 dry-run，不写状态不派翻译）
   - **状态推进**：`state get <m>`、`state transition [--module] [--to] [--substatus] [--reason] [--force]`（**`--to` 可省略**——模块级省略时只更新 substatus、status 不变，并行回传标 `agent_done` 就用这个形态）、`state update --module --status --cas-version [--substatus] [--reason]`（乐观锁写入，版本不匹配返冲突）、`state populate-modules`、`state deps <m>`（组感知依赖门禁，破环 M2-SCALE-SCC）、`state advance-sprint`（当前 sprint 全终态才推进；否则返回 `advanced:false` 而非报错）
   - **签批门（MDR-019）**：`state review-gate --module <m>`（判定 + 证据包索引）、`state approve --module <m> [--reason] [--by-policy <id> --attest <项>...]`（`reviewing → done` 的唯一单模块入口）、`state batch-transition-done --module <m>... [--by-policy --attest]`
