@@ -138,7 +138,7 @@ cargo run -- graph build --root fixtures/linear-deps  # 手动验证
    | 视角 | subagent_type | 豁免条件（全部满足才可跳过） |
    |------|--------------|---------------------------|
    | 主审 | `/code-review` skill | 不涉及代码改动 |
-   | 设计契约 | `design-checker` | 改动不涉及 `types/` / CLI JSON 输出 / state schema / 状态机 / 枚举定义，且不新增/删除 pub 字段 |
+   | 设计契约 | `design-checker` | 改动不涉及 `types/` / CLI JSON 输出 / state schema / 状态机 / 枚举定义，且不新增/删除 pub 字段，**且不涉及 `docs/design/` 中关于实现的事实性声明**（含「已有守卫」「已覆盖」这类元声明——PR #89 实测该视角在此类改动上抓到 2 个必修项，而按前几项条件它本可豁免） |
    | 专项 | `pr-review-toolkit:review-pr` | 改动 <30 行且不涉及错误处理 / 新类型 / 测试 / 注释变更 |
    | 异构交叉 | `codex:codex-rescue` | 改动 <50 行且仅涉及注释/文案/格式/单文件局部修复，不涉及算法/状态机/并发/解析器/图遍历/serde 格式 |
 
