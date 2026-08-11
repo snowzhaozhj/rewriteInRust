@@ -102,7 +102,7 @@ Plugin 中的确定性计算由独立的 Rust CLI 工具 `rustmigrate` 承担，
 
 > 各命令 `data` 字段的完整 Schema 随 M1 CLI 实现落地，纳入 insta 快照回归测试（见 [08 § CLI 测试](./08-roadmap-and-reference.md)）。
 
-**已实现命令 — 30 个**（含 M1 MVP 起陆续落地的 M2/M3/M4 命令；本表是 CLI 命令列表的唯一权威，新增命令须同步本表与 `plugin/skills/migrate/SKILL.md` 的命令清单）：
+**已实现命令 — 30 个**（含 M1 MVP 起陆续落地的 M2/M3/M4 命令；本表是 CLI 命令列表的唯一权威，新增命令须同步本表与 `plugin/skills/migrate/SKILL.md` 的命令清单——**两侧各自对 CLI 有 CI 守卫**（`cli/crates/cli/tests/design_command_table.rs`），两侧一致性由「都对齐 CLI」推出，本表与 SKILL.md 之间无直接比对边；命令**说明文本**的分歧不在守卫范围内）：
 
 | 子命令 | 说明 |
 |--------|------|
