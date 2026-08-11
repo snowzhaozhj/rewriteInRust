@@ -1842,9 +1842,9 @@ fn cmd_graph_export(format: &str) -> CmdResult {
 /// 并执行 DFS 环检测（blocked_by 关系图中的环路会导致死锁）。输出的 `ghost_refs`
 /// 列出「引用了未登记模块」的条目，成因是 state 与 source-graph 不同步（等待永不结束）。
 /// 注意它**不是** `still_blocked` 的子集：扫描覆盖全部模块，故非 blocked 模块上的残留
-/// 引用会出现在 `ghost_refs`（`module_blocked=false`）而不在 `still_blocked` 里。
-/// 两类处置动作不同，见 `validate_state` 告警文本（blocked 用 `state transition`
-/// 回 `pre_blocked_status`；残留用 `state reset`——后者无 `pre_blocked_status` 可回）。
+/// 引用会出现在 `ghost_refs`（`status` 非 `blocked`）而不在 `still_blocked` 里。
+/// 每条自带 `remedy`——**已替换好实际值的处置方案**，四类之一（`leave_blocked` /
+/// `reset` / `inert` / `reopen_migration`），编排器直接照做即可，不必回读 state 推断。
 ///
 /// `--auto-unblock`（需配合 `--check-blocked`）：对就绪的 blocked 模块自动恢复到
 /// `pre_blocked_status`（无则默认 `pending`），通过 `transition_module` 落盘。
@@ -1888,7 +1888,9 @@ fn cmd_validate_state(check_blocked: bool, auto_unblock: bool) -> CmdResult {
     // 取 `scan_ghost_references` 而非从 `checks` 提取：后者只遍历 blocked 模块，会与
     // `validate_state` 的全模块告警口径不一致——非 blocked 模块上的残留引用会出现
     // 「warnings 报了、`ghost_refs` 却是空数组」，只消费机读字段的编排器就漏掉了。
-    // `module_blocked` 区分「现在就永久阻塞」与「残留、将来才阻塞」。
+    // 每条带 `status`（紧迫性：`blocked` = 现在就永久阻塞，其余 = 残留、将来才阻塞）
+    // 与 `remedy`（该条的处置方案，判据取自 `reset_force_reason` / `can_transition_to`，
+    // 非手写清单——散文与守卫各写一份必然漂移，见 MDR-021「第三轮四视角」段）。
     let ghost_refs = scan_ghost_references(machine.state_file());
 
     let mut data = json!({
@@ -1904,8 +1906,17 @@ fn cmd_validate_state(check_blocked: bool, auto_unblock: bool) -> CmdResult {
     if auto_unblock {
         // 有环时拒绝自动解除（设计 09-appendix：环检测 → 报错中止）。
         if !cycle_paths.is_empty() {
+            // 「零解除」必须写在文案里：原文「无法自动解除」可被读成「（环上那些）无法解除」，
+            // 编排器据此可能以为 `ready_to_unblock` 已被处理。实测是**一个模块都不解除**。
+            // 记账（MDR-021）：本 Err 路径把已算出的 `data`（含 ghost_refs）与 warnings 整体
+            // 丢弃，编排器要拿诊断得去掉 `--auto-unblock` 重跑一次；改法是仿 `cmd_validate_rules`
+            // 把 data 经 `ErrorData` 的 `details` flatten 上来，属 pre-existing（PR #23）行为
+            // 变更，另 PR 处置。
             return Err(MigrateError::Config(format!(
-                "blocked_by 关系图存在环路，无法自动解除；请先打破环后重试。环路径: {cycle_paths:?}"
+                "blocked_by 关系图存在环路，无法自动解除：**本次一个模块都没有解除**\
+                 （ready_to_unblock 未被处理），请先打破环后重试。诊断明细（ghost_refs / \
+                 still_blocked / warnings）请去掉 --auto-unblock 重跑一次获取。环路径: \
+                 {cycle_paths:?}"
             )));
         }
 

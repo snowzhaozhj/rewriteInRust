@@ -2352,6 +2352,89 @@ fn subagent_call_status_domain_is_consistent_across_docs() {
     }
 }
 
+/// 设计文档声明的「reset 需 `--force` 的状态」集合，须与 `reset_force_reason` **完全相等**。
+///
+/// 存在理由是一次实测缺陷：幽灵引用告警的处置文案自己写了一份「`done`/`degrade_*` 需
+/// `--force`」的清单，漏掉 `paused`（也漏了 `blocked`），于是 paused 残留模块照文案做即得
+/// `E012`，而文案刚说这个状态不需要 `--force`。三处文档 + 一处代码守卫 = 四份真值源，
+/// 人工同步必漂，实测缺陷与实证记录见 MDR-021「第三轮四视角」段。
+///
+/// 判据取**集合相等**而非包含：只查「缺不缺」挡不住多写（把 `translating` 也写成需
+/// `--force`，编排器就会对本可裸 reset 的模块去要人类确认，白卡一轮）。
+///
+/// 值域两侧都不写死：一侧遍历 `ModuleStatus::iter()` 过 `reset_force_reason`，另一侧从文档
+/// 句子里抽反引号 token 后用 `ModuleStatus::from_str` 过滤——`--force` / `machine.rs` /
+/// `reset_force_reason` 这些非状态 token 自然落选，无需维护排除名单。
+#[test]
+fn reset_force_states_are_consistent_across_docs() {
+    use rustmigrate_core::state::machine::reset_force_reason;
+    use rustmigrate_core::types::state::ModuleStatus;
+    use std::str::FromStr;
+    use strum::IntoEnumIterator;
+
+    let mut expected: Vec<String> = ModuleStatus::iter()
+        .filter(|s| reset_force_reason(*s).is_some())
+        .map(|s| s.to_string())
+        .collect();
+    expected.sort();
+    assert!(
+        !expected.is_empty(),
+        "真值源为空——空集比空集会让本测试变成恒真的假绿。\
+         若确实取消了 reset 的 --force 守卫，请连同本断言一起重做，而不是让它空转"
+    );
+
+    // 三处文档里那句话的锚点。措辞被改写时**报锚点缺失**，而不是静默跳过校验。
+    const ANCHOR: &str = "reset 需 `--force` 的状态";
+    let sources = [
+        "docs/design/06-plugin-structure.md",
+        "docs/design/09-appendix-schemas.md",
+        "plugin/skills/migrate/run.md",
+    ];
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .expect("应能从 crate 目录上溯到仓库根")
+        .to_path_buf();
+
+    for rel_path in sources {
+        let path = repo_root.join(rel_path);
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("读不到 {}: {e}", path.display()));
+        let pos = text.find(ANCHOR).unwrap_or_else(|| {
+            panic!(
+                "{rel_path} 里找不到锚点「{ANCHOR}」——该句被删或改写了措辞。\
+                 **不要靠改锚点让本测试变绿**：这句话是编排器与用户照抄的权威声明，\
+                 删了它这一侧就再没有守卫。若确有重构，请连同本断言一起改并说明新锚点"
+            )
+        });
+        // 只取锚点所在的这一句：到首个「。」或行尾为止。06 的整张表行是一行，若取到整行会
+        // 把行内其他位置的 `reviewing`/`translating` 等状态 token 一并抓进来。
+        let rest = &text[pos..];
+        let line_end = rest.find('\n').unwrap_or(rest.len());
+        let sentence_end = rest[..line_end].find('。').unwrap_or(line_end);
+        let sentence = &rest[..sentence_end];
+
+        let mut declared: Vec<String> = sentence
+            .split('`')
+            .enumerate()
+            // 反引号成对包裹，奇数下标才是被包裹的内容。
+            .filter(|(i, _)| i % 2 == 1)
+            .filter_map(|(_, token)| ModuleStatus::from_str(token).ok())
+            .map(|s| s.to_string())
+            .collect();
+        declared.sort();
+        declared.dedup();
+
+        assert_eq!(
+            declared, expected,
+            "{rel_path} 声明的「reset 需 --force」状态集合与 `reset_force_reason` 不一致。\n\
+             代码（唯一真值源）: {expected:?}\n文档: {declared:?}\n\
+             **修法是改文档跟上代码**（或先改 `reset_force_reason` 再让文档跟上），\
+             不是改本断言的期望值。\n实际句子: {sentence}"
+        );
+    }
+}
+
 #[test]
 fn smoke_state_transition_invalid_status() {
     let tmp = tempfile::tempdir().unwrap();
@@ -3536,9 +3619,14 @@ fn smoke_validate_detects_ghost_blocked_by_reference() {
         assert_eq!(ghost_refs[0]["module"], serde_json::json!(key));
         assert_eq!(ghost_refs[0]["missing"], serde_json::json!("file:GHOST.ts"));
         assert_eq!(
-            ghost_refs[0]["module_blocked"],
-            serde_json::json!(true),
-            "该模块确为 blocked，应标记为现已阻塞: {json}"
+            ghost_refs[0]["status"],
+            serde_json::json!("blocked"),
+            "须回带持有方状态（紧迫性由它判读）: {json}"
+        );
+        assert_eq!(
+            ghost_refs[0]["remedy"],
+            serde_json::json!({"kind": "leave_blocked", "to": "pending", "anchored": true}),
+            "blocked 且有锚点时处置须是回锚点的 transition: {json}"
         );
         assert!(
             json["data"]["still_blocked"]
@@ -3585,29 +3673,61 @@ fn smoke_validate_detects_ghost_blocked_by_reference() {
             "非 blocked 模块的残留引用也须进 ghost_refs: {json}"
         );
         assert_eq!(
-            ghost_refs[0]["module_blocked"],
-            serde_json::json!(false),
+            ghost_refs[0]["status"],
+            serde_json::json!("pending"),
             "pending 模块不得标记为已阻塞: {json}"
+        );
+        assert_eq!(
+            ghost_refs[0]["remedy"],
+            serde_json::json!({"kind": "reset", "force": null}),
+            "pending 残留引用的处置是裸 reset: {json}"
         );
     });
 }
 
-/// 从告警文本里抽出以 `prefix` 开头的那条反引号包裹的命令。
+/// 按 `ghost_refs[].remedy` 构造 argv（`None` = 该方案没有可执行命令）。
 ///
-/// 用于「照告警说的做」类测试：判据必须是**文案里实际写的命令**，而不是测试自己硬编码
-/// 的一条。审查实证过硬编码的后果——告警可以被改成一条确定性失败的命令（例如把
-/// `--to <pre_blocked_status>` 换成 `--to done`），而硬编码 `--to pending` 的测试照样绿，
-/// 于是「建议照做能成功」这个命题失去守卫。
-fn parse_advice_command(advice: &str, prefix: &str) -> Option<String> {
-    advice
-        .split('`')
-        // 反引号成对包裹，奇数下标才是被包裹的内容（偶数下标是包裹外的散文）。
-        // 按内容启发式（如 contains("state")）会被散文里提到的同名词误触发。
-        .enumerate()
-        .filter(|(i, _)| i % 2 == 1)
-        .map(|(_, seg)| seg)
-        .find(|seg| seg.starts_with(prefix))
-        .map(str::to_owned)
+/// **执行来源是机读字段，不是人读告警文本。** 早先版本从 warning 里按反引号奇偶位抽命令，
+/// 实测两个致命弱点，都是审查变异实证出来的：
+/// ⑴ 抽出来之后跑的仍是**手写 argv**，二者毫无绑定——四个审查视角各自把告警改成不存在的
+///    flag（`--keep-progress` / `--ghost-purge` / `--bogus-flag`），两条「照做能成功」测试
+///    全部照样 PASS；
+/// ⑵ module key 经 `serde_json` 转义而**反引号不在转义集里**，key 里含一个反引号就让奇偶位
+///    整体错位，测试报成「告警没给命令」——假归因，比不报更难查。
+///
+/// 现在的分工：本函数按 `remedy` 真跑（可执行性的守卫），另有一条文案断言要求 warning 里
+/// 出现与 `remedy` 同类的命令（文案不得与机读字段各说一套）。
+fn ghost_remedy_argv(remedy: &serde_json::Value, module: &str) -> Option<Vec<String>> {
+    let kind = remedy["kind"].as_str().expect("remedy 须带 kind");
+    match kind {
+        "leave_blocked" => {
+            let to = remedy["to"].as_str().expect("leave_blocked 须带目标状态");
+            Some(vec![
+                "state".to_owned(),
+                "transition".to_owned(),
+                "--module".to_owned(),
+                module.to_owned(),
+                "--to".to_owned(),
+                to.to_owned(),
+                "--reason".to_owned(),
+                "清除幽灵 blocked_by".to_owned(),
+            ])
+        }
+        "reset" => {
+            let mut argv = vec![
+                "state".to_owned(),
+                "reset".to_owned(),
+                "--module".to_owned(),
+                module.to_owned(),
+            ];
+            if !remedy["force"].is_null() {
+                argv.push("--force".to_owned());
+            }
+            Some(argv)
+        }
+        "inert" | "reopen_migration" => None,
+        other => panic!("未知 remedy kind: {other}（新增变体须在此显式处置）"),
+    }
 }
 
 #[test]
@@ -3642,25 +3762,8 @@ fn smoke_ghost_reference_advice_actually_works() {
         sf["modules"][&key]["pre_blocked_status"] = serde_json::json!("pending");
         std::fs::write(&sp, serde_json::to_string_pretty(&sf).unwrap()).unwrap();
 
-        // 取告警里给出的处置命令。
-        let (_, json) = run(&["validate", "state"]);
-        let advice = json["warnings"][0].as_str().unwrap().to_string();
-
-        // 从 advice 里**解析**出建议的命令再执行，而不是硬编码。此前这里是
-        // `advice.contains("state transition")` + `!advice.contains("populate-modules 同步")`
-        // 两条文本形状断言，而后面照做的代码用的是硬编码 `--to pending`——文案与实际
-        // 执行之间没有任何绑定。审查变异实证：把死路建议换个措辞塞回来（保留
-        // "state transition" 字样）、甚至改成确定性失败的 `--to done`，该测试照样 PASS。
-        // 现在改为「文案说什么就跑什么」，给错建议即在下方 assert_eq!(code, 0) 处报红。
-        let cmd = parse_advice_command(&advice, "state transition")
-            .unwrap_or_else(|| panic!("告警须给出可解析的 transition 处置命令: {advice}"));
-        assert!(
-            cmd.contains("--to <pre_blocked_status>"),
-            "blocked 类处置须回 pre_blocked_status（该模块有此锚点、不丢进度）: {cmd}"
-        );
-
         // 反证：在**幽灵态尚未处置时**，旧文案建议的 populate 路径确实走不通。
-        // 必须在 transition 之前测——处置后模块已回 pending，populate 反而会成功，
+        // 必须在处置之前测——处置后模块已回 pending，populate 反而会成功，
         // 那时的成功证明不了任何事。
         let (code, out) = run(&["state", "populate-modules"]);
         assert_ne!(
@@ -3675,19 +3778,15 @@ fn smoke_ghost_reference_advice_actually_works() {
             "拒绝理由应为非 pending 状态保护: {out}"
         );
 
-        // 照建议执行：把解析出的 `<pre_blocked_status>` 占位符替换为该模块的实际锚点值。
-        let target = sf["modules"][&key]["pre_blocked_status"].as_str().unwrap();
-        let (code, out) = run(&[
-            "state",
-            "transition",
-            "--module",
-            &key,
-            "--to",
-            target,
-            "--reason",
-            "清除幽灵 blocked_by",
-        ]);
-        assert_eq!(code, 0, "告警建议的命令必须能成功执行: {out}");
+        // 照 remedy 执行（argv 由机读字段构造，不解析人读文案，理由见 `ghost_remedy_argv`）。
+        let (_, json) = run(&["validate", "state", "--check-blocked"]);
+        let remedy = json["data"]["ghost_refs"][0]["remedy"].clone();
+        let argv = ghost_remedy_argv(&remedy, &key).expect("blocked 类必有可执行命令");
+        let (code, out) = run(&argv.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(
+            code, 0,
+            "remedy 给的命令必须能成功执行: {out}（argv: {argv:?}）"
+        );
 
         // 照做之后问题真的消失（这才是「建议有效」的定义）。
         let (code, json) = run(&["validate", "state"]);
@@ -3697,6 +3796,240 @@ fn smoke_ghost_reference_advice_actually_works() {
         assert!(
             json["data"]["ghost_refs"].as_array().unwrap().is_empty(),
             "幽灵引用应已清除: {json}"
+        );
+    });
+}
+
+/// 幽灵引用处置的**状态网格**：每个 status 的 remedy 照做都必须真的有效。
+///
+/// 为什么必须按网格测：处置的可执行性取决于四个正交谓词（能否进 blocked / reset 是否需
+/// `--force` / 项目是否 graduate / 有无锚点），而告警一度按 `module_blocked` 这个 bool 二分。
+/// 上一轮补测试时只加了「残留类」一个格子（且恰好选中 `translating`——唯一零代价的状态），
+/// 于是 `paused` 照做即 `E012`、`done`/`degrade_*` 拿到基于不可达前提的破坏性动作，两者都
+/// 原样留到了下一轮审查才被抓出（详见 MDR-021「第三轮四视角」段 ⒜⒞）。
+///
+/// **教训的正确落法**：不是「记住要覆盖两类」，而是让定义域本身成为测试的参数。
+#[test]
+fn smoke_ghost_remedy_grid_is_actually_executable() {
+    struct Case {
+        status: &'static str,
+        anchor: Option<&'static str>,
+        remedy: serde_json::Value,
+        /// 告警正文须出现的片段——钉住「人读文案与机读 remedy 不得各说一套」。
+        warn_contains: &'static str,
+    }
+    let cases = [
+        Case {
+            status: "blocked",
+            anchor: Some("reviewing"),
+            remedy: serde_json::json!({"kind":"leave_blocked","to":"reviewing","anchored":true}),
+            warn_contains: "state transition --module <M> --to <T>",
+        },
+        Case {
+            // 无锚点的 blocked（`update_module` 直接注入 / 手工编辑可达，`machine.rs` 与
+            // `auto_unblock_modules` 都显式承认这一情形）。占位符若原样交给编排器，它会
+            // 替换出 `--to null`（实测 E012）；remedy 必须已经把默认值定下来。
+            status: "blocked",
+            anchor: None,
+            remedy: serde_json::json!({"kind":"leave_blocked","to":"pending","anchored":false}),
+            warn_contains: "无锚点时取 `pending`",
+        },
+        Case {
+            status: "translating",
+            anchor: None,
+            remedy: serde_json::json!({"kind":"reset","force":null}),
+            warn_contains: "state reset --module <M>",
+        },
+        Case {
+            status: "reviewing",
+            anchor: None,
+            remedy: serde_json::json!({"kind":"reset","force":null}),
+            warn_contains: "state reset --module <M>",
+        },
+        Case {
+            // 实测缺陷所在的那一格（MDR-021「第三轮四视角」⒜）：文案曾只列 `done`/`degrade_*`。
+            // 且它不只手工编辑可达——`state recover --policy skip` 就会把模块置为 paused
+            // 而保留 blocked_by。
+            status: "paused",
+            anchor: None,
+            remedy: serde_json::json!({"kind":"reset","force":"模块暂停中（自动重试耗尽待人类抉择），reset 会绕过降级决策点，须 --force"}),
+            warn_contains: "编排器不得自动补",
+        },
+        Case {
+            status: "done",
+            anchor: None,
+            remedy: serde_json::json!({"kind":"inert"}),
+            warn_contains: "永不可能再进 blocked",
+        },
+        Case {
+            status: "degrade_skip",
+            anchor: None,
+            remedy: serde_json::json!({"kind":"inert"}),
+            warn_contains: "永不可能再进 blocked",
+        },
+    ];
+
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("circular-deps"), tmp.path());
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        assert_eq!(run(&["graph", "build", "--root", "src"]).0, 0);
+        assert_eq!(run(&["state", "populate-modules"]).0, 0);
+        let sp = tmp.path().join(".rust-migration/migration-state.json");
+        let pristine = std::fs::read_to_string(&sp).unwrap();
+        let key = serde_json::from_str::<serde_json::Value>(&pristine).unwrap()["modules"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .min()
+            .unwrap()
+            .clone();
+
+        for case in &cases {
+            let label = format!("[status={} anchor={:?}]", case.status, case.anchor);
+            let mut sf: serde_json::Value = serde_json::from_str(&pristine).unwrap();
+            sf["modules"][&key]["status"] = serde_json::json!(case.status);
+            sf["modules"][&key]["blocked_by"] = serde_json::json!(["file:GHOST.ts"]);
+            sf["modules"][&key]["pre_blocked_status"] = match case.anchor {
+                Some(a) => serde_json::json!(a),
+                None => serde_json::Value::Null,
+            };
+            // 进度字段预置：用于钉住 reset 的**代价**描述（status 变不变是一回事，
+            // 进度字段一律清空是另一回事——旧文案「pending/translating 则原状态不变」
+            // 出现在「代价须知」句里，会被读成「这两类没有代价」）。
+            sf["modules"][&key]["substatus"] =
+                serde_json::json!("phase_a_complete_awaiting_review");
+            sf["modules"][&key]["test_pass_rate"] = serde_json::json!("95%");
+            std::fs::write(&sp, serde_json::to_string_pretty(&sf).unwrap()).unwrap();
+
+            let (code, json) = run(&["validate", "state", "--check-blocked"]);
+            assert_eq!(code, 0, "{label} 幽灵引用只告警不硬错: {json}");
+            let ghosts = json["data"]["ghost_refs"].as_array().unwrap();
+            assert_eq!(ghosts.len(), 1, "{label} 须扫出一条: {json}");
+            assert_eq!(
+                ghosts[0]["status"],
+                serde_json::json!(case.status),
+                "{label} 须回带持有方状态"
+            );
+            assert_eq!(ghosts[0]["remedy"], case.remedy, "{label} remedy 不符预期");
+
+            let (_, json) = run(&["validate", "state"]);
+            let warn = json["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|w| w.as_str().unwrap())
+                .find(|w| w.contains("file:GHOST.ts"))
+                .unwrap_or_else(|| panic!("{label} 须就幽灵引用告警: {json}"))
+                .to_owned();
+            assert!(
+                warn.contains(case.warn_contains),
+                "{label} 告警正文须与 remedy 同口径，缺「{}」: {warn}",
+                case.warn_contains
+            );
+
+            match ghost_remedy_argv(&ghosts[0]["remedy"], &key) {
+                None => {
+                    // inert：断言「无需处置」这个承诺是诚实的——引用留着确实不阻塞，
+                    // 且命令行照旧只是 warning、不硬错（上面已断言 code==0）。
+                    assert!(
+                        json["data"].get("still_blocked").is_none()
+                            || json["data"]["still_blocked"]
+                                .as_array()
+                                .is_none_or(|a| a.is_empty()),
+                        "{label} inert 类不得计入阻塞: {json}"
+                    );
+                }
+                Some(argv) => {
+                    // 需 --force 的格子：先证裸 reset **确实**被拒（这正是 remedy 里
+                    // 带 --force 的理由；不证就无法区分「remedy 多给了个 flag」）。
+                    if !ghosts[0]["remedy"]["force"].is_null() {
+                        let (bare_code, bare_out) = run(&["state", "reset", "--module", &key]);
+                        assert_ne!(
+                            bare_code, 0,
+                            "{label} 裸 reset 应被拒，否则 remedy 不该要求 --force: {bare_out}"
+                        );
+                    }
+                    let (code, out) = run(&argv.iter().map(String::as_str).collect::<Vec<_>>());
+                    assert_eq!(code, 0, "{label} remedy 须可执行: {out}（argv: {argv:?}）");
+
+                    let (code, json) = run(&["validate", "state"]);
+                    assert_eq!(code, 0, "{label} {json}");
+                    let (_, checked) = run(&["validate", "state", "--check-blocked"]);
+                    assert!(
+                        checked["data"]["ghost_refs"].as_array().unwrap().is_empty(),
+                        "{label} 照 remedy 做完幽灵引用须消失: {checked}"
+                    );
+
+                    // reset 的代价如实性：进度字段一律清空（含 status 不变的那两类）。
+                    if ghosts[0]["remedy"]["kind"] == "reset" {
+                        let after: serde_json::Value =
+                            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+                        assert!(
+                            after["modules"][&key]["substatus"].is_null()
+                                && after["modules"][&key]["test_pass_rate"].is_null(),
+                            "{label} reset 会清进度字段，文案不得读作「无代价」: {after}"
+                        );
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// 残留类模块上，**合法边**的 transition 会成功却不清 `blocked_by`。
+///
+/// 这条比「transition 被拒」危险得多，也是旧文案说反的地方：它写「transition 一律报非法
+/// 转换」，而 `blocked_by = None` 只在 `from == Blocked` 分支里执行（`machine.rs`）。于是
+/// `reviewing → translating` 这类合法边返回 `status:ok`，编排器把 rc=0 读成「已处置」，
+/// 幽灵引用毫发无损——比 `E004` 更难发现。
+#[test]
+fn smoke_transition_on_residual_ghost_succeeds_without_clearing_blocked_by() {
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("circular-deps"), tmp.path());
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        assert_eq!(run(&["graph", "build", "--root", "src"]).0, 0);
+        assert_eq!(run(&["state", "populate-modules"]).0, 0);
+        let sp = tmp.path().join(".rust-migration/migration-state.json");
+        let mut sf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+        let key = sf["modules"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .min()
+            .unwrap()
+            .clone();
+        sf["modules"][&key]["status"] = serde_json::json!("reviewing");
+        sf["modules"][&key]["blocked_by"] = serde_json::json!(["file:GHOST.ts"]);
+        sf["modules"][&key]["pre_blocked_status"] = serde_json::Value::Null;
+        std::fs::write(&sp, serde_json::to_string_pretty(&sf).unwrap()).unwrap();
+
+        // 前置假设：`reviewing → translating` 确实是合法边（矩阵变化时此处先红）。
+        let (code, out) = run(&[
+            "state",
+            "transition",
+            "--module",
+            &key,
+            "--to",
+            "translating",
+        ]);
+        assert_eq!(code, 0, "reviewing → translating 应为合法边: {out}");
+
+        // 关键断言：命令成功，但幽灵引用**还在**。
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+        assert_eq!(
+            after["modules"][&key]["blocked_by"],
+            serde_json::json!(["file:GHOST.ts"]),
+            "transition 不清 blocked_by（只有离开 blocked 的边才清）: {after}"
+        );
+        let (code, json) = run(&["validate", "state"]);
+        assert_eq!(code, 0, "{json}");
+        assert_eq!(
+            json["status"], "warning",
+            "幽灵引用未被清除，告警须仍在——rc=0 不等于已处置: {json}"
         );
     });
 }
@@ -3767,93 +4100,6 @@ fn smoke_auto_unblock_refuses_entirely_when_cycles_present() {
         assert_eq!(
             after["modules"]["READY"]["status"], "blocked",
             "拒绝须是整体的，可解除模块也不得被改状态: {after}"
-        );
-    });
-}
-
-#[test]
-fn smoke_residual_ghost_reference_advice_actually_works() {
-    // 补上一轮漏掉的另一半定义域。`scan_ghost_references` 有意扫**全部**模块，故告警
-    // 覆盖两类：`module_blocked=true`（正 blocked）与 `false`（残留引用）。但上一轮
-    // 为「建议照做能成功」加的 e2e 只覆盖了前者（测试里显式写 pre_blocked_status），
-    // 而处置文本当时是两类共用一段——于是后者拿到一条**确定性失败**的建议：
-    // 这类模块不在 blocked 态、`pre_blocked_status` 恒为 null，transition 无目标可回。
-    //
-    // 三个审查视角各自独立复现了同一缺陷；实测 `translating` 模块照做，`--to pending`
-    // 与 `--to translating` 均报 `E004 非法状态转换`，幽灵引用原样留着。更刺眼的是当时
-    // 文案明确否掉的 `state reset` 才是这一类唯一可行的处置。
-    //
-    // 教训：**测试的场景定义域必须覆盖被测行为的定义域**。告警分述两类而测试只测一类，
-    // 另一类的同型缺陷就原样留下。
-    let tmp = tempfile::tempdir().unwrap();
-    copy_dir(&fixtures_dir().join("circular-deps"), tmp.path());
-    with_cwd(tmp.path(), || {
-        let _ = run(&["init"]);
-        assert_eq!(run(&["graph", "build", "--root", "src"]).0, 0);
-        assert_eq!(run(&["state", "populate-modules"]).0, 0);
-
-        let sp = tmp.path().join(".rust-migration/migration-state.json");
-        let mut sf: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
-        let key = sf["modules"]
-            .as_object()
-            .unwrap()
-            .keys()
-            .min()
-            .unwrap()
-            .clone();
-        // 残留态：模块**不在** blocked，blocked_by 却留着幽灵引用，无 pre_blocked_status。
-        sf["modules"][&key]["status"] = serde_json::json!("translating");
-        sf["modules"][&key]["blocked_by"] = serde_json::json!(["file:GHOST.ts"]);
-        sf["modules"][&key]["pre_blocked_status"] = serde_json::Value::Null;
-        std::fs::write(&sp, serde_json::to_string_pretty(&sf).unwrap()).unwrap();
-
-        // 前置假设断言：确认这确实是残留类（module_blocked=false 且不在 still_blocked）。
-        // 若将来 scan 退回只扫 blocked 模块，此处会红而不是让下面的断言静默失去意义。
-        let (_, json) = run(&["validate", "state", "--check-blocked"]);
-        let ghosts = json["data"]["ghost_refs"].as_array().unwrap();
-        assert_eq!(ghosts.len(), 1, "残留引用须被扫出: {json}");
-        assert_eq!(
-            ghosts[0]["module_blocked"],
-            serde_json::json!(false),
-            "本场景须是残留类（模块不在 blocked）: {json}"
-        );
-        assert!(
-            json["data"]["still_blocked"].as_array().unwrap().is_empty(),
-            "残留类不进 still_blocked——ghost_refs 不是它的子集: {json}"
-        );
-
-        // 反证：blocked 类的处置动作对本类**确实**行不通（这正是本测试存在的理由）。
-        // 必须在处置之前做——处置后 blocked_by 已清，transition 的失败原因就变了。
-        for target in ["pending", "translating"] {
-            let (code, out) = run(&["state", "transition", "--module", &key, "--to", target]);
-            assert_ne!(
-                code, 0,
-                "残留类模块无 pre_blocked_status 可回，transition --to {target} 应被拒: {out}"
-            );
-        }
-
-        // 照告警说的做：解析出 reset 命令而非硬编码。
-        let (_, json) = run(&["validate", "state"]);
-        let advice = json["warnings"][0].as_str().unwrap().to_string();
-        let cmd = parse_advice_command(&advice, "state reset")
-            .unwrap_or_else(|| panic!("残留类告警须给出 reset 处置命令: {advice}"));
-        assert!(
-            cmd.contains("--module"),
-            "reset 处置须按模块给出: {cmd}（advice: {advice}）"
-        );
-
-        let (code, out) = run(&["state", "reset", "--module", &key]);
-        assert_eq!(code, 0, "残留类告警建议的命令必须能成功执行: {out}");
-
-        // 照做之后问题真的消失。
-        let (code, json) = run(&["validate", "state"]);
-        assert_eq!(code, 0, "{json}");
-        assert_eq!(json["status"], "ok", "照建议处置后不应再有告警: {json}");
-        let (_, json) = run(&["validate", "state", "--check-blocked"]);
-        assert!(
-            json["data"]["ghost_refs"].as_array().unwrap().is_empty(),
-            "幽灵引用应已清除: {json}"
         );
     });
 }

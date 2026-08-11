@@ -10,8 +10,9 @@ use std::collections::{HashMap, HashSet};
 use serde::Serialize;
 
 use crate::error::{MigrateError, Result};
+use crate::state::machine::reset_force_reason;
 use crate::state::{MigrationStateMachine, STATE_SCHEMA_VERSION};
-use crate::types::state::{MigrationStateFile, ModuleStatus, ProjectState};
+use crate::types::state::{MigrationStateFile, ModuleState, ModuleStatus, ProjectState};
 
 /// 校验状态文件完整性。
 ///
@@ -148,43 +149,90 @@ pub fn validate_state(state_file: &MigrationStateFile) -> Result<Vec<String>> {
     // 报了但机读字段是空数组」）。
     let ghosts = scan_ghost_references(state_file);
     if !ghosts.is_empty() {
-        // 按是否 blocked 分述：对 blocked 模块是「现在就永久阻塞」，对其余模块只是
-        // 残留引用（当前不阻塞，但该模块再被标 blocked 时会立刻永久阻塞）。
-        // 混为一谈会对 pending 模块作出「引用方将永久阻塞」这种当下失实的断言。
+        // 处置动作**按 [`GhostRemedy`] 的四类分述，而不是按「是否 blocked」二分**。
+        //
+        // 二分版本曾上线一轮并被审查全数推翻（MDR-021「第三轮四视角」段）：取决于四个**正交**
+        // 谓词——该状态能否进 blocked（决定要不要处置）、reset 是否需 `--force`、项目是否
+        // 已 graduate（决定 reset 可不可用）、blocked 模块有无 `pre_blocked_status` 锚点
+        // （决定 transition 的目标）。一个 bool 扛不住四个维度，于是残留支那条命令要通吃
+        // 11 个 status：`paused` 照做即 `E012`（4/4 视角独立复现），`done`/`degrade_*` 拿到
+        // 基于**不可达前提**的破坏性动作，graduate 项目下一条可行命令都没有。
+        //
+        // 判据一律取自代码而非散文清单：`--force` 值域取 [`reset_force_reason`]，可否进
+        // blocked 取 [`ModuleStatus::can_transition_to`]。同一失败模式在本 PR 已复发三次
+        // （`retryable` 兼任错误归属 → `module_blocked` 兼任四维度），故这次把真值源收敛到
+        // 一处，并由守卫测试把设计文档的声明钉在其上。
         let mut blocking: Vec<String> = Vec::new();
-        let mut residual: Vec<String> = Vec::new();
+        let mut resettable: Vec<String> = Vec::new();
+        let mut needs_force: Vec<String> = Vec::new();
+        let mut force_reasons: Vec<&'static str> = Vec::new();
+        let mut inert: Vec<String> = Vec::new();
+        let mut no_remedy: Vec<String> = Vec::new();
         for g in &ghosts {
             let line = format!("{} → {}", quote_key(&g.module), quote_key(&g.missing));
-            if g.module_blocked {
-                blocking.push(line);
-            } else {
-                residual.push(line);
+            match g.remedy {
+                GhostRemedy::LeaveBlocked { .. } => blocking.push(line),
+                GhostRemedy::Reset { force: None } => resettable.push(line),
+                GhostRemedy::Reset { force: Some(why) } => {
+                    needs_force.push(line);
+                    force_reasons.push(why);
+                }
+                GhostRemedy::Inert => inert.push(line),
+                GhostRemedy::ReopenMigration => no_remedy.push(line),
             }
         }
-        // 处置动作**必须按两类分开给**：blocked 模块有 `pre_blocked_status` 锚点，
-        // `transition` 回该状态即清空 `blocked_by` 且不丢进度；而非 blocked 模块的
-        // `pre_blocked_status` 恒为 None（该字段只在进入 blocked 时写入），同一条建议
-        // 对它是**确定性失败**——实测 `translating` 模块照做，`--to pending` 与
-        // `--to translating` 均报 `E004 非法状态转换`，幽灵引用原样留着。
-        // 这正是本轮修过的「告警建议照做会失败」那条 imp 的另一半入口，不能只修一半。
         let mut parts: Vec<String> = Vec::new();
         if !blocking.is_empty() {
             parts.push(format!(
                 "以下 blocked 模块的 blocked_by 指向未登记的 key，被引模块永远不会进终态、\
-                 该模块将永久阻塞: {}——处置：`state transition --module <M> --to \
-                 <pre_blocked_status>`（离开 blocked 即清空 blocked_by，不丢迁移进度）",
+                 该模块将永久阻塞: {}——处置：`state transition --module <M> --to <T>`\
+                 （离开 blocked 是**唯一**会清空 blocked_by 的转换边，且不丢迁移进度）。\
+                 T 取该模块的 `pre_blocked_status`；无锚点时取 `pending`（与 `--auto-unblock` \
+                 的默认一致，实测可行）。每条已替换好实际值的命令见 `--check-blocked` 输出的 \
+                 `ghost_refs[].remedy`",
                 blocking.join("、")
             ));
         }
-        if !residual.is_empty() {
+        if !resettable.is_empty() {
             parts.push(format!(
                 "以下模块残留指向未登记 key 的 blocked_by（当前未阻塞，但该模块一旦被标 \
-                 blocked 即永久阻塞）: {}——处置：`state reset --module <M>`（无条件清空 \
-                 blocked_by；这类模块不在 blocked 态、无 `pre_blocked_status` 可回，故\
-                 transition 一律报非法转换）。注意 reset 会把 `reviewing` 等状态回退到 \
-                 `translating` 并清进度字段，`done`/`degrade_*` 还需 `--force`；\
-                 `pending`/`translating` 则原状态不变",
-                residual.join("、")
+                 blocked 即永久阻塞）: {}——处置：`state reset --module <M>`。**transition \
+                 修不了这一类**：blocked_by 只在「离开 blocked」的边上被清空，故对非 blocked \
+                 模块，transition 要么报 `E004`（目标非法），要么返回成功而 blocked_by 原样\
+                 留着——后者更隐蔽，`status:ok` 会被误读成已处置。reset 的代价：\
+                 `reviewing`/`testing`/`compile_fixing` 会回退到 `translating`，\
+                 `pending`/`translating` 的 status 不变，但**两种情况都会清空** substatus / \
+                 phase_a_version / phase_a_audit_passed / test_pass_rate / coverage / \
+                 known_differences（attempts 与审计保留）",
+                resettable.join("、")
+            ));
+        }
+        if !needs_force.is_empty() {
+            force_reasons.sort_unstable();
+            force_reasons.dedup();
+            parts.push(format!(
+                "以下模块残留 blocked_by，且其状态的 reset **需 `--force`**: {}——理由：{}。\
+                 `--force` 在此是人类确认，**编排器不得自动补**（补了就绕过该状态本身要\
+                 保护的决策点）；代价同上（清进度字段）",
+                needs_force.join("、"),
+                force_reasons.join("；")
+            ));
+        }
+        if !inert.is_empty() {
+            parts.push(format!(
+                "以下模块残留 blocked_by，但其状态**永不可能再进 blocked**（`done` 不可转出、\
+                 `degrade_*` 仅可 `--force` 恢复到 `translating`），故该引用惰性无害、\
+                 **无需处置**: {}。如确要清理，须先 `--force` reset——那会把已完成模块打回 \
+                 `translating`、清空全部进度字段并产出「删除 .rs 产物 + 重译」的清理指令，\
+                 代价远大于收益",
+                inert.join("、")
+            ));
+        }
+        if !no_remedy.is_empty() {
+            parts.push(format!(
+                "以下模块残留 blocked_by，而项目已毕业（`graduate`）：reset 一律被拒且 \
+                 `--force` 不可绕，CLI 层**无可行处置命令**: {}——如需清理须先重开迁移",
+                no_remedy.join("、")
             ));
         }
         warnings.push(format!(
@@ -365,12 +413,71 @@ pub struct GhostReference {
     pub module: String,
     /// 无法归一到任何模块的被引 key。
     pub missing: String,
-    /// 持有方当前是否处于 `blocked`。
+    /// 持有方当前状态。
     ///
-    /// 决定后果的严重度，两者处置紧迫性不同：`true` 表示**现在就**永久阻塞；
-    /// `false` 只是残留引用（当前不阻塞，但该模块一旦被标 blocked 即永久阻塞）。
-    /// 不区分就会对 pending 模块作出「引用方将永久阻塞」这种当下失实的断言。
-    pub module_blocked: bool,
+    /// 取代了本条目早期的 `module_blocked: bool`——那个 bool 同时被当作「紧迫性」、
+    /// 「有无 `pre_blocked_status` 锚点」、「reset 需不需要 `--force`」、「有没有可行命令」
+    /// 四件事用，四个维度正交，一个 bool 扛不住（逐条实证见 MDR-021「第三轮四视角」段）。
+    /// 紧迫性由 `status == Blocked` 判读，其余三维交给 [`GhostReference::remedy`]。
+    pub status: ModuleStatus,
+    /// 这一条的处置方案（**已替换好实际值**，编排器可直接执行，无需回读 state 二次推断）。
+    ///
+    /// 早期版本只在人读 warning 里给带 `<M>` / `<pre_blocked_status>` 占位符的模板，
+    /// 编排器必须自己回读模块字段去替换；而锚点为 `null` 时它会替换出 `--to null`
+    /// （实测 `E012 非法 ModuleStatus`），停在一个没有下一步的位置。
+    pub remedy: GhostRemedy,
+}
+
+/// 一条幽灵引用的处置方案。
+///
+/// 由三个**代码级**判据推导，不含任何手写清单：
+/// [`ModuleStatus::can_transition_to`]（该状态能否进 blocked）、
+/// [`reset_force_reason`]（reset 是否需 `--force`）、项目是否 `graduate`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum GhostRemedy {
+    /// 模块正 blocked：`transition` 离开 blocked 即清空 `blocked_by`，且不丢进度。
+    ///
+    /// `to` 为该模块的 `pre_blocked_status`；无锚点时为 `pending`——与
+    /// [`auto_unblock_modules`] 的默认一致，`transition_inner` 在无锚点时只校验目标可
+    /// blockable，故该目标合法（实测 `status:ok` 且 `blocked_by` 被清）。
+    LeaveBlocked {
+        /// transition 的目标状态。
+        to: ModuleStatus,
+        /// 目标是否来自真实锚点（`false` = 无锚点、取的是 `pending` 默认值）。
+        anchored: bool,
+    },
+    /// 模块不在 blocked 但仍可能被标 blocked：只有 `reset` 会清 `blocked_by`。
+    ///
+    /// `force` 为 [`reset_force_reason`] 的返回值：`Some` 时裸 reset 会被拒，
+    /// 而补 `--force` 属人类决策（该状态正是靠它保护某个决策点）。
+    Reset {
+        /// `None` = 裸 reset 即可；`Some(理由)` = 须 `--force`，且理由须转达人类。
+        force: Option<&'static str>,
+    },
+    /// 该状态永不可能再进 blocked（`done` / `degrade_*`）：引用惰性无害，无需处置。
+    Inert,
+    /// 项目已 `graduate`：reset 一律被拒（`--force` 不可绕），CLI 层无可行命令。
+    ReopenMigration,
+}
+
+impl GhostRemedy {
+    /// 渲染成可直接执行的命令（`None` = 本方案不需要/没有可执行命令）。
+    ///
+    /// `module` 原样嵌入，不做 shell 引用：调用方按 argv 传参（key 可含空格/引号，
+    /// 拼成 shell 字符串反而会引入注入面）。
+    pub fn command(&self, module: &str) -> Option<String> {
+        match self {
+            Self::LeaveBlocked { to, .. } => Some(format!(
+                "state transition --module {module} --to {to} --reason '清除幽灵 blocked_by'"
+            )),
+            Self::Reset { force: None } => Some(format!("state reset --module {module}")),
+            Self::Reset { force: Some(_) } => {
+                Some(format!("state reset --module {module} --force"))
+            }
+            Self::Inert | Self::ReopenMigration => None,
+        }
+    }
 }
 
 /// 扫描全部模块的 `blocked_by`，返回无法归一到任何模块的引用。
@@ -379,7 +486,7 @@ pub struct GhostReference {
 /// （`machine.rs` 的 `transition_module`），但手工编辑或旧文件可能在非 blocked 模块上
 /// 留下残值，一旦该模块再次被标 blocked 就会立刻踩中同一个坑。
 ///
-/// 判据经 [`resolve_blocked_ref`] 归一，故 composite 组的非代表成员 key 不算幽灵。
+/// 判据经 `resolve_blocked_ref` 归一，故 composite 组的非代表成员 key 不算幽灵。
 ///
 /// 结果按 (module, missing) 字典序排序：`modules` 是 `HashMap`，不排序则告警文本与
 /// JSON 明细的条目顺序在每次运行间漂移。
@@ -394,7 +501,8 @@ pub fn scan_ghost_references(state_file: &MigrationStateFile) -> Vec<GhostRefere
                 out.push(GhostReference {
                     module: name.clone(),
                     missing: dep.clone(),
-                    module_blocked: module.status == ModuleStatus::Blocked,
+                    status: module.status,
+                    remedy: ghost_remedy(state_file.state, module),
                 });
             }
         }
@@ -406,6 +514,34 @@ pub fn scan_ghost_references(state_file: &MigrationStateFile) -> Vec<GhostRefere
     });
     out.dedup();
     out
+}
+
+/// 推导一条幽灵引用的处置方案。
+///
+/// **判定顺序不可换**，每一步都有实测理由：
+/// 1. `blocked` 必须先判：`Blocked` 自身不在 `blockable` 集合里，故第 2 步对它为假、会被
+///    误判成 `Inert`。且 `transition_module` **没有** graduate 守卫，所以已毕业项目下
+///    blocked 模块（手工编辑可达）照样可以 transition 出去，不该落进第 3 步。
+/// 2. 不可能再进 blocked 的（`done` / `degrade_*`）直接判 `Inert`：告警对它们断言的
+///    「一旦被标 blocked 即永久阻塞」是**不可达前提**，据此给破坏性 reset 是净损失。
+/// 3. graduate 项目态：`reset_module` 开头一律拒绝且 `--force` 不可绕，此时确实无命令可给。
+/// 4. 其余走 reset，是否需 `--force` 取 [`reset_force_reason`]（唯一真值源，不另写清单）。
+fn ghost_remedy(project: ProjectState, module: &ModuleState) -> GhostRemedy {
+    if module.status == ModuleStatus::Blocked {
+        return GhostRemedy::LeaveBlocked {
+            to: module.pre_blocked_status.unwrap_or(ModuleStatus::Pending),
+            anchored: module.pre_blocked_status.is_some(),
+        };
+    }
+    if !module.status.can_transition_to(ModuleStatus::Blocked) {
+        return GhostRemedy::Inert;
+    }
+    if project == ProjectState::Graduate {
+        return GhostRemedy::ReopenMigration;
+    }
+    GhostRemedy::Reset {
+        force: reset_force_reason(module.status),
+    }
 }
 
 /// 把模块 key 渲染进人读告警文本。
@@ -471,7 +607,7 @@ fn resolve_blocked_ref<'a>(state_file: &'a MigrationStateFile, dep: &str) -> Ref
 /// 遍历 `modules` 中 `status == Blocked` 的模块，逐个检查其 `blocked_by`
 /// 引用的模块是否已进入终态（done/degrade_ffi/degrade_manual/degrade_skip）。
 ///
-/// 引用先经 [`resolve_blocked_ref`] 归一（composite 组成员 key → 组代表），
+/// 引用先经 `resolve_blocked_ref` 归一（composite 组成员 key → 组代表），
 /// 就绪与否按**归一后**的模块判定。归一后仍无归属的引用（幽灵引用）与宿主歧义的引用
 /// 一律计入 `unresolved`、不判就绪，理由见 [`BlockedCheckResult::unresolved`]；
 /// 要单独取出哪些是幽灵引用请用 [`scan_ghost_references`]。
@@ -587,7 +723,7 @@ pub fn auto_unblock_modules(
 /// 用三色 DFS 检测环：白色（未访问）→ 灰色（栈上）→ 黑色（已完成）。
 /// 遇到灰色节点即发现环，回溯栈提取环路径。
 ///
-/// 建边前先经 [`resolve_blocked_ref`] 归一（composite 组成员 key → 组代表），
+/// 建边前先经 `resolve_blocked_ref` 归一（composite 组成员 key → 组代表），
 /// **必须与 `check_blocked_modules` 用同一判据**：若这里按原始字符串建边而那边归一，
 /// 「经成员 key 表达的互锁」会成为静默死锁——两侧都判成合法未终态依赖（无幽灵告警），
 /// 而成员 key 不在 `blocked_set` 里、边被丢弃（无环告警），模块永久阻塞且零诊断。
@@ -1605,14 +1741,130 @@ mod tests {
         assert_eq!(scan_ghost_references(&state).len(), 1, "重复引用须去重");
     }
 
+    /// `ghost_remedy` 对**每一个** `ModuleStatus` 都给出方案，且方案与代码级判据一致。
+    ///
+    /// 穷举而非抽样：处置的可执行性按 status 变化，抽样测法已被实证漏掉两格
+    /// （`paused` 照做即 `E012`、`done`/`degrade_*` 拿到基于不可达前提的破坏性动作）。
+    /// 表里每一格的期望值都写死，故实现改判据时此处必红——包括「新增状态默认走 reset」
+    /// 这种静默扩张。
+    #[test]
+    fn test_ghost_remedy_covers_every_module_status() {
+        use ModuleStatus::*;
+        let expected: &[(ModuleStatus, GhostRemedy)] = &[
+            (Pending, GhostRemedy::Reset { force: None }),
+            (Translating, GhostRemedy::Reset { force: None }),
+            (CompileFixing, GhostRemedy::Reset { force: None }),
+            (Testing, GhostRemedy::Reset { force: None }),
+            (Reviewing, GhostRemedy::Reset { force: None }),
+            // 需 --force：值域取自 `reset_force_reason`，此处不复写理由文本（复写就又成了
+            // 第二份真值源），只断言「是 Some」。理由文本本身由 machine.rs 的守卫测试钉。
+            (Done, GhostRemedy::Inert),
+            (DegradeFfi, GhostRemedy::Inert),
+            (DegradeManual, GhostRemedy::Inert),
+            (DegradeSkip, GhostRemedy::Inert),
+        ];
+        for (status, want) in expected {
+            let module = module_with_status(*status);
+            assert_eq!(
+                ghost_remedy(ProjectState::SprintLoop, &module),
+                *want,
+                "status={status} 的 remedy 不符"
+            );
+        }
+
+        // paused：可 blocked，但 reset 需 --force（4/4 审查视角独立复现过它被漏掉）。
+        let paused = module_with_status(Paused);
+        match ghost_remedy(ProjectState::SprintLoop, &paused) {
+            GhostRemedy::Reset { force: Some(why) } => {
+                assert_eq!(
+                    Some(why),
+                    reset_force_reason(Paused),
+                    "理由须原样取自唯一真值源"
+                );
+            }
+            other => panic!("paused 须是需 --force 的 reset，实得 {other:?}"),
+        }
+
+        // blocked：有锚点回锚点，无锚点回 pending（不是留 null 让调用方替换出 `--to null`）。
+        let mut blocked = module_with_status(Blocked);
+        assert_eq!(
+            ghost_remedy(ProjectState::SprintLoop, &blocked),
+            GhostRemedy::LeaveBlocked {
+                to: Pending,
+                anchored: false
+            }
+        );
+        blocked.pre_blocked_status = Some(Reviewing);
+        assert_eq!(
+            ghost_remedy(ProjectState::SprintLoop, &blocked),
+            GhostRemedy::LeaveBlocked {
+                to: Reviewing,
+                anchored: true
+            }
+        );
+
+        // graduate 项目态：reset 一律被拒且 --force 不可绕 → 无可行命令。
+        // 但 blocked 走 transition（**没有** graduate 守卫），故仍给 LeaveBlocked；
+        // done/degrade_* 本就无需处置，仍是 Inert。判定顺序错了这三条会互相串。
+        assert_eq!(
+            ghost_remedy(ProjectState::Graduate, &module_with_status(Translating)),
+            GhostRemedy::ReopenMigration
+        );
+        assert_eq!(
+            ghost_remedy(ProjectState::Graduate, &module_with_status(Paused)),
+            GhostRemedy::ReopenMigration
+        );
+        assert_eq!(
+            ghost_remedy(ProjectState::Graduate, &blocked),
+            GhostRemedy::LeaveBlocked {
+                to: Reviewing,
+                anchored: true
+            },
+            "graduate 不阻断 transition，故 blocked 仍有可行处置"
+        );
+        assert_eq!(
+            ghost_remedy(ProjectState::Graduate, &module_with_status(Done)),
+            GhostRemedy::Inert
+        );
+    }
+
+    /// `GhostRemedy::command` 渲染出的命令与 `ghost_remedy_argv`（e2e 侧）同形。
+    #[test]
+    fn test_ghost_remedy_command_rendering() {
+        assert_eq!(
+            GhostRemedy::Reset { force: None }.command("file:a.ts"),
+            Some("state reset --module file:a.ts".to_owned())
+        );
+        assert_eq!(
+            GhostRemedy::Reset {
+                force: Some("理由")
+            }
+            .command("file:a.ts"),
+            Some("state reset --module file:a.ts --force".to_owned()),
+            "需 --force 时命令里必须带上它，否则照做即被拒"
+        );
+        assert!(
+            GhostRemedy::LeaveBlocked {
+                to: ModuleStatus::Pending,
+                anchored: false,
+            }
+            .command("file:a.ts")
+            .is_some_and(|c| c.contains("--to pending")),
+            "无锚点时须渲染出真实默认值，不留占位符"
+        );
+        assert_eq!(GhostRemedy::Inert.command("file:a.ts"), None);
+        assert_eq!(GhostRemedy::ReopenMigration.command("file:a.ts"), None);
+    }
+
     #[test]
     fn test_ghost_scan_marks_blocked_vs_residual() {
         // 回归（异构交叉 imp3）：告警扫全部模块、`ghost_refs` 却只取 blocked 模块时，
         // 非 blocked 模块的幽灵引用会「warnings 报了但机读字段是空数组」，只消费
         // `data.ghost_refs` 的编排器直接漏掉。两侧现共用本函数。
         //
-        // 同时钉住 `module_blocked` 的区分：对 pending 模块断言「引用方将永久阻塞」
-        // 是当下失实的——它此刻并没有被阻塞。
+        // 同时钉住两类的区分：对 pending 模块断言「引用方将永久阻塞」是当下失实的——
+        // 它此刻并没有被阻塞。区分现由 `status` + `remedy` 承载（早期是一个
+        // `module_blocked: bool`，被证明扛不住四个正交维度——见 MDR-021「第三轮四视角」段）。
         let mut state = minimal_init_state();
         let mut blocked = module_with_status(ModuleStatus::Blocked);
         blocked.blocked_by = Some(vec!["file:GHOST_A.ts".to_owned()]);
@@ -1625,14 +1877,28 @@ mod tests {
         assert_eq!(ghosts.len(), 2, "两类模块都须被扫出: {ghosts:?}");
         // 结果按 (module, missing) 排序，故 a 在前。
         assert_eq!(ghosts[0].module, "file:a.ts");
-        assert!(ghosts[0].module_blocked, "blocked 模块须标记为现已阻塞");
+        assert_eq!(ghosts[0].status, ModuleStatus::Blocked, "须回带持有方状态");
+        assert_eq!(
+            ghosts[0].remedy,
+            GhostRemedy::LeaveBlocked {
+                to: ModuleStatus::Pending,
+                anchored: false,
+            },
+            "blocked 且无锚点时目标须取 pending 默认值，而不是留空让编排器替换出 null"
+        );
         assert_eq!(ghosts[1].module, "file:b.ts");
-        assert!(
-            !ghosts[1].module_blocked,
-            "pending 模块只是残留引用，不得断言其已阻塞"
+        assert_eq!(ghosts[1].status, ModuleStatus::Pending);
+        assert_eq!(
+            ghosts[1].remedy,
+            GhostRemedy::Reset { force: None },
+            "pending 只是残留引用，处置是 reset 且无需 --force"
         );
 
         // 告警文本须分述两类，不能把 pending 说成永久阻塞。
+        //
+        // 注：本测试只覆盖 blocked/pending 两格；全 11 个 status 的 remedy 由
+        // `test_ghost_remedy_covers_every_module_status` 穷举（那是本 PR 的教训所在——
+        // 「分述 N 类而只测 1 类」让 paused / done 两格的缺陷漏到了下一轮审查）。
         let warnings = validate_state(&state).expect("不得硬判损坏");
         let w = warnings
             .iter()

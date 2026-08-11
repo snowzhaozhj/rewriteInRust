@@ -45,7 +45,23 @@ impl ProjectState {
 }
 
 /// 模块级状态（模块迁移生命周期）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Display, EnumString)]
+///
+/// `EnumIter`：供守卫测试从**真值域**遍历全部状态（而非写死清单）——
+/// `reset_force_states_are_consistent_across_docs` 据它比对「设计文档声明的
+/// 『reset 需 `--force`』集合」与 `reset_force_reason` 的实际返回值。同 `ErrorCode` 的先例。
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    Display,
+    EnumString,
+    strum::EnumIter,
+)]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum ModuleStatus {
