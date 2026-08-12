@@ -149,14 +149,16 @@ pub fn validate_state(state_file: &MigrationStateFile) -> Result<Vec<String>> {
     let ghosts = scan_ghost_references(state_file);
     if !ghosts.is_empty() {
         // 只陈述**可直接观测的事实**：哪些模块的 `blocked_by` 指向未登记 key，及它此刻是否
-        // 正在阻塞。**不给处置命令、不作可达性预言。**
+        // 正在阻塞。处置指向 `state repair`（MDR-022）——它是**确定性的单一动作**（删除无处
+        // 归属的条目），不是按状态推导出来的「处方」。
         //
-        // 上一轮曾按四个正交谓词（能否进 blocked / reset 是否需 `--force` / 项目是否
-        // graduate / blocked 有无锚点）推导出「处置方案」写进用户可见文案，被审查全数推翻：
-        // 依据只是「看出边」（一步可达），却对多步可达的状态（如 `degrade_* → translating
-        // → blocked`）、以及「transition 修不了这一类」下了**「不可能」断言**，而反例存在
-        // （详见 MDR-021「第四轮」段）。处置层（含非破坏性清理入口）已拆出为后续 PR，此处
-        // 退回纯检出，绝不携带可能为假的动作建议。
+        // 曾经有一版按四个正交谓词（能否进 blocked / reset 是否需 `--force` / 项目是否
+        // graduate / blocked 有无锚点）为每个状态推导「该跑哪条命令」，被审查全数推翻：依据
+        // 只是「看出边」（一步可达），却对多步可达的状态（如 `degrade_* → translating →
+        // blocked`）下了**「不可能」断言**，而反例存在（详见 MDR-021「第四轮」段）。**此处不得
+        // 再按状态分叉给不同命令**——repair 对全部 11 个 status 一视同仁，正是因此才不需要
+        // 任何可达性预言。同理不写「这是唯一入口」：`transition` 的两步往返也能清掉引用
+        // （MDR-021 待办 3），声称唯一即又是一条假断言。
         let mut blocked_now: Vec<String> = Vec::new();
         let mut residual: Vec<String> = Vec::new();
         for g in &ghosts {
@@ -183,10 +185,14 @@ pub fn validate_state(state_file: &MigrationStateFile) -> Result<Vec<String>> {
             ));
         }
         warnings.push(format!(
-            "{}——成因是 state 与 source-graph 不同步。当前 CLI 未提供自动处置命令\
-             （后续版本将提供非破坏性清理入口）；不要靠等待依赖就绪，也不要用 \
-             `state populate-modules`（对非 pending 模块拒绝重填）。逐条机读明细\
-             （`{{module, missing, status}}`）见 `--check-blocked` 输出的 `ghost_refs`",
+            "{}——成因是 state 与 source-graph 不同步。处置：`{REPAIR_GHOST_COMMAND}`\
+             （只删无处归属的条目，保留合法未终态依赖，不改状态、不清进度字段；清完后仍 \
+             blocked 且已无依赖的模块由 `--auto-unblock` 按 `pre_blocked_status` 恢复）。\
+             **前提**是被引 key 确实不该存在——若它本应是登记模块、只是 analyze 漏登记，\
+             删引用会让引用方提前解除阻塞，那种情况应重跑 analyze 重建 state。不要靠等待\
+             依赖就绪，也不要用 `state populate-modules`（对非 pending 模块拒绝重填）。\
+             逐条机读明细（`{{module, missing, status}}`）见 `--check-blocked` 输出的 \
+             `ghost_refs`",
             parts.join("；")
         ));
     }
@@ -353,6 +359,16 @@ pub struct BlockedCheckResult {
     /// 是否就绪可解除（`unresolved` 为空）。
     pub ready: bool,
 }
+
+/// 幽灵 `blocked_by` 引用的处置命令（不含 `rustmigrate` 前缀与可选 `--module`）。
+///
+/// **告警文案与测试/e2e 的 argv 共用这一个字符串**，故「文案给的命令」与「照做真能跑的命令」
+/// 不可能漂移。上一轮为同一功能写的 e2e 是「解析人读文案、再跑手写 argv」，二者毫无绑定，
+/// 四个审查视角各自用变异穿透了它（改成 `--keep-progress`/`--bogus-flag` 全部 PASS）；
+/// 后来改成按机读字段构造 argv，又因那个字段是**按状态推导**的而整体被推翻（MDR-021）。
+/// 现在的处置是**对全部 11 个 status 一视同仁的单一动作**，所以它能是一个常量——这正是
+/// repair 不需要任何可达性预言的原因。
+pub const REPAIR_GHOST_COMMAND: &str = "state repair --clear-ghost-blocked-by";
 
 /// 一条幽灵引用：`module` 的 `blocked_by` 指向了 `missing`，而后者无处归属。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1415,10 +1431,22 @@ mod tests {
             .expect("应就幽灵引用告警");
         // 告警须同时点明引用方与被引 key——只说「存在幽灵引用」定位不到现场。
         assert!(hit.contains("file:a.ts"), "告警缺引用方: {hit}");
-        // 处置须可执行：点明重新同步，且不把「等待依赖就绪」当作出路。
+        // 处置须给出**真实存在且能跑**的命令。断言绑定到 `REPAIR_GHOST_COMMAND` 常量而非
+        // 手写字符串：e2e 用同一个常量构造 argv 真跑（`smoke_state_repair_*`），故文案与
+        // 「照做能不能成」不可能各说各话。
+        //
+        // 这条断言此前写的是 `hit.contains("populate-modules")`，注释声称它保的是「告警须
+        // 给出重新同步的处置」——而文案里 `populate-modules` 一直是**否定**用法（「不要用」），
+        // 子串断言在两种相反语义下都过。同型的空断言在本功能上被审查抓过一次（MDR-021
+        // 第二轮的 `!advice.contains("populate-modules 同步")` 恒真），此处一并订正。
         assert!(
-            hit.contains("populate-modules"),
-            "告警须给出重新同步的处置: {hit}"
+            hit.contains(REPAIR_GHOST_COMMAND),
+            "告警须给出处置命令 `{REPAIR_GHOST_COMMAND}`: {hit}"
+        );
+        // 「不要靠等待」这条反面指引也须在（等待是这类引用最容易踩的错误动作）。
+        assert!(
+            hit.contains("不要靠等待"),
+            "告警须否掉「等待依赖就绪」: {hit}"
         );
     }
 

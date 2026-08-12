@@ -4,7 +4,15 @@
 
 ## 当前位置
 
-- **位置（2026-08-12）**：master 在 `eb94959`——**[#88](https://github.com/snowzhaozhj/rewriteInRust/pull/88) 已由用户拍板合并**（squash），**开放 PR / 开放 issue 均清零**。**#88 已按第四轮结论收窄为「幽灵引用检出层」**——第三轮补的**处方层**（`GhostRemedy`/`remedy`/状态网格/四类处置文案）被第四轮证明仍把「不可能」写进用户可见文案（依据只是「看出边」，而 `X→blocked→X` 两步往返零代价清 `blocked_by` 且保留全部进度、`degrade_*` 多步可达等反例存在），故**整体移出 #88、拆为后续 PR**（届时设计非破坏性入口 `state repair --clear-ghost-blocked-by`）。详见 [MDR-021](decisions/021-no-json-schema-validation.md)「第四轮 + 拆 PR」段。
+- **位置（2026-08-12，本条最新）**：master 在 `10005da`（#88 已合并 + STATUS 回填）。**进行中：处方层 PR**（分支 `feat/m4-state-repair-ghost-blocked-by`）——新增 `state repair --clear-ghost-blocked-by`，收口「幽灵引用检出已交付、处置为零」这个状态。决策与边界见 **[MDR-022](decisions/022-ghost-blocked-by-repair-boundary.md)**。
+  - **核心设计（一句话）**：处置是**单一确定性动作**（对全部 11 个 status 一视同仁地删除无处归属的 `blocked_by` 条目），**不是按状态推导的处方**。这从结构上消除了前一轮出错的可能——第三轮的全部错误断言都产生于「为不同状态选不同命令」这个需求，需求消失，「不可能」断言就无处可写。`GhostRemedy` 那批符号一个都没回来。
+  - **三条不变量**：① 只删幽灵条目，`Resolved`（合法未终态依赖）与 `Ambiguous`（宿主歧义——跨组 `member_files` 破坏的**唯一检出通道**）原样保留，不清整个数组；② 不改状态、不清进度字段、不发删产物指令（与 `reset` 正相反），恢复交既有 `--auto-unblock`；③ `RepairedModule` 只放字段不放谓词，锚点判定留在 CLI 层（塞复合谓词进数据结构正是前一轮出错的形状）。
+  - **`graduate` 下放行**（与 `reset` 相反）：repair 不改状态，制造不出「项目终态 + 非终态模块」矛盾；拒绝只会让这类损坏永远没有修复入口。
+  - **文案↔argv 绑定**：`validate::REPAIR_GHOST_COMMAND` 常量同时被告警插值与 e2e argv 使用，故「文案给的命令」与「照做能不能成」不可能各说各话——这是「动作是常量」带来的红利（前两轮一个无绑定、一个绑定在被推翻的推导字段上）。同批订正 `contains("populate-modules")` 那条失实断言（文案里它一直是**否定**用法，子串断言在两种相反语义下都过）。
+  - **不做（记账 MDR-022）**：不收紧 `transition_inner`（MDR-021 待办 3）——那是改既有转换语义，与新增命令合并会让审查面过大，而这个功能恰恰被过大的审查面咬伤四轮。**推论：文案不得声称 repair 是唯一入口**，`X→blocked→X` 两步往返仍能清引用。
+  - **命令数 30 → 31**：06 表头 + 06 命令表行 + SKILL.md 清单（分组改名「断点续跑与数据修复（ROB-01a/b/c + MDR-022）」）+ `groups_are_frozen` 期望值。**三处守卫实测报红后才补齐**（35 vs 36 条），另撞到 SKILL.md 清单行里不能给说明文字加反引号（`blocked_by` 被判成疑似幽灵命令——守卫的显式 allowlist 判据，不往 allowlist 加条目而是改文案）。
+  - **待办**：`just ci` 全量 + 负向实证（独立 worktree）+ 提 PR 四视角审查。测试 886 → 897（8 core + 3 e2e）。
+- **位置（2026-08-12，已被上条取代，保留作历史）**：master 在 `eb94959`——**[#88](https://github.com/snowzhaozhj/rewriteInRust/pull/88) 已由用户拍板合并**（squash），**开放 PR / 开放 issue 均清零**。**#88 已按第四轮结论收窄为「幽灵引用检出层」**——第三轮补的**处方层**（`GhostRemedy`/`remedy`/状态网格/四类处置文案）被第四轮证明仍把「不可能」写进用户可见文案（依据只是「看出边」，而 `X→blocked→X` 两步往返零代价清 `blocked_by` 且保留全部进度、`degrade_*` 多步可达等反例存在），故**整体移出 #88、拆为后续 PR**（届时设计非破坏性入口 `state repair --clear-ghost-blocked-by`）。详见 [MDR-021](decisions/021-no-json-schema-validation.md)「第四轮 + 拆 PR」段。
   - **#88 现内容（本轮已完成）**：JSON Schema 如实化 + 摘依赖、错误码守卫、幽灵引用**检出**（`ghost_refs` = 纯事实 `{module, missing, status}`，告警只点名 + 区分 blocked/残留、不给动作、不作可达性预言）、`reset_force_reason` 唯一真值源 + 文档↔代码集合守卫（本轮改扫**全部**锚点出现处）。顺带修：`state reset --help` 两处补 `paused`、`grep -c` 获取命令纠正为读 rustdoc 自报计数。`just ci` 全绿 **886 测试**（拆掉 4 个处方测试：890 → 886），`cargo doc` 警告仍 10（全 pre-existing）。
   - **审查设界（用户 2026-08-12 拍板）**：第四轮只跑专项三子视角 + codex，**结束即收口、不起第五轮**，剩余问题记账 MDR-021。处方层遗留约束（两步往返依赖待办 3、reset 会擦 `Ambiguous` 检出通道、多步可达须按可达性处理）留给后续 PR。
   - **已合并（2026-08-12，用户拍板）**：squash 到 master `eb94959`（20 文件 +2228/−947）。合并前远端 CI 针对 head `5c3d5cf` 复跑 5 项全过；**合并后在 master 上复跑 `just ci` 全绿 886 测试**（与 PR 分支一致）。

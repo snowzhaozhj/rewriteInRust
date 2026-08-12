@@ -6,9 +6,9 @@ pub mod machine;
 pub mod review_gate;
 
 pub use machine::{
-    Approval, InterruptedModule, MigrationStateMachine, RecordMetricsOutcome, RecoverOutcome,
-    RecoverPolicy, ResetOutcome, ResumePlan, ResumeProgress, SprintAdvanceResult,
-    STATE_SCHEMA_VERSION, SUBSTATUS_AGENT_DONE,
+    Approval, ClearedGhostRef, GhostRepairOutcome, InterruptedModule, MigrationStateMachine,
+    RecordMetricsOutcome, RecoverOutcome, RecoverPolicy, RepairedModule, ResetOutcome, ResumePlan,
+    ResumeProgress, SprintAdvanceResult, STATE_SCHEMA_VERSION, SUBSTATUS_AGENT_DONE,
 };
 pub use review_gate::{
     GateDecision, GateJudgement, MandatoryReason, PolicyEvaluation, ReviewGateReport,

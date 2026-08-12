@@ -957,8 +957,13 @@ fn skill_md_command_list_groups_are_frozen() {
             vec!["state record-metrics", "state record-subagent-call"],
         ),
         (
-            "断点续跑（ROB-01a/b/c）",
-            vec!["state reset", "state recover", "state resume"],
+            "断点续跑与数据修复（ROB-01a/b/c + MDR-022）",
+            vec![
+                "state reset",
+                "state recover",
+                "state resume",
+                "state repair",
+            ],
         ),
         (
             "校验",
