@@ -255,10 +255,14 @@ pub struct ClearedGhostRef {
 
 /// 一个受 repair 影响的模块在**清除之后**的可观测事实。
 ///
-/// **只放字段，不放谓词**——是否「锚点非法」「能否被 `--auto-unblock` 解除」这类判定留给
-/// 调用方按需计算（CLI 层一行 `ModuleStatus::Blocked.can_transition_to(pre)` 即可）。
-/// 在结构里塞复合谓词是本 PR 前身反复付过账的形状：一个 bool 替多个谓词说话，然后每换一个
-/// 场景就出现一个双向反例（见 MDR-021 第三/四轮）。
+/// **只放字段，不放谓词**——是否「锚点非法」「下一步会不会被 `--auto-unblock` 接手」这类判定
+/// 留给调用方。在结构里塞复合谓词是本 PR 前身反复付过账的形状：一个 bool 替多个谓词说话，
+/// 然后每换一个场景就出现一个双向反例（见 MDR-021 第三/四轮）。
+///
+/// **但「留给调用方」不等于「让调用方自己造判据」**：就绪性必须调
+/// [`crate::validate::check_blocked_modules`]（`--auto-unblock` 用的同一真值源），不能用本结构的
+/// `blocked_by_remaining.is_empty()` 当代理——已终态的剩余依赖不计入 `unresolved`，故「剩余非空」
+/// 与「未就绪」不等价。本 PR 初版正是在 CLI 侧犯了这个错，被三个审查视角各自实证复现。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepairedModule {
     /// 模块 key。
@@ -266,8 +270,11 @@ pub struct RepairedModule {
     /// 清除后的模块状态。**repair 不改状态**，故与清除前相同——记录它是为了让调用方
     /// 无需回读 state 即可分辨「此刻仍 blocked」与「只是残留引用」。
     pub status: ModuleStatus,
-    /// 清除后剩余的 `blocked_by`（合法未终态依赖与宿主歧义引用都在此保留）。
-    /// 空 vec 表示已无任何阻塞依赖（字段本身已被设为 `None`）。
+    /// 清除后剩余的 `blocked_by`（合法未终态依赖、已终态依赖、宿主歧义引用都在此保留）。
+    /// 空 vec 表示字段已被设为 `None`。
+    ///
+    /// **不要拿它判就绪**：非空不代表模块还要等（剩余项可能全是终态依赖，那样模块立刻就绪），
+    /// 空也只是就绪的充分条件之一。就绪判定见本结构的类型级 doc。
     pub blocked_by_remaining: Vec<String>,
     /// 恢复锚点原样透传（repair 不动它）。`status == Blocked` 时它是恢复目标。
     pub pre_blocked_status: Option<ModuleStatus>,
@@ -276,6 +283,13 @@ pub struct RepairedModule {
 /// [`repair_ghost_blocked_by`](MigrationStateMachine::repair_ghost_blocked_by) 的结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GhostRepairOutcome {
+    /// 本次的作用域：`Some(归一后的组代表 key)` = 收窄到单模块；`None` = 全部模块。
+    ///
+    /// 存在的理由是**回显必须用归一后的 key**：入参可以是组的非代表成员，直接回显原始入参会
+    /// 说出「模块 `file:types.ts` 无幽灵引用」这种话，而它根本不是登记模块、没有自己的
+    /// `blocked_by`（被检查的是它的组代表）。`ResetOutcome`/`RecoverOutcome` 都带归一后的
+    /// `module` 供 CLI 回显，此处对齐。
+    pub scope: Option<String>,
     /// 逐条清除记录，按 `(module, missing)` 字典序（承自 `scan_ghost_references` 的排序）。
     pub cleared: Vec<ClearedGhostRef>,
     /// 受影响模块的清除后事实，每模块一条，按 module key 字典序。
@@ -1166,7 +1180,7 @@ impl MigrationStateMachine {
     ///
     /// # 三条不变量
     ///
-    /// 1. **只删幽灵条目，绝不删整个 `blocked_by` 数组。** 合法未终态依赖（`Resolved`）与宿主
+    /// 1. **只删幽灵条目，绝不删整个 `blocked_by` 数组。** 可归一到宿主模块的合法引用（`Resolved`，与宿主是否终态无关）与宿主
     ///    歧义引用（`Ambiguous`）原样保留——后者是 `member_files` 跨组互斥不变量被破坏的
     ///    **唯一检出通道**（`validate_state` 只经它扫出跨组破坏），清整个数组会连带把这条
     ///    通道擦掉。判据不在本方法里重写，复用 [`crate::validate::scan_ghost_references`]
@@ -1220,6 +1234,7 @@ impl MigrationStateMachine {
 
         if by_module.is_empty() {
             return Ok(GhostRepairOutcome {
+                scope: target,
                 cleared: Vec::new(),
                 affected: Vec::new(),
                 was_noop: true,
@@ -1273,6 +1288,7 @@ impl MigrationStateMachine {
         }
 
         Ok(GhostRepairOutcome {
+            scope: target,
             cleared,
             affected,
             was_noop: false,

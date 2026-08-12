@@ -22,9 +22,11 @@
 
 ### 决策 2：只删幽灵条目，绝不清空整个 `blocked_by` 数组
 
-`Resolved`（合法未终态依赖）与 `Ambiguous`（宿主歧义）原样保留。
+`Resolved`（能归一到宿主模块的引用，与宿主是否终态无关）与 `Ambiguous`（宿主歧义）原样保留。
 
-`Ambiguous` 的保留是硬要求而非洁癖：同一文件被多个组列为 `member_files` 时，`validate_state` 的跨组不变量告警**只经 `blocked_by` 里的这条引用**才能扫出来——它是 `member_files` 跨组互斥破坏的唯一检出通道。第四轮实证 `reset` 清整个数组会把这条通道连带擦掉，损坏还在而诊断没了。
+`Ambiguous` 的保留是硬要求而非洁癖：同一文件被多个组列为 `member_files` 时，`validate_state` 的跨组不变量告警**只经 `blocked_by` 里的这条引用**才能扫出来。第四轮实证 `reset` 清整个数组会把这条通道连带擦掉，损坏还在而诊断没了。
+
+**限定（异构交叉审查实证，pre-existing，见下方 TODO 4）**：上面这句只对「被引 key **不是**登记模块、而被 ≥2 个组列为成员」这一形态成立。另一形态——**被引 key 既是登记模块、又被别的组列为成员**——目前**根本检不出**：`resolve_blocked_ref` 先查 `modules` 命中就早返回 `Resolved`，不再反查 `member_files`，于是跨组互斥已被破坏却判成合法引用。实测后果不止漏诊断：`shared.ts` 登记为 `done` 而 `g1`（`translating`）把它列为成员时，`validate state` 零跨组告警，`--auto-unblock` **真的解除**了引用它的模块（`unblocked:["holder"]`），而该文件实际还在翻译中。故「唯一检出通道」这个说法**不可无条件引用**；repair 保留 `Ambiguous` 仍然必要（它是那一半形态的唯一通道），但不足以覆盖全部跨组破坏。
 
 判据复用 `validate::scan_ghost_references`（内部 `resolve_blocked_ref` 是「什么算幽灵」的唯一实现），**不在 `machine.rs` 里重写第二套**。同一功能已经为「同一概念两份表示」付过账（MDR-021 待办 1 第三点：`BlockedCheckResult.missing` 与 `GhostReference` 并存导致口径不一致，最终删掉前者）。
 
@@ -32,7 +34,7 @@
 
 与 `reset_module`（清 8 个进度字段 + 输出删 `.rs` 作用域，[MDR-015](015-reset-idempotent-retry-boundary.md)）正相反。
 
-清完后若模块仍 `blocked` 而 `blocked_by` 已空，它在 `check_blocked_modules` 里自然判 `ready`（`ready = unresolved.is_empty()`），由既有 `validate state --check-blocked --auto-unblock` 按 `pre_blocked_status` 恢复。**repair 不重复实现恢复逻辑**——那条路径已有测试与实战覆盖，重写一遍只会多一处会漂的判据。
+清完后若模块被 `check_blocked_modules` 判 `ready`（`ready = unresolved.is_empty()`——注意**已终态的剩余依赖不计入 `unresolved`**，故「剩余为空」只是就绪的充分条件之一，不可当代理），由既有 `validate state --check-blocked --auto-unblock` 按 `pre_blocked_status` 恢复（锚点缺失时以 `pending` 兜底）。**repair 不重复实现恢复逻辑**——那条路径已有测试与实战覆盖，重写一遍只会多一处会漂的判据。
 
 ### 决策 4：项目 `graduate` 态**放行**（与 `reset` 相反）
 
@@ -46,7 +48,7 @@
 
 ### 决策 6：锚点问题只告警、不顺带修
 
-清完后仍 `blocked`、已无剩余依赖、而恢复锚点用不了的模块，CLI 层告警：
+清完后经 `check_blocked_modules` 判为**就绪**（剩余依赖全部终态，含清空）、而恢复锚点用不了的模块，CLI 层告警：
 
 - `pre_blocked_status` 不在 `blocked` 的合法出边内（如 `done`）→ 按锚点恢复的路径会被转换矩阵拒；
 - 锚点缺失 → `--auto-unblock` 以 `pending` 兜底，原状态不可复原而进度字段仍在。
@@ -75,3 +77,7 @@
 1. **MDR-021 待办 3**：把「离开 blocked 需依赖全终态」下沉进 `transition_inner`，使 transition / CAS / auto-unblock 三条路径共享同一不变量，人工逃生走 repair 或显式 `--force`。见决策 5。
 2. **非法 / 缺失 `pre_blocked_status` 锚点的修复入口**：当前只告警（决策 6）。若将来要修，须先定「恢复目标由谁决定」——锚点丢了之后 CLI 无从推断原状态，可能得由人给 `--to`。
 3. **`--module` 之外的批量收窄**：当前只有「全部」与「单模块」两档。若真实场景出现「只清某个 sprint / 某组」的需求再议（当下无证据，YAGNI）。
+4. **⚠️ `resolve_blocked_ref` 的歧义判定漏一整类形态（pre-existing，本 PR 异构交叉审查实证）**——「被引 key 既是登记模块、又被别的组列为 `member_files` 成员」时，早返回让它判 `Resolved` 而非 `Ambiguous`。**后果是数据损坏而非仅漏诊断**：实测 `--auto-unblock` 会据错误宿主判就绪、真的解除引用方（`shared.ts` 登记 `done` 而 `g1` 是 `translating`，holder 被解除且落盘）。`machine.rs` 的 `canonical_module_key` 是同型早返回，同样漏。
+
+   **判为独立 PR**：修法本身小（把「直接命中」也算一个 host、总数 >1 即 `Ambiguous`），但它改变 #88 检出层的**既有判定行为**（这类引用从「合法且可能 ready」变成「一律非终态、不判 ready」），4 个消费方（`check_blocked_modules` / `detect_blocked_cycles` / `scan_ghost_references` / `validate_state` 跨组告警）连带受影响，须自带测试与负向实证。本 PR 正处在审查修复阶段，再塞一个行为变更进来恰是「审查面过大」的复发——那是这个功能被咬四轮的根因。
+5. **`resolve_blocked_ref` 在「全为幽灵」的坏 state 上呈二次复杂度（pre-existing，同上审查实测）**——每条未命中的引用都全表扫 `modules` + `member_files`。实测 1000 模块 0.72s / 5000 模块 1.38s / 10000 模块 4.55s / **20000 模块 14.20s**。与 MDR-021 记的「10 万模块 1.11s 近线性」不矛盾：那测的是**合法**引用（`contains_key` 哈希命中直接返回），这测的是全未命中路径。修法是一次性建 `key/member_file → 宿主` 索引 + 待删集合用 `HashSet`。真实规模百级故不阻塞，但 repair 恰是面向坏 state 的命令，坏 state 正是全未命中的那一侧。

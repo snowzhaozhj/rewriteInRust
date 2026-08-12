@@ -63,13 +63,13 @@
 |---|---|---|---|
 | ① | `cycles[]` 非空 | blocked 模块互相等待，死锁 | 报错中止、输出环路径、记入 `metadata.last_error`。**此时不要再调 `--auto-unblock`**（会 `E012` 硬错且零解除），也不要按 ② 逐个 transition——先打破环 |
 | ② | `ready_to_unblock[]` | 依赖已全部终态，可恢复 | 逐个 `state transition --module <M> --to <pre_blocked_status> --reason 'blocked_by resolved'` 并记日志。仅当 `cycles[]` **为空**时，才可整体改用 `--check-blocked --auto-unblock` 让 CLI 代劳 |
-| ③ | `ghost_refs[]` 非空 | `blocked_by` 指向无处归属的 key | 见下方「幽灵引用不能靠等」——**等待无效**。跑 `state repair --clear-ghost-blocked-by`（只删无处归属的条目，不改状态、不清进度），再重跑本命令按新输出分流：清完后仍 blocked 而已无依赖的模块会落到 ② |
+| ③ | `ghost_refs[]` 非空 | `blocked_by` 指向无处归属的 key | 见下方「幽灵引用不能靠等」——**等待无效**。跑 `state repair --clear-ghost-blocked-by`（只删无处归属的条目，不改状态、不清进度），再重跑本命令按新输出分流：清完后剩余依赖全部终态（含清空）的模块会落到 ② |
 | ④ | `warnings` 非空 | 含跨组 `member_files` 划分破坏等**数据完整性**问题（无机读字段，只经 warning 报出） | 如实转达用户并按 warning 指示处置。**不可当作正常等待跳过**。注意这类模块**可能完全不出现在任何机读字段里**——跨组歧义扫描覆盖全部带 `blocked_by` 的模块，而 `still_blocked` 只收 `status=blocked` 的，故引用方不是 blocked 时 `still_blocked` 为空数组，warning 正文是唯一线索 |
 | ⑤ | `still_blocked[]` 中其余模块 | 排除上述四类后，依赖确实还没译完 | 正常等待，跳过本轮 |
 
 > **幽灵引用不能靠等**：`blocked_by` 可能引用**无处归属**的 key（state 与 source-graph 不同步、SubAgent 写入非法引用、用户手填）。这类依赖永远不会进终态，等待是无效动作。`validate state` 会就此降级 warning 并点名「引用方 → 被引 key」，`--check-blocked` 在 `data.ghost_refs` 给逐条明细（`[{module, missing, status}]`，`missing` 是**单个** key 字符串、每条一项；`status` 是持有方当前状态，`blocked` 表示此刻就被永久阻塞、其余表示只是残留引用）。
 >
-> **处置：`state repair --clear-ghost-blocked-by`**（MDR-022）。它**只删无处归属的条目**——合法未终态依赖与宿主歧义引用原样保留，不是清空整个 `blocked_by`；**不改状态、不清进度字段、不发删产物指令**。`--module` 可省略（清全部模块，一次 state↔graph 不同步常波及多个）。幂等：无幽灵可清即空操作。清完后**重跑 `validate state --check-blocked` 重新分流**——仍 blocked 而已无依赖的模块会落到 ② `ready_to_unblock`，恢复用 `--auto-unblock`（repair 自己不改状态）。**前提**：本命令假定被引 key 不该存在；若它本应是登记模块、只是 analyze 漏登记，删引用会让引用方**提前**解除阻塞、翻译顺序出错——那种情况应重跑 analyze 重建 state，不是 repair。
+> **处置：`state repair --clear-ghost-blocked-by`**（MDR-022）。它**只删无处归属的条目**——可归一到宿主模块的合法引用（`Resolved`，含宿主已终态的）与宿主歧义引用原样保留，不是清空整个 `blocked_by`；**不改状态、不清进度字段、不发删产物指令**。`--module` 可省略（清全部模块，一次 state↔graph 不同步常波及多个）。幂等：无幽灵可清即空操作。清完后**重跑 `validate state --check-blocked` 重新分流**——剩余依赖全部终态（含清空）的模块会落到 ② `ready_to_unblock`，恢复用 `--auto-unblock`（repair 自己不改状态）。**前提**：本命令假定被引 key 不该存在；若它本应是登记模块、只是 analyze 漏登记，删引用会让引用方**提前**解除阻塞、翻译顺序出错——那种情况应重跑 analyze 重建 state，不是 repair。
 >
 > 三条别拿来代替 repair 的路（都实测过）：
 >

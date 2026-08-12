@@ -186,8 +186,9 @@ pub fn validate_state(state_file: &MigrationStateFile) -> Result<Vec<String>> {
         }
         warnings.push(format!(
             "{}——成因是 state 与 source-graph 不同步。处置：`{REPAIR_GHOST_COMMAND}`\
-             （只删无处归属的条目，保留合法未终态依赖，不改状态、不清进度字段；清完后仍 \
-             blocked 且已无依赖的模块由 `--auto-unblock` 按 `pre_blocked_status` 恢复）。\
+             （只删无处归属的条目，可归一的合法引用与宿主歧义引用都保留，不改状态、不清进度\
+             字段；清完后剩余依赖全部终态的模块由 `--auto-unblock` 按 `pre_blocked_status` \
+             恢复）。\
              **前提**是被引 key 确实不该存在——若它本应是登记模块、只是 analyze 漏登记，\
              删引用会让引用方提前解除阻塞，那种情况应重跑 analyze 重建 state。不要靠等待\
              依赖就绪，也不要用 `state populate-modules`（对非 pending 模块拒绝重填）。\
