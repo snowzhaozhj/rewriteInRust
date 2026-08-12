@@ -1,7 +1,7 @@
 # MDR-022: `state repair --clear-ghost-blocked-by` 非破坏性清理边界（收口 MDR-021 待办 1 后半段）
 
-- **状态**: 已决策
-- **日期**: 2026-08-12
+- **状态**: 已落地（PR #90 于 2026-08-13 合并到 master `dac8950`）
+- **日期**: 2026-08-12（决策）/ 2026-08-13（合并）
 - **范围**: 幽灵 `blocked_by` 引用的**处置**入口——新增 `state repair` CLI 命令（core `repair_ghost_blocked_by` + `GhostRepairOutcome`/`ClearedGhostRef`/`RepairedModule`）、`validate state` 告警文案从「未提供处置命令」改为指向本命令。改 `cli/`（core + CLI）、`plugin/`（SKILL.md / run.md）、`docs/design/`（06 命令表 + 06 § 10.7 + 09 附录）。
 
 ## 背景
