@@ -44,7 +44,8 @@ use rustmigrate_core::types::state::{
 };
 use rustmigrate_core::validate::rules::{check_adapters_dir, load_rule_registry};
 use rustmigrate_core::validate::{
-    auto_unblock_modules, check_blocked_modules, detect_blocked_cycles, validate_state,
+    auto_unblock_modules, check_blocked_modules, detect_blocked_cycles, scan_ghost_references,
+    validate_state,
 };
 
 /// `.rust-migration/` 工作目录名（见 `docs/design/04-toolchain.md § 5.7.3`）。
@@ -385,14 +386,14 @@ pub enum StateCommands {
     /// test_pass_rate/coverage/known_differences/blocked 锚点），保留 attempts 审计（追加 reset
     /// 记录）与结构冻结字段（tier/member_files/composite_kind/decomposition_*/danger）。
     /// **幂等**：已在干净入口时为空操作（`reset;reset` == `reset`）。**守护**：`done`/`blocked`/
-    /// `degrade_*` 须 `--force`。输出 `cleanup` 作用域（member 源文件 + 保留/清理指令）——CLI 不删
+    /// `paused`/`degrade_*` 须 `--force`。输出 `cleanup` 作用域（member 源文件 + 保留/清理指令）——CLI 不删
     /// `rust_root` 下 `.rs`（不猜路径，见 MDR-015），由编排器据此清理部分产物。
     Reset {
         /// 模块 key（组代表 NodeId，或折叠组的非代表成员，自动归一到组代表）。
         #[arg(long)]
         module: String,
         /// 强制回退终态 / 锚点：`done`（重迁已完成）/ `blocked`（清阻塞锚点）/
-        /// `degrade_*`（降级恢复，人类决策）须显式 `--force`。
+        /// `paused`（自动重试耗尽待人类抉择）/ `degrade_*`（降级恢复，人类决策）须显式 `--force`。
         #[arg(long)]
         force: bool,
     },
@@ -1838,7 +1839,13 @@ fn cmd_graph_export(format: &str) -> CmdResult {
 /// 基础模式（无 flag）：执行 schema 版本、历史链、前置条件等完整性检查。
 ///
 /// `--check-blocked`：额外检查所有 blocked 模块的 `blocked_by` 依赖是否已进入终态，
-/// 并执行 DFS 环检测（blocked_by 关系图中的环路会导致死锁）。
+/// 并执行 DFS 环检测（blocked_by 关系图中的环路会导致死锁）。输出的 `ghost_refs`
+/// 列出「引用了未登记模块」的条目，成因是 state 与 source-graph 不同步（等待永不结束）。
+/// 注意它**不是** `still_blocked` 的子集：扫描覆盖全部模块，故非 blocked 模块上的残留
+/// 引用会出现在 `ghost_refs`（`status` 非 `blocked`）而不在 `still_blocked` 里。
+/// 每条为纯检出事实 `{module, missing, status}`——`status == blocked` 表示此刻就被永久
+/// 阻塞，其余表示只是残留引用。**不含处置命令**：按状态推导处置动作的那一层曾把「不可能」
+/// 写进用户可见输出而依据只是「看出边」，被审查推翻，已拆出为后续 PR（见 MDR-021）。
 ///
 /// `--auto-unblock`（需配合 `--check-blocked`）：对就绪的 blocked 模块自动恢复到
 /// `pre_blocked_status`（无则默认 `pending`），通过 `transition_module` 落盘。
@@ -1877,11 +1884,22 @@ fn cmd_validate_state(check_blocked: bool, auto_unblock: bool) -> CmdResult {
         .collect();
     let cycle_paths: Vec<Vec<String>> = cycles;
 
+    // 幽灵引用（`blocked_by` 指向无处归属的 key）单列，供编排器机读。
+    //
+    // 取 `scan_ghost_references` 而非从 `checks` 提取：后者只遍历 blocked 模块，会与
+    // `validate_state` 的全模块告警口径不一致——非 blocked 模块上的残留引用会出现
+    // 「warnings 报了、`ghost_refs` 却是空数组」，只消费机读字段的编排器就漏掉了。
+    // 每条为纯检出事实 `{module, missing, status}`：`status` 表紧迫性（`blocked` = 现在就
+    // 永久阻塞，其余 = 残留引用）。**不再携带处置命令**——按状态推导动作的那一层已拆出为
+    // 后续 PR（见 MDR-021「第四轮」段），此处只给可直接观测的事实。
+    let ghost_refs = scan_ghost_references(machine.state_file());
+
     let mut data = json!({
         "valid": true,
         "blocked_count": blocked_count,
         "ready_to_unblock": ready_modules,
         "still_blocked": still_blocked,
+        "ghost_refs": ghost_refs,
         "cycles": cycle_paths,
     });
 
@@ -1889,8 +1907,17 @@ fn cmd_validate_state(check_blocked: bool, auto_unblock: bool) -> CmdResult {
     if auto_unblock {
         // 有环时拒绝自动解除（设计 09-appendix：环检测 → 报错中止）。
         if !cycle_paths.is_empty() {
+            // 「零解除」必须写在文案里：原文「无法自动解除」可被读成「（环上那些）无法解除」，
+            // 编排器据此可能以为 `ready_to_unblock` 已被处理。实测是**一个模块都不解除**。
+            // 记账（MDR-021）：本 Err 路径把已算出的 `data`（含 ghost_refs）与 warnings 整体
+            // 丢弃，编排器要拿诊断得去掉 `--auto-unblock` 重跑一次；改法是仿 `cmd_validate_rules`
+            // 把 data 经 `ErrorData` 的 `details` flatten 上来，属 pre-existing（PR #23）行为
+            // 变更，另 PR 处置。
             return Err(MigrateError::Config(format!(
-                "blocked_by 关系图存在环路，无法自动解除；请先打破环后重试。环路径: {cycle_paths:?}"
+                "blocked_by 关系图存在环路，无法自动解除：**本次一个模块都没有解除**\
+                 （ready_to_unblock 未被处理），请先打破环后重试。诊断明细（ghost_refs / \
+                 still_blocked / warnings）请去掉 --auto-unblock 重跑一次获取。环路径: \
+                 {cycle_paths:?}"
             )));
         }
 
@@ -2935,8 +2962,10 @@ fn cmd_state_deps(module: &str) -> CmdResult {
     }
 
     // 按终态（done/degrade_*）判就绪。未登记为模块的依赖（state 与 graph 不同步）单列
-    // `unresolved` + 告警，**不计入 blocking**——否则会被 run 填进 blocked_by，而
-    // check-blocked 对缺失 key 永判非终态（validate/mod.rs `unwrap_or(false)`），导致模块永久 blocked 死锁。
+    // `unresolved` + 告警，**不计入 blocking**——否则会被 run 填进 blocked_by，而缺失 key
+    // 永远不会进终态，模块将永久 blocked。读侧现已能检出这种幽灵引用（`validate state`
+    // 告警 + `--check-blocked` 的 `data.ghost_refs`），但那是**事后可观测**；此处不写进
+    // blocking 才是从源头不制造它。
     let mut dependencies = Vec::with_capacity(dep_keys.len());
     let mut blocking = Vec::new();
     let mut unresolved = Vec::new();

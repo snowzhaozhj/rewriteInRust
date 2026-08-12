@@ -231,7 +231,7 @@ Work Unit（一个 Claude Code 会话）:
 **降级路径与灰色情况处理**：
 - **假设不成立时的降级优先级**：若 M0 实测可靠性 < 85%，按模式分级收紧默认值——Skill 保持强制确认；/goal 强制 `auto_confirm_intent=false`；Workflow 改为批前人工签名（不退回 LLM 驱动完整翻译，意图摘要中间步骤保留）。
 - **灰色情况处理权限**：Phase B 期间 verifier 发现摘要与代码不符，视为「意图漂移」（区别于「摘要表述不清」），触发更新 `{module}-intent.md` 并由 verifier 记入 MDR；该修改**不计为违反 Step 2.5 人工确认**——因其源自后续代码生成的新发现，而非原始摘要问题（更新频率上限见 § 4.3 Step 6）。
-- **验收标准映射**（取代独立质量配置项）：意图摘要质量以「§ 4.3.1 用户应拒绝的 5 个特征 ↔ § 4.3 Step 2 的 7 字段完整性 ↔ [09 附录 E](./09-appendix-schemas.md#附录-e意图摘要module-intentmd内容规范) JSON Schema」三者映射判定，不引入 `intent_summary_min_quality` 配置项。
+- **验收标准映射**（取代独立质量配置项）：意图摘要质量以「§ 4.3.1 用户应拒绝的 5 个特征 ↔ § 4.3 Step 2 的 7 字段完整性 ↔ [09 附录 E](./09-appendix-schemas.md#附录-e意图摘要module-intentmd内容规范) 字段契约」三者映射判定，不引入 `intent_summary_min_quality` 配置项。该契约由 verifier（LLM）核对，无程序化 schema 校验器（[MDR-021](../decisions/021-no-json-schema-validation.md)）。
 
 ### 4.3.3 译后签批门交互规范（M4 MDR-019）
 

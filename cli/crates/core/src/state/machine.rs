@@ -158,6 +158,45 @@ pub struct ResetOutcome {
     pub member_files: Vec<String>,
 }
 
+/// 单模块 `reset` 是否需要 `--force`，以及需要的**理由原文**（`None` = 裸 reset 即可）。
+///
+/// **这是「哪些状态的 reset 需 --force」的唯一真值源。** 三个消费方共用：
+/// [`reset_module`](MigrationStateMachine::reset_module) 的守卫、`validate state` 幽灵引用
+/// 告警的处置文案、以及把设计文档声明与本函数对齐的守卫测试。
+///
+/// 抽出来的直接原因是一次实测缺陷：告警文案曾自己写了一份「`done`/`degrade_*` 需
+/// `--force`」的清单，漏掉 `paused`，于是 paused 残留模块照文案做即得 `E012`，而文案
+/// 刚告诉调用方这个状态不需要 `--force`——两份真值源必然漂移，多个审查视角各自
+/// 独立复现（详见 MDR-021「第三轮四视角」段——此处不写 rustdoc 内链，跨出 crate 的相对
+/// 路径在 `cargo doc` 里是断链，本 PR 刚为同类问题付过账）。**新增需 `--force` 的状态只改
+/// 本函数**，文案与文档由 `reset_force_states_are_consistent_across_docs` 逼着跟上。
+///
+/// 注意本函数**不覆盖项目级守护**：`ProjectState::Graduate` 下 reset 一律被拒且
+/// `--force` 不可绕（见 `reset_module` 开头），那是项目态而非模块态的性质。
+pub fn reset_force_reason(status: ModuleStatus) -> Option<&'static str> {
+    match status {
+        ModuleStatus::Done => Some("done 是终态，重迁已完成模块须 --force（人类确认）"),
+        ModuleStatus::Blocked => Some("模块阻塞中（等依赖），reset 会清除阻塞锚点，须 --force"),
+        // paused = 自动重试耗尽、待人类在「重试 vs 降级」间抉择的决策点（决策地位同
+        // degrade_*）。裸 reset 会静默塞回重试循环、绕过该抉择（ROB-01b watchdog 程序化
+        // 调 reset 时尤甚），故须 --force 显式确认「就是要重试」。
+        ModuleStatus::Paused => {
+            Some("模块暂停中（自动重试耗尽待人类抉择），reset 会绕过降级决策点，须 --force")
+        }
+        // 逐个变体列出而非 `s if s.is_degraded()`：guard 分支不参与穷尽性检查，会逼出一条
+        // `_ => None` 兜底，而那条兜底会让「新增状态默认不需要 --force」静默生效。显式列全
+        // 之后，新增 ModuleStatus 变体即编译失败，必须在此处做出决定。
+        ModuleStatus::DegradeFfi | ModuleStatus::DegradeManual | ModuleStatus::DegradeSkip => {
+            Some("降级恢复是人类决策（见设计 § Step 0.3），须 --force")
+        }
+        ModuleStatus::Pending
+        | ModuleStatus::Translating
+        | ModuleStatus::CompileFixing
+        | ModuleStatus::Testing
+        | ModuleStatus::Reviewing => None,
+    }
+}
+
 /// [`recover_module`](MigrationStateMachine::recover_module) 的 stall 恢复策略（M4-ROB-01b）。
 ///
 /// 编排器检测到 agent 静默超时（watchdog stall）后，据 `[orchestration].stall_recovery_policy`
@@ -878,23 +917,9 @@ impl MigrationStateMachine {
             .clone()
             .unwrap_or_else(|| vec![canonical.clone()]);
 
-        // 终态 / 锚点 / 决策点守护：done / blocked / paused / degrade_* 须 --force。
+        // 终态 / 锚点 / 决策点守护，值域取自 [`reset_force_reason`]（唯一真值源）。
         if !force {
-            let guard = match from {
-                ModuleStatus::Done => Some("done 是终态，重迁已完成模块须 --force（人类确认）"),
-                ModuleStatus::Blocked => {
-                    Some("模块阻塞中（等依赖），reset 会清除阻塞锚点，须 --force")
-                }
-                // paused = 自动重试耗尽、待人类在「重试 vs 降级」间抉择的决策点（决策地位同
-                // degrade_*）。裸 reset 会静默塞回重试循环、绕过该抉择（ROB-01b watchdog 程序化
-                // 调 reset 时尤甚），故须 --force 显式确认「就是要重试」。
-                ModuleStatus::Paused => {
-                    Some("模块暂停中（自动重试耗尽待人类抉择），reset 会绕过降级决策点，须 --force")
-                }
-                s if s.is_degraded() => Some("降级恢复是人类决策（见设计 § Step 0.3），须 --force"),
-                _ => None,
-            };
-            if let Some(msg) = guard {
+            if let Some(msg) = reset_force_reason(from) {
                 return Err(MigrateError::Config(format!(
                     "{from} 模块 reset 需 --force：{msg}"
                 )));

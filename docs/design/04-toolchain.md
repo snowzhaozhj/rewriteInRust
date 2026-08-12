@@ -595,7 +595,7 @@ CLI `rustmigrate graph` 子命令提供以下查询（M1 实现标注「是」�
 | **tokei** | 目录路径 | 语言统计 JSON（行数、文件数、空行/注释占比） | 代码量对比是基础分析，嵌入保证跨平台一致性 |
 | **syn + quote** | Rust 源码字符串 | Rust TokenStream / 格式化代码 | M2 条件嵌入：自定义 lint crate 的 proc-macro 生成需要时引入；MVP 不需要 |
 | **petgraph** | 节点+边列表 | 拓扑排序、路径查询、子图提取 JSON | 依赖图是核心数据结构，内存操作性能敏感 |
-| **jsonschema** | JSON 数据 + Schema 文件 | 校验结果（通过/失败+错误详情） | 检查点校验必须确定性执行，Schema 编译期内嵌 |
+| ~~**jsonschema**~~ | ~~JSON 数据 + Schema 文件~~ | ~~校验结果（通过/失败+错误详情）~~ | **已摘除（M4，[MDR-021](../decisions/021-no-json-schema-validation.md)）**：原理由「检查点校验必须确定性执行」仍成立，但确定性由 serde 类型化反序列化 + 手写判据提供，无需 schema 校验器——该依赖曾在册却源码零引用，且默认启用远程 `$ref` 解析而拖入 `tokio`/`hyper`/`reqwest` 共 80 个传递 crate |
 | **rusqlite** | 图数据（petgraph 节点+边） | 持久化到 SQLite DB / 从 DB 加载图 | 图持久化是断点续传与增量更新的前提，嵌入避免外部 SQLite CLI 依赖；M0 Spike 0 门控（见 § 5.7.3） |
 
 > **scc 与 tokei 的取舍**：5.3 节列出 `tokei + scc` 并用。v0.9.2 决定**仅嵌入 tokei**——tokei 是纯 Rust crate 可直接嵌入，覆盖核心 LOC 统计需求；scc 是 Go 编写的外部二进制，其额外的复杂度/COCOMO 估算能力可通过 tree-sitter AST 分析自行实现。如需 scc 的性能优势（大仓场景），可作为可选外部调用。

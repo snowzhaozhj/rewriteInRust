@@ -22,3 +22,5 @@ toml.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# design_error_codes.rs 守卫用 ErrorCode::iter() 取真值域（避免写死码清单）
+strum.workspace = true

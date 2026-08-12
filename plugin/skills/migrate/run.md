@@ -54,7 +54,29 @@
 | `pending` / `translating`(substatus=null) | 正常从第 2 步开始（非 batch 组的默认路由） |
 
 ### 2. 解除 blocked + 循环依赖检测
-遍历所有 `status=blocked` 模块，若其 `blocked_by` 引用的模块都已 `done`/`degrade_*`，则 `state transition --module <M> --to <pre_blocked_status> --reason 'blocked_by resolved'` 自动恢复并记日志。对 blocked 子图做 DFS 环检测：发现环即报错中止、输出环路径、记入 `metadata.last_error`（防 blocked 模块互相等待死锁）。
+
+**先执行 `rustmigrate validate state --check-blocked`**（一条命令同时完成依赖就绪判定、blocked 子图 DFS 环检测、幽灵引用检出，不写盘）。
+
+**这四类不是互斥分区，须按下表顺序判定**——同一次输出里 `ready_to_unblock` 与 `cycles` 可以同时非空，而 `--auto-unblock` 在 `cycles` 非空时会**整体拒绝**（返 `E012` + 退出码 1，一个模块都不解除）。故先看 `cycles`：
+
+| 顺序 | `data` 字段 | 含义 | 处置 |
+|---|---|---|---|
+| ① | `cycles[]` 非空 | blocked 模块互相等待，死锁 | 报错中止、输出环路径、记入 `metadata.last_error`。**此时不要再调 `--auto-unblock`**（会 `E012` 硬错且零解除），也不要按 ② 逐个 transition——先打破环 |
+| ② | `ready_to_unblock[]` | 依赖已全部终态，可恢复 | 逐个 `state transition --module <M> --to <pre_blocked_status> --reason 'blocked_by resolved'` 并记日志。仅当 `cycles[]` **为空**时，才可整体改用 `--check-blocked --auto-unblock` 让 CLI 代劳 |
+| ③ | `ghost_refs[]` 非空 | `blocked_by` 指向无处归属的 key | 见下方「幽灵引用不能靠等」——**等待无效**。CLI 检出并点名，但当前**不提供自动处置命令**（处方层已拆出为后续 PR，见 MDR-021）；人工处置须守下方两条硬约束 |
+| ④ | `warnings` 非空 | 含跨组 `member_files` 划分破坏等**数据完整性**问题（无机读字段，只经 warning 报出） | 如实转达用户并按 warning 指示处置。**不可当作正常等待跳过**。注意这类模块**可能完全不出现在任何机读字段里**——跨组歧义扫描覆盖全部带 `blocked_by` 的模块，而 `still_blocked` 只收 `status=blocked` 的，故引用方不是 blocked 时 `still_blocked` 为空数组，warning 正文是唯一线索 |
+| ⑤ | `still_blocked[]` 中其余模块 | 排除上述四类后，依赖确实还没译完 | 正常等待，跳过本轮 |
+
+> **幽灵引用不能靠等**：`blocked_by` 可能引用**无处归属**的 key（state 与 source-graph 不同步、SubAgent 写入非法引用、用户手填）。这类依赖永远不会进终态，等待是无效动作。`validate state` 会就此降级 warning 并点名「引用方 → 被引 key」，`--check-blocked` 在 `data.ghost_refs` 给逐条明细（`[{module, missing, status}]`，`missing` 是**单个** key 字符串、每条一项；`status` 是持有方当前状态，`blocked` 表示此刻就被永久阻塞、其余表示只是残留引用）。
+>
+> **CLI 当前只检出、不处置**。按状态推导「处置命令」的那一层曾把「不可能」写进用户可见输出、而依据只是「看出边」（一步可达），被审查全数推翻，已拆出为后续 PR（见 MDR-021），届时提供非破坏性清理入口。在此之前处置须人工判断，且须守两条硬约束：
+>
+> - **transition 不是通用处置**：`blocked_by` 只在「离开 blocked」的边上被清空。对非 blocked 模块，transition 要么报 `E004`（目标非法），要么**返回成功而 `blocked_by` 原样留着**——后者更危险，`status:ok` 会被误读成已处置。
+> - **不要用 `state populate-modules`**：它对非 pending 模块一律拒绝重填（断点续传保护）。`status=blocked` 的幽灵引用模块仍计入阻塞，`--auto-unblock` 不会放行它们——不是命令失灵，是不在损坏数据上改状态。
+>
+> reset 需 `--force` 的状态（值域取自 `machine.rs` 的 `reset_force_reason`，勿手工维护——有 CI 守卫比对）：`blocked`、`done`、`degrade_ffi`、`degrade_manual`、`degrade_skip`、`paused`。
+>
+> composite 组的**非代表成员** key 不算幽灵（它登记在组代表名下，CLI 已自动归一到组代表判定），不会出现在 `ghost_refs` 里。但若同一文件被**多个组**列为 `member_files`（跨组互斥不变量被破坏），CLI 无法判定按哪个组判就绪，会单独告警并一律按未就绪处理——处置是修正 `member_files` 划分，不是重新同步。
 
 > 源码 SCC（循环依赖）在 populate 阶段已被折叠成**一个模块组**（`member_files` 含组内全部源文件），翻译粒度=单文件、SCC 仅作整组编译门禁（步骤 6「SCC 组 Phase A」：契约+stub→契约门→逐文件填空→整组真门，见 [translator.md](../../agents/translator.md)「SCC 模块组翻译」），不再因循环依赖被标 `blocked`。这里的环检测只针对 `blocked` 子图的等待死锁，与源码 SCC 无关。
 

@@ -32,8 +32,10 @@ serde_json = "1"
 anyhow = "1"
 thiserror = "1"
 
-# Schema 校验
-jsonschema = "0.18"
+# 配置解析
+# 注：曾在册 `jsonschema`（声称供 `validate state` / `validate config` 做 JSON Schema
+# 校验），但从未被任何源码引用——两条命令的校验实为手写判据（状态机约束 + 字段合理性），
+# 且 serde 的类型化反序列化已覆盖 schema 能管的字段类型/required/枚举层。见 MDR-021。
 toml = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 

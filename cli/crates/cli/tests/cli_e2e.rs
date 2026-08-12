@@ -1578,6 +1578,290 @@ fn e2e_review_gate_fails_closed_on_broken_config() {
 }
 
 #[test]
+fn e2e_parse_failed_suggestion_covers_state_file_not_only_source() {
+    // E010（ParseFailed）原文案只说「源码解析失败，请检查文件语法」——state 文件损坏的
+    // 用户会被指去查源码语法，而真正坏的是 migration-state.json。更糟的是主审视角实证：
+    // 源码语法错误**根本不产出本码**（`MigrateError::Parse` 的三个调用点都在
+    // `graph/build.rs` 里降级成 warnings 并跳过该文件），故那句指引恒指错方向。
+    // 此测试钉住文案覆盖 state 文件这一路、且不再提三类不成立的来源。
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+
+        // 前置假设：init 后尚无 .backup（备份在首次 save 覆盖时才产生）。若此前提变化，
+        // 下面的损坏注入会被自动回退路径吃掉、测不到 E010，故先断言而非默认成立。
+        let backup = std::path::Path::new(".rust-migration/.migration-state.json.backup");
+        assert!(
+            !backup.exists(),
+            "前提失效：init 后已存在 .backup，损坏会被自动回退掉而非返 E010"
+        );
+
+        std::fs::write(".rust-migration/migration-state.json", "{ 坏掉的 json").unwrap();
+
+        let (code, json) = run(&["validate", "state"]);
+        assert_eq!(code, 1, "state 文件损坏且无备份可回退时应报错: {json}");
+        assert_eq!(json["data"]["error_code"], "E010", "{json}");
+
+        let suggestion = json["data"]["suggestion"].as_str().unwrap_or_default();
+        assert!(
+            suggestion.contains("migration-state.json"),
+            "建议须点明 state 文件这一路，否则用户被引去查源码语法: {suggestion}"
+        );
+        assert!(
+            !suggestion.starts_with("源码解析失败"),
+            "不得退回「只讲源码」的单一口径: {suggestion}"
+        );
+        // 不得提源码语法：主审实证 `MigrateError::Parse` 的三个调用点都在 graph/build.rs
+        // 降级成 warnings 并跳过，源码语法错误实测不产出 E010——提它等于给用户一条恒错的
+        // 首选指引（负向实证：还原旧文案时本断言与上一条同时红）。
+        assert!(
+            !suggestion.contains("源码"),
+            "源码语法错误实测不产出 E010（Parse 在 build.rs 被降级为 warning），提它是误导: {suggestion}"
+        );
+        // 不得提配置文件：`Toml`/`TomlSer` 虽在 `From<&MigrateError>` 里映射到 E010，
+        // 但实测配置损坏走 E012（见 e2e_broken_config_returns_config_error_not_parse_failed）。
+        assert!(
+            !suggestion.contains(".rustmigrate.toml"),
+            "配置损坏实际走 E012 而非本码，建议里提它是误导: {suggestion}"
+        );
+        // 须覆盖第二条真实路径：validate rules 的 --registry JSON 损坏同样返 E010
+        // （见 e2e_broken_rule_registry_returns_parse_failed_with_actionable_hint）。
+        assert!(
+            suggestion.contains("rule-registry.json"),
+            "E010 的第二条真实来源（--registry JSON 损坏）须在建议里覆盖: {suggestion}"
+        );
+    });
+}
+
+#[test]
+fn e2e_codes_marked_reachable_actually_appear_in_output() {
+    // 06 § 10.7「CLI 实际错误码全表」的「可达性」列是编排器分流的前提：标「可达」的码
+    // 若实际不可能出现，按它写的分支恒不命中（与已废弃的 VALIDATION_* 幽灵码同构）。
+    //
+    // `design_error_codes.rs` 的守卫只能做到「不可达」侧的清单一致性检查——异构交叉审查
+    // （codex）实证其类型级补强**无法**发现「有映射但源变体零构造点」型死码（`E006` 正是
+    // 此类：`MigrateError::Blocked` 有 From 映射却零构造点）。故「可达」侧必须由本测试用
+    // **真实命令产出**证明，而非从源码结构推断。
+    //
+    // 未覆盖的两个码及原因（如实记录，不假装全覆盖）：
+    // - `E013` Timeout：需注入睡满 `subagent_timeout_secs`（默认 60s）的假 cargo，
+    //   codex 已实证 `scaffold workspace` 可触发，但 65 秒不适合进 CI。
+    // - `E015` NotImplemented：需配 `source_language = "c"` 后 `graph build`，codex 已实证。
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        std::fs::write("package.json", r#"{"name":"p"}"#).unwrap();
+        std::fs::create_dir_all("src").unwrap();
+        std::fs::write("src/a.ts", "export const x = 1;\n").unwrap();
+
+        let expect_code = |args: &[&str], want: &str, why: &str| {
+            let (_, json) = run(args);
+            assert_eq!(
+                json["data"]["error_code"], want,
+                "{why}（若该码已变不可达，须同步 06 表的可达性列 + UNREACHABLE_CODES）: {json}"
+            );
+        };
+
+        // E012 ConfigError：模块不存在（也是 E003/E006 场景的实际归属码）。
+        let (_, json) = run(&["init"]);
+        assert!(
+            json["status"] == "ok" || json["status"] == "warning",
+            "init 应成功: {json}"
+        );
+        expect_code(&["state", "get", "absent"], "E012", "模块不存在");
+
+        // E004 InvalidTransition：init 态直接跳 plan（不满足转换矩阵）。
+        expect_code(
+            &["state", "transition", "--to", "plan"],
+            "E004",
+            "init→plan 非法转换",
+        );
+
+        // E007 LockConflict：CAS 版本不匹配（注意 message 是「版本冲突」而非进程冲突）。
+        expect_code(
+            &[
+                "state",
+                "update",
+                "--module",
+                "absent",
+                "--status",
+                "translating",
+                "--cas-version",
+                "99",
+            ],
+            "E007",
+            "CAS 版本冲突",
+        );
+
+        // E009 FileNotFound：--registry 指向不存在的文件。
+        expect_code(
+            &[
+                "validate",
+                "rules",
+                "--registry",
+                "missing.json",
+                "--adapters-dir",
+                ".",
+            ],
+            "E009",
+            "registry 文件不存在",
+        );
+
+        // E005 PreconditionFailed：推进到 sprint_loop 后未 graph build 即校验。
+        // 注意 `transition --to sprint_loop` 本身放行（不查 graph），前置条件由
+        // `validate state` 检查——这是 codex 给的场景，我起初误接在 transition 上。
+        for to in ["profile", "plan", "scaffold", "sprint_loop"] {
+            let (_, json) = run(&["state", "transition", "--to", to]);
+            assert_eq!(json["status"], "ok", "{to} 转换应成功: {json}");
+        }
+        expect_code(
+            &["validate", "state"],
+            "E005",
+            "sprint_loop 态但未 graph build",
+        );
+
+        // E008 SchemaValidation：schema 主版本不兼容。
+        let state_path = std::path::Path::new(".rust-migration/migration-state.json");
+        let mut state: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(state_path).unwrap()).unwrap();
+        state["schema_version"] = serde_json::json!("99.0.0");
+        std::fs::write(state_path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+        expect_code(&["validate", "state"], "E008", "schema 主版本不兼容");
+        state["schema_version"] = serde_json::json!("1.0.0");
+        std::fs::write(state_path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+
+        // E011 DatabaseError：source-graph.db 非 SQLite 内容。
+        std::fs::write(".rust-migration/source-graph.db", "not sqlite").unwrap();
+        expect_code(&["graph", "stats"], "E011", "db 文件非 SQLite");
+        std::fs::remove_file(".rust-migration/source-graph.db").unwrap();
+
+        // E001 GraphBuildFailed：图操作错误（此处为查询不存在的节点，非「构建」失败）。
+        let (_, json) = run(&["graph", "build", "--root", "."]);
+        assert!(
+            json["status"] == "ok" || json["status"] == "warning",
+            "graph build 应成功: {json}"
+        );
+        expect_code(
+            &["graph", "deps", "does-not-exist"],
+            "E001",
+            "查询不存在的图节点",
+        );
+
+        // E014 IoError：state 文件不可读。
+        let mut perms = std::fs::metadata(state_path).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o000);
+            std::fs::set_permissions(state_path, perms.clone()).unwrap();
+            expect_code(&["validate", "state"], "E014", "state 文件权限不足");
+            perms.set_mode(0o644);
+            std::fs::set_permissions(state_path, perms).unwrap();
+        }
+
+        // E010 ParseFailed：state JSON 损坏且无备份（备份由前面的 transition 产生，须先删）。
+        let backup = std::path::Path::new(".rust-migration/.migration-state.json.backup");
+        if backup.exists() {
+            std::fs::remove_file(backup).unwrap();
+        }
+        std::fs::write(state_path, "{ 坏掉的 json").unwrap();
+        expect_code(&["validate", "state"], "E010", "state JSON 损坏且无备份");
+    });
+}
+
+#[test]
+fn e2e_broken_rule_registry_returns_parse_failed_with_actionable_hint() {
+    // E010 的**第二条真实路径**（主审视角发现，初版文案漏了）：`validate rules --registry`
+    // 指向的 rule-registry.json 损坏时经 `?` → `#[from] serde_json::Error` → E010。
+    //
+    // 该路径与 state 文件、与 `.backup` 机制均无关，且 `init` **不生成** rule-registry.json
+    // （它在 plugin/skills/migrate/references/ 下），故初版建议的「无法修复则重新执行 init」
+    // 对这条路径是无效动作——与本 PR 要消灭的「给用户恒不成立的指引」同类。
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        std::fs::create_dir_all("adapters/typescript").unwrap();
+        std::fs::write("registry.json", "not json at all {{{").unwrap();
+
+        let (code, json) = run(&[
+            "validate",
+            "rules",
+            "--registry",
+            "./registry.json",
+            "--adapters-dir",
+            "./adapters",
+        ]);
+        assert_eq!(code, 1, "registry JSON 损坏应报错: {json}");
+        assert_eq!(
+            json["data"]["error_code"], "E010",
+            "registry 损坏经 #[from] serde_json::Error 走 ParseFailed: {json}"
+        );
+
+        let suggestion = json["data"]["suggestion"].as_str().unwrap_or_default();
+        assert!(
+            suggestion.contains("rule-registry.json"),
+            "建议须覆盖这条路径，否则用户只看到 state 文件的指引: {suggestion}"
+        );
+        // `init` 兜底须收在 state 分句内部——对本路径 init 无效。判据：init 建议与
+        // rule-registry 提示不得出现在同一句里（用分号切句后各自检查）。
+        let registry_clause = suggestion
+            .split('；')
+            .find(|c| c.contains("rule-registry.json"))
+            .unwrap_or_default();
+        assert!(
+            !registry_clause.contains("init"),
+            "init 不生成 rule-registry.json，把它写进该路径的建议是无效动作: {registry_clause}"
+        );
+    });
+}
+
+#[test]
+fn e2e_broken_config_returns_config_error_not_parse_failed() {
+    // 上一个测试「E010 建议不提配置文件」这一断言的依据：配置文件 TOML 损坏时走的是
+    // `E012`（ConfigError）而非 `E010`——三处 `toml::from_str` 都显式包成
+    // `MigrateError::Config`，`MigrateError::Toml` 除 `#[from]` 外零构造点。
+    // 若将来有人改成经 `?` 上抛（走 From → E010），本测试会红，提示同步 E010 的建议文案。
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        std::fs::write(".rustmigrate.toml", "[project\nsource_root = ").unwrap();
+
+        let (code, json) = run(&["validate", "config"]);
+        assert_eq!(code, 1, "配置损坏应报错: {json}");
+        assert_eq!(
+            json["data"]["error_code"], "E012",
+            "配置损坏须走 ConfigError；若变成 E010 请同步该码的建议文案（现声明「永不到此」）: {json}"
+        );
+    });
+}
+
+#[test]
+fn e2e_corrupt_state_with_backup_recovers_instead_of_parse_error() {
+    // 上一个测试的对照面，也是其「无备份才到此」前提的实证：主文件损坏但 .backup 可用时
+    // CLI 自动回退并降级 warning，根本不返 E010。两者合起来证明 ParseFailed 的 state
+    // 一路只在「备份也不可用」时命中——故建议文案不应再叫用户去从备份恢复（死路）。
+    let tmp = tempfile::tempdir().unwrap();
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        // 触发一次 save 以产生 .backup。
+        let (code, json) = run(&["state", "transition", "--to", "profile"]);
+        assert_eq!(code, 0, "前置转换应成功: {json}");
+        let backup = std::path::Path::new(".rust-migration/.migration-state.json.backup");
+        assert!(backup.exists(), "前提失效：save 后未产生 .backup");
+
+        std::fs::write(".rust-migration/migration-state.json", "{ 坏掉的 json").unwrap();
+
+        let (code, json) = run(&["validate", "state"]);
+        assert_eq!(code, 0, "有备份时应自动回退而非报错: {json}");
+        assert_eq!(json["status"], "warning", "{json}");
+        let warnings = json["warnings"].to_string();
+        assert!(
+            warnings.contains("已从 .backup 恢复"),
+            "须显式告知发生了回退（进度可能丢失）: {warnings}"
+        );
+    });
+}
+
+#[test]
 fn smoke_state_reset() {
     // M4-ROB-01a：state reset 幂等回退失败/中途模块 + 输出 cleanup 作用域。
     let tmp = tempfile::tempdir().unwrap();
@@ -2063,6 +2347,98 @@ fn subagent_call_status_domain_is_consistent_across_docs() {
                  编排器照抄即被 CLI 解析期拒（本 PR 要消灭的正是这个失败模式）。\n\
                  提及废弃值的沿革说明是允许的，但不能写成 `{deprecated}`（<释义>) 这种值域条目形态。\n\
                  实际段落: {segment}"
+            );
+        }
+    }
+}
+
+/// 设计文档声明的「reset 需 `--force` 的状态」集合，须与 `reset_force_reason` **完全相等**。
+///
+/// 存在理由是一次实测缺陷：幽灵引用告警的处置文案自己写了一份「`done`/`degrade_*` 需
+/// `--force`」的清单，漏掉 `paused`（也漏了 `blocked`），于是 paused 残留模块照文案做即得
+/// `E012`，而文案刚说这个状态不需要 `--force`。三处文档 + 一处代码守卫 = 四份真值源，
+/// 人工同步必漂，实测缺陷与实证记录见 MDR-021「第三轮四视角」段。
+///
+/// 判据取**集合相等**而非包含：只查「缺不缺」挡不住多写（把 `translating` 也写成需
+/// `--force`，编排器就会对本可裸 reset 的模块去要人类确认，白卡一轮）。
+///
+/// 值域两侧都不写死：一侧遍历 `ModuleStatus::iter()` 过 `reset_force_reason`，另一侧从文档
+/// 句子里抽反引号 token 后用 `ModuleStatus::from_str` 过滤——`--force` / `machine.rs` /
+/// `reset_force_reason` 这些非状态 token 自然落选，无需维护排除名单。
+#[test]
+fn reset_force_states_are_consistent_across_docs() {
+    use rustmigrate_core::state::machine::reset_force_reason;
+    use rustmigrate_core::types::state::ModuleStatus;
+    use std::str::FromStr;
+    use strum::IntoEnumIterator;
+
+    let mut expected: Vec<String> = ModuleStatus::iter()
+        .filter(|s| reset_force_reason(*s).is_some())
+        .map(|s| s.to_string())
+        .collect();
+    expected.sort();
+    assert!(
+        !expected.is_empty(),
+        "真值源为空——空集比空集会让本测试变成恒真的假绿。\
+         若确实取消了 reset 的 --force 守卫，请连同本断言一起重做，而不是让它空转"
+    );
+
+    // 三处文档里那句话的锚点。措辞被改写时**报锚点缺失**，而不是静默跳过校验。
+    const ANCHOR: &str = "reset 需 `--force` 的状态";
+    let sources = [
+        "docs/design/06-plugin-structure.md",
+        "docs/design/09-appendix-schemas.md",
+        "plugin/skills/migrate/run.md",
+    ];
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .expect("应能从 crate 目录上溯到仓库根")
+        .to_path_buf();
+
+    for rel_path in sources {
+        let path = repo_root.join(rel_path);
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("读不到 {}: {e}", path.display()));
+        // 扫描**全部**锚点出现处，而非只 `find` 首处：一处漏 `paused`、别处补齐的组合
+        // 曾能骗过只查首处的旧实现（第四轮 imp）。每一处都必须与真值源相等。
+        //
+        // 覆盖范围仅限「带反引号逐个列出状态」的这句话。用 `degrade_*` 通配缩写的枚举
+        // （如 06 § 命令表的 reset 行、`state reset --help` 文案）不在本机制内——`degrade_*`
+        // 不是合法 ModuleStatus token，无法逐项比对；那些处靠人工与评审保证，见 MDR-021。
+        let positions: Vec<usize> = text.match_indices(ANCHOR).map(|(i, _)| i).collect();
+        assert!(
+            !positions.is_empty(),
+            "{rel_path} 里找不到锚点「{ANCHOR}」——该句被删或改写了措辞。\
+             **不要靠改锚点让本测试变绿**：这句话是编排器与用户照抄的权威声明，\
+             删了它这一侧就再没有守卫。若确有重构，请连同本断言一起改并说明新锚点"
+        );
+
+        for pos in positions {
+            // 只取锚点所在的这一句：到首个「。」或行尾为止。06 的整张表行是一行，若取到整行会
+            // 把行内其他位置的 `reviewing`/`translating` 等状态 token 一并抓进来。
+            let rest = &text[pos..];
+            let line_end = rest.find('\n').unwrap_or(rest.len());
+            let sentence_end = rest[..line_end].find('。').unwrap_or(line_end);
+            let sentence = &rest[..sentence_end];
+
+            let mut declared: Vec<String> = sentence
+                .split('`')
+                .enumerate()
+                // 反引号成对包裹，奇数下标才是被包裹的内容。
+                .filter(|(i, _)| i % 2 == 1)
+                .filter_map(|(_, token)| ModuleStatus::from_str(token).ok())
+                .map(|s| s.to_string())
+                .collect();
+            declared.sort();
+            declared.dedup();
+
+            assert_eq!(
+                declared, expected,
+                "{rel_path} 声明的「reset 需 --force」状态集合与 `reset_force_reason` 不一致。\n\
+                 代码（唯一真值源）: {expected:?}\n文档: {declared:?}\n\
+                 **修法是改文档跟上代码**（或先改 `reset_force_reason` 再让文档跟上），\
+                 不是改本断言的期望值。\n实际句子: {sentence}"
             );
         }
     }
@@ -3183,6 +3559,262 @@ fn smoke_state_deps_unresolved_not_blocking() {
                 .iter()
                 .any(|b| b.as_str().unwrap().contains("shared")),
             "absent 依赖不应进 blocking: {json}"
+        );
+    });
+}
+
+#[test]
+fn smoke_validate_detects_ghost_blocked_by_reference() {
+    // MDR-021 待办 1：`blocked_by` 引用未登记模块时，此前 `validate state` 返
+    // `valid:true` 零告警、`--check-blocked` 只把它列进 `still_blocked`——与「依赖还在
+    // 翻译中」完全无法区分，而这个依赖永远不会进终态，模块永久阻塞。
+    //
+    // 复现路径与 `smoke_state_deps_unresolved_not_blocking` 同源（state 与 graph 不同步），
+    // 但走的是读侧：那条测试证明 deps 侧不把幽灵 key 填进 blocked_by，这条证明**已经**
+    // 落进 blocked_by 的幽灵 key 能被检出。
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("circular-deps"), tmp.path());
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        let (code, _) = run(&["graph", "build", "--root", "src"]);
+        assert_eq!(code, 0);
+        let (code, _) = run(&["state", "populate-modules"]);
+        assert_eq!(code, 0);
+
+        // 手工把一个模块标 blocked 并填入不存在的 blocked_by（模拟 SubAgent 写入非法
+        // 引用 / 用户手填 / state 与 graph 不同步后残留）。
+        //
+        // 取字典序最小的 key 而非 `.keys().next()`：后者的稳定性依赖「serde_json 未启用
+        // preserve_order 故 Map 实为 BTreeMap」这一不显眼的前提，前提一变测试就 flaky
+        // 且症状难懂。显式排序把选取变成确定的。
+        let sp = tmp.path().join(".rust-migration/migration-state.json");
+        let mut sf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+        let key = sf["modules"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .min()
+            .expect("populate 后应至少有一个模块")
+            .clone();
+        sf["modules"][&key]["status"] = serde_json::json!("blocked");
+        sf["modules"][&key]["blocked_by"] = serde_json::json!(["file:GHOST.ts"]);
+        sf["modules"][&key]["pre_blocked_status"] = serde_json::json!("pending");
+        std::fs::write(&sp, serde_json::to_string_pretty(&sf).unwrap()).unwrap();
+
+        // 基础 validate：必须降级 warning 并点名幽灵引用，且不硬判损坏（旧文件须可读）。
+        let (code, json) = run(&["validate", "state"]);
+        assert_eq!(code, 0, "幽灵引用只告警，不应命令失败: {json}");
+        assert_eq!(json["status"], "warning", "有告警须降级 status: {json}");
+        // 注：`valid` 在 cmd_validate_state 里是硬编码字面量，任何输入下都是 true，
+        // 该断言不区分实现分支——它锁的是 09:602 对编排器的**文档承诺**（「退出码
+        // 仍为 0、valid 仍为 true」）。「不硬判损坏」的真实可观测面是上面两条
+        // （code==0 + status 降级），不是这一条。
+        assert_eq!(json["data"]["valid"], true);
+        let warns = json["warnings"].as_array().unwrap();
+        let ghost_warn = warns
+            .iter()
+            .find(|w| w.as_str().unwrap().contains("file:GHOST.ts"))
+            .unwrap_or_else(|| panic!("应就幽灵引用告警: {json}"));
+        let ghost_warn = ghost_warn.as_str().unwrap();
+        assert!(ghost_warn.contains(&key), "告警须点名引用方: {ghost_warn}");
+
+        // --check-blocked：幽灵引用单列进 ghost_refs，同时仍留在 still_blocked
+        // （它确实阻塞），但编排器据 ghost_refs 可区分出「等不到」而非「还没到」。
+        let (code, json) = run(&["validate", "state", "--check-blocked"]);
+        assert_eq!(code, 0, "{json}");
+        let ghost_refs = json["data"]["ghost_refs"].as_array().unwrap();
+        assert_eq!(ghost_refs.len(), 1, "应有一条幽灵引用记录: {json}");
+        assert_eq!(ghost_refs[0]["module"], serde_json::json!(key));
+        assert_eq!(ghost_refs[0]["missing"], serde_json::json!("file:GHOST.ts"));
+        assert_eq!(
+            ghost_refs[0]["status"],
+            serde_json::json!("blocked"),
+            "须回带持有方状态（紧迫性由它判读）: {json}"
+        );
+        assert!(
+            ghost_refs[0].get("remedy").is_none(),
+            "ghost_refs 为纯检出事实，不得携带处置命令（处方层已拆出，见 MDR-021）: {json}"
+        );
+        assert!(
+            json["data"]["still_blocked"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m.as_str().unwrap() == key),
+            "幽灵引用仍须阻塞: {json}"
+        );
+
+        // --auto-unblock：绝不能在损坏数据上改状态。
+        let (code, json) = run(&["validate", "state", "--check-blocked", "--auto-unblock"]);
+        assert_eq!(code, 0, "{json}");
+        assert!(
+            json["data"]["unblocked"].as_array().unwrap().is_empty(),
+            "不得自动解除带幽灵引用的模块: {json}"
+        );
+        let sf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+        assert_eq!(
+            sf["modules"][&key]["status"], "blocked",
+            "落盘状态须保持 blocked"
+        );
+
+        // 非 blocked 模块上的残留幽灵引用同样须进 ghost_refs（异构交叉 imp3 回归）：
+        // 此前告警扫全部模块、ghost_refs 只取 blocked 模块，只读机读字段的编排器会
+        // 看到「warnings 有、ghost_refs 空数组」而漏掉。
+        let mut sf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+        sf["modules"][&key]["status"] = serde_json::json!("pending");
+        sf["modules"][&key]["pre_blocked_status"] = serde_json::Value::Null;
+        std::fs::write(&sp, serde_json::to_string_pretty(&sf).unwrap()).unwrap();
+
+        let (code, json) = run(&["validate", "state", "--check-blocked"]);
+        assert_eq!(code, 0, "{json}");
+        assert_eq!(
+            json["data"]["blocked_count"], 0,
+            "该模块已非 blocked: {json}"
+        );
+        let ghost_refs = json["data"]["ghost_refs"].as_array().unwrap();
+        assert_eq!(
+            ghost_refs.len(),
+            1,
+            "非 blocked 模块的残留引用也须进 ghost_refs: {json}"
+        );
+        assert_eq!(
+            ghost_refs[0]["status"],
+            serde_json::json!("pending"),
+            "pending 模块不得标记为已阻塞: {json}"
+        );
+        assert!(
+            ghost_refs[0].get("remedy").is_none(),
+            "残留引用同样是纯检出事实，无 remedy 字段: {json}"
+        );
+    });
+}
+
+/// 残留类模块上，**合法边**的 transition 会成功却不清 `blocked_by`。
+///
+/// 这是检出层必须尊重、且后续处方 PR 必须绕开的行为事实：`blocked_by = None` 只在
+/// `from == Blocked` 分支里执行（`machine.rs`），故 `reviewing → translating` 这类合法边
+/// 返回 `status:ok` 却不清幽灵引用，编排器若把 rc=0 读成「已处置」就会放过它——比 `E004`
+/// 更难发现。钉住它，防未来把 transition 当通用清理手段。
+#[test]
+fn smoke_transition_on_residual_ghost_succeeds_without_clearing_blocked_by() {
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("circular-deps"), tmp.path());
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        assert_eq!(run(&["graph", "build", "--root", "src"]).0, 0);
+        assert_eq!(run(&["state", "populate-modules"]).0, 0);
+        let sp = tmp.path().join(".rust-migration/migration-state.json");
+        let mut sf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+        let key = sf["modules"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .min()
+            .unwrap()
+            .clone();
+        sf["modules"][&key]["status"] = serde_json::json!("reviewing");
+        sf["modules"][&key]["blocked_by"] = serde_json::json!(["file:GHOST.ts"]);
+        sf["modules"][&key]["pre_blocked_status"] = serde_json::Value::Null;
+        std::fs::write(&sp, serde_json::to_string_pretty(&sf).unwrap()).unwrap();
+
+        // 前置假设：`reviewing → translating` 确实是合法边（矩阵变化时此处先红）。
+        let (code, out) = run(&[
+            "state",
+            "transition",
+            "--module",
+            &key,
+            "--to",
+            "translating",
+        ]);
+        assert_eq!(code, 0, "reviewing → translating 应为合法边: {out}");
+
+        // 关键断言：命令成功，但幽灵引用**还在**。
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+        assert_eq!(
+            after["modules"][&key]["blocked_by"],
+            serde_json::json!(["file:GHOST.ts"]),
+            "transition 不清 blocked_by（只有离开 blocked 的边才清）: {after}"
+        );
+        let (code, json) = run(&["validate", "state"]);
+        assert_eq!(code, 0, "{json}");
+        assert_eq!(
+            json["status"], "warning",
+            "幽灵引用未被清除，告警须仍在——rc=0 不等于已处置: {json}"
+        );
+    });
+}
+
+#[test]
+fn smoke_auto_unblock_refuses_entirely_when_cycles_present() {
+    // run.md 步骤 2 的分流表把 `ready_to_unblock` 与 `cycles` 列成两行，读起来像可以各自
+    // 处理；但 `--auto-unblock` 在环存在时**整体拒绝**（E012 + 退出码 1），连本可解除的
+    // 模块也一个不动。编排器若按 ready 行选了 `--auto-unblock` 而恰好同时有环，会拿到
+    // 硬错且零进展——本 PR 通篇在消灭「文档给的动作实现里做不到」，这属同类。
+    //
+    // 表已改为带优先级（先判 cycles），此测试钉住那个前提行为，防表与实现反向漂移。
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("circular-deps"), tmp.path());
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        assert_eq!(run(&["graph", "build", "--root", "src"]).0, 0);
+        assert_eq!(run(&["state", "populate-modules"]).0, 0);
+
+        let sp = tmp.path().join(".rust-migration/migration-state.json");
+        let mut sf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+        // 以既有模块为模板造四个：一个终态依赖、一个可解除、两个互锁。
+        let template = sf["modules"]
+            .as_object()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()
+            .clone();
+        let mk = |status: &str, blocked_by: serde_json::Value, pre: serde_json::Value| {
+            let mut m = template.clone();
+            m["status"] = serde_json::json!(status);
+            m["blocked_by"] = blocked_by;
+            m["pre_blocked_status"] = pre;
+            m["composite_kind"] = serde_json::Value::Null;
+            m.as_object_mut().unwrap().remove("member_files");
+            m
+        };
+        sf["modules"] = serde_json::json!({
+            "DONE": mk("done", serde_json::Value::Null, serde_json::Value::Null),
+            "READY": mk("blocked", serde_json::json!(["DONE"]), serde_json::json!("pending")),
+            "C1": mk("blocked", serde_json::json!(["C2"]), serde_json::json!("pending")),
+            "C2": mk("blocked", serde_json::json!(["C1"]), serde_json::json!("pending")),
+        });
+        std::fs::write(&sp, serde_json::to_string_pretty(&sf).unwrap()).unwrap();
+
+        // 前置假设：两者确实同时非空（否则本测试测不到它要测的东西）。
+        let (_, json) = run(&["validate", "state", "--check-blocked"]);
+        assert_eq!(
+            json["data"]["ready_to_unblock"],
+            serde_json::json!(["READY"]),
+            "前提：READY 须被判为可解除: {json}"
+        );
+        assert!(
+            !json["data"]["cycles"].as_array().unwrap().is_empty(),
+            "前提：C1↔C2 须被检出为环: {json}"
+        );
+
+        // 有环时 --auto-unblock 整体拒绝。
+        let (code, out) = run(&["validate", "state", "--check-blocked", "--auto-unblock"]);
+        assert_ne!(code, 0, "有环时 --auto-unblock 应硬错: {out}");
+        assert_eq!(out["data"]["error_code"], "E012", "{out}");
+
+        // 且**一个都没解除**——这是「不能按 ready 行直接调 auto-unblock」的实质理由。
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+        assert_eq!(
+            after["modules"]["READY"]["status"], "blocked",
+            "拒绝须是整体的，可解除模块也不得被改状态: {after}"
         );
     });
 }

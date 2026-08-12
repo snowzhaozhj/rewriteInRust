@@ -5,7 +5,12 @@ use std::path::PathBuf;
 use serde::Serialize;
 
 /// 错误码枚举——覆盖 ~15 条高频错误，提供编号、重试建议和用户提示。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+///
+/// `EnumIter`：供 `design_error_codes.rs` 守卫从**真值域**取全部码（而非写死清单）
+/// 断言「设计文档 06 § 10.7 错误码表声称由 CLI 返回的码必须真实存在」——M4 核实时
+/// 该表 11 个语义码里有 3 个（`VALIDATION_TIMEOUT`/`OOM`/`SCHEMA_CORRUPTED`）在 CLI
+/// 中从不存在，而 06 § 10.7 要求编排器按它们分流，照做恒为假。见 MDR-021。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, strum::EnumIter)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     /// 图构建失败。
@@ -70,16 +75,49 @@ impl ErrorCode {
     /// 用户提示信息。
     pub fn suggestion(self) -> &'static str {
         match self {
-            Self::GraphBuildFailed => "请检查源码目录结构后重试 graph build",
+            // 本码覆盖图**操作**错误（构建期与查询期都有构造点，见 graph/persist.rs），
+            // 故建议不能只讲 graph build——异构交叉审查实测 `graph deps <不存在的节点>`
+            // 亦返本码，那时叫用户去"重试 graph build"指错了方向。
+            Self::GraphBuildFailed => {
+                "图操作失败：若在构建期，请检查源码目录结构后重试 graph build；\
+                 若在查询期，请确认节点/模块标识是否存在（可用 graph stats 核对图规模）"
+            }
             Self::CyclicDependency => "请打破循环依赖后重试",
             Self::ModuleNotFound => "请确认模块路径是否正确",
             Self::InvalidTransition => "当前状态不允许此操作，请检查迁移状态",
             Self::PreconditionFailed => "前置条件不满足，请先完成依赖步骤",
             Self::ModuleBlocked => "模块被上游依赖阻塞，请先完成上游模块迁移",
-            Self::LockConflict => "迁移锁冲突，请确认无其他迁移进程运行后重试",
+            // 唯一构造点是 `state/machine.rs` 的 CAS 版本检查——原文案「请确认无其他迁移
+            // 进程运行后重试」属过度归因（异构交叉审查实证：`--cas-version 99` 在无并发时
+            // 同样触发）。正确处置是重读 state 取新版本号，而非等锁释放。
+            Self::LockConflict => {
+                "CAS 版本不匹配（多为传入的 --cas-version 已陈旧）：重新读取 \
+                 migration-state.json 的 metadata.version 后重发；若确有并发迁移进程，先等其结束"
+            }
             Self::SchemaValidation => "Schema 校验失败，请检查配置文件格式",
             Self::FileNotFound => "文件不存在，请确认路径是否正确",
-            Self::ParseFailed => "源码解析失败，请检查文件语法",
+            // E010 的**两条真实路径**（主审视角逐条实证，见 MDR-021 § 可达性核查）：
+            // ① `migration-state.json` 损坏且 `.backup` 也不可用；② `validate rules
+            // --registry` 指向的 `rule-registry.json` 损坏。
+            //
+            // 三处**看似是来源、实则不是**的映射，故文案不提它们：
+            // ⒜ `MigrateError::Parse`（源码语法）虽映射到本码，但其全部三个调用点
+            //    （`graph/build.rs` 的 analyze_file 处）都把它降级成 `warnings` 并跳过该
+            //    文件，绝不上抛——源码语法错误实测不产出本码，写进建议会让用户拿到的第一
+            //    条指引永远指错方向。
+            // ⒝ `Toml`/`TomlSer` 亦映射到本码，但三处 `toml::from_str` 全部显式包成
+            //    `MigrateError::Config`——配置文件损坏实测返 E012。
+            // ⒞ 不提「从备份恢复」：state 主文件 JSON 损坏时 `MigrationStateMachine::load`
+            //    已自动回退 `.migration-state.json.backup` 并降级 warning；能走到本建议说明
+            //    备份不存在或同样不可用，叫用户去恢复是把他引向死路。
+            //
+            // `init` 兜底只对 state 文件成立（它不生成 `rule-registry.json`，那个文件在
+            // `plugin/skills/migrate/references/` 下），故该建议收在 state 分句内部。
+            Self::ParseFailed => {
+                "JSON 解析失败：若为 .rust-migration/migration-state.json 损坏，按 message 中的\
+                 行列号修正（主文件与 .backup 双双不可用时才会到此），无法修复则重新执行 init；\
+                 若为 validate rules 的 --registry 指向的 rule-registry.json 损坏，按行列号修正该文件"
+            }
             Self::DatabaseError => "数据库操作失败，可重试；若持续失败请检查 .rust-migration/ 目录",
             Self::ConfigError => "配置错误，请检查配置文件",
             Self::Timeout => "子进程超时，可重试或增加超时时间",
