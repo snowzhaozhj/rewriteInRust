@@ -184,7 +184,7 @@ STATUS 把修法记为二选一、**需先定方向**：⒜ 如实化 + 摘依�
 
 ## 待办（本次核实出、判超范围）
 
-1. ~~**`blocked_by` 幽灵引用无检出**~~ **✅ 已收口**（后续 PR）——落地方式与原修法方向一致（`validate_state` 加扫描 + 告警，不硬判损坏）。三点落地细化，均非原记账所能预见：
+1. ~~**`blocked_by` 幽灵引用无检出**~~ **✅ 检出已收口**（PR #88，master `eb94959`）；**处置见 [MDR-022](022-ghost-blocked-by-repair-boundary.md)**（`state repair --clear-ghost-blocked-by`，PR #90 **待合并**——本行在其合并后才成立）。落地方式与原修法方向一致（`validate_state` 加扫描 + 告警，不硬判损坏）。三点落地细化，均非原记账所能预见：
    - **扫描覆盖全部模块而非仅 blocked**。正常路径下 `transition_module` 离开 blocked 会清空 `blocked_by`（`machine.rs:637`），但手工编辑或旧文件可能在非 blocked 模块上留残值，该模块再被标 blocked 时会立刻踩中同一个坑。`check_blocked_modules` 只看 blocked 模块，这条只能由 `validate_state` 兜住。
    - **幽灵引用由 `scan_ghost_references` 单独提供**（`BlockedCheckResult` 不再单列）。原实现用 `.unwrap_or(false)` 把「依赖不存在」与「依赖未终态」抹平进同一个 `unresolved`，而两者处置动作**相反**：一个要重新同步 state，一个只需等待。幽灵引用**仍计入** `unresolved` 是有意的——否则它会让模块判为「就绪可解除」，`--auto-unblock` 就会在损坏数据上真的改状态；已有专门测试钉死这条性质。
    - **命名冲突需留意**：`state deps` 的 `unresolved` 指的正是幽灵引用，而 `BlockedCheckResult.unresolved` 指「未进终态的依赖」（含幽灵）。同词异义，故 `--check-blocked` 侧的输出键取名 `ghost_refs` 而非复用 `unresolved`，避免两个命令的同名字段语义相反。
@@ -217,7 +217,7 @@ STATUS 把修法记为二选一、**需先定方向**：⒜ 如实化 + 摘依�
    - **未采纳（主审 nit）**：`resolve_blocked_ref` 每条引用做全表扫描，建议改建反向索引。判为不改——codex 实测 10 万模块 1.11s、近线性（`contains_key` 是哈希查找，非 O(n²)），真实规模是百级；引入索引会多一份需与 `member_files` 保持同步的中间状态，收益不抵复杂度。若将来模块数量级变化再议。
 2. **`E002` 定义了但从不出现在输出里**（连带修正 ② 末）——`graph topo-sort` 走 `ErrorData::new`。要么改用 `with_error_code(CyclicDependency, …)` 使码域自洽，要么把 `CyclicDependency` 从枚举摘掉；两者都会动 CLI 输出契约（前者新增字段、后者改码域），需独立 PR。
 3. **`transition_inner` 不校验 `blocked_by` 是否终态**（收口待办 1 时由异构交叉审查实证，**pre-existing**）——`state transition --to <pre_blocked_status>` 与 `state update --cas-version` 共用该路径，离开 `blocked` 只校验 `target == pre_blocked_status`，**不带 `--force` 即可解除阻塞**并清空 `blocked_by`；`--auto-unblock` 侧的「依赖须全终态」不变量在这条路径上不成立。对幽灵引用而言，意味着「不在损坏数据上改状态」只由 `--auto-unblock` 保证，普通 transition 仍可绕过。
-   **判为不在待办 1 范围内**：该行为对所有 blocked 模块一视同仁（非幽灵专有），本 PR 之前即如此；收窄它等于给 `blocked → pre_blocked_status` 这条边加新前置条件，会改变既有转换语义并影响 `run.md` 步骤 2 的自动解除流程，须独立评估。修法方向：把不变量下沉进 `transition_inner`，使 transition / CAS / auto-unblock 三条路径共享；人工逃生改走显式 `--force` 或 repair 语义。已在 `check_blocked_modules` 的相关测试注释中如实限定承诺范围，不为该路径背书。
+   **判为不在待办 1 范围内**：该行为对所有 blocked 模块一视同仁（非幽灵专有），本 PR 之前即如此；收窄它等于给 `blocked → pre_blocked_status` 这条边加新前置条件，会改变既有转换语义并影响 `run.md` 步骤 2 的自动解除流程，须独立评估。修法方向：把不变量下沉进 `transition_inner`，使 transition / CAS / auto-unblock 三条路径共享；人工逃生改走显式 `--force` 或 repair 语义。已在 `check_blocked_modules` 的相关测试注释中如实限定承诺范围，不为该路径背书。**2026-08-12 更新**：`repair` 语义已实现（[MDR-022](022-ghost-blocked-by-repair-boundary.md)，PR #90 待合并），故本项只剩「下沉不变量」一步；MDR-022 决策 5 记明了为何不与新增命令合并到同一个 PR。**注意 repair 只补了逃生口的一半**——它处置的是「无处归属的引用」，而这处宽松覆盖**全部** blocked 模块：想强行离开 blocked 但依赖是**合法未终态**的那一类，repair 帮不上，只能靠显式 `--force`，而 `--force` 那一半正是「下沉不变量」时才会出现的（不收紧就不需要 force）。
 4. **`project.name` 等字符串字段空值无校验**（见「未采纳」）。
 5. **`ValidationConfig` 空结构 vs `[validation]` 配置段**——06 § 11.1 的 `timeout_secs = 30` 已注释并标注未落地。若 M2 真要做校验超时，须同时落配置字段与超时机制，否则应把该段从配置样例中彻底删去。
 6. **`--auto-unblock` 遇环的 `Err` 路径丢弃已算出的诊断**（第三轮由专项·静默失败视角实证，**pre-existing**，PR #23）——`data`（含 `ghost_refs`/`ready_to_unblock`/`still_blocked`）与 warnings 在返回 `Err` 时整体丢弃，编排器要拿诊断得去掉 `--auto-unblock` 重跑一次；本 PR 加的幽灵引用诊断在这条路径上完全不可见。修法：仿 `cmd_validate_rules` 把 `data` 经 `ErrorData` 的 `details` flatten 上来（需把 `cmd_validate_state` 改成直写 `writer` 的形态）。属既有错误路径的输出契约变更，独立 PR。本轮只在错误文案里补明「本次一个模块都没有解除」。
@@ -234,6 +234,7 @@ STATUS 把修法记为二选一、**需先定方向**：⒜ 如实化 + 摘依�
 
 - **留在 #88（本轮已完成）**：JSON Schema 如实化 + 摘依赖、错误码守卫、幽灵引用**检出**（`ghost_refs` 收窄为纯事实 `{module, missing, status}`）、`reset_force_reason` 唯一真值源 + 文档↔代码集合守卫。告警退回**纯检出描述**：点名 `module → missing`、区分 blocked（永久阻塞）/ 残留，明说「当前 CLI 未提供自动处置命令」，不给任何动作、不作可达性预言。
 - **移出 #88（后续 PR）**：`GhostRemedy` enum / `ghost_remedy` 分类器 / `GhostReference.remedy` 字段 / `GhostRemedy::command` / 5 桶处方文案 / `test_ghost_remedy_*` 与 e2e 状态网格 / `ghost_remedy_argv` / run.md·06·09 的四类处置表。后续 PR 应设计**非破坏性入口**（拟 `state repair --clear-ghost-blocked-by`：只清幽灵 `blocked_by`、不动进度字段、不触发删产物），届时才谈「处置」。
+  - **已实现、待合并（PR #90，见 [MDR-022](022-ghost-blocked-by-repair-boundary.md)，2026-08-12）**。命令名与语义如拟，但**处方层没有被重建**：关键差别是 repair 对全部 11 个 status **一视同仁**（只删无处归属的条目），因此不需要任何按状态分叉的判断——前一轮的全部错误断言都产生于「为不同状态选不同命令」这个需求，需求消失，断言无处可写。上面列的那些符号一个都没回来。
 - **本轮顺带修的留存侧真缺陷**：`state reset --help` 两处 doc 补 `paused`；文档↔代码守卫改扫**全部**锚点出现处（并注明 `degrade_*` 通配缩写不在该 token 机制内、靠人工+评审）；`grep -c` 获取命令改为读 rustdoc 自报计数。`cargo doc` 警告数仍 **10**（全 pre-existing，处方层移除未新增/未减少）。
 
 **遗留给后续处方 PR 的约束**（都已实证，勿再当新发现）：两步往返依赖待办 3 的 `transition_inner` 宽松；`reset` 会擦掉同模块 `Ambiguous` 引用这一检出通道；非法锚点 / graduate+blocked / `degrade_*` 多步可达都必须在**可达性**而非「一步出边」层面处理。

@@ -2,6 +2,7 @@
 //!
 //! 管理 `migration-state.json` 的生命周期：创建、加载、保存、状态转换。
 
+use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -237,6 +238,64 @@ pub struct RecoverOutcome {
     /// 模块的源文件作用域（NodeId）：composite → `member_files`；单文件 → `[module]`。
     /// retry 时 CLI 据此构造产物清理指令（同 [`ResetOutcome::member_files`]）。
     pub member_files: Vec<String>,
+}
+
+/// 一条被清除的幽灵 `blocked_by` 引用（`module` 的 `blocked_by` 里删掉了 `missing`）。
+///
+/// 与 `validate::GhostReference` 是同一事实的**处置后**表示：那边是「检出到什么」，这边是
+/// 「清掉了什么」。不复用同一个类型，因为 `GhostReference` 带 `status`（检出时的持有方状态），
+/// 而清除后的状态观测归 [`RepairedModule`]（按模块一条，不按引用一条）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClearedGhostRef {
+    /// 持有该 `blocked_by` 的模块 key（已是登记 key，无需再归一）。
+    pub module: String,
+    /// 被删掉的无处归属的被引 key。
+    pub missing: String,
+}
+
+/// 一个受 repair 影响的模块在**清除之后**的可观测事实。
+///
+/// **只放字段，不放谓词**——是否「锚点非法」「下一步会不会被 `--auto-unblock` 接手」这类判定
+/// 留给调用方。在结构里塞复合谓词是本 PR 前身反复付过账的形状：一个 bool 替多个谓词说话，
+/// 然后每换一个场景就出现一个双向反例（见 MDR-021 第三/四轮）。
+///
+/// **但「留给调用方」不等于「让调用方自己造判据」**：就绪性必须调
+/// [`crate::validate::check_blocked_modules`]（`--auto-unblock` 用的同一真值源），不能用本结构的
+/// `blocked_by_remaining.is_empty()` 当代理——已终态的剩余依赖不计入 `unresolved`，故「剩余非空」
+/// 与「未就绪」不等价。本 PR 初版正是在 CLI 侧犯了这个错，被三个审查视角各自实证复现。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepairedModule {
+    /// 模块 key。
+    pub module: String,
+    /// 清除后的模块状态。**repair 不改状态**，故与清除前相同——记录它是为了让调用方
+    /// 无需回读 state 即可分辨「此刻仍 blocked」与「只是残留引用」。
+    pub status: ModuleStatus,
+    /// 清除后剩余的 `blocked_by`（合法未终态依赖、已终态依赖、宿主歧义引用都在此保留）。
+    /// 空 vec 表示字段已被设为 `None`。
+    ///
+    /// **不要拿它判就绪**：非空不代表模块还要等（剩余项可能全是终态依赖，那样模块立刻就绪），
+    /// 空也只是就绪的充分条件之一。就绪判定见本结构的类型级 doc。
+    pub blocked_by_remaining: Vec<String>,
+    /// 恢复锚点原样透传（repair 不动它）。`status == Blocked` 时它是恢复目标。
+    pub pre_blocked_status: Option<ModuleStatus>,
+}
+
+/// [`repair_ghost_blocked_by`](MigrationStateMachine::repair_ghost_blocked_by) 的结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GhostRepairOutcome {
+    /// 本次的作用域：`Some(归一后的组代表 key)` = 收窄到单模块；`None` = 全部模块。
+    ///
+    /// 存在的理由是**回显必须用归一后的 key**：入参可以是组的非代表成员，直接回显原始入参会
+    /// 说出「模块 `file:types.ts` 无幽灵引用」这种话，而它根本不是登记模块、没有自己的
+    /// `blocked_by`（被检查的是它的组代表）。`ResetOutcome`/`RecoverOutcome` 都带归一后的
+    /// `module` 供 CLI 回显，此处对齐。
+    pub scope: Option<String>,
+    /// 逐条清除记录，按 `(module, missing)` 字典序（承自 `scan_ghost_references` 的排序）。
+    pub cleared: Vec<ClearedGhostRef>,
+    /// 受影响模块的清除后事实，每模块一条，按 module key 字典序。
+    pub affected: Vec<RepairedModule>,
+    /// 是否为幂等空操作（无幽灵引用可清 → 未改任何字段、未追加审计，调用方可省略 save）。
+    pub was_noop: bool,
 }
 
 /// [`resume_plan`](MigrationStateMachine::resume_plan) 的结果——额度耗尽/中断后续跑的**断点计划**
@@ -1112,6 +1171,128 @@ impl MigrationStateMachine {
                 })
             }
         }
+    }
+
+    /// 删除无处归属的 `blocked_by` 引用（幽灵引用），**只删引用、不动其它任何东西**。
+    ///
+    /// 收口 MDR-021 待办 1 的后半段：检出层（`validate state` 告警 + `--check-blocked` 的
+    /// `ghost_refs`）此前已交付，但 CLI 一条可执行的处置命令都没有。见 MDR-022。
+    ///
+    /// # 三条不变量
+    ///
+    /// 1. **只删幽灵条目，绝不删整个 `blocked_by` 数组。** 可归一到宿主模块的合法引用（`Resolved`，与宿主是否终态无关）与宿主
+    ///    歧义引用（`Ambiguous`）原样保留——后者是 `member_files` 跨组互斥不变量被破坏的
+    ///    **唯一检出通道**（`validate_state` 只经它扫出跨组破坏），清整个数组会连带把这条
+    ///    通道擦掉。判据不在本方法里重写，复用 [`crate::validate::scan_ghost_references`]
+    ///    （其内部 `resolve_blocked_ref` 是「什么算幽灵」的唯一实现）。
+    /// 2. **不改状态、不清进度字段、不发产物清理指令**——与 [`reset_module`](Self::reset_module)
+    ///    （清 8 个进度字段 + 输出删 `.rs` 作用域）正相反。清完后若模块仍 `blocked` 而
+    ///    `blocked_by` 已空，它在 `check_blocked_modules` 里自然判 `ready`，由既有
+    ///    `--auto-unblock`（`validate::auto_unblock_modules`）按 `pre_blocked_status` 恢复；
+    ///    本方法不重复实现恢复逻辑。
+    /// 3. **不作可达性预言。** 返回的 [`RepairedModule`] 只有字段、没有谓词。
+    ///
+    /// # 幂等
+    ///
+    /// 无幽灵引用可清 → `was_noop = true`，不改任何字段、**不追加审计**（保证
+    /// `repair;repair == repair`，调用方可据此省略 save，同 [`reset_module`](Self::reset_module)）。
+    ///
+    /// # 作用域
+    ///
+    /// `module = None` 清全部模块——幽灵引用的成因是 state 与 source-graph 不同步，一次不同步
+    /// 常波及多个模块。`Some(m)` 收窄到单模块，key 经 [`canonical_module_key`](Self::canonical_module_key)
+    /// 归一（可传组非代表成员，同 reset/recover），模块不存在即报错而非静默清零条。
+    ///
+    /// # 项目 `graduate` 态**放行**（与 [`reset_module`](Self::reset_module) 相反）
+    ///
+    /// reset 在 graduate 下一律被拒，因为它把 `done` 模块打回非终态、制造「项目终态 + 非终态
+    /// 模块」矛盾（MDR-015）。repair 不改状态，制造不出该矛盾；它删的是本就不该存在的引用。
+    /// 若此处也拒绝，`graduate` 项目里的这类损坏将永远没有修复入口。
+    ///
+    /// # 使用前提（误用会**提前**解除阻塞）
+    ///
+    /// 本方法假定被引 key **不该存在**。若实际情况是「该模块本应登记、只是 analyze 漏了」，
+    /// 删掉引用会让引用方提前离开阻塞、翻译顺序出错——那种情况的正确修法是重跑 analyze
+    /// 重建 state，不是 repair。CLI 层在输出的 `advice` 里如实提示这一点。
+    pub fn repair_ghost_blocked_by(&mut self, module: Option<&str>) -> Result<GhostRepairOutcome> {
+        // `--module` 先归一：既支持传组非代表成员（同 reset/recover），也借归一顺带校验模块
+        // 存在——否则「模块名拼错」会静默走成「清了 0 条」的成功输出。
+        let target = match module {
+            Some(m) => Some(self.canonical_module_key(m)?),
+            None => None,
+        };
+
+        // 判据复用 validate 侧的唯一实现，不在此处第二次判定「什么算幽灵」：两份判据必然
+        // 漂移，而这个功能已经为「同一概念两份表示」付过账（MDR-021 待办 1 第三点）。
+        let ghosts = crate::validate::scan_ghost_references(&self.state_file);
+        let mut by_module: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for g in ghosts {
+            if target.as_ref().map_or(true, |t| &g.module == t) {
+                by_module.entry(g.module).or_default().push(g.missing);
+            }
+        }
+
+        if by_module.is_empty() {
+            return Ok(GhostRepairOutcome {
+                scope: target,
+                cleared: Vec::new(),
+                affected: Vec::new(),
+                was_noop: true,
+            });
+        }
+
+        let mut cleared: Vec<ClearedGhostRef> = Vec::new();
+        let mut affected: Vec<RepairedModule> = Vec::new();
+        for (name, missing_keys) in by_module {
+            let module_state = self
+                .state_file
+                .modules
+                .get_mut(&name)
+                .expect("scan_ghost_references 只产出登记模块的 key");
+            let blocked_by = module_state
+                .blocked_by
+                .as_mut()
+                .expect("scan_ghost_references 只扫有 blocked_by 的模块");
+
+            // 删除的是**数组元素**，可能多于 `missing_keys.len()`：`scan_ghost_references` 对
+            // (module, missing) 去重，而同一幽灵 key 在 `blocked_by` 里可以重复出现（手工编辑
+            // 所致）。审计计数记实际删除的元素数，不记去重后的 key 数。
+            let before = blocked_by.len();
+            blocked_by.retain(|dep| !missing_keys.contains(dep));
+            let removed = before - blocked_by.len();
+            // 清空后设 `None` 而非留 `[]`：与 `transition_inner` 离开 blocked 时的表示一致，
+            // 避免「无阻塞依赖」在 state 文件里有 `null` 与 `[]` 两种写法。
+            if blocked_by.is_empty() {
+                module_state.blocked_by = None;
+            }
+
+            module_state.attempts.push(AttemptRecord {
+                timestamp: Timestamp::new(chrono::Utc::now().to_rfc3339()),
+                result: format!("repair:cleared-ghost-blocked-by({removed})"),
+                retry_count: 0,
+                checkpoint: None,
+            });
+
+            affected.push(RepairedModule {
+                module: name.clone(),
+                status: module_state.status,
+                blocked_by_remaining: module_state.blocked_by.clone().unwrap_or_default(),
+                pre_blocked_status: module_state.pre_blocked_status,
+            });
+            for missing in missing_keys {
+                cleared.push(ClearedGhostRef {
+                    module: name.clone(),
+                    missing,
+                });
+            }
+        }
+
+        Ok(GhostRepairOutcome {
+            scope: target,
+            cleared,
+            affected,
+            was_noop: false,
+        })
     }
 
     /// 生成额度耗尽/中断后续跑的**断点计划**（M4-ROB-01c）——纯查询、无 mutation、不加载 graph。
@@ -4017,6 +4198,277 @@ mod tests {
         assert_eq!(
             plan.interrupted[0].member_files,
             vec!["file:a.ts".to_string(), "file:b.ts".to_string()]
+        );
+    }
+
+    // ---- repair_ghost_blocked_by（MDR-022）----------------------------------
+    //
+    // 行为分述两类持有方（`blocked` 与「残留、当前非 blocked」），故**两类都要覆盖**：
+    // 同一功能的检出层上一轮就是因为「行为分两类而 e2e 只测一类」，让另一类的同型缺陷
+    // 原样留下（MDR-021 待办 1）。
+
+    /// 辅助：造一个含幽灵引用的最小 machine。
+    ///
+    /// - `ghost`（blocked，锚点 translating）：`blocked_by = [不存在的 key, 合法未终态依赖]`
+    /// - `residual`（reviewing，非 blocked）：`blocked_by = [另一个不存在的 key]`
+    /// - `dep`（translating）：合法的未终态依赖，谁都不该动它
+    fn machine_with_ghosts() -> MigrationStateMachine {
+        let mut m = new_machine();
+        let mut ghost = module_with_status(ModuleStatus::Blocked);
+        ghost.blocked_by = Some(vec!["nope".to_string(), "dep".to_string()]);
+        ghost.pre_blocked_status = Some(ModuleStatus::Translating);
+        m.update_module("ghost", ghost);
+
+        let mut residual = module_with_status(ModuleStatus::Reviewing);
+        residual.blocked_by = Some(vec!["also-nope".to_string()]);
+        m.update_module("residual", residual);
+
+        m.update_module("dep", module_with_status(ModuleStatus::Translating));
+        m
+    }
+
+    #[test]
+    fn test_repair_clears_only_ghost_entries_in_both_classes() {
+        // 两类持有方各清掉自己的幽灵条目，而**合法未终态依赖 `dep` 原样保留**——
+        // 这正是本命令与 `reset` 的分野：reset 清整个数组，repair 只挑幽灵。
+        let mut m = machine_with_ghosts();
+        let out = m.repair_ghost_blocked_by(None).expect("repair 应成功");
+
+        assert!(!out.was_noop);
+        // cleared 按 (module, missing) 字典序：ghost→nope 在 residual→also-nope 之前。
+        assert_eq!(
+            out.cleared
+                .iter()
+                .map(|c| (c.module.as_str(), c.missing.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("ghost", "nope"), ("residual", "also-nope")]
+        );
+
+        // blocked 类：幽灵没了，合法依赖还在，状态**未变**。
+        let g = &m.state_file().modules["ghost"];
+        assert_eq!(g.blocked_by, Some(vec!["dep".to_string()]));
+        assert_eq!(g.status, ModuleStatus::Blocked);
+        assert_eq!(g.pre_blocked_status, Some(ModuleStatus::Translating));
+
+        // 残留类：唯一条目是幽灵 → 数组清空后设 `None`（不留 `[]`，与 transition_inner 一致）。
+        let r = &m.state_file().modules["residual"];
+        assert_eq!(r.blocked_by, None);
+        assert_eq!(r.status, ModuleStatus::Reviewing);
+
+        // affected 两条，按 module 字典序，且如实回显剩余引用。
+        assert_eq!(
+            out.affected
+                .iter()
+                .map(|a| (a.module.as_str(), a.status, a.blocked_by_remaining.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("ghost", ModuleStatus::Blocked, vec!["dep".to_string()]),
+                ("residual", ModuleStatus::Reviewing, Vec::<String>::new()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_repair_preserves_ambiguous_reference() {
+        // 宿主歧义引用（同一 key 被多个组列为 member_files）**不是**幽灵，必须原样保留：
+        // 它是 `member_files` 跨组互斥不变量被破坏的唯一检出通道（`validate_state` 只经它
+        // 扫出跨组破坏）。第四轮实证 `reset` 清整个数组会把这条通道连带擦掉——本断言钉死
+        // repair 不重犯。
+        let mut m = new_machine();
+        let mut holder = module_with_status(ModuleStatus::Blocked);
+        holder.blocked_by = Some(vec!["shared.ts".to_string(), "nope".to_string()]);
+        holder.pre_blocked_status = Some(ModuleStatus::Testing);
+        m.update_module("holder", holder);
+
+        // shared.ts 同属两个组 → resolve_blocked_ref 判 Ambiguous。
+        for group in ["g1", "g2"] {
+            let mut g = module_with_status(ModuleStatus::Translating);
+            g.member_files = Some(vec![group.to_string(), "shared.ts".to_string()]);
+            m.update_module(group, g);
+        }
+
+        let out = m.repair_ghost_blocked_by(None).expect("repair 应成功");
+        assert_eq!(
+            out.cleared
+                .iter()
+                .map(|c| c.missing.as_str())
+                .collect::<Vec<_>>(),
+            vec!["nope"],
+            "只有真幽灵 `nope` 该被清"
+        );
+        assert_eq!(
+            m.state_file().modules["holder"].blocked_by,
+            Some(vec!["shared.ts".to_string()]),
+            "Ambiguous 引用必须保留——它是跨组破坏的唯一检出通道"
+        );
+    }
+
+    #[test]
+    fn test_repair_does_not_touch_progress_fields() {
+        // 与 `reset` 的核心差异：repair **只删引用**。用 dirty_module（全部进度字段有值）
+        // 做全字段比对，任何顺带清理都会在此报红。
+        let mut m = new_machine();
+        let mut dirty = dirty_module(ModuleStatus::Reviewing);
+        dirty.blocked_by = Some(vec!["nope".to_string()]);
+        dirty.tier = Some(crate::types::state::ModuleTier::Standard);
+        m.update_module("a", dirty.clone());
+
+        m.repair_ghost_blocked_by(None).expect("repair 应成功");
+
+        let after = &m.state_file().modules["a"];
+        // 逐字段比对「除 blocked_by 与 attempts 外全等」：attempts 会追加一条审计记录，
+        // blocked_by 是本命令唯一该改的字段。
+        assert_eq!(after.status, dirty.status);
+        assert_eq!(after.substatus, dirty.substatus);
+        assert_eq!(after.phase_a_version, dirty.phase_a_version);
+        assert_eq!(after.phase_a_audit_passed, dirty.phase_a_audit_passed);
+        assert_eq!(after.test_pass_rate, dirty.test_pass_rate);
+        assert_eq!(after.coverage, dirty.coverage);
+        assert_eq!(after.known_differences, dirty.known_differences);
+        assert_eq!(after.tier, dirty.tier);
+        assert_eq!(after.pre_blocked_status, dirty.pre_blocked_status);
+        assert_eq!(after.blocked_by, None);
+        // attempts：既有历史保留 + 追加一条 repair 审计（记实际删除的元素数）。
+        assert_eq!(after.attempts.len(), dirty.attempts.len() + 1);
+        assert_eq!(after.attempts[0].result, dirty.attempts[0].result);
+        assert_eq!(
+            after.attempts.last().expect("应有审计").result,
+            "repair:cleared-ghost-blocked-by(1)"
+        );
+    }
+
+    #[test]
+    fn test_repair_is_idempotent_noop_without_ghosts() {
+        // 无幽灵可清 → noop，不改字段、**不追加审计**（保 `repair;repair == repair`，
+        // 调用方据此省略 save）。
+        let mut m = new_machine();
+        let mut clean = module_with_status(ModuleStatus::Blocked);
+        clean.blocked_by = Some(vec!["dep".to_string()]);
+        m.update_module("a", clean);
+        m.update_module("dep", module_with_status(ModuleStatus::Translating));
+
+        let first = m.repair_ghost_blocked_by(None).expect("repair 应成功");
+        assert!(first.was_noop);
+        assert!(first.cleared.is_empty() && first.affected.is_empty());
+        assert!(
+            m.state_file().modules["a"].attempts.is_empty(),
+            "noop 不得追加审计"
+        );
+
+        // 真清一次之后再清：第二次是 noop。
+        let mut m2 = machine_with_ghosts();
+        assert!(!m2.repair_ghost_blocked_by(None).unwrap().was_noop);
+        let snapshot = m2.state_file().clone();
+        let second = m2.repair_ghost_blocked_by(None).expect("repair 应成功");
+        assert!(second.was_noop);
+        assert_eq!(
+            m2.state_file().modules,
+            snapshot.modules,
+            "第二次 repair 不得改动任何模块"
+        );
+    }
+
+    #[test]
+    fn test_repair_module_scope_narrows_and_normalizes_key() {
+        // `--module` 只清指定模块，其它模块的幽灵引用原样留着（本轮没被要求处理）。
+        let mut m = machine_with_ghosts();
+        let out = m
+            .repair_ghost_blocked_by(Some("residual"))
+            .expect("repair 应成功");
+        assert_eq!(out.affected.len(), 1);
+        assert_eq!(out.affected[0].module, "residual");
+        assert_eq!(m.state_file().modules["residual"].blocked_by, None);
+        assert_eq!(
+            m.state_file().modules["ghost"].blocked_by,
+            Some(vec!["nope".to_string(), "dep".to_string()]),
+            "未指定的模块不得被动"
+        );
+
+        // 组非代表成员 key 传入 → 归一到组代表（同 reset/recover）。
+        let mut m2 = new_machine();
+        let mut group = module_with_status(ModuleStatus::Blocked);
+        group.member_files = Some(vec!["rep".to_string(), "member".to_string()]);
+        group.blocked_by = Some(vec!["nope".to_string()]);
+        m2.update_module("rep", group);
+
+        let out2 = m2
+            .repair_ghost_blocked_by(Some("member"))
+            .expect("成员 key 应归一到组代表");
+        assert_eq!(out2.affected[0].module, "rep");
+        assert_eq!(m2.state_file().modules["rep"].blocked_by, None);
+    }
+
+    #[test]
+    fn test_repair_unknown_module_errors_rather_than_silently_clearing_nothing() {
+        // 模块名拼错必须报错——否则「清了 0 条」的成功输出会被读成「没有幽灵引用」。
+        let mut m = machine_with_ghosts();
+        let err = m.repair_ghost_blocked_by(Some("typo"));
+        assert!(
+            matches!(err, Err(MigrateError::Config(_))),
+            "未知模块应报 Config 错，实得 {err:?}"
+        );
+        // 报错路径不得有任何副作用。
+        assert_eq!(
+            m.state_file().modules["ghost"].blocked_by,
+            Some(vec!["nope".to_string(), "dep".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_repair_allowed_in_graduate_project_state() {
+        // 与 `reset_module` 相反：graduate 下**放行**。repair 不改状态，制造不出
+        // 「项目终态 + 非终态模块」矛盾（MDR-015 禁止的那个），拒绝只会让 graduate 项目里
+        // 的这类损坏永远没有修复入口。
+        let mut m = machine_with_ghosts();
+        // 直接改项目态到 graduate（跳过完整流程，本测试只关心项目态守护）。
+        for target in [
+            ProjectState::Profile,
+            ProjectState::Plan,
+            ProjectState::Scaffold,
+            ProjectState::SprintLoop,
+            ProjectState::Graduate,
+        ] {
+            m.transition(target).expect("项目态推进应成功");
+        }
+        assert_eq!(m.current_state(), ProjectState::Graduate);
+
+        let out = m
+            .repair_ghost_blocked_by(None)
+            .expect("graduate 下 repair 应放行");
+        assert!(!out.was_noop);
+        assert_eq!(m.state_file().modules["residual"].blocked_by, None);
+
+        // 对照：同一状态下 reset 仍被拒（本 PR 不放松 reset 的守护）。
+        assert!(
+            matches!(
+                m.reset_module("residual", true),
+                Err(MigrateError::Config(_))
+            ),
+            "graduate 下 reset 应仍被拒"
+        );
+    }
+
+    #[test]
+    fn test_repair_audit_counts_removed_elements_not_deduped_keys() {
+        // 同一幽灵 key 在 `blocked_by` 里重复出现（手工编辑所致）时，`scan_ghost_references`
+        // 对 (module, missing) 去重，但删除的是**数组元素**。审计计数记实际删除数，
+        // 否则「清了 1 条」与实际删掉 2 个元素不符。
+        let mut m = new_machine();
+        let mut dup = module_with_status(ModuleStatus::Blocked);
+        dup.blocked_by = Some(vec!["nope".to_string(), "nope".to_string()]);
+        m.update_module("a", dup);
+
+        let out = m.repair_ghost_blocked_by(None).expect("repair 应成功");
+        assert_eq!(
+            out.cleared.len(),
+            1,
+            "cleared 是去重后的 (module, missing) 对"
+        );
+        assert_eq!(m.state_file().modules["a"].blocked_by, None);
+        assert_eq!(
+            m.state_file().modules["a"].attempts[0].result,
+            "repair:cleared-ghost-blocked-by(2)",
+            "审计须记实际删除的元素数（2），而非去重后的 key 数（1）"
         );
     }
 }

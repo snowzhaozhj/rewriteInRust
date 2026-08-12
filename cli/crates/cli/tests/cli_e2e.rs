@@ -3634,7 +3634,7 @@ fn smoke_validate_detects_ghost_blocked_by_reference() {
         );
         assert!(
             ghost_refs[0].get("remedy").is_none(),
-            "ghost_refs 为纯检出事实，不得携带处置命令（处方层已拆出，见 MDR-021）: {json}"
+            "ghost_refs 为纯检出事实，不得携带逐条处置命令：处置是对全部状态一视同仁的单一动作\n             （`state repair`，MDR-022 决策 1），不需要按条 remedy——被推翻的正是那种按状态\n             推导的处方（MDR-021）: {json}"
         );
         assert!(
             json["data"]["still_blocked"]
@@ -3687,7 +3687,433 @@ fn smoke_validate_detects_ghost_blocked_by_reference() {
         );
         assert!(
             ghost_refs[0].get("remedy").is_none(),
-            "残留引用同样是纯检出事实，无 remedy 字段: {json}"
+            "残留引用同样是纯检出事实，无 remedy 字段（同上，MDR-022 决策 1）: {json}"
+        );
+    });
+}
+
+/// 造一份含幽灵引用的 state，返回 `(state 文件路径, 原模块 key, 合成依赖模块 key)`。
+///
+/// 手工合成第二个模块而不靠 fixture：decompose 会把 fixture 的多个文件凝聚成**一个**组
+/// （实测 diamond-deps/circular-deps populate 后都只有 1 个模块），靠 fixture 拿不到两个
+/// 独立模块，且凝聚策略一变测试就跟着碎。合成模块由现有模块 JSON 复制而来（字段齐全，
+/// schema 变化时不会漏字段），但**必须清掉 `member_files`**——照抄组代表的成员列表会让
+/// 同一文件属于两个组，`resolve_blocked_ref` 就判 `Ambiguous` 而非 `Missing`，把被测场景
+/// 悄悄换成另一个。
+///
+/// 布局：
+/// - 原模块（`key`）：`blocked`，`blocked_by = [幽灵 key, 合成依赖]`，锚点 `pending`
+/// - 合成依赖（`dep_key`）：`reviewing`（未终态），自身还残留 `blocked_by = [另一个幽灵 key]`
+///   ——同时充当「残留类持有方」，让一次 repair 覆盖两类持有方
+fn setup_ghost_state(tmp: &std::path::Path) -> (std::path::PathBuf, String, String) {
+    let _ = run(&["init"]);
+    assert_eq!(run(&["graph", "build", "--root", "src"]).0, 0);
+    assert_eq!(run(&["state", "populate-modules"]).0, 0);
+
+    let sp = tmp.join(".rust-migration/migration-state.json");
+    let mut sf: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+    let key = sf["modules"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .min()
+        .expect("populate 后应至少有一个模块")
+        .clone();
+    let dep_key = "file:SYNTHETIC-DEP.ts".to_string();
+
+    let mut dep = sf["modules"][&key].clone();
+    dep["status"] = serde_json::json!("reviewing");
+    dep["member_files"] = serde_json::Value::Null;
+    dep["pre_blocked_status"] = serde_json::Value::Null;
+    dep["blocked_by"] = serde_json::json!(["file:ALSO-GHOST.ts"]);
+    sf["modules"][&dep_key] = dep;
+
+    sf["modules"][&key]["status"] = serde_json::json!("blocked");
+    sf["modules"][&key]["blocked_by"] = serde_json::json!(["file:GHOST.ts", dep_key]);
+    sf["modules"][&key]["pre_blocked_status"] = serde_json::json!("pending");
+    std::fs::write(&sp, serde_json::to_string_pretty(&sf).unwrap()).unwrap();
+    (sp, key, dep_key)
+}
+
+/// `state repair --clear-ghost-blocked-by --module <m>` 的 argv，命令部分从
+/// `REPAIR_GHOST_COMMAND` 常量派生——手写 argv 在 flag 改名时会独立漂，而常量绑定的价值
+/// 恰恰是「改一处、所有消费点一起红」。
+fn scoped_repair_argv(module: &str) -> Vec<&str> {
+    let mut argv: Vec<&str> = rustmigrate_core::validate::REPAIR_GHOST_COMMAND
+        .split(' ')
+        .collect();
+    argv.extend(["--module", module]);
+    argv
+}
+
+/// `state repair` 端到端闭环：清幽灵 → validate 转干净 → 依赖终态后 `--auto-unblock` 真解除。
+///
+/// 收口 MDR-021 待办 1 的后半段（MDR-022）。这条测试的重点不是「命令返回 ok」，而是**照做
+/// 之后问题真的消失**，且沿途每一步都由 CLI 真实输出驱动——检出层上一轮的教训正是「e2e 只
+/// 验告警文本、没验建议照做能成功」。
+#[test]
+fn smoke_state_repair_clears_ghosts_and_unblocks_end_to_end() {
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("diamond-deps"), tmp.path());
+    with_cwd(tmp.path(), || {
+        let (sp, key, dep_key) = setup_ghost_state(tmp.path());
+
+        // 前置：两类持有方各一条幽灵引用。
+        let (code, json) = run(&["validate", "state", "--check-blocked"]);
+        assert_eq!(code, 0, "{json}");
+        assert_eq!(
+            json["data"]["ghost_refs"].as_array().unwrap().len(),
+            2,
+            "前置应有两条幽灵引用（blocked 类 + 残留类）: {json}"
+        );
+
+        // repair：清掉两条幽灵，**合法未终态依赖保留**。
+        //
+        // argv 由 core 的 `REPAIR_GHOST_COMMAND` 常量拆出，而 `validate state` 的告警文案用
+        // **同一个**常量插值——故「告警里给的命令」与「这条测试真跑的命令」不可能漂移。上一轮
+        // 为同一功能写的 e2e 是「解析人读文案 + 手写 argv」，二者无绑定，被四个视角各自变异
+        // 穿透（MDR-021）。先断言告警确实给出这条命令，再照它跑。
+        let repair_argv: Vec<&str> = rustmigrate_core::validate::REPAIR_GHOST_COMMAND
+            .split(' ')
+            .collect();
+        let (_, vjson) = run(&["validate", "state"]);
+        let ghost_warn = vjson["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| w.as_str().unwrap().contains("file:GHOST.ts"))
+            .unwrap_or_else(|| panic!("应就幽灵引用告警: {vjson}"))
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            ghost_warn.contains(rustmigrate_core::validate::REPAIR_GHOST_COMMAND),
+            "告警须给出下面真跑的这条命令: {ghost_warn}"
+        );
+
+        let (code, json) = run(&repair_argv);
+        assert_eq!(code, 0, "{json}");
+        assert_eq!(json["data"]["was_noop"], false, "{json}");
+        let cleared: Vec<(String, String)> = json["data"]["cleared"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                (
+                    c["module"].as_str().unwrap().to_string(),
+                    c["missing"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        // 期望值显式排序而非手写顺序：断言的性质是「按 (module, missing) 字典序」，而合成
+        // 依赖 key 的大小写决定了它排在原模块之前（`S` < `a`），手写顺序等于把这个细节
+        // 硬编码进期望值。
+        let mut expected = vec![
+            (key.clone(), "file:GHOST.ts".to_string()),
+            (dep_key.clone(), "file:ALSO-GHOST.ts".to_string()),
+        ];
+        expected.sort();
+        assert_eq!(
+            cleared, expected,
+            "两类持有方都须被清，且按 (module, missing) 字典序: {json}"
+        );
+        // affected 如实回带清除后事实：blocked 类仍 blocked 且剩余合法依赖，残留类已空。
+        let affected = json["data"]["affected"].as_array().unwrap();
+        let blocked_one = affected
+            .iter()
+            .find(|a| a["module"] == serde_json::json!(key))
+            .unwrap_or_else(|| panic!("affected 应含 blocked 类: {json}"));
+        assert_eq!(blocked_one["status"], "blocked", "repair 不改状态: {json}");
+        assert_eq!(
+            blocked_one["blocked_by_remaining"],
+            serde_json::json!([dep_key]),
+            "合法未终态依赖必须保留（不是清空整个数组）: {json}"
+        );
+        assert_eq!(blocked_one["pre_blocked_status"], "pending");
+
+        // validate：幽灵已清零，但该模块**仍阻塞**（依赖 dep_key 还没进终态）。
+        let (code, json) = run(&["validate", "state", "--check-blocked"]);
+        assert_eq!(code, 0, "{json}");
+        assert!(
+            json["data"]["ghost_refs"].as_array().unwrap().is_empty(),
+            "repair 后不应再有幽灵引用: {json}"
+        );
+        assert!(
+            json["data"]["ready_to_unblock"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "依赖未终态，此刻不该判就绪: {json}"
+        );
+        assert!(
+            json["data"]["still_blocked"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m.as_str().unwrap() == key),
+            "仍应在 still_blocked 里（正常等待）: {json}"
+        );
+
+        // 依赖进终态 → 该模块判就绪 → `--auto-unblock` 真的解除（repair 自己不做恢复）。
+        let mut sf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+        sf["modules"][&dep_key]["status"] = serde_json::json!("done");
+        std::fs::write(&sp, serde_json::to_string_pretty(&sf).unwrap()).unwrap();
+
+        let (code, json) = run(&["validate", "state", "--check-blocked"]);
+        assert_eq!(code, 0, "{json}");
+        assert_eq!(
+            json["data"]["ready_to_unblock"],
+            serde_json::json!([key]),
+            "依赖终态后应判就绪: {json}"
+        );
+
+        let (code, json) = run(&["validate", "state", "--check-blocked", "--auto-unblock"]);
+        assert_eq!(code, 0, "{json}");
+        assert_eq!(
+            json["data"]["unblocked"],
+            serde_json::json!([key]),
+            "恢复由既有 --auto-unblock 承担: {json}"
+        );
+        let sf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+        assert_eq!(
+            sf["modules"][&key]["status"], "pending",
+            "应恢复到 pre_blocked_status"
+        );
+        assert!(sf["modules"][&key]["blocked_by"].is_null());
+    });
+}
+
+/// `state repair` 幂等：第二次是空操作，且不改动 state。
+#[test]
+fn smoke_state_repair_is_idempotent() {
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("diamond-deps"), tmp.path());
+    with_cwd(tmp.path(), || {
+        let (sp, key, _dep) = setup_ghost_state(tmp.path());
+
+        // argv 一律从 `REPAIR_GHOST_COMMAND` 拆出（含下面 `--module` 形态），不手写：
+        // 手写的那几条在 flag 改名时会独立漂，而常量绑定的价值恰恰是「一处改、处处红」。
+        let repair_argv: Vec<&str> = rustmigrate_core::validate::REPAIR_GHOST_COMMAND
+            .split(' ')
+            .collect();
+        assert_eq!(run(&repair_argv).0, 0);
+        let after_first: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+
+        let (code, json) = run(&["state", "repair", "--clear-ghost-blocked-by"]);
+        assert_eq!(code, 0, "{json}");
+        assert_eq!(json["data"]["was_noop"], true, "第二次应为空操作: {json}");
+        assert!(json["data"]["cleared"].as_array().unwrap().is_empty());
+
+        let after_second: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+        assert_eq!(
+            after_first["modules"], after_second["modules"],
+            "noop 不得改动任何模块（含不追加审计记录）"
+        );
+
+        // **noop 真的不落盘**——比「内容相同」更强的断言。此前只比 `modules` 内容，而 noop
+        // 落盘写出的内容本就相同，观测不到差异：变异实证把 `if !was_noop || recovered` 改成
+        // `if true`（noop 也写）时 11 个 repair 测试全过。真实危害是「一次声称无副作用的命令
+        // 重写主文件并覆盖 `.backup`」——手工格式化与未知字段会被规范化掉。
+        //
+        // 用 `.backup` 观测：每次 save 都会把**当前**主文件复制成备份（`backup_on_write` 默认
+        // 开），故 noop 若落盘，备份内容会从「第一次 repair 前的样子」变成「第一次 repair 后的
+        // 样子」。文件名带前导点（`sibling_with_suffix` 对不以点开头的名字前置一个点）。
+        let backup = std::path::Path::new(".rust-migration/.migration-state.json.backup");
+        let backup_before = std::fs::read_to_string(backup).expect("首次 repair 应已写出备份");
+        assert!(
+            backup_before.contains("file:GHOST.ts"),
+            "备份应是第一次 repair **之前**的内容（幽灵引用还在）"
+        );
+        let (code, json) = run(&repair_argv);
+        assert_eq!(code, 0, "{json}");
+        assert_eq!(json["data"]["was_noop"], true, "{json}");
+        assert_eq!(
+            std::fs::read_to_string(backup).unwrap(),
+            backup_before,
+            "noop 不得落盘——否则会覆盖 `.backup`，让上一版可回退状态丢失"
+        );
+
+        // `--module` 指定一个没有幽灵引用的模块同样是 noop（而非报错）。
+        let mut scoped = repair_argv.clone();
+        scoped.extend(["--module", key.as_str()]);
+        let (code, json) = run(&scoped);
+        assert_eq!(code, 0, "{json}");
+        assert_eq!(json["data"]["was_noop"], true, "{json}");
+
+        // 回显必须用**归一后**的组代表 key，而非原始入参。
+        //
+        // 传组的非代表成员时，原始入参根本不是登记模块、没有自己的 `blocked_by`，被检查的是
+        // 它的组代表；照抄入参会说出「模块 `<成员>` 的 blocked_by 无幽灵引用」这种关于不存在
+        // 实体的话。`reset`/`recover` 都在输出里回显归一后的 key，此处对齐（审查抓出）。
+        let sf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+        let member = sf["modules"][&key]["member_files"]
+            .as_array()
+            .and_then(|mf| mf.iter().map(|m| m.as_str().unwrap()).find(|m| *m != key))
+            .expect("diamond-deps 的组代表应有非代表成员（组凝聚了多个文件）")
+            .to_string();
+        let mut by_member = repair_argv.clone();
+        by_member.extend(["--module", member.as_str()]);
+        let (code, json) = run(&by_member);
+        assert_eq!(code, 0, "{json}");
+        assert_eq!(
+            json["data"]["scope"],
+            serde_json::json!(key),
+            "scope 须回显归一后的组代表: {json}"
+        );
+        let reason = json["data"]["guidance"]["reason"].as_str().unwrap();
+        assert!(
+            reason.contains(&key) && !reason.contains(member.as_str()),
+            "noop 说明须点名组代表 `{key}` 而非入参成员 `{member}`（后者不是登记模块）: {reason}"
+        );
+    });
+}
+
+/// `state repair` 对「清完后即就绪、但恢复锚点用不了」的模块如实告警（CLI 层判定）。
+///
+/// 两种锚点问题都覆盖：锚点不在 `blocked` 的合法出边内（`done`——正常路径产生不了，成因同
+/// 幽灵引用），以及锚点缺失（`--auto-unblock` 会以 `pending` 兜底、原状态不可复原）。
+///
+/// 告警的触发面是「`check_blocked_modules` 判它 ready」——即剩余依赖**全部已终态**（含清空）。
+/// 四个场景都覆盖：非法锚点 / 锚点缺失 / 剩余依赖已终态（曾漏报）/ 合法锚点须静默（曾零覆盖）。
+#[test]
+fn smoke_state_repair_warns_when_recovery_anchor_unusable() {
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("diamond-deps"), tmp.path());
+    with_cwd(tmp.path(), || {
+        let (sp, key, _dep) = setup_ghost_state(tmp.path());
+
+        // 场景 A：锚点 `done` 不在 blocked 的合法出边内；唯一依赖是幽灵，清完即无依赖。
+        let mut sf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+        sf["modules"][&key]["blocked_by"] = serde_json::json!(["file:GHOST.ts"]);
+        sf["modules"][&key]["pre_blocked_status"] = serde_json::json!("done");
+        std::fs::write(&sp, serde_json::to_string_pretty(&sf).unwrap()).unwrap();
+
+        let (code, json) = run(&scoped_repair_argv(&key));
+        assert_eq!(code, 0, "锚点问题只告警，不失败: {json}");
+        assert_eq!(json["status"], "warning", "有告警须降级 status: {json}");
+        let warns = json["warnings"].as_array().unwrap();
+        assert!(
+            warns.iter().any(|w| {
+                let w = w.as_str().unwrap();
+                w.contains(&key) && w.contains("pre_blocked_status=done") && w.contains("矩阵")
+            }),
+            "应就非法锚点告警: {json}"
+        );
+
+        // 场景 B：锚点缺失 → auto-unblock 以 pending 兜底，原状态不可复原。
+        let mut sf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+        sf["modules"][&key]["blocked_by"] = serde_json::json!(["file:GHOST2.ts"]);
+        sf["modules"][&key]["pre_blocked_status"] = serde_json::Value::Null;
+        std::fs::write(&sp, serde_json::to_string_pretty(&sf).unwrap()).unwrap();
+
+        let (code, json) = run(&scoped_repair_argv(&key));
+        assert_eq!(code, 0, "{json}");
+        let warns = json["warnings"].as_array().unwrap();
+        assert!(
+            warns.iter().any(|w| {
+                let w = w.as_str().unwrap();
+                w.contains(&key) && w.contains("缺 `pre_blocked_status`")
+            }),
+            "应就锚点缺失告警: {json}"
+        );
+
+        // 反面①：仍有**未终态**剩余依赖的模块不报锚点告警——它还在正常等待，`check_blocked_modules`
+        // 判它 not ready，锚点问题此刻确实不由本次 repair 触发。
+        let mut sf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+        sf["modules"][&key]["status"] = serde_json::json!("blocked");
+        sf["modules"][&key]["pre_blocked_status"] = serde_json::json!("done");
+        sf["modules"][&key]["blocked_by"] =
+            serde_json::json!(["file:GHOST3.ts", "file:SYNTHETIC-DEP.ts"]);
+        sf["modules"]["file:SYNTHETIC-DEP.ts"]["status"] = serde_json::json!("reviewing");
+        std::fs::write(&sp, serde_json::to_string_pretty(&sf).unwrap()).unwrap();
+
+        let (code, json) = run(&scoped_repair_argv(&key));
+        assert_eq!(code, 0, "{json}");
+        let anchor_warn = json["warnings"]
+            .as_array()
+            .map(|ws| ws.iter().any(|w| w.as_str().unwrap().contains("恢复锚点")))
+            .unwrap_or(false);
+        assert!(!anchor_warn, "剩余依赖未终态时不该报锚点告警: {json}");
+
+        // 场景 C【三视角独立复现的漏报，回归守卫】：剩余依赖**已终态** + 非法锚点 → **必须告警**。
+        //
+        // 这条边界曾被漏掉：旧判据用「`blocked_by_remaining` 为空」当「下一步会被 auto-unblock
+        // 接手」的代理，而真判据是 `ready = unresolved.is_empty()`，**已终态的剩余依赖不计入
+        // `unresolved`**。于是本场景清完幽灵后剩余非空 → 旧判据跳过告警，而模块立刻就是
+        // `ready_to_unblock`，下一步 `--auto-unblock` 必报「非法状态转换: blocked → done」。
+        // 三个审查视角各自实证复现，判据已改为直接调 `check_blocked_modules`。
+        let mut sf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+        sf["modules"][&key]["status"] = serde_json::json!("blocked");
+        sf["modules"][&key]["pre_blocked_status"] = serde_json::json!("done");
+        sf["modules"][&key]["blocked_by"] =
+            serde_json::json!(["file:GHOST4.ts", "file:SYNTHETIC-DEP.ts"]);
+        sf["modules"]["file:SYNTHETIC-DEP.ts"]["status"] = serde_json::json!("done");
+        std::fs::write(&sp, serde_json::to_string_pretty(&sf).unwrap()).unwrap();
+
+        let (code, json) = run(&scoped_repair_argv(&key));
+        assert_eq!(code, 0, "{json}");
+        assert!(
+            json["warnings"]
+                .as_array()
+                .map(|ws| ws.iter().any(|w| {
+                    let w = w.as_str().unwrap();
+                    w.contains(&key) && w.contains("pre_blocked_status=done") && w.contains("矩阵")
+                }))
+                .unwrap_or(false),
+            "剩余依赖已终态时模块下一步即就绪，非法锚点必须告警（三视角实证的漏报场景）: {json}"
+        );
+        // 同时用 `--auto-unblock` 实证告警说的是真的：该路径确实会被矩阵拒。
+        let (_, vjson) = run(&["validate", "state", "--check-blocked"]);
+        assert!(
+            vjson["data"]["ready_to_unblock"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m.as_str().unwrap() == key),
+            "剩余依赖已终态 → 该模块应判就绪: {vjson}"
+        );
+        let (_, ujson) = run(&["validate", "state", "--check-blocked", "--auto-unblock"]);
+        assert!(
+            ujson["data"]["unblocked"].as_array().unwrap().is_empty()
+                && ujson["warnings"]
+                    .as_array()
+                    .map(|ws| ws
+                        .iter()
+                        .any(|w| w.as_str().unwrap().contains("非法状态转换")))
+                    .unwrap_or(false),
+            "告警断言的后果须真实发生（按非法锚点恢复会被矩阵拒）: {ujson}"
+        );
+
+        // 反面②【A1 补覆盖】：**合法**锚点 + 剩余依赖已清空 → 静默。
+        //
+        // 这一侧此前零覆盖：把告警守卫改成恒真（任何锚点都报）时 897 个测试全过，也就是
+        // 「给每个正常模块多报一条虚假告警 + 把 status 降级成 warning」这个回归可以直接上线。
+        let mut sf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+        sf["modules"][&key]["status"] = serde_json::json!("blocked");
+        sf["modules"][&key]["pre_blocked_status"] = serde_json::json!("translating");
+        sf["modules"][&key]["blocked_by"] = serde_json::json!(["file:GHOST5.ts"]);
+        std::fs::write(&sp, serde_json::to_string_pretty(&sf).unwrap()).unwrap();
+
+        let (code, json) = run(&scoped_repair_argv(&key));
+        assert_eq!(code, 0, "{json}");
+        assert_eq!(
+            json["status"], "ok",
+            "锚点合法时不得有任何告警、不得降级 status: {json}"
+        );
+        assert!(
+            json["warnings"].is_null(),
+            "锚点合法时 warnings 应整体省略: {json}"
         );
     });
 }

@@ -31,7 +31,8 @@ use rustmigrate_core::response::{ErrorData, Response, Status};
 use rustmigrate_core::scaffold::scaffold_project;
 use rustmigrate_core::state::Approval;
 use rustmigrate_core::state::{
-    MigrationStateMachine, RecoverOutcome, RecoverPolicy, ResetOutcome, SprintAdvanceResult,
+    GhostRepairOutcome, MigrationStateMachine, RecoverOutcome, RecoverPolicy, ResetOutcome,
+    SprintAdvanceResult,
 };
 use rustmigrate_core::stats::{
     compare_structure, count_loc, count_loc_excluding_tests, detect_community_deviation, Ratio,
@@ -429,6 +430,31 @@ pub enum StateCommands {
     /// 额度**检测**归编排器/harness（CLI 观测不到 token 预算）；本命令只据已 checkpoint 的 state
     /// 产出计划。实际重入的状态变更复用 `state recover`（不重复实现）。见 MDR-017。
     Resume,
+    /// 删除无处归属的 `blocked_by` 引用（幽灵引用）——**非破坏性**数据修复（MDR-022）。
+    ///
+    /// 收口检出层的后半段：`validate state` / `--check-blocked` 的 `ghost_refs` 早已能点名
+    /// 「哪个模块的 `blocked_by` 指向未登记 key」，但此前 CLI 一条处置命令都没有。
+    ///
+    /// **只删幽灵条目**：可归一到宿主模块的合法引用（`Resolved`，含宿主已终态的）与宿主歧义引用（`member_files` 跨组破坏的唯一检出
+    /// 通道）原样保留——不是清空整个 `blocked_by` 数组。**不改状态、不清进度字段、不发产物
+    /// 清理指令**（与 `state reset` 正相反）。清完后若模块仍 `blocked` 而 `blocked_by` 已空，
+    /// 它在 `--check-blocked` 里即判 `ready_to_unblock`，恢复走既有 `--auto-unblock`。
+    ///
+    /// **幂等**：无幽灵可清即空操作（`was_noop`，不落盘、不追加审计）。项目 `graduate` 态
+    /// **放行**（repair 不改状态，制造不出「项目终态 + 非终态模块」矛盾，拒绝只会让这类损坏
+    /// 永远修不了）。**前提**：本命令假定被引 key 不该存在；若它本应是登记模块（analyze 漏了），
+    /// 删引用会让引用方提前解除阻塞，正确修法是重跑 analyze 重建 state（输出 `advice` 有提示）。
+    Repair {
+        /// 清除幽灵 `blocked_by` 引用。**必填**——不存在「裸 `repair` 包打天下」，修复动作
+        /// 须在命令行上显式可见。（将来若增加第二种修复类型，改用 `ArgGroup(required)` 表达
+        /// 「至少一个」；当下只有一种，`required` 即精确语义。）
+        #[arg(long, required = true)]
+        clear_ghost_blocked_by: bool,
+        /// 收窄到单个模块（组代表 NodeId，或折叠组的非代表成员，自动归一）。
+        /// 省略 = 清全部模块——幽灵引用成因是 state 与 source-graph 不同步，一次不同步常波及多个模块。
+        #[arg(long)]
+        module: Option<String>,
+    },
     /// 译后签批门判定 + 证据包索引（MDR-019）。**纯查询、无副作用、不加载 graph**。
     ///
     /// `reviewing → done` 是最终签批门（设计 `02 § 3.4` / `03 § 7.4`「不自动宣布成功」）。本命令输出：
@@ -774,6 +800,16 @@ fn execute<W: Write>(command: &Commands, writer: &mut W) -> i32 {
                 ),
             ),
             StateCommands::Resume => emit(writer, cmd_state_resume()),
+            StateCommands::Repair {
+                clear_ghost_blocked_by,
+                module,
+            } => {
+                // `clear_ghost_blocked_by` 由 clap `required = true` 保证为真；解构出来只为
+                // 「新增第二种修复类型时此处编译失败、必须做出分派决定」——忽略成 `..` 会让
+                // 新 flag 静默无效。
+                debug_assert!(*clear_ghost_blocked_by);
+                emit(writer, cmd_state_repair_ghost_blocked_by(module.as_deref()))
+            }
         },
         Commands::Stats { action } => match action {
             StatsCommands::Loc { source, rust } => {
@@ -2305,6 +2341,118 @@ fn cmd_state_recover(module: &str, policy: RecoverPolicy, reason: Option<&str>) 
         }),
         warnings,
     ))
+}
+
+/// `state repair --clear-ghost-blocked-by [--module <M>]`：删除无处归属的 `blocked_by` 引用
+/// （MDR-022）。
+///
+/// 委派 [`MigrationStateMachine::repair_ghost_blocked_by`]——只删幽灵条目（可归一到宿主模块的
+/// 合法引用与宿主歧义引用都保留）、不改状态、不清进度字段、不发产物清理指令。恢复不在本命令
+/// 职责内：清完后由 `check_blocked_modules` 判为就绪的模块，交既有
+/// `validate state --check-blocked --auto-unblock` 接手。
+fn cmd_state_repair_ghost_blocked_by(module: Option<&str>) -> CmdResult {
+    let path = state_path();
+    let (mut machine, mut warnings) = load_state_with_warnings(&path)?;
+    let outcome: GhostRepairOutcome = machine.repair_ghost_blocked_by(module)?;
+    // 幂等空操作免落盘（同 reset/recover，保 `repair;repair == repair`）；但若本次从 backup
+    // 恢复，即使 noop 也 save 一次自愈损坏主文件（见 machine.rs do_backup 门控）。
+    if !outcome.was_noop || machine.recovered_from_backup() {
+        machine.save(&path)?;
+    }
+
+    // 锚点类数据完整性告警。**判定在 CLI 层做**，core 的 outcome 只放字段不放谓词——本功能的
+    // 前身正是因为把复合谓词塞进数据结构而反复出错（MDR-021）。
+    //
+    // 就绪判定**复用 `check_blocked_modules`**（`--auto-unblock` 用的同一真值源），不自造代理。
+    // 曾经这里用「`blocked_by_remaining` 为空」当「下一步会被 auto-unblock 接手」的近似，是错的：
+    // `ready = unresolved.is_empty()`，而**已进终态的剩余依赖不计入 `unresolved`**，故
+    // `blocked_by = [幽灵, 已 done 的依赖]` 这个形状在清完幽灵后剩余非空、却立刻就是 ready——
+    // 锚点问题恰恰由本次 repair 触发，而旧判据在这里静默返回 `status:ok`。三个审查视角各自
+    // 独立复现了这个漏报（实测下一步 `--auto-unblock` 必报「非法状态转换: blocked → done」）。
+    //
+    // 教训与「一个 bool 扛多个谓词」同源：**别给已有判据造近似代理**，直接调它。
+    let ready_now: Vec<String> = check_blocked_modules(machine.state_file())
+        .into_iter()
+        .filter(|c| c.ready)
+        .map(|c| c.module)
+        .collect();
+    for m in &outcome.affected {
+        if !ready_now.contains(&m.module) {
+            continue;
+        }
+        match m.pre_blocked_status {
+            // 锚点不在 `blocked` 的合法出边内。这是**静态一步判定**（转换矩阵是静态的，而
+            // `auto_unblock_modules` 恰好只走一条 `transition_module`），不是「任意步不可达」
+            // 断言——后者正是被审查推翻过的那类预言，不在此处重犯。
+            Some(pre) if !ModuleStatus::Blocked.can_transition_to(pre) => warnings.push(format!(
+                "模块 `{}` 的幽灵引用已清、剩余依赖均已终态（下一步即被判就绪），但其恢复锚点 \
+                 `pre_blocked_status={}` 不在 `blocked` 的合法出边内，按锚点恢复（含 \
+                 `--auto-unblock`）会被转换矩阵拒。正常路径产生不了这种锚点（进 blocked 时的\
+                 来源状态必然可被阻塞），成因同幽灵引用——手工编辑 `migration-state.json`，或\
+                 旧版本写入的 state 文件。本命令不动锚点（改锚点会丢失恢复目标，属破坏性）",
+                m.module, pre
+            )),
+            // 锚点缺失：`auto_unblock_modules` 用 `pending` 兜底，模块会被恢复成 pending 而
+            // 进度字段仍在（如 test_pass_rate 还留着），成为「pending + 有进度」的混合态。
+            None => warnings.push(format!(
+                "模块 `{}` 的幽灵引用已清、剩余依赖均已终态（下一步即被判就绪），但缺 \
+                 `pre_blocked_status` 恢复锚点（手工编辑 `migration-state.json`，或旧版本写入的 \
+                 state 文件——`state update --status blocked` 走的是转换路径，必然写入锚点，\
+                 产生不了这种缺失）。`--auto-unblock` 对无锚点模块以 `pending` 兜底恢复，\
+                 原状态不可复原，而进度字段仍保留",
+                m.module
+            )),
+            Some(_) => {}
+        }
+    }
+
+    // 顶层字段集在 noop / 非 noop 两条路径上**恒定**，路径差异收进恒存在的 `guidance` 子对象
+    // ——与 `reset` 的 `cleanup`、`recover` 的 `recovery` 同构（那两个命令的 noop 分支也是往
+    // 子对象里塞 `skip`/`reason`，顶层不变）。此前 repair 把差异放在顶层（noop 时没有
+    // `next`/`advice`、多一个 `reason`），而 06 命令表只登记了非 noop 那一支，照文档读
+    // `data.next` 的编排器在 noop 上会拿到 undefined。
+    let guidance = if outcome.was_noop {
+        json!({
+            "skip": true,
+            // 回显用 `outcome.scope`（归一后的 key）而非原始入参：传组的非代表成员时，
+            // 原始入参并不是登记模块、也没有自己的 `blocked_by`，照抄会说出不存在的模块。
+            "reason": match &outcome.scope {
+                Some(m) => format!("幂等空操作：模块 `{m}` 的 blocked_by 无幽灵引用，未改任何字段、未追加审计"),
+                None => "幂等空操作：无模块持有幽灵 blocked_by 引用，未改任何字段、未追加审计".to_string(),
+            },
+        })
+    } else {
+        json!({
+            "skip": false,
+            "next": "重跑 `validate state --check-blocked` 按新输出重新分流：清完后剩余依赖均已\
+                     终态的模块会落在 `ready_to_unblock`，恢复用 `--auto-unblock`（本命令不改状态）",
+            "advice": "本命令假定被引 key **不该存在**（state 与 source-graph 不同步的残留）。\
+                       若它本应是登记模块、只是 analyze 漏登记，删引用会让引用方**提前**解除\
+                       阻塞、翻译顺序出错——那种情况应重跑 analyze 重建 state，而非 repair",
+        })
+    };
+    let data = json!({
+        "scope": outcome.scope,
+        "cleared": outcome
+            .cleared
+            .iter()
+            .map(|c| json!({"module": c.module, "missing": c.missing}))
+            .collect::<Vec<_>>(),
+        "affected": outcome
+            .affected
+            .iter()
+            .map(|m| json!({
+                "module": m.module,
+                "status": m.status.to_string(),
+                "blocked_by_remaining": m.blocked_by_remaining,
+                "pre_blocked_status": m.pre_blocked_status.map(|s| s.to_string()),
+            }))
+            .collect::<Vec<_>>(),
+        "was_noop": outcome.was_noop,
+        "guidance": guidance,
+    });
+
+    Ok((data, warnings))
 }
 
 /// `state resume`：额度耗尽/中断后的续跑断点计划（M4-ROB-01c）。
