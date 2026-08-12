@@ -386,14 +386,14 @@ pub enum StateCommands {
     /// test_pass_rate/coverage/known_differences/blocked 锚点），保留 attempts 审计（追加 reset
     /// 记录）与结构冻结字段（tier/member_files/composite_kind/decomposition_*/danger）。
     /// **幂等**：已在干净入口时为空操作（`reset;reset` == `reset`）。**守护**：`done`/`blocked`/
-    /// `degrade_*` 须 `--force`。输出 `cleanup` 作用域（member 源文件 + 保留/清理指令）——CLI 不删
+    /// `paused`/`degrade_*` 须 `--force`。输出 `cleanup` 作用域（member 源文件 + 保留/清理指令）——CLI 不删
     /// `rust_root` 下 `.rs`（不猜路径，见 MDR-015），由编排器据此清理部分产物。
     Reset {
         /// 模块 key（组代表 NodeId，或折叠组的非代表成员，自动归一到组代表）。
         #[arg(long)]
         module: String,
         /// 强制回退终态 / 锚点：`done`（重迁已完成）/ `blocked`（清阻塞锚点）/
-        /// `degrade_*`（降级恢复，人类决策）须显式 `--force`。
+        /// `paused`（自动重试耗尽待人类抉择）/ `degrade_*`（降级恢复，人类决策）须显式 `--force`。
         #[arg(long)]
         force: bool,
     },
@@ -1843,8 +1843,9 @@ fn cmd_graph_export(format: &str) -> CmdResult {
 /// 列出「引用了未登记模块」的条目，成因是 state 与 source-graph 不同步（等待永不结束）。
 /// 注意它**不是** `still_blocked` 的子集：扫描覆盖全部模块，故非 blocked 模块上的残留
 /// 引用会出现在 `ghost_refs`（`status` 非 `blocked`）而不在 `still_blocked` 里。
-/// 每条自带 `remedy`——**已替换好实际值的处置方案**，四类之一（`leave_blocked` /
-/// `reset` / `inert` / `reopen_migration`），编排器直接照做即可，不必回读 state 推断。
+/// 每条为纯检出事实 `{module, missing, status}`——`status == blocked` 表示此刻就被永久
+/// 阻塞，其余表示只是残留引用。**不含处置命令**：按状态推导处置动作的那一层曾把「不可能」
+/// 写进用户可见输出而依据只是「看出边」，被审查推翻，已拆出为后续 PR（见 MDR-021）。
 ///
 /// `--auto-unblock`（需配合 `--check-blocked`）：对就绪的 blocked 模块自动恢复到
 /// `pre_blocked_status`（无则默认 `pending`），通过 `transition_module` 落盘。
@@ -1888,9 +1889,9 @@ fn cmd_validate_state(check_blocked: bool, auto_unblock: bool) -> CmdResult {
     // 取 `scan_ghost_references` 而非从 `checks` 提取：后者只遍历 blocked 模块，会与
     // `validate_state` 的全模块告警口径不一致——非 blocked 模块上的残留引用会出现
     // 「warnings 报了、`ghost_refs` 却是空数组」，只消费机读字段的编排器就漏掉了。
-    // 每条带 `status`（紧迫性：`blocked` = 现在就永久阻塞，其余 = 残留、将来才阻塞）
-    // 与 `remedy`（该条的处置方案，判据取自 `reset_force_reason` / `can_transition_to`，
-    // 非手写清单——散文与守卫各写一份必然漂移，见 MDR-021「第三轮四视角」段）。
+    // 每条为纯检出事实 `{module, missing, status}`：`status` 表紧迫性（`blocked` = 现在就
+    // 永久阻塞，其余 = 残留引用）。**不再携带处置命令**——按状态推导动作的那一层已拆出为
+    // 后续 PR（见 MDR-021「第四轮」段），此处只给可直接观测的事实。
     let ghost_refs = scan_ghost_references(machine.state_file());
 
     let mut data = json!({

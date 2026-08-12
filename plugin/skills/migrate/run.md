@@ -63,25 +63,16 @@
 |---|---|---|---|
 | ① | `cycles[]` 非空 | blocked 模块互相等待，死锁 | 报错中止、输出环路径、记入 `metadata.last_error`。**此时不要再调 `--auto-unblock`**（会 `E012` 硬错且零解除），也不要按 ② 逐个 transition——先打破环 |
 | ② | `ready_to_unblock[]` | 依赖已全部终态，可恢复 | 逐个 `state transition --module <M> --to <pre_blocked_status> --reason 'blocked_by resolved'` 并记日志。仅当 `cycles[]` **为空**时，才可整体改用 `--check-blocked --auto-unblock` 让 CLI 代劳 |
-| ③ | `ghost_refs[]` 非空 | `blocked_by` 指向无处归属的 key | 见下方「幽灵引用不能靠等」——**等待无效**，逐条照 `ghost_refs[].remedy` 做 |
+| ③ | `ghost_refs[]` 非空 | `blocked_by` 指向无处归属的 key | 见下方「幽灵引用不能靠等」——**等待无效**。CLI 检出并点名，但当前**不提供自动处置命令**（处方层已拆出为后续 PR，见 MDR-021）；人工处置须守下方两条硬约束 |
 | ④ | `warnings` 非空 | 含跨组 `member_files` 划分破坏等**数据完整性**问题（无机读字段，只经 warning 报出） | 如实转达用户并按 warning 指示处置。**不可当作正常等待跳过**。注意这类模块**可能完全不出现在任何机读字段里**——跨组歧义扫描覆盖全部带 `blocked_by` 的模块，而 `still_blocked` 只收 `status=blocked` 的，故引用方不是 blocked 时 `still_blocked` 为空数组，warning 正文是唯一线索 |
 | ⑤ | `still_blocked[]` 中其余模块 | 排除上述四类后，依赖确实还没译完 | 正常等待，跳过本轮 |
 
-> **幽灵引用不能靠等**：`blocked_by` 可能引用**无处归属**的 key（state 与 source-graph 不同步、SubAgent 写入非法引用、用户手填）。这类依赖永远不会进终态，等待是无效动作。`validate state` 会就此降级 warning 并点名「引用方 → 被引 key」，`--check-blocked` 在 `data.ghost_refs` 给逐条明细（`[{module, missing, status, remedy}]`，`missing` 是**单个** key 字符串、每条一项；`status` 是持有方当前状态，`blocked` 表示此刻就被永久阻塞、其余表示只是残留引用）。
+> **幽灵引用不能靠等**：`blocked_by` 可能引用**无处归属**的 key（state 与 source-graph 不同步、SubAgent 写入非法引用、用户手填）。这类依赖永远不会进终态，等待是无效动作。`validate state` 会就此降级 warning 并点名「引用方 → 被引 key」，`--check-blocked` 在 `data.ghost_refs` 给逐条明细（`[{module, missing, status}]`，`missing` 是**单个** key 字符串、每条一项；`status` 是持有方当前状态，`blocked` 表示此刻就被永久阻塞、其余表示只是残留引用）。
 >
-> **照 `remedy` 做，不要自己推断**。`remedy` 是 CLI 按四个正交谓词（该状态能否进 blocked / reset 是否需 `--force` / 项目是否 `graduate` / blocked 有无锚点）算出的、**已替换好实际值**的处置方案，四类之一：
+> **CLI 当前只检出、不处置**。按状态推导「处置命令」的那一层曾把「不可能」写进用户可见输出、而依据只是「看出边」（一步可达），被审查全数推翻，已拆出为后续 PR（见 MDR-021），届时提供非破坏性清理入口。在此之前处置须人工判断，且须守两条硬约束：
 >
-> | `remedy.kind` | 命令 | 说明 |
-> |---|---|---|
-> | `leave_blocked` | `state transition --module <M> --to <remedy.to>` | 模块正 blocked。**离开 blocked 是唯一会清空 `blocked_by` 的转换边**，且不丢迁移进度。`remedy.to` 取该模块的 `pre_blocked_status`；`anchored=false` 表示无锚点、CLI 已代入 `pending`（与 `--auto-unblock` 同默认）。**不要自己去读 `pre_blocked_status` 拼命令**——它可能是 `null`，拼出的 `--to null` 会报 `E012` |
-> | `reset` + `force=null` | `state reset --module <M>` | 残留引用。代价：`reviewing`/`testing`/`compile_fixing` 会回退到 `translating`，`pending`/`translating` 的 status 不变，但**两种情况都会清空** `substatus`/`phase_a_version`/`phase_a_audit_passed`/`test_pass_rate`/`coverage`/`known_differences`（`attempts` 与审计保留） |
-> | `reset` + `force=<理由>` | `state reset --module <M> --force` | 同上，但该状态的 reset 需 `--force`。**`--force` 是人类确认，编排器不得自动补**——把 `force` 里的理由转达用户并等抉择（自动补就绕过了该状态本身要保护的决策点） |
-> | `inert` | 无 | 该状态**永不可能再进 blocked**（`done` 不可转出、`degrade_*` 仅可 `--force` 恢复到 `translating`），引用惰性无害、**无需处置**。别为清一个无害字段把已完成模块打回 `translating` |
-> | `reopen_migration` | 无 | 项目已 `graduate`：reset 一律被拒且 `--force` 不可绕，CLI 层无可行命令。如需清理须先重开迁移 |
->
-> **transition 不是通用处置**：`blocked_by` 只在「离开 blocked」的边上被清空。对非 blocked 模块，transition 要么报 `E004`（目标非法），要么**返回成功而 `blocked_by` 原样留着**——后者更危险，`status:ok` 会被误读成已处置。
->
-> 有可执行 `remedy` 的处置后都应 `graph build` 重建图确认真实依赖。**不要用 `state populate-modules`**：它对非 pending 模块一律拒绝重填（断点续传保护）。注意 `status=blocked` 的幽灵引用模块仍计入阻塞，`--auto-unblock` 不会放行它们——不是命令失灵，是不在损坏数据上改状态。
+> - **transition 不是通用处置**：`blocked_by` 只在「离开 blocked」的边上被清空。对非 blocked 模块，transition 要么报 `E004`（目标非法），要么**返回成功而 `blocked_by` 原样留着**——后者更危险，`status:ok` 会被误读成已处置。
+> - **不要用 `state populate-modules`**：它对非 pending 模块一律拒绝重填（断点续传保护）。`status=blocked` 的幽灵引用模块仍计入阻塞，`--auto-unblock` 不会放行它们——不是命令失灵，是不在损坏数据上改状态。
 >
 > reset 需 `--force` 的状态（值域取自 `machine.rs` 的 `reset_force_reason`，勿手工维护——有 CI 守卫比对）：`blocked`、`done`、`degrade_ffi`、`degrade_manual`、`degrade_skip`、`paused`。
 >
