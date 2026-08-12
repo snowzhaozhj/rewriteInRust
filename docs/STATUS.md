@@ -7,7 +7,7 @@
 - **位置（2026-08-12）**：master 在 `2b86691`，**开放 PR 仅 [#88](https://github.com/snowzhaozhj/rewriteInRust/pull/88)**、开放 issue 0。**#88 已按第四轮结论收窄为「幽灵引用检出层」**——第三轮补的**处方层**（`GhostRemedy`/`remedy`/状态网格/四类处置文案）被第四轮证明仍把「不可能」写进用户可见文案（依据只是「看出边」，而 `X→blocked→X` 两步往返零代价清 `blocked_by` 且保留全部进度、`degrade_*` 多步可达等反例存在），故**整体移出 #88、拆为后续 PR**（届时设计非破坏性入口 `state repair --clear-ghost-blocked-by`）。详见 [MDR-021](decisions/021-no-json-schema-validation.md)「第四轮 + 拆 PR」段。
   - **#88 现内容（本轮已完成）**：JSON Schema 如实化 + 摘依赖、错误码守卫、幽灵引用**检出**（`ghost_refs` = 纯事实 `{module, missing, status}`，告警只点名 + 区分 blocked/残留、不给动作、不作可达性预言）、`reset_force_reason` 唯一真值源 + 文档↔代码集合守卫（本轮改扫**全部**锚点出现处）。顺带修：`state reset --help` 两处补 `paused`、`grep -c` 获取命令纠正为读 rustdoc 自报计数。`just ci` 全绿 **886 测试**（拆掉 4 个处方测试：890 → 886），`cargo doc` 警告仍 10（全 pre-existing）。
   - **审查设界（用户 2026-08-12 拍板）**：第四轮只跑专项三子视角 + codex，**结束即收口、不起第五轮**，剩余问题记账 MDR-021。处方层遗留约束（两步往返依赖待办 3、reset 会擦 `Ambiguous` 检出通道、多步可达须按可达性处理）留给后续 PR。
-  - **待拍板**：<推送 sha + 远端 CI 状态，push 后回填>。**绝不自行 merge**。
+  - **待拍板**：已推送 `514b0ce`，远端 CI 针对该 sha 复跑 **5 项全过**（check/coverage/deny/shellcheck/test），PR `MERGEABLE`。**绝不自行 merge**——等用户审阅拍板。
 - **位置（2026-08-11，已被上条取代，保留作历史）**：master 在 `e9220bf`（#89 已合并），**开放 PR 仅 [#88](https://github.com/snowzhaozhj/rewriteInRust/pull/88)**、开放 issue 0。master 上复跑 `just ci` 全绿 **856 测试**（849 → 856，+7 为 #89 的守卫），远端 CI 针对 `e9220bf` 5 项全过。
   - **#88 的剩余工作两项**（PR 内容见下方 #88 两条专条）：
     - ① **第三轮四视角审查已完成，8 类 important，修复已落地**（详见下方 #88 专条与 [MDR-021](decisions/021-no-json-schema-validation.md)「第三轮四视角」段）。结论是**上两轮的修法方向就是错的**——不是文案写错几个字，而是 `module_blocked` 一个 bool 扛了四个正交谓词。已按根因重做：`reset_force_reason` 抽为唯一真值源、`GhostReference` 改带 `status` + `remedy`（四类、已替换好实际值）、新增文档↔代码集合相等守卫、e2e 改按机读 `remedy` 真跑并参数化成状态网格。
