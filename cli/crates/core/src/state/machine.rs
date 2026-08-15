@@ -7,6 +7,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::error::{MigrateError, Result};
+use crate::state::host_index::{broken_partition_message, HostIndex, HostResolution};
 use crate::types::common::{SourceLang, Timestamp};
 use crate::types::config::PersistenceConfig;
 use crate::types::state::{
@@ -111,7 +112,9 @@ pub struct BatchDoneOutcome {
     pub succeeded: Vec<String>,
     /// 未升 `done` 的模块及原因码 + 细节（`(module, code, detail)`）。
     /// 原因码：`approval_required` / `awaiting_final_review` / `not_agent_done` /
-    /// `policy_rejected` / `transition_rejected` / `not_found`。
+    /// `policy_rejected` / `transition_rejected` / `not_found` / `broken_partition`
+    /// （后者 = `member_files` 跨组互斥被破坏、宿主不唯一，处置是修划分而非补登记；
+    /// 与 `not_found` 分列是因为两者的排查方向相反）。
     pub skipped: Vec<(String, String, String)>,
 }
 
@@ -899,36 +902,42 @@ impl MigrationStateMachine {
 
     /// 归一 module key：调用方通常传组代表 key，但 run/reset 阶段也可能对折叠组的非代表成员
     /// （如 `file:types.ts`）发起操作——反查其所属组代表后按组处理，避免硬失败破坏 composite
-    /// 组状态推进（与 `cmd_state_deps` 的归一逻辑对称）。命中直接返回；查无则 `模块不存在`。
+    /// 组状态推进（与 `cmd_state_deps` 的归一逻辑对称）。查无则 `模块不存在`。
     ///
     /// 依赖不变量：`member_files` 是文件节点的**划分**（跨组互斥，每个文件至多属一个组，见
-    /// populate-modules 落盘）。该不变量成立时 `find` 命中唯一、归一确定；若被破坏（同一文件
-    /// 出现在多组），`find` 取 HashMap 迭代序首个为非确定——debug 下断言钉住。
+    /// populate-modules 落盘）。**被破坏时一律硬错**（含 release）——静默取一个宿主会让破坏性的
+    /// reset 清空**错误模块**的进度字段（数据破坏而非仅状态偏差，MDR-015:55）。
+    ///
+    /// 判定委托 [`resolve_module_host`](Self::resolve_module_host)，两种破坏形态一视同仁：
+    /// ⒜ 同一文件被 ≥2 个组列为成员；⒝ 它既登记为独立模块、又被别的组列为成员。⒝ 此前
+    /// **完全检不出**——本方法曾在「已是登记模块」处早返回，于是对这类 key 的 reset/transition
+    /// 都按「它自己」处理，而组里那份同名成员仍在别的状态（MDR-023 实证：`--auto-unblock`
+    /// 会据此真的解除引用方并落盘）。修 `member_files` 只能改 state 文件本身（CLI 无改划分的
+    /// 命令），故硬错不会堵死修复入口。
+    ///
+    /// 需要**区分**两类失败的调用方（如 `batch_transition_done` 要分 `skipped.code`）请直接用
+    /// [`resolve_module_host`](Self::resolve_module_host)：`Result` 只有一个 `Config` 变体，
+    /// 从错误值上分不出是哪一类。
     pub fn canonical_module_key(&self, name: &str) -> Result<String> {
-        if self.state_file.modules.contains_key(name) {
-            return Ok(name.to_string());
+        match self.resolve_module_host(name) {
+            HostResolution::Resolved(key) => Ok(key.clone()),
+            HostResolution::Missing => Err(MigrateError::Config(format!("模块不存在: {name}"))),
+            HostResolution::Ambiguous(hosts) => {
+                Err(MigrateError::Config(broken_partition_message(name, &hosts)))
+            }
         }
-        // 反查非代表成员所属组。不变量破坏时（同一文件属多组）**release 也硬错**——
-        // 原仅 debug_assert 钉住、release 静默取 HashMap 迭代序首个（非确定），复用到破坏性的
-        // reset 会清空**错误模块**的进度字段（数据破坏，非仅状态偏差），故升级为运行时错误。
-        let matches: Vec<&String> = self
-            .state_file
-            .modules
-            .iter()
-            .filter(|(_, m)| {
-                m.member_files
-                    .as_ref()
-                    .is_some_and(|mf| mf.iter().any(|f| f == name))
-            })
-            .map(|(k, _)| k)
-            .collect();
-        match matches.as_slice() {
-            [] => Err(MigrateError::Config(format!("模块不存在: {name}"))),
-            [one] => Ok((*one).clone()),
-            _ => Err(MigrateError::Config(format!(
-                "member_files 跨组互斥不变量被破坏：{name} 同属多个组"
-            ))),
-        }
+    }
+
+    /// [`canonical_module_key`](Self::canonical_module_key) 的三态版本（同一判定，不丢信息）。
+    ///
+    /// 判定实现在 [`HostIndex`]，与 `validate` 侧共用——两处各写一份必然漂移，而这个不变量
+    /// 恰恰因「多份判定都在同一处早返回」而漏检了一整类破坏（MDR-023）。
+    ///
+    /// **每次调用重建索引**（O(全部 `member_files` 条目)，与它替代的旧全表扫同阶）。单模块操作
+    /// 用它无妨，**但不要在循环里调**——审查实测 200 组时每次 88.5ms、1000 组 1.87s。
+    /// [`batch_transition_done`](Self::batch_transition_done) 目前正是循环调用，见 MDR-023 记账。
+    pub fn resolve_module_host(&self, name: &str) -> HostResolution<'_> {
+        HostIndex::build(&self.state_file).resolve(name)
     }
 
     /// 幂等回退失败/中途模块到干净的重译入口（M4-ROB-01a：checkpoint 硬化 + 幂等重试）。
@@ -1181,10 +1190,14 @@ impl MigrationStateMachine {
     /// # 三条不变量
     ///
     /// 1. **只删幽灵条目，绝不删整个 `blocked_by` 数组。** 可归一到宿主模块的合法引用（`Resolved`，与宿主是否终态无关）与宿主
-    ///    歧义引用（`Ambiguous`）原样保留——后者是 `member_files` 跨组互斥不变量被破坏的
-    ///    **唯一检出通道**（`validate_state` 只经它扫出跨组破坏），清整个数组会连带把这条
-    ///    通道擦掉。判据不在本方法里重写，复用 [`crate::validate::scan_ghost_references`]
-    ///    （其内部 `resolve_blocked_ref` 是「什么算幽灵」的唯一实现）。
+    ///    歧义引用（`Ambiguous`）原样保留——repair 的职责是删「无处归属」的条目，而歧义引用
+    ///    的实体是存在的，坏的是 `member_files` 划分，处置是修划分。判据不在本方法里重写，
+    ///    复用 [`crate::validate::scan_ghost_references`]（其内部经 [`HostIndex`] 判定
+    ///    「什么算幽灵」，与 machine 侧的归一共用同一实现）。
+    ///
+    ///    历史注记：这条不变量原先还有一个理由——`Ambiguous` 引用曾是跨组破坏的**唯一检出
+    ///    通道**（`validate_state` 只在遍历 `blocked_by` 时顺带发现）。该理由已由 MDR-023
+    ///    取消：跨组告警改扫**全量 `member_files` 划分**，不再依赖恰好有引用指向它。
     /// 2. **不改状态、不清进度字段、不发产物清理指令**——与 [`reset_module`](Self::reset_module)
     ///    （清 8 个进度字段 + 输出删 `.rs` 作用域）正相反。清完后若模块仍 `blocked` 而
     ///    `blocked_by` 已空，它在 `check_blocked_modules` 里自然判 `ready`，由既有
@@ -1529,14 +1542,39 @@ impl MigrationStateMachine {
         review_gate_config: &crate::types::config::ReviewGateConfig,
         coverage_threshold: u32,
     ) -> Result<ApproveOutcome> {
+        let canonical = self.canonical_module_key(name)?;
+        self.approve_canonical(
+            &canonical,
+            approval,
+            reason,
+            review_gate_config,
+            coverage_threshold,
+        )
+    }
+
+    /// [`approve_module`](Self::approve_module) 的「入参已归一」版本。
+    ///
+    /// 存在的唯一理由是**避免重复建宿主索引**：归一走 [`HostIndex`]（O(全部 `member_files`
+    /// 条目)），而 [`batch_transition_done`](Self::batch_transition_done) 已在循环外一次性归一
+    /// 完毕；若那里再调 `approve_module`，每个模块会白建一次索引，规模大时呈平方
+    /// （审查 A/B 实测 4000 模块 33s vs master 0.87s）。
+    ///
+    /// `canonical` **必须**是 `modules` 里已登记的 key（调用方负责归一），否则内部 `expect` 会 panic。
+    fn approve_canonical(
+        &mut self,
+        canonical: &str,
+        approval: &Approval,
+        reason: Option<&str>,
+        review_gate_config: &crate::types::config::ReviewGateConfig,
+        coverage_threshold: u32,
+    ) -> Result<ApproveOutcome> {
         use crate::state::review_gate::{check_policy_approval, SUBSTATUS_AWAITING_FINAL_REVIEW};
 
-        let canonical = self.canonical_module_key(name)?;
         let module = self
             .state_file
             .modules
-            .get(&canonical)
-            .expect("canonical 已校验存在");
+            .get(canonical)
+            .expect("canonical 已由调用方归一并校验存在");
         let previous_substatus = module.substatus.clone();
         let is_awaiting = previous_substatus.as_deref() == Some(SUBSTATUS_AWAITING_FINAL_REVIEW);
 
@@ -1605,17 +1643,17 @@ impl MigrationStateMachine {
 
         // 凭据已复核 → 放行该边（transition_inner 据 approval 非 None 跳过硬门）。
         self.transition_inner(
-            &canonical,
+            canonical,
             Some(ModuleStatus::Done),
             None,
             None,
             false,
             Some(approval),
         )?;
-        let audit = self.push_approval_audit(&canonical, approval, reason, &overridden);
+        let audit = self.push_approval_audit(canonical, approval, reason, &overridden);
 
         Ok(ApproveOutcome {
-            module: canonical,
+            module: canonical.to_owned(),
             approval: match approval {
                 Approval::Human => "human".to_owned(),
                 Approval::Policy { id, .. } => format!("policy:{id}"),
@@ -1702,15 +1740,44 @@ impl MigrationStateMachine {
         let mut succeeded = Vec::new();
         let mut skipped: Vec<(String, String, String)> = Vec::new();
 
-        for name in modules {
-            // 模块不存在：不写 attempts（无处可写），直接记 skipped（此时无 canonical 可回显）。
-            let Ok(canonical) = self.canonical_module_key(name) else {
-                skipped.push((
-                    name.clone(),
-                    "not_found".to_owned(),
-                    "模块不在 migration-state.json".to_owned(),
-                ));
-                continue;
+        // **归一在循环外一次性完成**：宿主判定要建索引（O(全部 `member_files` 条目)），在循环里
+        // 逐个调 `resolve_module_host` 会每个模块白建一次，规模大时呈平方——审查 A/B 实测 4000
+        // 模块 33s，而 master 是 0.87s（它对登记模块走 `contains_key` O(1) 早返回，而那条快路径
+        // 正是本 PR 要消灭的缺陷：它不反查 `member_files`）。索引提不进循环是借用检查所致：
+        // 循环持 `&mut self`，索引借自 `self.state_file`。故先在不可变块里把入参归一成 owned。
+        //
+        // **两类归一失败必须分码**：既会因「查无此 key」失败，也会因「宿主不唯一（`member_files`
+        // 跨组互斥被破坏）」失败，后者是数据损坏、处置是修划分而非补登记。此前一律记
+        // `not_found`（「模块不在 migration-state.json」），编排器据此去查登记、而真因在别处
+        // ——同「一个判据替多个谓词说话」的失败模式。
+        type Normalized = std::result::Result<String, (&'static str, String)>;
+        let normalized: Vec<(&String, Normalized)> = {
+            let hosts = HostIndex::build(&self.state_file);
+            modules
+                .iter()
+                .map(|name| {
+                    let outcome: Normalized = match hosts.resolve(name) {
+                        HostResolution::Resolved(key) => Ok(key.clone()),
+                        HostResolution::Missing => {
+                            Err(("not_found", "模块不在 migration-state.json".to_owned()))
+                        }
+                        HostResolution::Ambiguous(owners) => {
+                            Err(("broken_partition", broken_partition_message(name, &owners)))
+                        }
+                    };
+                    (name, outcome)
+                })
+                .collect()
+        };
+
+        for (name, outcome) in normalized {
+            // 归一失败：不写 attempts（无处可写），记 skipped（此时无 canonical 可回显）。
+            let canonical = match outcome {
+                Ok(key) => key,
+                Err((code, detail)) => {
+                    skipped.push((name.clone(), code.to_owned(), detail));
+                    continue;
+                }
             };
 
             let Some(approval) = approval else {
@@ -1749,8 +1816,14 @@ impl MigrationStateMachine {
                 continue;
             }
 
-            match self.approve_module(name, approval, None, review_gate_config, coverage_threshold)
-            {
+            // 已归一，故直接走 `approve_canonical`——再调 `approve_module` 会重复建索引（见上）。
+            match self.approve_canonical(
+                &canonical,
+                approval,
+                None,
+                review_gate_config,
+                coverage_threshold,
+            ) {
                 Ok(outcome) => succeeded.push(outcome.module),
                 Err(e) => {
                     let detail = e.to_string();
@@ -3070,6 +3143,103 @@ mod tests {
     }
 
     #[test]
+    fn test_canonical_module_key_rejects_registered_module_also_owned_by_group() {
+        // MDR-023：另一形态的同一破坏——被引 key **既是登记模块、又被别的组列为成员**。
+        // 归一此前在「已是登记模块」处早返回，故这一整类完全检不出：对 `file:shared.ts` 的
+        // reset 按「它自己」处理，而 `g1` 组里那份同名成员仍在别的状态。
+        let mut m = new_machine();
+        m.update_module(
+            "file:shared.ts",
+            module_with_status(ModuleStatus::Translating),
+        );
+        let mut g1 = module_with_status(ModuleStatus::Translating);
+        g1.member_files = Some(vec!["g1".to_string(), "file:shared.ts".to_string()]);
+        m.update_module("g1", g1);
+
+        let err = m.reset_module("file:shared.ts", false);
+        assert!(
+            matches!(&err, Err(MigrateError::Config(msg)) if msg.contains("不变量被破坏")),
+            "登记模块被别组列为成员同样是破坏，不得静默按「它自己」处理: {err:?}"
+        );
+        // 归因须点名两个宿主，否则用户无从知道该删哪一边。
+        let msg = match m.canonical_module_key("file:shared.ts") {
+            Err(MigrateError::Config(msg)) => msg,
+            other => panic!("期望 Config 错误，实际: {other:?}"),
+        };
+        assert!(
+            msg.contains("file:shared.ts") && msg.contains("g1"),
+            "归因须列出全部宿主: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_canonical_module_key_accepts_representative_listed_in_own_member_files() {
+        // 反向不误报（本次修复最容易踩的坑）：`populate-modules` 落的 `member_files` **含组代表
+        // 自身**（`DecompUnit.members` 首个成员即代表 key）。若把这份自引用也计为一个宿主，
+        // 每个正常 composite 组的代表都会被判成跨组破坏，全部 run/reset 路径当场瘫掉。
+        let mut m = new_machine();
+        let mut group = module_with_status(ModuleStatus::Translating);
+        group.member_files = Some(vec!["grp".to_string(), "file:helper.ts".to_string()]);
+        m.update_module("grp", group);
+
+        assert_eq!(m.canonical_module_key("grp").unwrap(), "grp");
+        assert_eq!(m.canonical_module_key("file:helper.ts").unwrap(), "grp");
+    }
+
+    #[test]
+    fn test_batch_transition_done_distinguishes_broken_partition_from_not_found() {
+        // `skipped.code` 是机读契约：归一失败的两类原因处置相反（补登记 vs 修 member_files
+        // 划分），此前一律记 `not_found`（「模块不在 migration-state.json」）会把编排器指去
+        // 查登记表，而真因是数据损坏。
+        let mut m = new_machine();
+        let mut g1 = module_with_status(ModuleStatus::Pending);
+        g1.member_files = Some(vec!["g1".to_string(), "file:shared.ts".to_string()]);
+        let mut g2 = module_with_status(ModuleStatus::Pending);
+        g2.member_files = Some(vec!["g2".to_string(), "file:shared.ts".to_string()]);
+        m.update_module("g1", g1);
+        m.update_module("g2", g2);
+
+        let outcome = m
+            .batch_transition_done(
+                &[
+                    "file:shared.ts".to_string(),
+                    "file:nonexistent.ts".to_string(),
+                ],
+                None,
+                &crate::types::config::ReviewGateConfig::default(),
+                80,
+            )
+            .expect("逐模块独立处理，整体不应失败");
+        let codes: BTreeMap<&str, &str> = outcome
+            .skipped
+            .iter()
+            .map(|(module, code, _)| (module.as_str(), code.as_str()))
+            .collect();
+        assert_eq!(
+            codes.get("file:shared.ts"),
+            Some(&"broken_partition"),
+            "宿主不唯一须自成一码: {:?}",
+            outcome.skipped
+        );
+        assert_eq!(
+            codes.get("file:nonexistent.ts"),
+            Some(&"not_found"),
+            "查无此 key 仍是 not_found: {:?}",
+            outcome.skipped
+        );
+        let detail = outcome
+            .skipped
+            .iter()
+            .find(|(module, _, _)| module == "file:shared.ts")
+            .map(|(_, _, detail)| detail.clone())
+            .unwrap();
+        assert!(
+            detail.contains("member_files"),
+            "detail 须指向 member_files 划分: {detail}"
+        );
+    }
+
+    #[test]
     fn test_reset_module_force_recovers_terminal_and_anchor() {
         // 带 --force：done/blocked/degrade_* 均可回退到 translating（blocked 锚点一并清）。
         let mut m = new_machine();
@@ -4270,10 +4440,11 @@ mod tests {
 
     #[test]
     fn test_repair_preserves_ambiguous_reference() {
-        // 宿主歧义引用（同一 key 被多个组列为 member_files）**不是**幽灵，必须原样保留：
-        // 它是 `member_files` 跨组互斥不变量被破坏的唯一检出通道（`validate_state` 只经它
-        // 扫出跨组破坏）。第四轮实证 `reset` 清整个数组会把这条通道连带擦掉——本断言钉死
-        // repair 不重犯。
+        // 宿主歧义引用（同一 key 的宿主不唯一）**不是**幽灵，必须原样保留：实体存在，坏的是
+        // `member_files` 划分，处置是修划分而非删引用。
+        //
+        // 该保留原先还有第二个理由——它曾是跨组破坏的唯一检出通道；MDR-023 把跨组告警改成扫
+        // 全量划分后那个理由已不成立，但保留本身依旧正确（repair 只删无处归属的条目）。
         let mut m = new_machine();
         let mut holder = module_with_status(ModuleStatus::Blocked);
         holder.blocked_by = Some(vec!["shared.ts".to_string(), "nope".to_string()]);
@@ -4299,7 +4470,7 @@ mod tests {
         assert_eq!(
             m.state_file().modules["holder"].blocked_by,
             Some(vec!["shared.ts".to_string()]),
-            "Ambiguous 引用必须保留——它是跨组破坏的唯一检出通道"
+            "Ambiguous 引用必须保留——实体存在，坏的是 member_files 划分，repair 不该删它"
         );
     }
 

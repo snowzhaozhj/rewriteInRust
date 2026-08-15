@@ -2,9 +2,11 @@
 //!
 //! 负责迁移项目状态的加载、保存、转换。
 
+pub mod host_index;
 pub mod machine;
 pub mod review_gate;
 
+pub use host_index::{HostIndex, HostResolution};
 pub use machine::{
     Approval, ClearedGhostRef, GhostRepairOutcome, InterruptedModule, MigrationStateMachine,
     RecordMetricsOutcome, RecoverOutcome, RecoverPolicy, RepairedModule, ResetOutcome, ResumePlan,

@@ -3515,6 +3515,85 @@ fn smoke_state_deps_group_aware() {
 }
 
 #[test]
+fn smoke_state_deps_refuses_when_host_is_ambiguous() {
+    // MDR-023：`cmd_state_deps` 曾是同一不变量的**第三处**判定，且比另两处更弱——归一先查
+    // `modules` 命中即早返回，否则 `find` 取 HashMap 迭代序首个；而「依赖文件 → 组代表」那张
+    // 表用 `insert` 建，同一文件被多组列为成员时**后写覆盖先写**。两处的择一结果还可能不一致。
+    //
+    // 编排器用真实 CLI 复现的两种错误后果（本用例逐一钉住）：
+    // ⒝ 被查 key 既登记为独立模块、又被别组列为成员 → 返回 `all_ready:true` **零告警**，
+    //    而 run.md 步骤 3 正是用本命令做依赖门禁 → 依赖未就绪却静默放行；
+    // ⒜ 依赖闭包里的文件被两组列为成员 → 组内自依赖的剔除失效，报出**假阻塞**（而 `blocking`
+    //    会被 run.md 回填进 `blocked_by`，错误的阻塞会一路传播）。
+    //
+    // 现在两种形态都硬错并指向 `member_files` 划分。这是本 PR 新增的失败路径，故须有覆盖。
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("linear-deps"), tmp.path());
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        assert_eq!(run(&["graph", "build", "--root", "src"]).0, 0);
+        assert_eq!(run(&["state", "populate-modules"]).0, 0);
+
+        let sp = tmp.path().join(".rust-migration/migration-state.json");
+        let read_state = || -> serde_json::Value {
+            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap()
+        };
+        let pristine = read_state();
+        // 前置假设：decompose 把三个文件凝聚成一个组，代表在自己的 member_files 里。
+        let members: Vec<String> = pristine["modules"]["file:index.ts"]["member_files"]
+            .as_array()
+            .unwrap_or_else(|| panic!("前提：应有 composite 组: {pristine}"))
+            .iter()
+            .map(|m| m.as_str().unwrap().to_owned())
+            .collect();
+        assert!(
+            members.contains(&"file:index.ts".to_owned())
+                && members.contains(&"file:utils.ts".to_owned()),
+            "前提：组成员应含代表自身与 utils: {members:?}"
+        );
+
+        // 形态⒝：utils 既登记为独立模块（done），又留在 index 组（translating）里。
+        let mut broken = pristine.clone();
+        broken["modules"]["file:index.ts"]["status"] = serde_json::json!("translating");
+        broken["modules"]["file:utils.ts"] = serde_json::json!({
+            "status": "done", "sprint": 1, "attempts": [], "known_differences": 0
+        });
+        std::fs::write(&sp, serde_json::to_string_pretty(&broken).unwrap()).unwrap();
+
+        let (code, out) = run(&["state", "deps", "file:utils.ts"]);
+        assert_ne!(code, 0, "宿主不唯一时不得静默放行门禁: {out}");
+        assert_eq!(out["data"]["error_code"], "E012", "{out}");
+        let msg = out["data"]["message"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("member_files") && msg.contains("宿主不唯一"),
+            "归因须指向划分: {out}"
+        );
+
+        // 形态⒜：utils 不额外登记，但被另一个组 g2 也列为成员；查组代表 index。
+        let mut broken2 = pristine.clone();
+        broken2["modules"]["file:index.ts"]["status"] = serde_json::json!("translating");
+        broken2["modules"]["g2"] = serde_json::json!({
+            "status": "pending", "sprint": 1, "attempts": [], "known_differences": 0,
+            "member_files": ["g2", "file:utils.ts"], "composite_kind": "coupled_batch"
+        });
+        std::fs::write(&sp, serde_json::to_string_pretty(&broken2).unwrap()).unwrap();
+
+        let (code, out) = run(&["state", "deps", "file:index.ts"]);
+        assert_ne!(code, 0, "依赖闭包含坏划分文件时不得报出假阻塞: {out}");
+        let msg = out["data"]["message"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("file:utils.ts"),
+            "归因须点名真正宿主不唯一的那个文件（而非被查的模块）: {out}"
+        );
+
+        // 反向不误报：还原成合法划分后本命令须照常工作（硬错不得扩散到正常场景）。
+        std::fs::write(&sp, serde_json::to_string_pretty(&pristine).unwrap()).unwrap();
+        let (code, out) = run(&["state", "deps", "file:index.ts"]);
+        assert_eq!(code, 0, "合法划分下 state deps 须照常成功: {out}");
+    });
+}
+
+#[test]
 fn smoke_state_deps_unresolved_not_blocking() {
     // absent 死锁修复（主审）：依赖未登记为模块（state 与 graph 不同步）时进 unresolved + warning，
     // **不进 blocking**——否则会被填入 blocked_by，而 check-blocked 对缺失 key 永判非终态导致死锁。
@@ -4171,6 +4250,234 @@ fn smoke_transition_on_residual_ghost_succeeds_without_clearing_blocked_by() {
         assert_eq!(
             json["status"], "warning",
             "幽灵引用未被清除，告警须仍在——rc=0 不等于已处置: {json}"
+        );
+    });
+}
+
+#[test]
+fn smoke_auto_unblock_refuses_when_dep_is_registered_and_owned_by_another_group() {
+    // MDR-023 端到端锁：被引 key **既是登记模块、又被别的组列为 `member_files` 成员**时，
+    // 归一此前在「已是登记模块」处早返回、判成合法引用。
+    //
+    // 编排器在写这个测试前先用真实 CLI 独立复现了原始缺陷（`/tmp` 造同形 state）：
+    // `file:shared.ts` 登记 `done` 而 `g1` 组是 `translating` → `validate state` 报
+    // `valid:true` **零跨组告警**，`--check-blocked` 把 holder 列进 `ready_to_unblock`，
+    // `--auto-unblock` **真的解除**（`blocked → translating`）并落盘——而该文件实际还在 g1
+    // 组里翻译中。这不是漏诊断，是数据损坏。
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("linear-deps"), tmp.path());
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        assert_eq!(run(&["graph", "build", "--root", "src"]).0, 0);
+        assert_eq!(run(&["state", "populate-modules"]).0, 0);
+
+        let sp = tmp.path().join(".rust-migration/migration-state.json");
+        let mut sf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+        let template = sf["modules"]
+            .as_object()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()
+            .clone();
+        let mk = |status: &str,
+                  blocked_by: serde_json::Value,
+                  pre: serde_json::Value,
+                  members: serde_json::Value| {
+            let mut m = template.clone();
+            m["status"] = serde_json::json!(status);
+            m["blocked_by"] = blocked_by;
+            m["pre_blocked_status"] = pre;
+            m["composite_kind"] = serde_json::Value::Null;
+            m.as_object_mut().unwrap().remove("member_files");
+            if !members.is_null() {
+                m["member_files"] = members;
+                m["composite_kind"] = serde_json::json!("coupled_batch");
+            }
+            m
+        };
+        let null = serde_json::Value::Null;
+        sf["modules"] = serde_json::json!({
+            // 登记为独立模块且已 done。
+            "file:shared.ts": mk("done", null.clone(), null.clone(), null.clone()),
+            // 同一文件又被 g1 组列为成员，而 g1 还在翻译中 → 划分被破坏。
+            "g1": mk("translating", null.clone(), null.clone(),
+                     serde_json::json!(["g1", "file:shared.ts"])),
+            "holder": mk("blocked", serde_json::json!(["file:shared.ts"]),
+                         serde_json::json!("translating"), null.clone()),
+        });
+        std::fs::write(&sp, serde_json::to_string_pretty(&sf).unwrap()).unwrap();
+
+        // ① 体检必须报出来（此前 `valid:true` 零告警）。
+        let (_, json) = run(&["validate", "state"]);
+        let warns = json["warnings"].as_array().cloned().unwrap_or_default();
+        let hit = warns
+            .iter()
+            .filter_map(|w| w.as_str())
+            .find(|w| w.contains("跨组互斥"))
+            .unwrap_or_else(|| panic!("坏划分须告警: {json}"));
+        assert!(
+            hit.contains("file:shared.ts") && hit.contains("g1"),
+            "告警须列出全部宿主: {hit}"
+        );
+
+        // ② 不得判就绪——`done` 那个宿主不代表 g1 组里那份也完成了。
+        let (_, json) = run(&["validate", "state", "--check-blocked"]);
+        assert_eq!(
+            json["data"]["ready_to_unblock"],
+            serde_json::json!([]),
+            "宿主不唯一时不得判可解除: {json}"
+        );
+        assert_eq!(
+            json["data"]["still_blocked"],
+            serde_json::json!(["holder"]),
+            "holder 须留在 still_blocked: {json}"
+        );
+        // 也不是幽灵：实体存在，坏的是划分，处置是修 member_files 而非 repair。
+        assert_eq!(
+            json["data"]["ghost_refs"],
+            serde_json::json!([]),
+            "坏划分不得被当成幽灵引用: {json}"
+        );
+
+        // ③ `--auto-unblock` 一个都不许动（原始缺陷的直接后果就在这一步落盘）。
+        let (_, out) = run(&["validate", "state", "--check-blocked", "--auto-unblock"]);
+        assert_eq!(
+            out["data"]["unblocked"],
+            serde_json::json!([]),
+            "不得解除: {out}"
+        );
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+        assert_eq!(
+            after["modules"]["holder"]["status"], "blocked",
+            "holder 状态不得被改: {after}"
+        );
+        assert_eq!(
+            after["modules"]["holder"]["blocked_by"],
+            serde_json::json!(["file:shared.ts"]),
+            "blocked_by 不得被清: {after}"
+        );
+
+        // ④ 凡按 key 归一的单模块操作都宁停不错，且归因指向 member_files 划分而非「模块
+        //    不存在」。**逐条真跑**——初版只测了 `reset` 一条，而告警文案对四条命令下了断言。
+        //
+        //    这里不再断言「文案列举的每条都被真跑过」：那个断言比的是「手写 cases == 手写
+        //    常量」，两侧都是人工维护，结构上抓不到「常量漏了代码里真实存在的命令」——设计
+        //    契约视角实测指出常量当时就漏了 4 条（`record-metrics`/`review-gate`/`approve`/
+        //    `update`，行为完全相同）。故常量改为**举例**（明示不穷举），本表则尽量覆盖全部
+        //    已知同型命令。让候选集从 clap 树派生的真守卫记入 MDR-023 待办。
+        let cases: Vec<(&str, Vec<&str>)> = vec![
+            (
+                "state transition",
+                vec![
+                    "state",
+                    "transition",
+                    "--module",
+                    "file:shared.ts",
+                    "--to",
+                    "done",
+                ],
+            ),
+            (
+                "state reset",
+                vec!["state", "reset", "--module", "file:shared.ts", "--force"],
+            ),
+            (
+                "state recover",
+                vec![
+                    "state",
+                    "recover",
+                    "--module",
+                    "file:shared.ts",
+                    "--policy",
+                    "retry",
+                ],
+            ),
+            (
+                "state repair --module",
+                vec![
+                    "state",
+                    "repair",
+                    "--clear-ghost-blocked-by",
+                    "--module",
+                    "file:shared.ts",
+                ],
+            ),
+            (
+                "state record-metrics",
+                vec![
+                    "state",
+                    "record-metrics",
+                    "--module",
+                    "file:shared.ts",
+                    "--test-pass-rate",
+                    "1.0",
+                ],
+            ),
+            (
+                "state review-gate",
+                vec!["state", "review-gate", "--module", "file:shared.ts"],
+            ),
+            (
+                "state approve",
+                vec!["state", "approve", "--module", "file:shared.ts"],
+            ),
+            (
+                // `--cas-version` 须与当前 `metadata.version` 一致：CAS 检查排在归一**之前**，
+                // 版本不对会先返 `E007` 而根本走不到宿主判定（本用例最初写 `1` 即撞上这点）。
+                "state update",
+                vec![
+                    "state",
+                    "update",
+                    "--module",
+                    "file:shared.ts",
+                    "--status",
+                    "done",
+                    "--cas-version",
+                    "0",
+                ],
+            ),
+        ];
+        for (name, argv) in &cases {
+            let (code, out) = run(argv);
+            assert_ne!(code, 0, "{name} 在宿主不唯一时应硬错: {out}");
+            let msg = out["data"]["message"].as_str().unwrap_or_default();
+            assert!(
+                msg.contains("member_files") && msg.contains("宿主不唯一"),
+                "{name} 的归因须指向划分而非模块不存在: {out}"
+            );
+            assert_eq!(
+                out["data"]["error_code"], "E012",
+                "{name} 的错误码须是 E012（告警与 run.md 都这么声明）: {out}"
+            );
+        }
+
+        // 而不带 `--module` 的全量 repair 确实**不**报错（它不做 key 归一）——把这条也钉住，
+        // 否则告警里那句「不受影响」将来会与实现漂移。
+        let (code, out) = run(&["state", "repair", "--clear-ghost-blocked-by"]);
+        assert_eq!(
+            code, 0,
+            "全量 repair 不做 key 归一，不应受坏划分影响: {out}"
+        );
+        assert_eq!(
+            out["data"]["was_noop"],
+            serde_json::json!(true),
+            "本 state 无幽灵引用，全量 repair 应为空操作: {out}"
+        );
+
+        // batch-transition-done 不硬错，而是分码——`not_found` 会把编排器指去查登记表。
+        let (_, out) = run(&[
+            "state",
+            "batch-transition-done",
+            "--module",
+            "file:shared.ts",
+        ]);
+        assert_eq!(
+            out["data"]["skipped"][0]["code"],
+            serde_json::json!("broken_partition"),
+            "坏划分须与 not_found 分码: {out}"
         );
     });
 }

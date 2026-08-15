@@ -53,6 +53,7 @@ status → `translating`，清全部「尝试进度」字段（`substatus` / `ph
 
 - **新增**：core `MigrationStateMachine::reset_module` + `ResetOutcome`（导出）；`validate` 无关。7 reset 单测 + 1 全字段 round-trip 单测；`state reset` CLI 命令 + `cmd_state_reset`（1 cli_e2e：回退/幂等/done 守护/force 恢复/cleanup 作用域）。
 - **重构**：`transition_module` 的组代表归一抽出为私有 `canonical_module_key`（reset 复用）；顺带把「`member_files` 跨组互斥不变量破坏」从仅 `debug_assert`（release 静默取迭代序首个）**升级为 release 运行时硬错**——复用到破坏性 reset 后误归组会清空**错误模块**进度字段（数据破坏），故必须硬错（专项审查 MEDIUM）。
+  - **补记（[MDR-023](023-cross-group-host-resolution.md)，2026-08-15）**：这里的硬错当时只覆盖「同一文件被 ≥2 个组列为成员」一种形态。`canonical_module_key` 先查 `modules`、命中即早返回，故「该 key **既登记为独立模块、又被别的组列为成员**」这一形态从未触发硬错，而是静默按「它自己」处理。现两形态一视同仁硬错，判定下沉到 `state::host_index::HostIndex`，与 `validate` 侧共用同一实现。
 - **改**：SKILL.md 新增「失败/中途模块回滚：`state reset`」单点约定；run.md 断点路由 `done` 行 + 单文件 Phase A 失败回滚改引用 `state reset`（paused/保留状态的回滚非 reset 语义，不动）。
 - **不改 schema**：`ModuleState` 无新字段（产物清单归编排器，见决策 1）。
 
