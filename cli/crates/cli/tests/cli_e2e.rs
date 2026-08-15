@@ -4281,13 +4281,97 @@ fn smoke_auto_unblock_refuses_when_dep_is_registered_and_owned_by_another_group(
             "blocked_by 不得被清: {after}"
         );
 
-        // ④ 对该 key 的状态操作宁停不错，且归因指向 member_files 划分而非「模块不存在」。
-        let (code, out) = run(&["state", "reset", "--module", "file:shared.ts", "--force"]);
-        assert_ne!(code, 0, "宿主不唯一时 reset 应硬错: {out}");
-        let msg = out["data"]["message"].as_str().unwrap_or_default();
-        assert!(
-            msg.contains("member_files"),
-            "归因须指向划分而非模块不存在: {out}"
+        // ④ 凡按 key 归一的单模块操作都宁停不错，且归因指向 member_files 划分而非「模块
+        //    不存在」。**清单取自 core 常量**（告警文案用同一个常量插值），故「文案声称会
+        //    报错的命令」与「这里真跑过的命令」不可能各说各话——沿用 `REPAIR_GHOST_COMMAND`
+        //    的绑定手法（MDR-022 决策 7）。
+        //
+        //    这条覆盖是必要的而非仪式：告警初版把不带 `--module` 的全量 `state repair` 也
+        //    列了进去，而实测它**不报错**（不做 key 归一，照常 noop）——那是靠推断写下的
+        //    失实声明，逐条真跑才发现。
+        let cases: Vec<(&str, Vec<&str>)> = vec![
+            (
+                "state transition",
+                vec![
+                    "state",
+                    "transition",
+                    "--module",
+                    "file:shared.ts",
+                    "--to",
+                    "done",
+                ],
+            ),
+            (
+                "state reset",
+                vec!["state", "reset", "--module", "file:shared.ts", "--force"],
+            ),
+            (
+                "state recover",
+                vec![
+                    "state",
+                    "recover",
+                    "--module",
+                    "file:shared.ts",
+                    "--policy",
+                    "retry",
+                ],
+            ),
+            (
+                "state repair --module",
+                vec![
+                    "state",
+                    "repair",
+                    "--clear-ghost-blocked-by",
+                    "--module",
+                    "file:shared.ts",
+                ],
+            ),
+        ];
+        let covered: std::collections::BTreeSet<&str> =
+            cases.iter().map(|(name, _)| *name).collect();
+        let declared: std::collections::BTreeSet<&str> =
+            rustmigrate_core::validate::KEY_NORMALIZING_COMMANDS
+                .iter()
+                .copied()
+                .collect();
+        assert_eq!(
+            covered, declared,
+            "告警文案列举的每条命令都必须在此真跑过（新增一条即须补一个 case）"
+        );
+        for (name, argv) in &cases {
+            let (code, out) = run(argv);
+            assert_ne!(code, 0, "{name} 在宿主不唯一时应硬错: {out}");
+            let msg = out["data"]["message"].as_str().unwrap_or_default();
+            assert!(
+                msg.contains("member_files") && msg.contains("宿主不唯一"),
+                "{name} 的归因须指向划分而非模块不存在: {out}"
+            );
+        }
+
+        // 而不带 `--module` 的全量 repair 确实**不**报错（它不做 key 归一）——把这条也钉住，
+        // 否则告警里那句「不受影响」将来会与实现漂移。
+        let (code, out) = run(&["state", "repair", "--clear-ghost-blocked-by"]);
+        assert_eq!(
+            code, 0,
+            "全量 repair 不做 key 归一，不应受坏划分影响: {out}"
+        );
+        assert_eq!(
+            out["data"]["was_noop"],
+            serde_json::json!(true),
+            "本 state 无幽灵引用，全量 repair 应为空操作: {out}"
+        );
+
+        // batch-transition-done 不硬错，而是分码——`not_found` 会把编排器指去查登记表。
+        let (_, out) = run(&[
+            "state",
+            "batch-transition-done",
+            "--module",
+            "file:shared.ts",
+        ]);
+        assert_eq!(
+            out["data"]["skipped"][0]["code"],
+            serde_json::json!("broken_partition"),
+            "坏划分须与 not_found 分码: {out}"
         );
     });
 }

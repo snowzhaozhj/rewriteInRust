@@ -222,14 +222,23 @@ pub fn validate_state(state_file: &MigrationStateFile) -> Result<Vec<String>> {
                 format!("{}（同属 {}）", quote_key(file), hosts)
             })
             .collect();
+        let commands = KEY_NORMALIZING_COMMANDS
+            .iter()
+            .map(|c| format!("`{c}`"))
+            .collect::<Vec<_>>()
+            .join("/");
         warnings.push(format!(
             "member_files 跨组互斥不变量被破坏，以下文件的宿主不唯一: {}\
              ——无法判定应按哪个组的状态判就绪，引用它们的 blocked_by 一律按未就绪处理\
-             （不会被 `--auto-unblock` 解除），对这些模块的 `state transition`/`reset`/\
-             `recover`/`repair` 会直接报错而非猜一个宿主。处置：修正 modules 的 \
-             member_files 划分，使每个文件只属一个组；**注意宿主清单里可能有该文件自己**\
-             ——那表示它既登记为独立模块、又被别的组列为成员，二者留一个",
-            listed.join("；")
+             （不会被 `--auto-unblock` 解除）；凡**按 key 归一的单模块操作**（{}）对它们直接\
+             报错而非猜一个宿主，`state batch-transition-done` 记 \
+             `skipped.code=broken_partition`。\
+             处置：修正 modules 的 member_files 划分，使每个文件只属一个组；\
+             **注意宿主清单里可能有该文件自己**——那表示它既登记为独立模块、又被别的组列为\
+             成员，二者留一个。（不带 `--module` 的全量 `{REPAIR_GHOST_COMMAND}` 不受影响，\
+             它不做 key 归一——但它也清不掉本问题，幽灵引用与坏划分是两回事）",
+            listed.join("；"),
+            commands
         ));
     }
 
@@ -367,6 +376,25 @@ pub struct BlockedCheckResult {
 /// 现在的处置是**对全部 11 个 status 一视同仁的单一动作**，所以它能是一个常量——这正是
 /// repair 不需要任何可达性预言的原因。
 pub const REPAIR_GHOST_COMMAND: &str = "state repair --clear-ghost-blocked-by";
+
+/// 「宿主不唯一」时会**直接报错**的单模块操作（子命令路径，不含 `rustmigrate` 前缀与各自的
+/// 必填参数）。
+///
+/// 共同特征是**按 key 归一**：都经 `MigrationStateMachine::canonical_module_key` 把入参解析
+/// 到宿主模块，宿主不唯一即拒绝。跨组告警的文案由本常量插值，e2e 亦据它校验「文案列举的每条
+/// 都被真跑过」——沿用 [`REPAIR_GHOST_COMMAND`] 的绑定手法（MDR-022 决策 7），使「文案说会报错
+/// 的命令」与「实测真报错的命令」不可能各说各话。
+///
+/// **不含**不带 `--module` 的全量 `state repair`：它不做 key 归一，故不报错（实测 noop）——
+/// 那条曾被本告警的初版一并列进去，是靠推断而非实测写下的失实声明。
+/// 也不含 `state batch-transition-done`：它逐模块独立处理、不硬错，而是记
+/// `skipped.code=broken_partition`。
+pub const KEY_NORMALIZING_COMMANDS: [&str; 4] = [
+    "state transition",
+    "state reset",
+    "state recover",
+    "state repair --module",
+];
 
 /// 一条幽灵引用：`module` 的 `blocked_by` 指向了 `missing`，而后者无处归属。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
