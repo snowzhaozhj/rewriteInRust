@@ -186,7 +186,7 @@ cargo test 2>&1
     --by-policy <策略 id> --attest <项1> --attest <项2> ...
   ```
   - **不给 `--by-policy` 时一个都不升 done**（整组 check 通过不构成签批凭据），全部落 `skipped[].code=approval_required` 并降级 warning。
-  - 逐条读 `data.skipped[]`：`code` 区分处置——`awaiting_final_review`（等人签批，正常）/ `not_agent_done` / `not_reviewing` / `mandatory_manual` / `missing_attestations` / `policy_not_enabled` / `not_found`。不要把它们混成一句「部分失败」。
+  - 逐条读 `data.skipped[]`：`code` 区分处置——`awaiting_final_review`（等人签批，正常）/ `not_agent_done` / `not_reviewing` / `mandatory_manual` / `missing_attestations` / `policy_not_enabled` / `not_found` / `broken_partition`（`member_files` 跨组互斥被破坏、该 key 的宿主不唯一：**数据损坏，处置是修 `member_files` 划分**，不是补登记也不是重译；`rustmigrate validate state` 会列出全部被破坏的划分）。不要把它们混成一句「部分失败」。
   - 策略须已在 `.rustmigrate.toml` 的 `[review_gate].auto_approve_policies` 预签（默认空 = 全停门等人签批），否则整批被拒。
 
   **④ 收尾**：待签批清单不阻塞本层其他模块，也不阻塞下一层的**无依赖**模块（依赖待签批模块的下游按 `blocked_by` 机制自动阻塞——待签批模块非 `done`，层间依赖门禁不放行）。

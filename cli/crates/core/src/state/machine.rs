@@ -1205,10 +1205,14 @@ impl MigrationStateMachine {
     /// # 三条不变量
     ///
     /// 1. **只删幽灵条目，绝不删整个 `blocked_by` 数组。** 可归一到宿主模块的合法引用（`Resolved`，与宿主是否终态无关）与宿主
-    ///    歧义引用（`Ambiguous`）原样保留——后者是 `member_files` 跨组互斥不变量被破坏的
-    ///    **唯一检出通道**（`validate_state` 只经它扫出跨组破坏），清整个数组会连带把这条
-    ///    通道擦掉。判据不在本方法里重写，复用 [`crate::validate::scan_ghost_references`]
-    ///    （其内部 `resolve_blocked_ref` 是「什么算幽灵」的唯一实现）。
+    ///    歧义引用（`Ambiguous`）原样保留——repair 的职责是删「无处归属」的条目，而歧义引用
+    ///    的实体是存在的，坏的是 `member_files` 划分，处置是修划分。判据不在本方法里重写，
+    ///    复用 [`crate::validate::scan_ghost_references`]（其内部经 [`HostIndex`] 判定
+    ///    「什么算幽灵」，与 machine 侧的归一共用同一实现）。
+    ///
+    ///    历史注记：这条不变量原先还有一个理由——`Ambiguous` 引用曾是跨组破坏的**唯一检出
+    ///    通道**（`validate_state` 只在遍历 `blocked_by` 时顺带发现）。该理由已由 MDR-023
+    ///    取消：跨组告警改扫**全量 `member_files` 划分**，不再依赖恰好有引用指向它。
     /// 2. **不改状态、不清进度字段、不发产物清理指令**——与 [`reset_module`](Self::reset_module)
     ///    （清 8 个进度字段 + 输出删 `.rs` 作用域）正相反。清完后若模块仍 `blocked` 而
     ///    `blocked_by` 已空，它在 `check_blocked_modules` 里自然判 `ready`，由既有
@@ -4406,10 +4410,11 @@ mod tests {
 
     #[test]
     fn test_repair_preserves_ambiguous_reference() {
-        // 宿主歧义引用（同一 key 被多个组列为 member_files）**不是**幽灵，必须原样保留：
-        // 它是 `member_files` 跨组互斥不变量被破坏的唯一检出通道（`validate_state` 只经它
-        // 扫出跨组破坏）。第四轮实证 `reset` 清整个数组会把这条通道连带擦掉——本断言钉死
-        // repair 不重犯。
+        // 宿主歧义引用（同一 key 的宿主不唯一）**不是**幽灵，必须原样保留：实体存在，坏的是
+        // `member_files` 划分，处置是修划分而非删引用。
+        //
+        // 该保留原先还有第二个理由——它曾是跨组破坏的唯一检出通道；MDR-023 把跨组告警改成扫
+        // 全量划分后那个理由已不成立，但保留本身依旧正确（repair 只删无处归属的条目）。
         let mut m = new_machine();
         let mut holder = module_with_status(ModuleStatus::Blocked);
         holder.blocked_by = Some(vec!["shared.ts".to_string(), "nope".to_string()]);
