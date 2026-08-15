@@ -4282,13 +4282,13 @@ fn smoke_auto_unblock_refuses_when_dep_is_registered_and_owned_by_another_group(
         );
 
         // ④ 凡按 key 归一的单模块操作都宁停不错，且归因指向 member_files 划分而非「模块
-        //    不存在」。**清单取自 core 常量**（告警文案用同一个常量插值），故「文案声称会
-        //    报错的命令」与「这里真跑过的命令」不可能各说各话——沿用 `REPAIR_GHOST_COMMAND`
-        //    的绑定手法（MDR-022 决策 7）。
+        //    不存在」。**逐条真跑**——初版只测了 `reset` 一条，而告警文案对四条命令下了断言。
         //
-        //    这条覆盖是必要的而非仪式：告警初版把不带 `--module` 的全量 `state repair` 也
-        //    列了进去，而实测它**不报错**（不做 key 归一，照常 noop）——那是靠推断写下的
-        //    失实声明，逐条真跑才发现。
+        //    这里不再断言「文案列举的每条都被真跑过」：那个断言比的是「手写 cases == 手写
+        //    常量」，两侧都是人工维护，结构上抓不到「常量漏了代码里真实存在的命令」——设计
+        //    契约视角实测指出常量当时就漏了 4 条（`record-metrics`/`review-gate`/`approve`/
+        //    `update`，行为完全相同）。故常量改为**举例**（明示不穷举），本表则尽量覆盖全部
+        //    已知同型命令。让候选集从 clap 树派生的真守卫记入 MDR-023 待办。
         let cases: Vec<(&str, Vec<&str>)> = vec![
             (
                 "state transition",
@@ -4326,18 +4326,41 @@ fn smoke_auto_unblock_refuses_when_dep_is_registered_and_owned_by_another_group(
                     "file:shared.ts",
                 ],
             ),
+            (
+                "state record-metrics",
+                vec![
+                    "state",
+                    "record-metrics",
+                    "--module",
+                    "file:shared.ts",
+                    "--test-pass-rate",
+                    "1.0",
+                ],
+            ),
+            (
+                "state review-gate",
+                vec!["state", "review-gate", "--module", "file:shared.ts"],
+            ),
+            (
+                "state approve",
+                vec!["state", "approve", "--module", "file:shared.ts"],
+            ),
+            (
+                // `--cas-version` 须与当前 `metadata.version` 一致：CAS 检查排在归一**之前**，
+                // 版本不对会先返 `E007` 而根本走不到宿主判定（本用例最初写 `1` 即撞上这点）。
+                "state update",
+                vec![
+                    "state",
+                    "update",
+                    "--module",
+                    "file:shared.ts",
+                    "--status",
+                    "done",
+                    "--cas-version",
+                    "0",
+                ],
+            ),
         ];
-        let covered: std::collections::BTreeSet<&str> =
-            cases.iter().map(|(name, _)| *name).collect();
-        let declared: std::collections::BTreeSet<&str> =
-            rustmigrate_core::validate::KEY_NORMALIZING_COMMANDS
-                .iter()
-                .copied()
-                .collect();
-        assert_eq!(
-            covered, declared,
-            "告警文案列举的每条命令都必须在此真跑过（新增一条即须补一个 case）"
-        );
         for (name, argv) in &cases {
             let (code, out) = run(argv);
             assert_ne!(code, 0, "{name} 在宿主不唯一时应硬错: {out}");
@@ -4345,6 +4368,10 @@ fn smoke_auto_unblock_refuses_when_dep_is_registered_and_owned_by_another_group(
             assert!(
                 msg.contains("member_files") && msg.contains("宿主不唯一"),
                 "{name} 的归因须指向划分而非模块不存在: {out}"
+            );
+            assert_eq!(
+                out["data"]["error_code"], "E012",
+                "{name} 的错误码须是 E012（告警与 run.md 都这么声明）: {out}"
             );
         }
 

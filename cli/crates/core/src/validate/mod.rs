@@ -223,7 +223,7 @@ pub fn validate_state(state_file: &MigrationStateFile) -> Result<Vec<String>> {
                 format!("{}（同属 {}）", quote_key(file), hosts)
             })
             .collect();
-        let commands = KEY_NORMALIZING_COMMANDS
+        let examples = KEY_NORMALIZING_COMMAND_EXAMPLES
             .iter()
             .map(|c| format!("`{c}`"))
             .collect::<Vec<_>>()
@@ -231,15 +231,15 @@ pub fn validate_state(state_file: &MigrationStateFile) -> Result<Vec<String>> {
         warnings.push(format!(
             "member_files 跨组互斥不变量被破坏，以下文件的宿主不唯一: {}\
              ——无法判定应按哪个组的状态判就绪，引用它们的 blocked_by 一律按未就绪处理\
-             （不会被 `--auto-unblock` 解除）；凡**按 key 归一的单模块操作**（{}）对它们直接\
-             报错而非猜一个宿主，`state batch-transition-done` 记 \
-             `skipped.code=broken_partition`。\
+             （不会被 `--auto-unblock` 解除）；**凡按 key 归一的单模块操作**（带 `--module` 的\
+             命令，如 {} 等，不止这些）对它们直接报错（`E012`）而非猜一个宿主，\
+             `state batch-transition-done` 记 `skipped.code=broken_partition`。\
              处置：修正 modules 的 member_files 划分，使每个文件只属一个组；\
              **注意宿主清单里可能有该文件自己**——那表示它既登记为独立模块、又被别的组列为\
              成员，二者留一个。（不带 `--module` 的全量 `{REPAIR_GHOST_COMMAND}` 不受影响，\
              它不做 key 归一——但它也清不掉本问题，幽灵引用与坏划分是两回事）",
             listed.join("；"),
-            commands
+            examples
         ));
     }
 
@@ -378,19 +378,23 @@ pub struct BlockedCheckResult {
 /// repair 不需要任何可达性预言的原因。
 pub const REPAIR_GHOST_COMMAND: &str = "state repair --clear-ghost-blocked-by";
 
-/// 「宿主不唯一」时会**直接报错**的单模块操作（子命令路径，不含 `rustmigrate` 前缀与各自的
-/// 必填参数）。
+/// 「宿主不唯一」时会**直接报错**的单模块操作的**举例**（子命令路径，不含 `rustmigrate` 前缀
+/// 与各自的必填参数）。
 ///
-/// 共同特征是**按 key 归一**：都经 `MigrationStateMachine::canonical_module_key` 把入参解析
-/// 到宿主模块，宿主不唯一即拒绝。跨组告警的文案由本常量插值，e2e 亦据它校验「文案列举的每条
-/// 都被真跑过」——沿用 [`REPAIR_GHOST_COMMAND`] 的绑定手法（MDR-022 决策 7），使「文案说会报错
-/// 的命令」与「实测真报错的命令」不可能各说各话。
+/// ⚠️ **这不是穷举清单，文案里也不得当成穷举用**。共同特征是按 key 归一——都经
+/// [`MigrationStateMachine::canonical_module_key`](crate::state::MigrationStateMachine::canonical_module_key)
+/// 把入参解析到宿主模块，宿主不唯一即拒绝。该函数有 7 个生产调用点，实测至少 8 条 CLI 命令
+/// 命中同一行为（除下列 4 条外还有 `state record-metrics` / `review-gate` / `approve` /
+/// `update --cas-version`，均返 `E012` + 同一归因）。
 ///
-/// **不含**不带 `--module` 的全量 `state repair`：它不做 key 归一，故不报错（实测 noop）——
-/// 那条曾被本告警的初版一并列进去，是靠推断而非实测写下的失实声明。
-/// 也不含 `state batch-transition-done`：它逐模块独立处理、不硬错，而是记
-/// `skipped.code=broken_partition`。
-pub const KEY_NORMALIZING_COMMANDS: [&str; 4] = [
+/// **本常量的初版把自己写成了穷举**（告警文案列出 4 条、e2e 断言「文案列举的每条都被真跑
+/// 过」），设计契约视角实测指出：⒜ 4 条清单合并时就已失实；⒝ 那个 e2e 断言比的是「手写
+/// cases == 手写常量」，两侧都是人工维护，**结构上无法检出「常量漏了代码里真实存在的命令」**
+/// ——它给的是虚假的安全感，而非 `reset_force_reason` 那种真双向守卫（一侧遍历
+/// `ModuleStatus::iter()` 过真实函数）。穷举「凡走某内部函数的命令」需要静态分析，手写清单
+/// 假装它是双向守卫比不写更糟。故改为**举例 + 明示不穷举**；真守卫的修法（从 clap 树取全部
+/// 带 `--module` 的叶子命令、在坏 state 上逐个跑、只允许显式豁免）记入 MDR-023 后续 TODO。
+pub const KEY_NORMALIZING_COMMAND_EXAMPLES: [&str; 4] = [
     "state transition",
     "state reset",
     "state recover",
