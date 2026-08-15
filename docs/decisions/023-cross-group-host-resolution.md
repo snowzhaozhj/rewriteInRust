@@ -76,6 +76,23 @@
 
 修复前 5000 → 20000 是 4× 规模、**15.8× 时间**（平方）；修复后 3.1×（线性）。真实规模百级故不阻塞任何人，但 60 秒无输出在 CLI 上与挂死无法区分。
 
+### 决策 6：告警对命令行为的断言由常量绑定，且逐条实测
+
+跨组告警要告诉编排器「这类 key 上什么会失败」。初版按推断写了「`state transition`/`reset`/`recover`/`repair` 会直接报错」，自查时逐条真跑六个命令，发现**不带 `--module` 的全量 `state repair` 并不报错**（它不做 key 归一，照常 noop）——一条靠推断写下的失实声明。
+
+修法沿用 MDR-022 决策 7 的手法：清单收成 `validate::KEY_NORMALIZING_COMMANDS` 常量，告警文案插值它，e2e 据它断言「文案列举的每条都被真跑过」（新增一条即须补一个 case，否则集合不等而报红）。判据本身也从枚举改为**性质**——「凡按 key 归一的单模块操作」，故将来新增的命令只要走归一就自然满足，声明不因新增而失实。
+
+实测结果（同一坏 state，逐条）：
+
+| 命令 | 实测 |
+|---|---|
+| `state transition --to done` | `E012`，归因指向 `member_files` |
+| `state reset --force` | `E012`，同上 |
+| `state recover --policy retry` | `E012`，同上 |
+| `state repair --clear-ghost-blocked-by --module <M>` | `E012`，同上 |
+| `state repair --clear-ghost-blocked-by`（全量） | **`status:ok`、`was_noop:true`**——不做 key 归一，故不受影响；但它也清不掉本问题 |
+| `state batch-transition-done --module <M>` | 不硬错，`skipped.code=broken_partition` |
+
 ## 影响
 
 - **行为变更（非破坏性 API，但改既有判定）**：「key 既是登记模块、又被别组列为成员」这类引用从「合法、可能判 ready」变为「一律非终态、不判 ready，且对该 key 的状态操作硬错」。4 个消费方（`check_blocked_modules` / `detect_blocked_cycles` / `scan_ghost_references` / `validate_state` 跨组告警）连带受影响，逐个有测试。
@@ -90,9 +107,10 @@
   1. `resolve` 恢复「命中即返回」→ **5 层同时红**（e2e + host_index ×2 + machine + validate），即原始缺陷复现；
   2. 自引用计入宿主 → **11 红**（6 个既有 e2e + 5 个新反向守卫），证明决策 2 的排除是必须的、且守卫有区分力；
   3. 跨组告警退回「沿 `blocked_by` 撞见」→ 只有 `test_broken_partition_warns_without_any_blocked_by_reference` 红，证明它是该覆盖的唯一守卫；
-  4. `broken_partition` 码退回 `not_found` → 分码测试红，报错里两条都是 `not_found`。
-- **端到端锁** `smoke_auto_unblock_refuses_when_dep_is_registered_and_owned_by_another_group`：按上表四行逐条断言（告警 / 不判就绪 / 不解除且不落盘 / reset 归因指向 `member_files`）。
-- `just ci` 全绿 912 测试。
+  4. `broken_partition` 码退回 `not_found` → 分码测试红，报错里两条都是 `not_found`；
+  5. 从 e2e 的 case 表里删掉 `state recover` → 覆盖完整性断言红并列出集合差集（证明「文案列举 == 真跑过」这条绑定不是摆设）。
+- **端到端锁** `smoke_auto_unblock_refuses_when_dep_is_registered_and_owned_by_another_group`：按上表逐条断言（告警 / 不判就绪 / 不解除且不落盘 / 四条命令硬错 / 全量 repair 不报错 / batch 分码）。
+- 测试 897 → 912，`just ci` 全绿。
 
 ## 后续 TODO（记账，非阻塞）
 
