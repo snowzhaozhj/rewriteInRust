@@ -4176,6 +4176,123 @@ fn smoke_transition_on_residual_ghost_succeeds_without_clearing_blocked_by() {
 }
 
 #[test]
+fn smoke_auto_unblock_refuses_when_dep_is_registered_and_owned_by_another_group() {
+    // MDR-023 端到端锁：被引 key **既是登记模块、又被别的组列为 `member_files` 成员**时，
+    // 归一此前在「已是登记模块」处早返回、判成合法引用。
+    //
+    // 编排器在写这个测试前先用真实 CLI 独立复现了原始缺陷（`/tmp` 造同形 state）：
+    // `file:shared.ts` 登记 `done` 而 `g1` 组是 `translating` → `validate state` 报
+    // `valid:true` **零跨组告警**，`--check-blocked` 把 holder 列进 `ready_to_unblock`，
+    // `--auto-unblock` **真的解除**（`blocked → translating`）并落盘——而该文件实际还在 g1
+    // 组里翻译中。这不是漏诊断，是数据损坏。
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("linear-deps"), tmp.path());
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        assert_eq!(run(&["graph", "build", "--root", "src"]).0, 0);
+        assert_eq!(run(&["state", "populate-modules"]).0, 0);
+
+        let sp = tmp.path().join(".rust-migration/migration-state.json");
+        let mut sf: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+        let template = sf["modules"]
+            .as_object()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()
+            .clone();
+        let mk = |status: &str,
+                  blocked_by: serde_json::Value,
+                  pre: serde_json::Value,
+                  members: serde_json::Value| {
+            let mut m = template.clone();
+            m["status"] = serde_json::json!(status);
+            m["blocked_by"] = blocked_by;
+            m["pre_blocked_status"] = pre;
+            m["composite_kind"] = serde_json::Value::Null;
+            m.as_object_mut().unwrap().remove("member_files");
+            if !members.is_null() {
+                m["member_files"] = members;
+                m["composite_kind"] = serde_json::json!("coupled_batch");
+            }
+            m
+        };
+        let null = serde_json::Value::Null;
+        sf["modules"] = serde_json::json!({
+            // 登记为独立模块且已 done。
+            "file:shared.ts": mk("done", null.clone(), null.clone(), null.clone()),
+            // 同一文件又被 g1 组列为成员，而 g1 还在翻译中 → 划分被破坏。
+            "g1": mk("translating", null.clone(), null.clone(),
+                     serde_json::json!(["g1", "file:shared.ts"])),
+            "holder": mk("blocked", serde_json::json!(["file:shared.ts"]),
+                         serde_json::json!("translating"), null.clone()),
+        });
+        std::fs::write(&sp, serde_json::to_string_pretty(&sf).unwrap()).unwrap();
+
+        // ① 体检必须报出来（此前 `valid:true` 零告警）。
+        let (_, json) = run(&["validate", "state"]);
+        let warns = json["warnings"].as_array().cloned().unwrap_or_default();
+        let hit = warns
+            .iter()
+            .filter_map(|w| w.as_str())
+            .find(|w| w.contains("跨组互斥"))
+            .unwrap_or_else(|| panic!("坏划分须告警: {json}"));
+        assert!(
+            hit.contains("file:shared.ts") && hit.contains("g1"),
+            "告警须列出全部宿主: {hit}"
+        );
+
+        // ② 不得判就绪——`done` 那个宿主不代表 g1 组里那份也完成了。
+        let (_, json) = run(&["validate", "state", "--check-blocked"]);
+        assert_eq!(
+            json["data"]["ready_to_unblock"],
+            serde_json::json!([]),
+            "宿主不唯一时不得判可解除: {json}"
+        );
+        assert_eq!(
+            json["data"]["still_blocked"],
+            serde_json::json!(["holder"]),
+            "holder 须留在 still_blocked: {json}"
+        );
+        // 也不是幽灵：实体存在，坏的是划分，处置是修 member_files 而非 repair。
+        assert_eq!(
+            json["data"]["ghost_refs"],
+            serde_json::json!([]),
+            "坏划分不得被当成幽灵引用: {json}"
+        );
+
+        // ③ `--auto-unblock` 一个都不许动（原始缺陷的直接后果就在这一步落盘）。
+        let (_, out) = run(&["validate", "state", "--check-blocked", "--auto-unblock"]);
+        assert_eq!(
+            out["data"]["unblocked"],
+            serde_json::json!([]),
+            "不得解除: {out}"
+        );
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+        assert_eq!(
+            after["modules"]["holder"]["status"], "blocked",
+            "holder 状态不得被改: {after}"
+        );
+        assert_eq!(
+            after["modules"]["holder"]["blocked_by"],
+            serde_json::json!(["file:shared.ts"]),
+            "blocked_by 不得被清: {after}"
+        );
+
+        // ④ 对该 key 的状态操作宁停不错，且归因指向 member_files 划分而非「模块不存在」。
+        let (code, out) = run(&["state", "reset", "--module", "file:shared.ts", "--force"]);
+        assert_ne!(code, 0, "宿主不唯一时 reset 应硬错: {out}");
+        let msg = out["data"]["message"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("member_files"),
+            "归因须指向划分而非模块不存在: {out}"
+        );
+    });
+}
+
+#[test]
 fn smoke_auto_unblock_refuses_entirely_when_cycles_present() {
     // run.md 步骤 2 的分流表把 `ready_to_unblock` 与 `cycles` 列成两行，读起来像可以各自
     // 处理；但 `--auto-unblock` 在环存在时**整体拒绝**（E012 + 退出码 1），连本可解除的
