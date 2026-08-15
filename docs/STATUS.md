@@ -18,7 +18,7 @@
     - **DEVIATION 已处置**：MDR-021:231 的同类声明补取代标记；`skipped` doc 里 `policy_rejected`/`transition_rejected` 实现中不存在（pre-existing）与 `E012` 的 `suggestion` 误导（pre-existing）记入 MDR-023 待办 1/4。
   - **编排器自查发现（未被任何视角报出）**：`cmd_state_deps` 是**第三处**判定。这条正是「给判据加归一时所有共用路径必须同步」那条教训在本 PR 内的复发——我在 `host_index` 模块头写「此前两份判定」时就已失实（实为三份），已订正。
   - **下一步**：① **重跑失败的 5 个视角**（额度刷新后）——按 CLAUDE.md「审查修复本身要再过一轮」，本轮修复量（+3 commit、含行为变更与性能重构）远超豁免阈值，必须再审；② 用户拍板合并。
-  - **CI**：远端针对 `6e31962` 5 项全过；此后又推了 3 个 commit，**合并前须确认 CI 针对最新 sha 复跑**（本仓教训：「本地绿 ≠ PR 绿」，记「待拍板」必须带已推送 sha + 远端 CI 是否针对该 sha 复跑）。本地 `just ci` 全绿 **914 测试**（897 → 914）。
+  - **CI**：**远端针对最新 sha `e40af62` 5 项全过**（check/coverage/deny/shellcheck/test），`mergeable: MERGEABLE`。本地 `just ci` 全绿 **914 测试**（897 → 914）。按本仓教训（「本地绿 ≠ PR 绿」），若此后再推提交须重新确认 CI 针对新 sha 复跑。
   - **负向实证累计六轮**（独立 worktree / 变异，全部报红且归因精确）：① 恢复早返回 → **5 层同时红**（原始缺陷复现）；② 自引用计入宿主 → **11 红**（6 个既有 e2e + 5 个新反向守卫）；③ 跨组告警退回沿引用撞见 → 唯一守卫红；④ `broken_partition` 码退回 `not_found` → 分码测试红；⑤ 删掉一条命令的 e2e case → 覆盖断言红（该断言后按设计契约结论整体删除，见上）；⑥ 归一退回循环内 → **性能回归复现**（N=4000 17.33s vs 0.48s）。
 - **位置（2026-08-13，已被上条取代，保留作历史）**：master 在 `dac8950`——**[#90](https://github.com/snowzhaozhj/rewriteInRust/pull/90) 已由用户拍板合并**（squash，13 文件 +1191/−34），**开放 PR / 开放 issue 均清零**。#90 = `state repair --clear-ghost-blocked-by`，收口「幽灵引用检出已交付、处置为零」这个状态。决策与边界见 **[MDR-022](decisions/022-ghost-blocked-by-repair-boundary.md)**。
   - **⚠️ 下方「三条不变量」①、「异构交叉抓出两条」①②、以及各处「唯一检出通道」表述均已被 [MDR-023](decisions/023-cross-group-host-resolution.md)（PR #91）收口或取代**，阅读时以顶部条目为准。

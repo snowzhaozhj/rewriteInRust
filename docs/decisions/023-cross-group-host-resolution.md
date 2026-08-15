@@ -131,22 +131,25 @@
 
 ## 影响
 
-- **行为变更（非破坏性 API，但改既有判定）**：「key 既是登记模块、又被别组列为成员」这类引用从「合法、可能判 ready」变为「一律非终态、不判 ready，且对该 key 的状态操作硬错」。4 个消费方（`check_blocked_modules` / `detect_blocked_cycles` / `scan_ghost_references` / `validate_state` 跨组告警）连带受影响，逐个有测试。
+- **行为变更（非破坏性 API，但改既有判定）**：「key 既是登记模块、又被别组列为成员」这类引用从「合法、可能判 ready」变为「一律非终态、不判 ready，且对该 key 的状态操作硬错」。5 个消费方（`check_blocked_modules` / `detect_blocked_cycles` / `scan_ghost_references` / `validate_state` 跨组告警 / CLI `cmd_state_deps`）连带受影响，逐个有测试。
 - **`skipped.code` 新增 `broken_partition`**：机读契约的**增量**（旧值域全部保留）。已同步 `06` 值域声明与 `workflow.md` 分流列表。
-- **新增 pub 类型** `HostIndex` / `HostResolution` 与 pub 方法 `resolve_module_host`；删除私有 `resolve_blocked_ref`（无 pub 影响）。
+- **新增 pub 类型** `HostIndex` / `HostResolution`、pub 方法 `resolve_module_host`、pub fn `broken_partition_message`；新增私有 `approve_canonical`；删除私有 `resolve_blocked_ref`（无 pub 移除）。
 - 告警文本变化（`warnings` 是用户可见文本、非机读契约；`plugin/` 对旧措辞零依赖）。
-- 测试 897 → 912（8 host_index 单测 + 3 machine + 3 validate + 1 e2e）。
+- **`state deps` 在依赖闭包含坏划分文件时整命令硬错**——这是新增的失败路径。权衡：宿主不唯一意味着「该依赖属于哪个组」不确定，而组状态决定就绪；即便两个宿主当下终态性相同（选谁都判 ready），那也是**按当下状态推导**，正是 MDR-021/022 反复被推翻的形状。故宁停不错，并把损坏暴露出来促使修复。**不涉及该文件的模块不受影响**（只有入参归一或其依赖闭包命中坏划分才报错）。
+- 测试 897 → 914。
 
 ## 验证
 
-- **负向实证四轮**（独立 worktree，全部报红且归因精确）：
+- **负向实证六轮**（独立 worktree / 变异，全部报红且归因精确）：
   1. `resolve` 恢复「命中即返回」→ **5 层同时红**（e2e + host_index ×2 + machine + validate），即原始缺陷复现；
   2. 自引用计入宿主 → **11 红**（6 个既有 e2e + 5 个新反向守卫），证明决策 2 的排除是必须的、且守卫有区分力；
   3. 跨组告警退回「沿 `blocked_by` 撞见」→ 只有 `test_broken_partition_warns_without_any_blocked_by_reference` 红，证明它是该覆盖的唯一守卫；
   4. `broken_partition` 码退回 `not_found` → 分码测试红，报错里两条都是 `not_found`；
-  5. 从 e2e 的 case 表里删掉 `state recover` → 覆盖完整性断言红并列出集合差集（证明「文案列举 == 真跑过」这条绑定不是摆设）。
-- **端到端锁** `smoke_auto_unblock_refuses_when_dep_is_registered_and_owned_by_another_group`：按上表逐条断言（告警 / 不判就绪 / 不解除且不落盘 / 四条命令硬错 / 全量 repair 不报错 / batch 分码）。
-- 测试 897 → 912，`just ci` 全绿。
+  5. 从 e2e 的 case 表里删掉 `state recover` → 覆盖完整性断言红并列出集合差集（**该断言后按设计契约结论整体删除**，见决策 6——它比的是两份手写清单，不是真守卫）；
+  6. 归一退回循环内 → **性能回归复现**（N=4000 17.33s，master 0.49s，修复后 0.48s）。
+- **端到端锁** `smoke_auto_unblock_refuses_when_dep_is_registered_and_owned_by_another_group`：按决策 6 的表逐条断言（告警 / 不判就绪 / 不解除且不落盘 / **8 条命令**硬错且 `error_code==E012` / 全量 repair 不报错 / batch 分码）。
+- **「唯一实现」已用跨行 grep 核实**：`rg -Un --multiline "member_files[\s\S]{0,200}?(iter\(\)\.any|contains\(|find\(|\.get\()" crates/` 在**生产代码里零命中**（全部命中都在测试文件），即三份反查判定已确实收敛（`HostIndex::build` 用 `for file in members` 建表，不属该模式）。这条核实是必要的：编排器最初用单行 grep 只找到两份判定，漏掉了 `cmd_state_deps` 那一处。
+- 测试 897 → **914**，本地 `just ci` 全绿；**远端 CI 针对 `e40af62` 5 项全过**。
 
 ## 后续 TODO（记账，非阻塞）
 
