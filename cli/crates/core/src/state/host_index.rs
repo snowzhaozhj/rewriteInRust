@@ -7,20 +7,24 @@
 //! 成员的组——而这两个来源**可以同时命中**，那正是 `member_files` 跨组互斥不变量被破坏
 //! 的形态之一。
 //!
-//! 此前 `validate::resolve_blocked_ref` 与 `MigrationStateMachine::canonical_module_key`
-//! 各写了一份判定，且两份都是「先查 `modules`，命中就早返回」——于是「key 既是登记模块、
-//! 又被别的组列为成员」这一类破坏被判成**合法**引用。实测后果不是漏诊断而是数据损坏：
-//! `file:shared.ts` 登记为 `done` 而 `g1` 组（`translating`）把它列为成员时，
-//! `validate state` 零跨组告警、`--auto-unblock` 真的解除了引用它的模块并落盘，而该文件
-//! 实际还在翻译中（MDR-023）。
+//! 此前这一判定在仓内有**三份**各自独立的实现，且**三份都是「先查 `modules`，命中就早返回」**：
+//! `validate::resolve_blocked_ref`（处置：降级告警，旧文件须可读）、
+//! `MigrationStateMachine::canonical_module_key`（处置：硬错，MDR-015:55）、
+//! CLI `cmd_state_deps` 的内联归一（处置：静默取 `find` 的迭代序首个）。于是「key 既是登记
+//! 模块、又被别的组列为成员」这一类破坏在三条路径上**同时**被判成合法。
+//!
+//! 实测后果不是漏诊断而是数据损坏：`file:shared.ts` 登记为 `done` 而 `g1` 组（`translating`）
+//! 把它列为成员时，`validate state` 零跨组告警、`--auto-unblock` 真的解除了引用它的模块并
+//! 落盘，而该文件实际还在翻译中；`state deps` 则返回 `all_ready:true` 零告警，让依赖门禁静默
+//! 放行（MDR-023）。
 //!
 //! 故本模块的两条设计约束：
 //!
 //! 1. **不早返回**。[`HostIndex::resolve`] 把两个来源的宿主**全部收集完**再判个数，
 //!    互斥破坏因此无法从任何一侧溜过去。
-//! 2. **唯一实现**。validate 侧（降级为告警，旧文件须可读）与 machine 侧（硬错，
-//!    MDR-015）处置策略不同，但**判定**共用这里——两份判定必然漂移，而这个功能已经为
-//!    「同一概念两份表示」付过账（MDR-021 待办 1 第三点）。
+//! 2. **唯一实现**。三处处置策略各不相同（告警 / 硬错 / 门禁拒绝）是对的，但**判定**共用
+//!    这里——多份判定必然漂移，而这三份不是漂移而是**同时错在同一处**，因为它们是互相
+//!    照着写的。判定失败时的用户可见说明也共用 [`broken_partition_message`]。
 
 use std::collections::HashMap;
 
@@ -42,6 +46,40 @@ pub enum HostResolution<'a> {
     Missing,
 }
 
+/// 把模块 key 渲染进人读告警/错误文本。
+///
+/// 用 JSON 字符串字面量而非裸反引号包裹：key 来自 state 文件（可被手工编辑），
+/// 若其中含反引号、`→`、`、` 或换行，裸包裹会让文本里的条目边界可被内容伪造，
+/// 读者无从分辨哪部分是 key、哪部分是分隔符。JSON 转义同时处理引号与控制字符。
+///
+/// 原在 `validate` 模块内私有；[`broken_partition_message`] 需要同一处理（同一份数据、同一类
+/// 风险给相反答案是「已有实现要沿用别重写」的反面），故上移到判定所在的本模块共用。
+pub(crate) fn quote_key(key: &str) -> String {
+    serde_json::to_string(key).unwrap_or_else(|_| format!("{key:?}"))
+}
+
+/// 「宿主不唯一」的统一说明文本（`member_files` 跨组互斥不变量被破坏）。
+///
+/// 三条路径共用它——`MigrationStateMachine::canonical_module_key` 的错误信息、
+/// `batch_transition_done` 的 `skipped.detail`、CLI `state deps` 的归一失败——因为同一损坏在
+/// 各条路径上各写一遍措辞必然漂移，而它是用户看到的唯一归因来源。
+///
+/// key 一律经 [`quote_key`] 转义，不用裸反引号。
+pub fn broken_partition_message(key: &str, hosts: &[&String]) -> String {
+    let quoted_key = quote_key(key);
+    let hosts = hosts
+        .iter()
+        .map(|h| quote_key(h))
+        .collect::<Vec<_>>()
+        .join("、");
+    format!(
+        "member_files 跨组互斥不变量被破坏：{quoted_key} 的宿主不唯一（{hosts}）——归一到任何\
+         一个都可能改错模块，故拒绝操作。修正 modules 的 member_files 划分后重试；若宿主清单里\
+         含 {quoted_key} 自己，表示它既登记为独立模块、又被别的组列为成员，二者留一个。\
+         `rustmigrate validate state` 会列出全部被破坏的划分"
+    )
+}
+
 /// key → 宿主模块的一次性索引。
 ///
 /// # 为什么是索引而不是每次全表扫
@@ -52,16 +90,27 @@ pub enum HostResolution<'a> {
 /// 10000 模块 4.55s / 20000 模块 14.20s（MDR-022 待办 5）。而面向坏 state 的
 /// `state repair` 恰好总在这一侧。
 ///
-/// 建表一次 O(成员总数)，之后每查 O(1)。**不提供「查单条」的自由函数**——那正是让调用方
-/// 在循环里退回二次复杂度的入口。单条查询请显式 `build` 再 `resolve`。
+/// 建表一次 O(成员总数)，之后每查 O(1)。
+///
+/// **本模块不提供隐藏建表的自由函数**——那正是让调用方在循环里退回二次复杂度的入口。但要如实
+/// 说明一个例外：[`MigrationStateMachine::resolve_module_host`](crate::state::MigrationStateMachine::resolve_module_host)
+/// 与 `canonical_module_key` 是**每次调用都重建索引**的便捷入口（单模块操作用，O(成员总数)
+/// 与它们替代的旧全表扫同阶，无回归），**不得在循环里调用**：`batch_transition_done` 目前
+/// 恰好是在 `for name in modules` 里调它，审查实测 200 组时每次调用 88.5ms、1000 组时 1.87s。
+/// 现实 batch 规模（数十模块）下仍是亚秒级，故记账而非本轮重构（把索引提到循环外需要先在
+/// 不可变借用块里把全部入参归一成 owned，才能进 `&mut self` 的 mutate 循环）。见 MDR-023
+/// 后续 TODO。
 pub struct HostIndex<'a> {
     state_file: &'a MigrationStateFile,
-    /// 成员文件 → 把它列为成员的模块 key（字典序）。
+    /// 成员文件 → 把它列为成员的模块 key（**字典序、已去重**）。
     ///
-    /// **不含「组代表把自己列进 `member_files`」那一项**：`populate-modules` 落盘的
-    /// `member_files` 就是全体成员、含代表自身（`DecompUnit.members` 的首个成员即组代表
-    /// key），故那不是破坏。它已由 [`resolve`](HostIndex::resolve) 的「自己是登记模块」
-    /// 那一支计为一个宿主；这里再计一次，每个正常 composite 组都会被误判成跨组破坏。
+    /// 两条不变量：
+    ///
+    /// - **不含「组代表把自己列进 `member_files`」那一项**：`populate-modules` 落盘的
+    ///   `member_files` 就是全体成员、含代表自身（`DecompUnit.members` 的首个成员即组代表
+    ///   key），故那不是破坏。它已由 [`resolve`](HostIndex::resolve) 的「自己是登记模块」
+    ///   那一支计为一个宿主；这里再计一次，每个正常 composite 组都会被误判成跨组破坏。
+    /// - **已去重**：宿主按**模块**计数、不按条目计数。同一组重复列同一文件仍是唯一宿主。
     by_member: HashMap<&'a str, Vec<&'a String>>,
 }
 
@@ -82,8 +131,13 @@ impl<'a> HostIndex<'a> {
             }
         }
         // `modules` 是 `HashMap`：不排序则多宿主告警文本的宿主顺序每次运行都漂移。
+        // 排序后紧跟 `dedup`：**宿主要按模块计数，不按条目计数**。同一组的 `member_files` 里
+        // 重复列同一文件是合法的（宿主仍唯一），而被删的两份旧实现用「按模块 filter」天然
+        // 满足这点，改成逐条目建表后必须显式去重——否则 `Ambiguous(["grp","grp"])` 会让合法
+        // 划分被判成破坏（四条按 key 归一的命令全拒 + `--auto-unblock` 永不放行）。
         for hosts in by_member.values_mut() {
             hosts.sort();
+            hosts.dedup();
         }
         Self {
             state_file,
@@ -261,6 +315,59 @@ mod tests {
             index.resolve("file:shared.ts"),
             HostResolution::Ambiguous(vec![&shared_key, &g1_key]),
             "既是登记模块、又被别组列为成员 → 互斥被破坏，宿主须两者都在"
+        );
+    }
+
+    #[test]
+    fn test_duplicate_member_entry_is_not_a_broken_partition() {
+        // 回归（类型设计视角抓出，本 PR 引入的功能回归）：同一组的 `member_files` 里**重复列**
+        // 同一文件时，宿主其实唯一，不是破坏。
+        //
+        // 被删的两份旧实现用 `.filter(|(_, m)| ...any(...))` 按**模块**筛，每模块最多贡献一条，
+        // 天然去重；索引改成按**条目**遍历后这个隐式保证丢了 → 同一宿主入表两次 →
+        // `Ambiguous(["grp","grp"])`。后果是对合法划分硬错：四条按 key 归一的命令全拒，
+        // `check_blocked_modules` 把它计入 `unresolved` 致 `--auto-unblock` 永不放行（迁移卡死），
+        // 而告警文案「若宿主清单里含它自己……二者留一个」在两个宿主同名时根本无法照做。
+        //
+        // 可达性：`populate-modules` 从图派生（成员已排序去重）不产生重复，但手工编辑与旧文件
+        // 会——而「旧文件须可读」正是本模块 doc 自己声明要支持的场景，且全仓没有任何
+        // `member_files` 去重校验。
+        let mut group = module(ModuleStatus::Translating);
+        group.member_files = Some(vec![
+            "grp".to_owned(),
+            "file:a.ts".to_owned(),
+            "file:a.ts".to_owned(),
+        ]);
+        let state = state_with(&[("grp", group)]);
+        let index = HostIndex::build(&state);
+        assert_eq!(
+            index.resolve("file:a.ts"),
+            HostResolution::Resolved(&"grp".to_owned()),
+            "重复条目不改变宿主个数，划分是合法的"
+        );
+        assert!(
+            index.broken_partitions().is_empty(),
+            "重复列名不得被报成跨组破坏"
+        );
+    }
+
+    #[test]
+    fn test_self_listing_does_not_mask_a_real_cross_group_break() {
+        // 排除自引用**不掩盖**真实破坏：`grp` 自列于 `member_files`、同时被 `g2` 列为成员时，
+        // 「它是登记模块」那一支已把 `grp` 计为一个宿主，`g2` 再加一个 → 仍判 Ambiguous。
+        // 这条推理是自引用排除得以成立的前提，故须有测试钉住。
+        let mut grp = module(ModuleStatus::Translating);
+        grp.member_files = Some(vec!["grp".to_owned(), "file:a.ts".to_owned()]);
+        let mut g2 = module(ModuleStatus::Pending);
+        g2.member_files = Some(vec!["g2".to_owned(), "grp".to_owned()]);
+        let state = state_with(&[("grp", grp), ("g2", g2)]);
+        let index = HostIndex::build(&state);
+        let grp_key = "grp".to_owned();
+        let g2_key = "g2".to_owned();
+        assert_eq!(
+            index.resolve("grp"),
+            HostResolution::Ambiguous(vec![&g2_key, &grp_key]),
+            "自引用排除不得掩盖别组把它列为成员这一真实破坏"
         );
     }
 

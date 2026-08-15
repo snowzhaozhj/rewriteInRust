@@ -29,10 +29,11 @@ use rustmigrate_core::profile::{
 };
 use rustmigrate_core::response::{ErrorData, Response, Status};
 use rustmigrate_core::scaffold::scaffold_project;
+use rustmigrate_core::state::host_index::broken_partition_message;
 use rustmigrate_core::state::Approval;
 use rustmigrate_core::state::{
-    GhostRepairOutcome, MigrationStateMachine, RecoverOutcome, RecoverPolicy, ResetOutcome,
-    SprintAdvanceResult,
+    GhostRepairOutcome, HostIndex, HostResolution, MigrationStateMachine, RecoverOutcome,
+    RecoverPolicy, ResetOutcome, SprintAdvanceResult,
 };
 use rustmigrate_core::stats::{
     compare_structure, count_loc, count_loc_excluding_tests, detect_community_deviation, Ratio,
@@ -435,8 +436,9 @@ pub enum StateCommands {
     /// 收口检出层的后半段：`validate state` / `--check-blocked` 的 `ghost_refs` 早已能点名
     /// 「哪个模块的 `blocked_by` 指向未登记 key」，但此前 CLI 一条处置命令都没有。
     ///
-    /// **只删幽灵条目**：可归一到宿主模块的合法引用（`Resolved`，含宿主已终态的）与宿主歧义引用（`member_files` 跨组破坏的唯一检出
-    /// 通道）原样保留——不是清空整个 `blocked_by` 数组。**不改状态、不清进度字段、不发产物
+    /// **只删幽灵条目**：可归一到宿主模块的合法引用（`Resolved`，含宿主已终态的）与宿主歧义
+    /// 引用（实体存在、坏的是 `member_files` 划分，处置是修划分）原样保留——不是清空整个
+    /// `blocked_by` 数组。**不改状态、不清进度字段、不发产物
     /// 清理指令**（与 `state reset` 正相反）。清完后若模块仍 `blocked` 而 `blocked_by` 已空，
     /// 它在 `--check-blocked` 里即判 `ready_to_unblock`，恢复走既有 `--auto-unblock`。
     ///
@@ -3051,18 +3053,26 @@ fn cmd_state_deps(module: &str) -> CmdResult {
 
     // 归一 module key：调用方通常传组代表 key，但也容忍传 composite 组的非代表成员
     // （如 `file:handler.ts`）——反查其所属组代表后按组解析，避免误用直接报错。
-    let canonical: String = if modules.contains_key(module) {
-        module.to_string()
-    } else if let Some((key, _)) = modules.iter().find(|(_, m)| {
-        m.member_files
-            .as_ref()
-            .is_some_and(|mf| mf.iter().any(|f| f == module))
-    }) {
-        key.clone()
-    } else {
-        return Err(MigrateError::Config(format!(
-            "模块 `{module}` 不在 migration-state.json 中（请先 populate-modules）"
-        )));
+    //
+    // 判定走 `HostIndex`（与 `validate` / `canonical_module_key` 同一实现，MDR-023）。此前
+    // 这里是**第三份**独立实现：先查 `modules` 命中即早返回，否则 `find` 取 HashMap 迭代序
+    // 首个。两处都会静默吞掉「宿主不唯一」——实测 `file:utils.ts` 既登记为 `done` 又留在
+    // `file:index.ts` 组（`translating`）的 `member_files` 里时，本命令返回
+    // `all_ready:true` 零告警，而 run.md 步骤 3 正是用它做依赖门禁 → 依赖未就绪却放行。
+    let canonical: String = match machine.resolve_module_host(module) {
+        HostResolution::Resolved(key) => key.clone(),
+        HostResolution::Missing => {
+            return Err(MigrateError::Config(format!(
+                "模块 `{module}` 不在 migration-state.json 中（请先 populate-modules）"
+            )))
+        }
+        // 门禁命令上宁停不错：挑错宿主会让 `all_ready`/`blocking` 判错，而 `blocking` 会被
+        // run.md 回填进 `blocked_by`（错误的阻塞会一路传播下去）。
+        HostResolution::Ambiguous(hosts) => {
+            return Err(MigrateError::Config(broken_partition_message(
+                module, &hosts,
+            )))
+        }
     };
     let module = canonical.as_str();
 
@@ -3076,18 +3086,12 @@ fn cmd_state_deps(module: &str) -> CmdResult {
         None => vec![module.to_string()],
     };
 
-    // 反向映射：仅为 composite 组建「成员文件 → 组代表 key」表。单文件模块无需登记——
-    // 查表 miss 时回退 dep_file 自身即恒等映射（见下 `unwrap_or`），故表只含多文件组成员，
-    // 规模 O(composite 成员数) 而非 O(全部模块)。
-    let mut file_to_key: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
-    for (key, m) in modules {
-        if let Some(members) = &m.member_files {
-            for f in members {
-                file_to_key.insert(f.clone(), key.clone());
-            }
-        }
-    }
+    // 依赖文件 → 组代表 key 的映射同样走 `HostIndex`，不再自建一张 `HashMap`：此前那张表用
+    // `insert` 建，同一文件被多组列为成员时**后写覆盖先写**，于是静默取到某一个组——而上面
+    // 的 `find` 可能取到**另一个**，同一次运行内两处择一结果不一致。实测形态：`file:utils.ts`
+    // 同属 index 组与 g2 时，`file_to_key` 把它映射到 g2，组内自依赖的剔除随之失效，本命令
+    // 报出假阻塞 `blocking:["g2"]`（而 `blocking` 会被 run.md 回填进 `blocked_by`）。
+    let hosts = HostIndex::build(machine.state_file());
 
     // 从全部成员出发收集正向依赖闭包，映射回组代表，剔除组内自依赖、去重。
     // 成员文件已从 graph 删除（state 与 graph 不同步）时跳过该成员并告警，而非整命令硬失败。
@@ -3102,7 +3106,18 @@ fn cmd_state_deps(module: &str) -> CmdResult {
             continue;
         };
         for dep_file in collect_imports_closure(&graph, &start, DependencyDirection::Forward) {
-            let dep_key = file_to_key.get(&dep_file).cloned().unwrap_or(dep_file);
+            // `Missing`（既非登记模块也非任何组的成员）回退 dep_file 自身，即此前
+            // `file_to_key.get(..).unwrap_or(dep_file)` 的恒等映射——那类依赖由下游
+            // `unresolved` 单列并告警，不进 `blocking`。
+            let dep_key = match hosts.resolve(&dep_file) {
+                HostResolution::Resolved(key) => key.clone(),
+                HostResolution::Missing => dep_file,
+                HostResolution::Ambiguous(owners) => {
+                    return Err(MigrateError::Config(broken_partition_message(
+                        &dep_file, &owners,
+                    )))
+                }
+            };
             if dep_key != module {
                 dep_keys.insert(dep_key);
             }

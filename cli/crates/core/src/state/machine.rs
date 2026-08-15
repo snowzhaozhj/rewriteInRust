@@ -7,7 +7,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::error::{MigrateError, Result};
-use crate::state::host_index::{HostIndex, HostResolution};
+use crate::state::host_index::{broken_partition_message, HostIndex, HostResolution};
 use crate::types::common::{SourceLang, Timestamp};
 use crate::types::config::PersistenceConfig;
 use crate::types::state::{
@@ -23,25 +23,6 @@ pub const STATE_SCHEMA_VERSION: &str = "1.0.0";
 
 /// 模块 substatus 值：agent 级自检完成（两层 done 协议）。
 pub const SUBSTATUS_AGENT_DONE: &str = "agent_done";
-
-/// 「宿主不唯一」的统一说明文本（`member_files` 跨组互斥不变量被破坏）。
-///
-/// [`MigrationStateMachine::canonical_module_key`] 的错误信息与
-/// [`MigrationStateMachine::batch_transition_done`] 的 `skipped.detail` 共用它：同一损坏在两条
-/// 路径上各写一遍措辞必然漂移，而它是用户看到的唯一归因来源。
-fn broken_partition_message(name: &str, hosts: &[&String]) -> String {
-    let hosts = hosts
-        .iter()
-        .map(|h| format!("`{h}`"))
-        .collect::<Vec<_>>()
-        .join("、");
-    format!(
-        "member_files 跨组互斥不变量被破坏：{name} 的宿主不唯一（{hosts}）——归一到任何一个都\
-         可能改错模块，故拒绝操作。修正 modules 的 member_files 划分后重试；若宿主清单里含 \
-         {name} 自己，表示它既登记为独立模块、又被别的组列为成员，二者留一个。\
-         `rustmigrate validate state` 会列出全部被破坏的划分"
-    )
-}
 
 /// 迁移状态机，持有并管理 `MigrationStateFile`。
 #[derive(Debug, Clone)]
@@ -950,7 +931,11 @@ impl MigrationStateMachine {
     /// [`canonical_module_key`](Self::canonical_module_key) 的三态版本（同一判定，不丢信息）。
     ///
     /// 判定实现在 [`HostIndex`]，与 `validate` 侧共用——两处各写一份必然漂移，而这个不变量
-    /// 恰恰因「两份判定都在同一处早返回」而漏检了一整类破坏（MDR-023）。
+    /// 恰恰因「多份判定都在同一处早返回」而漏检了一整类破坏（MDR-023）。
+    ///
+    /// **每次调用重建索引**（O(全部 `member_files` 条目)，与它替代的旧全表扫同阶）。单模块操作
+    /// 用它无妨，**但不要在循环里调**——审查实测 200 组时每次 88.5ms、1000 组 1.87s。
+    /// [`batch_transition_done`](Self::batch_transition_done) 目前正是循环调用，见 MDR-023 记账。
     pub fn resolve_module_host(&self, name: &str) -> HostResolution<'_> {
         HostIndex::build(&self.state_file).resolve(name)
     }
@@ -1736,6 +1721,11 @@ impl MigrationStateMachine {
             // （`member_files` 跨组互斥被破坏）」失败，后者是数据损坏、处置是修划分而非补
             // 登记。此前一律记 `not_found`（「模块不在 migration-state.json」），编排器据此
             // 去查登记、而真因在别处——同「一个判据替多个谓词说话」的失败模式。
+            //
+            // 注意 `resolve_module_host` **每次调用重建索引**，此处是在循环里调它。现实 batch
+            // 规模（数十模块）下亚秒级，但规模大了会显著变慢（审查实测 1000 组时每次 1.87s）。
+            // 索引提不到循环外是借用检查所致：本循环持 `&mut self`，而索引借自 `self.state_file`。
+            // 修法（记账，MDR-023 后续 TODO 3）是先在不可变块里把全部入参归一成 owned 结果。
             let canonical = match self.resolve_module_host(name) {
                 HostResolution::Resolved(key) => key.clone(),
                 HostResolution::Missing => {
@@ -4440,7 +4430,7 @@ mod tests {
         assert_eq!(
             m.state_file().modules["holder"].blocked_by,
             Some(vec!["shared.ts".to_string()]),
-            "Ambiguous 引用必须保留——它是跨组破坏的唯一检出通道"
+            "Ambiguous 引用必须保留——实体存在，坏的是 member_files 划分，repair 不该删它"
         );
     }
 

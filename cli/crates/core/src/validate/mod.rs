@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 use serde::Serialize;
 
 use crate::error::{MigrateError, Result};
+use crate::state::host_index::quote_key;
 use crate::state::{HostIndex, HostResolution, MigrationStateMachine, STATE_SCHEMA_VERSION};
 use crate::types::state::{MigrationStateFile, ModuleStatus, ProjectState};
 
@@ -447,15 +448,6 @@ pub fn scan_ghost_references(state_file: &MigrationStateFile) -> Vec<GhostRefere
     });
     out.dedup();
     out
-}
-
-/// 把模块 key 渲染进人读告警文本。
-///
-/// 用 JSON 字符串字面量而非裸反引号包裹：key 来自 state 文件（可被手工编辑），
-/// 若其中含反引号、`→`、`、` 或换行，裸包裹会让告警里的条目边界可被内容伪造，
-/// 读者无从分辨哪部分是 key、哪部分是分隔符。JSON 转义同时处理引号与控制字符。
-fn quote_key(key: &str) -> String {
-    serde_json::to_string(key).unwrap_or_else(|_| format!("{key:?}"))
 }
 
 /// 检查所有 blocked 模块的依赖就绪状态。
