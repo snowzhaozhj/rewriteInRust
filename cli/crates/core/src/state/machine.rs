@@ -1542,14 +1542,39 @@ impl MigrationStateMachine {
         review_gate_config: &crate::types::config::ReviewGateConfig,
         coverage_threshold: u32,
     ) -> Result<ApproveOutcome> {
+        let canonical = self.canonical_module_key(name)?;
+        self.approve_canonical(
+            &canonical,
+            approval,
+            reason,
+            review_gate_config,
+            coverage_threshold,
+        )
+    }
+
+    /// [`approve_module`](Self::approve_module) 的「入参已归一」版本。
+    ///
+    /// 存在的唯一理由是**避免重复建宿主索引**：归一走 [`HostIndex`]（O(全部 `member_files`
+    /// 条目)），而 [`batch_transition_done`](Self::batch_transition_done) 已在循环外一次性归一
+    /// 完毕；若那里再调 `approve_module`，每个模块会白建一次索引，规模大时呈平方
+    /// （审查 A/B 实测 4000 模块 33s vs master 0.87s）。
+    ///
+    /// `canonical` **必须**是 `modules` 里已登记的 key（调用方负责归一），否则内部 `expect` 会 panic。
+    fn approve_canonical(
+        &mut self,
+        canonical: &str,
+        approval: &Approval,
+        reason: Option<&str>,
+        review_gate_config: &crate::types::config::ReviewGateConfig,
+        coverage_threshold: u32,
+    ) -> Result<ApproveOutcome> {
         use crate::state::review_gate::{check_policy_approval, SUBSTATUS_AWAITING_FINAL_REVIEW};
 
-        let canonical = self.canonical_module_key(name)?;
         let module = self
             .state_file
             .modules
-            .get(&canonical)
-            .expect("canonical 已校验存在");
+            .get(canonical)
+            .expect("canonical 已由调用方归一并校验存在");
         let previous_substatus = module.substatus.clone();
         let is_awaiting = previous_substatus.as_deref() == Some(SUBSTATUS_AWAITING_FINAL_REVIEW);
 
@@ -1618,17 +1643,17 @@ impl MigrationStateMachine {
 
         // 凭据已复核 → 放行该边（transition_inner 据 approval 非 None 跳过硬门）。
         self.transition_inner(
-            &canonical,
+            canonical,
             Some(ModuleStatus::Done),
             None,
             None,
             false,
             Some(approval),
         )?;
-        let audit = self.push_approval_audit(&canonical, approval, reason, &overridden);
+        let audit = self.push_approval_audit(canonical, approval, reason, &overridden);
 
         Ok(ApproveOutcome {
-            module: canonical,
+            module: canonical.to_owned(),
             approval: match approval {
                 Approval::Human => "human".to_owned(),
                 Approval::Policy { id, .. } => format!("policy:{id}"),
@@ -1715,33 +1740,42 @@ impl MigrationStateMachine {
         let mut succeeded = Vec::new();
         let mut skipped: Vec<(String, String, String)> = Vec::new();
 
-        for name in modules {
+        // **归一在循环外一次性完成**：宿主判定要建索引（O(全部 `member_files` 条目)），在循环里
+        // 逐个调 `resolve_module_host` 会每个模块白建一次，规模大时呈平方——审查 A/B 实测 4000
+        // 模块 33s，而 master 是 0.87s（它对登记模块走 `contains_key` O(1) 早返回，而那条快路径
+        // 正是本 PR 要消灭的缺陷：它不反查 `member_files`）。索引提不进循环是借用检查所致：
+        // 循环持 `&mut self`，索引借自 `self.state_file`。故先在不可变块里把入参归一成 owned。
+        //
+        // **两类归一失败必须分码**：既会因「查无此 key」失败，也会因「宿主不唯一（`member_files`
+        // 跨组互斥被破坏）」失败，后者是数据损坏、处置是修划分而非补登记。此前一律记
+        // `not_found`（「模块不在 migration-state.json」），编排器据此去查登记、而真因在别处
+        // ——同「一个判据替多个谓词说话」的失败模式。
+        type Normalized = std::result::Result<String, (&'static str, String)>;
+        let normalized: Vec<(&String, Normalized)> = {
+            let hosts = HostIndex::build(&self.state_file);
+            modules
+                .iter()
+                .map(|name| {
+                    let outcome: Normalized = match hosts.resolve(name) {
+                        HostResolution::Resolved(key) => Ok(key.clone()),
+                        HostResolution::Missing => {
+                            Err(("not_found", "模块不在 migration-state.json".to_owned()))
+                        }
+                        HostResolution::Ambiguous(owners) => {
+                            Err(("broken_partition", broken_partition_message(name, &owners)))
+                        }
+                    };
+                    (name, outcome)
+                })
+                .collect()
+        };
+
+        for (name, outcome) in normalized {
             // 归一失败：不写 attempts（无处可写），记 skipped（此时无 canonical 可回显）。
-            // **两类失败必须分码**：既会因「查无此 key」失败，也会因「宿主不唯一
-            // （`member_files` 跨组互斥被破坏）」失败，后者是数据损坏、处置是修划分而非补
-            // 登记。此前一律记 `not_found`（「模块不在 migration-state.json」），编排器据此
-            // 去查登记、而真因在别处——同「一个判据替多个谓词说话」的失败模式。
-            //
-            // 注意 `resolve_module_host` **每次调用重建索引**，此处是在循环里调它。现实 batch
-            // 规模（数十模块）下亚秒级，但规模大了会显著变慢（审查实测 1000 组时每次 1.87s）。
-            // 索引提不到循环外是借用检查所致：本循环持 `&mut self`，而索引借自 `self.state_file`。
-            // 修法（记账，MDR-023 后续 TODO 3）是先在不可变块里把全部入参归一成 owned 结果。
-            let canonical = match self.resolve_module_host(name) {
-                HostResolution::Resolved(key) => key.clone(),
-                HostResolution::Missing => {
-                    skipped.push((
-                        name.clone(),
-                        "not_found".to_owned(),
-                        "模块不在 migration-state.json".to_owned(),
-                    ));
-                    continue;
-                }
-                HostResolution::Ambiguous(hosts) => {
-                    skipped.push((
-                        name.clone(),
-                        "broken_partition".to_owned(),
-                        broken_partition_message(name, &hosts),
-                    ));
+            let canonical = match outcome {
+                Ok(key) => key,
+                Err((code, detail)) => {
+                    skipped.push((name.clone(), code.to_owned(), detail));
                     continue;
                 }
             };
@@ -1782,8 +1816,14 @@ impl MigrationStateMachine {
                 continue;
             }
 
-            match self.approve_module(name, approval, None, review_gate_config, coverage_threshold)
-            {
+            // 已归一，故直接走 `approve_canonical`——再调 `approve_module` 会重复建索引（见上）。
+            match self.approve_canonical(
+                &canonical,
+                approval,
+                None,
+                review_gate_config,
+                coverage_threshold,
+            ) {
                 Ok(outcome) => succeeded.push(outcome.module),
                 Err(e) => {
                     let detail = e.to_string();
