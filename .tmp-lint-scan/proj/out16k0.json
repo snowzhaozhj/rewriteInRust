@@ -1,0 +1,1 @@
+{"status":"warning","data":{"blocked_count":0,"cycles":[],"ghost_refs":[],"ready_to_unblock":[],"still_blocked":[],"unblocked":[],"valid":true},"warnings":["模块 `file:dep.ts` 已为 done，但 attempts 中缺少译后签批审计（approved:human 或 auto_approved_by_policy:<id>）"]}

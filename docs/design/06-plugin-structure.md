@@ -737,7 +737,7 @@ CLI 的成功输出为 `{status, data, warnings}`（见 § 10.0.1）。失败时
 | `E009` | `FileNotFound` | 可达 | 文件不存在 | false |
 | `E010` | `ParseFailed` | 可达 | **JSON 解析失败**，两条真实路径：① `migration-state.json` 损坏（且 `.backup` 也不可用）；② `validate rules --registry` 指向的 `rule-registry.json` 损坏。**注意两处易误解**：⒜ `MigrateError::Parse`（源码语法）虽映射到本码，但其全部三个调用点（`graph/build.rs`）都把它**降级为 `warnings` 并跳过该文件**，故源码语法错误**实测不产出本码**；⒝ `Toml`/`TomlSer` 亦映射到本码，但三处 `toml::from_str` 全部显式包成 `Config`——**配置文件损坏实测返 `E012`** | false |
 | `E011` | `DatabaseError` | 可达 | SQLite 操作失败（经 `#[from] rusqlite::Error`，如 `source-graph.db` 非法） | **true** |
-| `E012` | `ConfigError` | 可达 | 配置错误。**实际是最宽的一类**——除配置文件本身问题（解析失败、「未检测到支持的源语言」）外，「模块不存在」「模块不在 state 中」等也归此码（见 `E003`/`E006` 行） | false |
+| `E012` | `ConfigError` | 可达 | 配置错误。**实际是最宽的一类**——除配置文件本身问题（解析失败、「未检测到支持的源语言」）外，「模块不存在」「模块不在 state 中」等也归此码（见 `E003`/`E006` 行）；**`member_files` 跨组互斥不变量被破坏**（某 key 的宿主不唯一）时，凡按 key 归一的单模块操作亦返本码（[MDR-023](../decisions/023-cross-group-host-resolution.md)）——注意该情形的处置是改 `migration-state.json` 的 `member_files` 划分，与配置文件无关，而本码的通用 `suggestion`（「请检查配置文件」）会指错方向，须读 `message` 而非 `suggestion` | false |
 | `E013` | `Timeout` | 可达 | 子进程超时（`run_with_timeout`） | **true** |
 | `E014` | `IoError` | 可达 | IO 操作失败（如 state 文件权限不足） | **true** |
 | `E015` | `NotImplemented` | 可达 | 命令/语言路径尚未实现 | false |
