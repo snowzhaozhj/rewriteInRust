@@ -3515,6 +3515,85 @@ fn smoke_state_deps_group_aware() {
 }
 
 #[test]
+fn smoke_state_deps_refuses_when_host_is_ambiguous() {
+    // MDR-023：`cmd_state_deps` 曾是同一不变量的**第三处**判定，且比另两处更弱——归一先查
+    // `modules` 命中即早返回，否则 `find` 取 HashMap 迭代序首个；而「依赖文件 → 组代表」那张
+    // 表用 `insert` 建，同一文件被多组列为成员时**后写覆盖先写**。两处的择一结果还可能不一致。
+    //
+    // 编排器用真实 CLI 复现的两种错误后果（本用例逐一钉住）：
+    // ⒝ 被查 key 既登记为独立模块、又被别组列为成员 → 返回 `all_ready:true` **零告警**，
+    //    而 run.md 步骤 3 正是用本命令做依赖门禁 → 依赖未就绪却静默放行；
+    // ⒜ 依赖闭包里的文件被两组列为成员 → 组内自依赖的剔除失效，报出**假阻塞**（而 `blocking`
+    //    会被 run.md 回填进 `blocked_by`，错误的阻塞会一路传播）。
+    //
+    // 现在两种形态都硬错并指向 `member_files` 划分。这是本 PR 新增的失败路径，故须有覆盖。
+    let tmp = tempfile::tempdir().unwrap();
+    copy_dir(&fixtures_dir().join("linear-deps"), tmp.path());
+    with_cwd(tmp.path(), || {
+        let _ = run(&["init"]);
+        assert_eq!(run(&["graph", "build", "--root", "src"]).0, 0);
+        assert_eq!(run(&["state", "populate-modules"]).0, 0);
+
+        let sp = tmp.path().join(".rust-migration/migration-state.json");
+        let read_state = || -> serde_json::Value {
+            serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap()
+        };
+        let pristine = read_state();
+        // 前置假设：decompose 把三个文件凝聚成一个组，代表在自己的 member_files 里。
+        let members: Vec<String> = pristine["modules"]["file:index.ts"]["member_files"]
+            .as_array()
+            .unwrap_or_else(|| panic!("前提：应有 composite 组: {pristine}"))
+            .iter()
+            .map(|m| m.as_str().unwrap().to_owned())
+            .collect();
+        assert!(
+            members.contains(&"file:index.ts".to_owned())
+                && members.contains(&"file:utils.ts".to_owned()),
+            "前提：组成员应含代表自身与 utils: {members:?}"
+        );
+
+        // 形态⒝：utils 既登记为独立模块（done），又留在 index 组（translating）里。
+        let mut broken = pristine.clone();
+        broken["modules"]["file:index.ts"]["status"] = serde_json::json!("translating");
+        broken["modules"]["file:utils.ts"] = serde_json::json!({
+            "status": "done", "sprint": 1, "attempts": [], "known_differences": 0
+        });
+        std::fs::write(&sp, serde_json::to_string_pretty(&broken).unwrap()).unwrap();
+
+        let (code, out) = run(&["state", "deps", "file:utils.ts"]);
+        assert_ne!(code, 0, "宿主不唯一时不得静默放行门禁: {out}");
+        assert_eq!(out["data"]["error_code"], "E012", "{out}");
+        let msg = out["data"]["message"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("member_files") && msg.contains("宿主不唯一"),
+            "归因须指向划分: {out}"
+        );
+
+        // 形态⒜：utils 不额外登记，但被另一个组 g2 也列为成员；查组代表 index。
+        let mut broken2 = pristine.clone();
+        broken2["modules"]["file:index.ts"]["status"] = serde_json::json!("translating");
+        broken2["modules"]["g2"] = serde_json::json!({
+            "status": "pending", "sprint": 1, "attempts": [], "known_differences": 0,
+            "member_files": ["g2", "file:utils.ts"], "composite_kind": "coupled_batch"
+        });
+        std::fs::write(&sp, serde_json::to_string_pretty(&broken2).unwrap()).unwrap();
+
+        let (code, out) = run(&["state", "deps", "file:index.ts"]);
+        assert_ne!(code, 0, "依赖闭包含坏划分文件时不得报出假阻塞: {out}");
+        let msg = out["data"]["message"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("file:utils.ts"),
+            "归因须点名真正宿主不唯一的那个文件（而非被查的模块）: {out}"
+        );
+
+        // 反向不误报：还原成合法划分后本命令须照常工作（硬错不得扩散到正常场景）。
+        std::fs::write(&sp, serde_json::to_string_pretty(&pristine).unwrap()).unwrap();
+        let (code, out) = run(&["state", "deps", "file:index.ts"]);
+        assert_eq!(code, 0, "合法划分下 state deps 须照常成功: {out}");
+    });
+}
+
+#[test]
 fn smoke_state_deps_unresolved_not_blocking() {
     // absent 死锁修复（主审）：依赖未登记为模块（state 与 graph 不同步）时进 unresolved + warning，
     // **不进 blocking**——否则会被填入 blocked_by，而 check-blocked 对缺失 key 永判非终态导致死锁。

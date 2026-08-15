@@ -1,0 +1,61 @@
+[project]
+name = "proj"
+source_language = "typescript"
+source_root = "src"
+rust_root = "rust-src"
+
+[strategy]
+max_retry_rounds = 3
+auto_confirm_intent = false
+degrade_strategy = "ffi"
+max_concurrent_agents = 4
+async_strategy = "boundary_async"
+
+[testing]
+coverage_threshold = 80
+proptest_cases = 256
+fuzz_duration_secs = 60
+benchmark_tolerance = 0.1
+nextest_threads = "auto"
+ffi_coverage_mode = "rust_only"
+
+[orchestration]
+subagent_timeout_secs = 600
+max_retries_per_step = 2
+lock_timeout_secs = 300
+retry_backoff_secs = [5, 15]
+stall_timeout_secs = 600
+stall_recovery_policy = "retry_then_skip"
+
+[context]
+max_tokens_per_translation = 100000
+budget_check_mode = "warn"
+enable_auto_split = true
+module_summary_strategy = "interface_only"
+
+[tools]
+
+[quality]
+done_threshold = 80.0
+degrade_ffi_threshold = 60.0
+evaluation_method_version = "0.1"
+baseline_sprint = 1
+
+[parser]
+
+[analysis]
+
+[reproducibility]
+
+[workspace]
+
+[persistence]
+backup_on_write = true
+
+[validation]
+
+[rules]
+enforce_rule_version_consistency = true
+
+[review_gate]
+auto_approve_policies = []
